@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+  "components/*",
+  "bases/*",
+  "projects/publisher",
+  "projects/content_management",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
