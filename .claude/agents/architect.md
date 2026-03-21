@@ -1,0 +1,1 @@
+/nix/store/nwnqaf7abq04gczbrw2napmhfrkj4yc4-claude-agents-architect.md
