@@ -2,7 +2,7 @@
 
 ## Status
 
-Experimental — under evaluation
+Accepted
 
 ## Context
 
@@ -46,14 +46,15 @@ occurs
 content
 : capitalized
 
-paragraphs [1..3] {#summary}
-: The article abstract. Tell the reader what they will learn.
+Your article summary. Tell the reader what they will learn. {#summary}
+occurs
+: 1..3
 
 [<name>](/authors/<name>) {#author}
 occurs
 : exactly once
 
-[cover image description](images/*.(jpg|jpeg|png|webp)) {#cover}
+![cover image description](images/*.(jpg|jpeg|png|webp)) {#cover}
 orientation
 : landscape
 thumbnail
@@ -71,8 +72,12 @@ headings
 ### Key properties of the format
 
 **Schema as document template**: reading the schema gives an author a clear picture of what their
-article should look like. The placeholder text (`Your blog post title`, the paragraph guidance) is
-shown in the content editor as authoring hints.
+article should look like. The placeholder text (`Your blog post title`, `Your article summary…`) is
+shown in the content editor as authoring hints. Paragraph slots are written as plain text lines with
+a `{#name}` anchor — visually indistinguishable from document prose. This preserves the core
+property: the schema looks like the document it describes. Cardinality (`occurs: 1..3`) lives in
+the definition-list constraints below the line, eliminating the old `paragraphs [min..max]`
+bracket-count syntax.
 
 **Named slots via anchors**: `{#title}`, `{#cover}`, `{#summary}` make structural positions
 queryable. Templates and content documents reference them as `${article:title}`,
@@ -85,6 +90,12 @@ queryable. Templates and content documents reference them as `${article:title}`,
 produce image derivatives. Generated and computed fields (including intrinsic properties like
 `width`, `height`, `average_color`) join the data graph and are referenceable:
 `${article:cover:average_color}`, `${article:cover:thumbnail:1024x768}`.
+
+**Content documents are plain markdown**: `{#name}` anchors appear only in schema files. Content
+editors write ordinary markdown with no schema annotations. The publisher infers which slot each
+element occupies by matching document elements positionally against the schema's slot sequence.
+This is a hard design constraint — schema syntax must never leak into the content editing
+experience.
 
 **Path-based schema binding**: schemas attach to path patterns (`blog/*`, `authors/*`). The
 filesystem layout is the taxonomy. No separate routing or schema registry configuration.
@@ -125,6 +136,7 @@ with no existing tooling and no readability advantage over JSON Schema.
 - The content editor can display schema files as authoring prompts natively
 - Uniform reference syntax across content and templates simplifies the mental model
 - Generation hints in the schema keep asset pipeline config close to content type definition
+- Content documents are plain markdown — authors never see or touch schema syntax
 
 **Negative / open questions:**
 - Requires a custom schema parser — no existing library parses this format
@@ -149,3 +161,39 @@ Before committing to this format, validate it against a real case:
 
 Do not implement generation hints or cross-content references in the experiment — validate the
 document grammar and named slots first.
+
+## Evaluation
+
+**Verdict: format accepted.**
+
+The experiment (steps 1–5) is complete. Findings:
+
+**Format readability:** The annotated markdown format reads naturally. A schema for a blog
+article is immediately comprehensible to a non-technical author. The definition-list constraint
+syntax is unobtrusive. The `----` separator is intuitive. The "schema looks like the document"
+property holds for all four element types.
+
+**Parser tractability:** A line-by-line state machine parser is straightforward to implement
+and reason about. No library dependency is required for the schema parser. The grammar types
+(`Grammar`, `Slot`, `Element`, `Constraint`, `BodyRules`) map cleanly to the format.
+
+**Paragraph slots:** The initial `paragraphs [min..max] {#name}` keyword syntax was replaced
+with plain text lines carrying a `{#name}` anchor. This restores format consistency —
+paragraph slots are now visually indistinguishable from document prose, matching the approach
+used for headings, links, and images. Cardinality is expressed via `occurs: 1..3` in the
+definition-list constraints.
+
+**Content documents are plain markdown:** Authors write ordinary markdown with no schema
+syntax. The publisher infers slot assignment positionally. This is a hard design constraint
+that survived the experiment intact.
+
+**Open questions for future ADRs:**
+- Positional matching handles the common case but needs work for optional slots (a missing
+  optional slot currently cascades into false errors for subsequent slots).
+- The content parser flattens inline vs. block context (an inline link and a standalone link
+  both produce `ContentElement::Link`). The validator cannot currently distinguish them.
+- The constraint vocabulary (`occurs`, `orientation`, `headings`, `alt`, `content`) is
+  sufficient for the experiment scope but needs formal specification before general use.
+- Pattern matching for link/image `pattern` fields is parsed but not yet validated.
+
+These open questions are scoped to future work and do not block accepting the format.

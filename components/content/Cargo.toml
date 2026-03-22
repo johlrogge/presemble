@@ -1,0 +1,11 @@
+[package]
+name = "content"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.polylith]
+interface = "content"
+
+[dependencies]
+schema = { workspace = true }
+pulldown-cmark = { workspace = true }
