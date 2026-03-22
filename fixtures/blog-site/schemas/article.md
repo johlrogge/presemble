@@ -4,9 +4,9 @@ occurs
 content
 : capitalized
 
-paragraphs [1..3] {#summary}
+Your article summary. Tell the reader what they will learn. {#summary}
 occurs
-: at least once
+: 1..3
 
 [<name>](/authors/<name>) {#author}
 occurs

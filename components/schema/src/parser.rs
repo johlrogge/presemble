@@ -141,19 +141,20 @@ fn try_parse_element(line: &str) -> Result<Option<Slot>, SchemaError> {
         return parse_heading_line(line).map(Some);
     }
 
-    // 2. Paragraphs: `paragraphs [min..max] {#name}`
-    if line.starts_with("paragraphs ") {
-        return parse_paragraphs_line(line).map(Some);
-    }
-
-    // 3. Image: `![alt](pattern) {#name}` — check before Link
+    // 2. Image: `![alt](pattern) {#name}` — check before Link
     if line.starts_with("![") {
         return parse_image_line(line).map(Some);
     }
 
-    // 4. Link: `[text](pattern) {#name}`
+    // 3. Link: `[text](pattern) {#name}`
     if line.starts_with('[') {
         return parse_link_line(line).map(Some);
+    }
+
+    // 4. Paragraph: any other line with a `{#name}` anchor is a paragraph slot.
+    //    The line text becomes the hint shown to authors in the content editor.
+    if line.contains("{#") {
+        return parse_paragraph_line(line).map(Some);
     }
 
     Ok(None)
@@ -195,32 +196,14 @@ fn parse_heading_line(line: &str) -> Result<Slot, SchemaError> {
     })
 }
 
-/// Parse `paragraphs [1..3] {#summary}` → Slot with Element::Paragraphs.
-fn parse_paragraphs_line(line: &str) -> Result<Slot, SchemaError> {
-    let rest = line
-        .strip_prefix("paragraphs ")
-        .ok_or_else(|| SchemaError::ParseError(format!("expected 'paragraphs ' prefix: {line}")))?
-        .trim();
-
-    // Find the bracket range `[...]`
-    let bracket_start = rest
-        .find('[')
-        .ok_or_else(|| SchemaError::ParseError(format!("missing '[' in paragraphs line: {line}")))?;
-    let bracket_end = rest[bracket_start..]
-        .find(']')
-        .ok_or_else(|| SchemaError::ParseError(format!("missing ']' in paragraphs line: {line}")))?
-        + bracket_start;
-
-    let range_str = &rest[bracket_start + 1..bracket_end];
-    let count = parse_count_range_from_bracket(range_str, line)?;
-
-    // After the `]` comes ` {#name}` (with optional hint text before)
-    let after_bracket = rest[bracket_end + 1..].trim();
-    let (hint_text, name) = extract_anchor(after_bracket)?;
-
+/// Parse any line with a `{#name}` anchor that isn't a heading, image, or link
+/// into a paragraph slot. The line text (minus the anchor) becomes the hint shown
+/// to authors in the content editor.
+fn parse_paragraph_line(line: &str) -> Result<Slot, SchemaError> {
+    let (hint_text, name) = extract_anchor(line.trim())?;
     Ok(Slot {
         name: SlotName::new(name),
-        element: Element::Paragraphs { count },
+        element: Element::Paragraph,
         constraints: Vec::new(),
         hint_text: if hint_text.is_empty() {
             None
@@ -319,7 +302,12 @@ fn apply_body_rule(rules: &mut BodyRules, key: &str, value: &str) -> Result<(), 
 // ---------------------------------------------------------------------------
 
 fn parse_occurs_value(value: &str) -> Result<CountRange, SchemaError> {
-    match value.trim() {
+    let trimmed = value.trim();
+    // Numeric range syntax: `1..3`, `1..`, `..3`, `2`
+    if trimmed.chars().next().map(|c| c.is_ascii_digit() || c == '.').unwrap_or(false) {
+        return parse_count_range_from_bracket(trimmed, value);
+    }
+    match trimmed {
         "exactly once" => Ok(CountRange::Exactly(1)),
         "at least once" => Ok(CountRange::AtLeast(1)),
         "at most once" => Ok(CountRange::AtMost(1)),
@@ -560,44 +548,42 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // Paragraphs element
+    // Paragraph element
     // -------------------------------------------------------------------
 
     #[test]
     fn paragraphs_slot_is_parsed() {
-        let grammar = parse("paragraphs [1..3] {#summary}\n");
+        let grammar = parse("Your article summary. {#summary}\noccurs\n: 1..3\n");
         assert_eq!(grammar.preamble.len(), 1);
         let slot = &grammar.preamble[0];
         assert_eq!(slot.name.as_str(), "summary");
+        assert!(matches!(slot.element, Element::Paragraph));
         assert!(matches!(
-            slot.element,
-            Element::Paragraphs {
-                count: CountRange::Between { min: 1, max: 3 }
-            }
+            slot.constraints[0],
+            Constraint::Occurs(CountRange::Between { min: 1, max: 3 })
         ));
+        assert_eq!(slot.hint_text.as_deref(), Some("Your article summary."));
     }
 
     #[test]
     fn paragraphs_exact_count() {
-        let grammar = parse("paragraphs [2] {#body}\n");
+        let grammar = parse("Body content goes here. {#body}\noccurs\n: 2\n");
         let slot = &grammar.preamble[0];
+        assert!(matches!(slot.element, Element::Paragraph));
         assert!(matches!(
-            slot.element,
-            Element::Paragraphs {
-                count: CountRange::Exactly(2)
-            }
+            slot.constraints[0],
+            Constraint::Occurs(CountRange::Exactly(2))
         ));
     }
 
     #[test]
     fn paragraphs_at_least() {
-        let grammar = parse("paragraphs [1..] {#body}\n");
+        let grammar = parse("Body content goes here. {#body}\noccurs\n: 1..\n");
         let slot = &grammar.preamble[0];
+        assert!(matches!(slot.element, Element::Paragraph));
         assert!(matches!(
-            slot.element,
-            Element::Paragraphs {
-                count: CountRange::AtLeast(1)
-            }
+            slot.constraints[0],
+            Constraint::Occurs(CountRange::AtLeast(1))
         ));
     }
 
@@ -653,7 +639,7 @@ mod tests {
 
     #[test]
     fn occurs_at_least_once_constraint() {
-        let input = "paragraphs [1..3] {#summary}\noccurs\n: at least once\n";
+        let input = "Your article summary. {#summary}\noccurs\n: at least once\n";
         let grammar = parse(input);
         let slot = &grammar.preamble[0];
         assert!(matches!(
@@ -783,8 +769,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_paragraphs_range_is_an_error() {
-        let err = parse_err("paragraphs [abc] {#body}\n");
+    fn invalid_occurs_value_is_an_error() {
+        let err = parse_err("Summary text. {#summary}\noccurs\n: abc\n");
         assert!(matches!(err, SchemaError::ParseError(_)));
     }
 }

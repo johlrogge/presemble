@@ -40,7 +40,8 @@ impl std::fmt::Display for SlotName {
 #[derive(Debug, Clone)]
 pub enum Element {
     Heading { level: HeadingLevelRange },
-    Paragraphs { count: CountRange },
+    /// One or more paragraphs. Cardinality is expressed via `Constraint::Occurs`.
+    Paragraph,
     Link { pattern: String },
     Image { pattern: String },
 }

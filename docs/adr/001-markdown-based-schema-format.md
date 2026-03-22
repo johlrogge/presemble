@@ -46,8 +46,9 @@ occurs
 content
 : capitalized
 
-paragraphs [1..3] {#summary}
-: The article abstract. Tell the reader what they will learn.
+Your article summary. Tell the reader what they will learn. {#summary}
+occurs
+: 1..3
 
 [<name>](/authors/<name>) {#author}
 occurs
@@ -71,8 +72,12 @@ headings
 ### Key properties of the format
 
 **Schema as document template**: reading the schema gives an author a clear picture of what their
-article should look like. The placeholder text (`Your blog post title`, the paragraph guidance) is
-shown in the content editor as authoring hints.
+article should look like. The placeholder text (`Your blog post title`, `Your article summary…`) is
+shown in the content editor as authoring hints. Paragraph slots are written as plain text lines with
+a `{#name}` anchor — visually indistinguishable from document prose. This preserves the core
+property: the schema looks like the document it describes. Cardinality (`occurs: 1..3`) lives in
+the definition-list constraints below the line, eliminating the old `paragraphs [min..max]`
+bracket-count syntax.
 
 **Named slots via anchors**: `{#title}`, `{#cover}`, `{#summary}` make structural positions
 queryable. Templates and content documents reference them as `${article:title}`,

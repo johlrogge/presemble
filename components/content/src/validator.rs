@@ -83,16 +83,15 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
                 check_occurs_count(count, slot, &mut diagnostics);
             }
 
-            Element::Paragraphs { count: count_range } => {
+            Element::Paragraph => {
                 let count = consume_paragraphs(
                     elements,
                     &mut cursor,
-                    count_range,
+                    expected_count,
                     slot,
                     &mut diagnostics,
                 );
-                // Check occurs if present (supplements the bracket range)
-                check_occurs_count_if_present(count, slot, &mut diagnostics);
+                check_occurs_count(count, slot, &mut diagnostics);
             }
 
             Element::Link { .. } => {
@@ -216,16 +215,6 @@ fn check_occurs_count(count: usize, slot: &Slot, diagnostics: &mut Vec<Validatio
     }
 }
 
-/// Check occurs only if an explicit Occurs constraint is present.
-/// For paragraphs, the bracket range is the primary constraint.
-fn check_occurs_count_if_present(
-    count: usize,
-    slot: &Slot,
-    diagnostics: &mut Vec<ValidationDiagnostic>,
-) {
-    check_occurs_count(count, slot, diagnostics);
-}
-
 fn check_count_against_range(
     count: usize,
     count_range: &CountRange,
@@ -323,17 +312,16 @@ fn consume_headings(
     count
 }
 
-/// Consume paragraphs at `cursor` within the count range of the slot's Element::Paragraphs.
-/// Returns count of consumed paragraphs.
+/// Consume paragraphs at `cursor` up to the expected count. Returns count consumed.
 fn consume_paragraphs(
     elements: &[ContentElement],
     cursor: &mut usize,
-    count_range: &CountRange,
+    expected: ExpectedCount,
     slot: &Slot,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
-    let min = count_range_min(count_range);
-    let max = count_range_max(count_range);
+    let min = expected.min();
+    let max = expected.max();
     let mut count = 0usize;
 
     loop {
