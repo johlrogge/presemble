@@ -1,0 +1,9 @@
+[package]
+name = "schema"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.polylith]
+interface = "schema"
+
+[dependencies]

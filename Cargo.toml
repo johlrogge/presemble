@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "components/*",
-  "bases/*",
   "projects/publisher",
   "projects/content_management",
 ]
@@ -12,3 +11,6 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+schema = { path = "components/schema" }
+content = { path = "components/content" }
+pulldown-cmark = "0.12"
