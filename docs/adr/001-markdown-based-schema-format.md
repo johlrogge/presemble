@@ -53,7 +53,7 @@ paragraphs [1..3] {#summary}
 occurs
 : exactly once
 
-[cover image description](images/*.(jpg|jpeg|png|webp)) {#cover}
+![cover image description](images/*.(jpg|jpeg|png|webp)) {#cover}
 orientation
 : landscape
 thumbnail
@@ -85,6 +85,12 @@ queryable. Templates and content documents reference them as `${article:title}`,
 produce image derivatives. Generated and computed fields (including intrinsic properties like
 `width`, `height`, `average_color`) join the data graph and are referenceable:
 `${article:cover:average_color}`, `${article:cover:thumbnail:1024x768}`.
+
+**Content documents are plain markdown**: `{#name}` anchors appear only in schema files. Content
+editors write ordinary markdown with no schema annotations. The publisher infers which slot each
+element occupies by matching document elements positionally against the schema's slot sequence.
+This is a hard design constraint — schema syntax must never leak into the content editing
+experience.
 
 **Path-based schema binding**: schemas attach to path patterns (`blog/*`, `authors/*`). The
 filesystem layout is the taxonomy. No separate routing or schema registry configuration.
@@ -125,6 +131,7 @@ with no existing tooling and no readability advantage over JSON Schema.
 - The content editor can display schema files as authoring prompts natively
 - Uniform reference syntax across content and templates simplifies the mental model
 - Generation hints in the schema keep asset pipeline config close to content type definition
+- Content documents are plain markdown — authors never see or touch schema syntax
 
 **Negative / open questions:**
 - Requires a custom schema parser — no existing library parses this format
