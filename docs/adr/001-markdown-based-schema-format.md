@@ -2,7 +2,7 @@
 
 ## Status
 
-Experimental — under evaluation
+Accepted
 
 ## Context
 
@@ -161,3 +161,39 @@ Before committing to this format, validate it against a real case:
 
 Do not implement generation hints or cross-content references in the experiment — validate the
 document grammar and named slots first.
+
+## Evaluation
+
+**Verdict: format accepted.**
+
+The experiment (steps 1–5) is complete. Findings:
+
+**Format readability:** The annotated markdown format reads naturally. A schema for a blog
+article is immediately comprehensible to a non-technical author. The definition-list constraint
+syntax is unobtrusive. The `----` separator is intuitive. The "schema looks like the document"
+property holds for all four element types.
+
+**Parser tractability:** A line-by-line state machine parser is straightforward to implement
+and reason about. No library dependency is required for the schema parser. The grammar types
+(`Grammar`, `Slot`, `Element`, `Constraint`, `BodyRules`) map cleanly to the format.
+
+**Paragraph slots:** The initial `paragraphs [min..max] {#name}` keyword syntax was replaced
+with plain text lines carrying a `{#name}` anchor. This restores format consistency —
+paragraph slots are now visually indistinguishable from document prose, matching the approach
+used for headings, links, and images. Cardinality is expressed via `occurs: 1..3` in the
+definition-list constraints.
+
+**Content documents are plain markdown:** Authors write ordinary markdown with no schema
+syntax. The publisher infers slot assignment positionally. This is a hard design constraint
+that survived the experiment intact.
+
+**Open questions for future ADRs:**
+- Positional matching handles the common case but needs work for optional slots (a missing
+  optional slot currently cascades into false errors for subsequent slots).
+- The content parser flattens inline vs. block context (an inline link and a standalone link
+  both produce `ContentElement::Link`). The validator cannot currently distinguish them.
+- The constraint vocabulary (`occurs`, `orientation`, `headings`, `alt`, `content`) is
+  sufficient for the experiment scope but needs formal specification before general use.
+- Pattern matching for link/image `pattern` fields is parsed but not yet validated.
+
+These open questions are scoped to future work and do not block accepting the format.
