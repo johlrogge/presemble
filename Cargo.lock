@@ -19,6 +19,13 @@ dependencies = [
 [[package]]
 name = "content_management"
 version = "0.1.0"
+dependencies = [
+ "editor_server",
+]
+
+[[package]]
+name = "editor_server"
+version = "0.1.0"
 
 [[package]]
 name = "getopts"

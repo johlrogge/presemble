@@ -15,4 +15,5 @@ edition = "2024"
 schema = { path = "components/schema" }
 content = { path = "components/content" }
 publisher_cli = { path = "bases/publisher_cli" }
+editor_server = { path = "bases/editor_server" }
 pulldown-cmark = "0.12"

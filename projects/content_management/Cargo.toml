@@ -1,13 +1,11 @@
 [package]
 name = "content_management"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [[bin]]
 name = "content_management"
 path = "src/main.rs"
 
 [dependencies]
-# Add base and component deps here, e.g.:
-# my-base = { path = "../../bases/my-base" }
-# my-component-stub = { path = "../../components/my-component-stub", package = "my-component-stub" }
+editor_server = { workspace = true }

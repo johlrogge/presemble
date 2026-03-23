@@ -1,0 +1,6 @@
+[package]
+name = "editor_server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
