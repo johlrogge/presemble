@@ -144,7 +144,7 @@ pub fn build_content_page(
             .and_then(|s| s.to_str())
             .unwrap_or("index")
             .to_string();
-        let url = format!("/{schema_stem}/{slug}");
+        let url = format!("/{schema_stem}/{slug}.html");
 
         let mut slot_graph = template::build_article_graph(&doc, grammar);
         slot_graph.insert("url", template::Value::Text(url.clone()));
