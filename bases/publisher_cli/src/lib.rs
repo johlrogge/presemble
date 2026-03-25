@@ -101,6 +101,39 @@ pub fn run() -> Result<(), CliError> {
 
             if result.is_valid() {
                 println!("{file_name}: PASS");
+
+                // Rendering phase — only for valid documents
+                let templates_dir = std::path::Path::new(site_dir).join("templates");
+                let template_path = templates_dir.join(format!("{schema_stem}.html"));
+
+                if template_path.exists() {
+                    // Build data graph — wrap under schema_stem (e.g., "article")
+                    let article_graph = template::build_article_graph(&doc, &grammar);
+                    let mut context = template::DataGraph::new();
+                    context.insert(schema_stem, template::Value::Record(article_graph));
+
+                    // Load and render the template
+                    let loader = template::FileTemplateLoader::new(&templates_dir);
+                    let tmpl_src = std::fs::read_to_string(&template_path)?;
+                    let tmpl = template::parse_template(&tmpl_src)
+                        .map_err(|e| CliError::Template(template::RenderError::ParseError(e)))?;
+                    let html = template::render(&tmpl, &context, &loader)
+                        .map_err(CliError::Template)?;
+
+                    // Write output
+                    let output_dir = std::path::Path::new(site_dir)
+                        .join("output")
+                        .join(schema_stem);
+                    std::fs::create_dir_all(&output_dir)?;
+                    let output_path = output_dir.join(
+                        content_path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(|s| format!("{s}.html"))
+                            .unwrap_or_else(|| "index.html".to_string())
+                    );
+                    std::fs::write(&output_path, &html)?;
+                    println!("  \u{2192} {}", output_path.display());
+                }
             } else {
                 println!("{file_name}: FAIL");
                 for diagnostic in &result.diagnostics {

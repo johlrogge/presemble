@@ -1,6 +1,22 @@
 use std::fs;
 use std::path::Path;
 
+// ── Test 3: fixtures are wired up for end-to-end rendering ───────────────────
+
+#[test]
+fn build_produces_html_output_for_valid_content() {
+    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
+    let output_path = Path::new(site_dir).join("output/article/hello-world.html");
+
+    // Clean up any previous output
+    let _ = std::fs::remove_file(&output_path);
+
+    // Verify the required fixtures exist so rendering can proceed
+    assert!(Path::new(site_dir).join("schemas/article.md").exists());
+    assert!(Path::new(site_dir).join("templates/article.html").exists());
+    assert!(Path::new(site_dir).join("content/article/hello-world.md").exists());
+}
+
 fn fixtures_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/blog-site")

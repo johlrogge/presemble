@@ -1,0 +1,13 @@
+<article class="article-card">
+  {{ article:cover | maybe(template:cover_thumbnail) }}
+
+  <div class="article-card__content">
+    <h2 class="article-card__title">
+      <a href="{{ article:url }}">{{ article:title }}</a>
+    </h2>
+
+    <p class="article-card__summary">
+      {{ article:summary | first }}
+    </p>
+  </div>
+</article>

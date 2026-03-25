@@ -1,9 +1,12 @@
 [package]
-name = "publisher_cli"
+name = "template"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 schema = { workspace = true }
 content = { workspace = true }
-template = { workspace = true }
+
+[dev-dependencies]
+schema = { workspace = true }
+content = { workspace = true }

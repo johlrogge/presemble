@@ -2,7 +2,7 @@
 
 ## Status
 
-Under evaluation
+Proposed
 
 ## Context
 
@@ -49,6 +49,9 @@ Transformations are chained via `|`. Each transformation takes a value and produ
 {{ article:title | uppercase }}
 {{ article:cover | thumbnail(800x600) | url }}
 {{ article:published_at | date_format("MMMM d, yyyy") }}
+{{ article:cover:orientation | match(landscape => "cover--landscape", portrait => "cover--portrait") }}
+{{ article:subtitle | default("Untitled") }}
+{{ article:summary | rest }}
 ```
 
 ### Iteration via `each`
@@ -62,6 +65,21 @@ collection:
 
 `template:article_card` references another template file. That file receives one article from the
 collection and produces an HTML fragment. The fragments are concatenated at the call site.
+
+### Collection accessors
+
+Collection values (multi-occurrence slots) support positional access via pipe transforms:
+
+```
+{{ article:summary | first }}
+{{ article:summary | rest | each(template:summary_continuation) }}
+```
+
+`first` returns the first element. `rest` returns all elements except the first. Together with
+`each`, they enable split-and-remap patterns where different parts of a collection receive
+different templates.
+
+Additional transforms (`last`, `nth(N)`, `take(N)`, `skip(N)`) are reserved for future use.
 
 ### Optionality via `maybe`
 
@@ -88,12 +106,35 @@ a pipe:
 Templates are pure: they take a data graph value and return an HTML fragment. No side effects,
 no global state.
 
+### Fragment context scoping
+
+When a template is invoked via a pipe (`maybe`, `each`, or direct `template:` reference), the
+piped value becomes the template's context root. The fragment sees only the value it receives,
+not the caller's full context. Fields are accessed as bare names on the context root.
+
+This makes fragments pure functions of their input — a cover fragment says `{{ path }}` and
+`{{ alt }}`, not `{{ article:cover:path }}`. The same fragment works for any content type that
+has a cover slot.
+
+### Template context map
+
+Each page render receives a context map: a set of named root values provided by the publisher.
+Top-level names in expressions (`site`, `article`) resolve from this map. The publisher
+establishes the context map based on content type and routing rules.
+
+Fragment templates invoked via pipes receive a narrowed context: the piped value is the sole
+root. Page templates are entry points with declared dependencies; fragments are pure functions
+of their piped input.
+
 ### Conditionals and branching
 
-Deferred. The pipe model will be pushed until it breaks. If predicate-based branching (e.g., "use
-layout A if cover is landscape, layout B if portrait") cannot be expressed via `match` or `when`
-as pipe transforms, a second mechanism will be introduced. The failure mode determines the form
-of the solution.
+Attribute-level conditionals are handled by `match` (maps enumerated values to output strings)
+and `default` (provides a fallback for absent values). Both are pipe transforms.
+
+Full block-level branching — different HTML structure based on a predicate — remains deferred.
+If cases arise where `match` is insufficient (e.g., rendering entirely different element trees
+based on a value), a `when` or block-level mechanism will be introduced. The failure mode
+will determine the form.
 
 ### Delimiter syntax (TBD)
 
@@ -136,7 +177,7 @@ can no longer visually read a template as an approximation of its output.
 **Negative / open questions:**
 - A custom expression language requires a parser and interpreter — non-trivial investment
 - Delimiter syntax is unresolved — needs empirical validation with real templates
-- Predicate-based conditionals are deferred — the pipe model may not stretch to cover all cases
+- Attribute-level conditionals are resolved via `match` and `default`; full block-level branching remains deferred
 - No existing library implements this model; this is a Presemble-native component
 
 ## Experiment scope
@@ -147,3 +188,48 @@ can no longer visually read a template as an approximation of its output.
 3. Assess delimiter ergonomics empirically
 4. Implement a minimal expression interpreter (graph lookups + pipes + `each` + `maybe`) and
    render one content type to HTML
+
+## Evaluation
+
+Real templates were written for the blog-site fixture (article detail page, article list
+page, article card fragment, article cover fragment). These are the findings.
+
+### What worked well
+
+The basic expression model — graph lookups, pipe chaining, `each` for iteration, `maybe`
+for optionality, and `template:` for composition — covered the common cases cleanly. Templates
+read as approximations of their output. The pipe model eliminated the need for block
+directives in all cases tested. Composition via pipes made data dependencies explicit at
+every call site.
+
+### Findings
+
+Four gaps were identified. All are resolved within the pipe model.
+
+**Fragment context scoping** — piped value becomes the fragment's context root; bare field
+names access it. Makes fragments pure functions, enables reuse across content types. See
+the Fragment context scoping section.
+
+**Template context establishment** — top-level page templates receive a named context map
+from the publisher. See the Template context map section.
+
+**Attribute-level conditionals** — resolved by `match` and `default` pipe transforms, not
+block directives.
+
+**Multi-occurrence slot access** — resolved by `rest` (and future collection accessors)
+combined with `each` for split-and-remap patterns.
+
+### Delimiter ergonomics
+
+`{{ }}` was used for the experiment. It reads well in HTML but causes editor confusion
+(Jinja2/Handlebars association). `[[ ]]` avoids this but conflicts with the `[[reference]]`
+syntax from ADR-002. If schema files use `[[reference]]` and template files use `[[ ]]`
+expression slots, the contextual separation may be sufficient — but this must be stated
+explicitly if `[[ ]]` is chosen. Decision remains open.
+
+### Verdict
+
+The pipe model is validated. The four gaps are resolved by specification additions and new
+transforms — no block-level syntax or second mechanism is required. Proceed to implementation
+of a minimal expression interpreter covering: graph lookups, pipes, `each`, `maybe`, `match`,
+`default`, `first`, `rest`, and `template:` composition.

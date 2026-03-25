@@ -14,6 +14,7 @@ edition = "2024"
 [workspace.dependencies]
 schema = { path = "components/schema" }
 content = { path = "components/content" }
+template = { path = "components/template" }
 publisher_cli = { path = "bases/publisher_cli" }
 editor_server = { path = "bases/editor_server" }
 pulldown-cmark = "0.12"

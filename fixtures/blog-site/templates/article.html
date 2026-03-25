@@ -1,0 +1,24 @@
+{{ site | template:header }}
+
+<main class="article">
+  <article>
+    <header class="article__header">
+      <h1>{{ article:title }}</h1>
+      <p class="article__byline">
+        By <a href="{{ article:author:href }}">{{ article:author:text }}</a>
+      </p>
+    </header>
+
+    {{ article:cover | maybe(template:article_cover) }}
+
+    <div class="article__summary">
+      {{ article:summary }}
+    </div>
+
+    <div class="article__body">
+      {{ article:body }}
+    </div>
+  </article>
+</main>
+
+{{ site | template:footer }}

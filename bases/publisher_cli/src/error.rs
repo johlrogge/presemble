@@ -6,6 +6,8 @@ pub enum CliError {
     Content(content::ContentError),
     Io(std::io::Error),
     Usage(String),
+    Template(template::RenderError),
+    Render(String),
 }
 
 impl fmt::Display for CliError {
@@ -15,6 +17,8 @@ impl fmt::Display for CliError {
             CliError::Content(e) => write!(f, "content error: {e}"),
             CliError::Io(e) => write!(f, "io error: {e}"),
             CliError::Usage(msg) => write!(f, "usage: {msg}"),
+            CliError::Template(e) => write!(f, "template error: {e}"),
+            CliError::Render(msg) => write!(f, "render error: {msg}"),
         }
     }
 }
@@ -34,5 +38,11 @@ impl From<content::ContentError> for CliError {
 impl From<std::io::Error> for CliError {
     fn from(e: std::io::Error) -> Self {
         CliError::Io(e)
+    }
+}
+
+impl From<template::RenderError> for CliError {
+    fn from(e: template::RenderError) -> Self {
+        CliError::Template(e)
     }
 }
