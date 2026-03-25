@@ -1,22 +1,37 @@
 use crate::error::CliError;
-use crate::build_site;
+use crate::{build_site, rebuild_affected, DependencyGraph};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tiny_http::{Response, Server, StatusCode};
 
 pub fn serve_site(site_dir: &Path, port: u16) -> Result<(), CliError> {
     let output_dir = site_dir.join("output");
 
-    // Initial build
+    // Initial build — capture the dependency graph
     println!("Building site...");
-    run_build(site_dir);
+    let current_graph = Arc::new(Mutex::new(DependencyGraph::new()));
+    match build_site(site_dir) {
+        Ok(outcome) => {
+            *current_graph.lock().unwrap() = outcome.dep_graph;
+            if outcome.files_failed > 0 {
+                eprintln!("Build completed with {} error(s)", outcome.files_failed);
+            } else {
+                println!("Build complete ({} file(s))", outcome.files_built);
+            }
+        }
+        Err(e) => {
+            eprintln!("Build failed: {e}");
+        }
+    }
 
     // Start file watcher in background thread
     let site_dir_owned = site_dir.to_path_buf();
+    let graph_clone = Arc::clone(&current_graph);
     std::thread::spawn(move || {
-        watch_and_rebuild(&site_dir_owned);
+        watch_and_rebuild(&site_dir_owned, graph_clone);
     });
 
     // Start HTTP server
@@ -35,21 +50,6 @@ pub fn serve_site(site_dir: &Path, port: u16) -> Result<(), CliError> {
     }
 
     Ok(())
-}
-
-fn run_build(site_dir: &Path) {
-    match build_site(site_dir) {
-        Ok(outcome) => {
-            if outcome.has_errors() {
-                eprintln!("Build completed with {} error(s)", outcome.files_failed);
-            } else {
-                println!("Build complete ({} file(s))", outcome.files_built);
-            }
-        }
-        Err(e) => {
-            eprintln!("Build failed: {e}");
-        }
-    }
 }
 
 fn print_available_pages(output_dir: &Path, addr: &str) {
@@ -80,7 +80,7 @@ fn collect_html_files(root: &Path, dir: &Path, pages: &mut Vec<String>) {
     }
 }
 
-fn watch_and_rebuild(site_dir: &Path) {
+fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
     let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
@@ -105,13 +105,16 @@ fn watch_and_rebuild(site_dir: &Path) {
     }
 
     loop {
-        // Wait for the first event
+        let mut dirty: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+
+        // Wait for first event, collect its paths
         match rx.recv() {
-            Ok(_) => {}
-            Err(_) => break, // channel closed
+            Ok(Ok(event)) => dirty.extend(event.paths),
+            Ok(Err(_)) | Err(_) => break,
         }
 
-        // Debounce: drain any additional events that arrive within 150ms
+        // Debounce: drain additional events within 150ms, collecting paths
         let deadline = std::time::Instant::now() + Duration::from_millis(150);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -119,13 +122,52 @@ fn watch_and_rebuild(site_dir: &Path) {
                 break;
             }
             match rx.recv_timeout(remaining) {
-                Ok(_) => {} // more events, keep draining
-                Err(_) => break, // timeout or closed
+                Ok(Ok(event)) => dirty.extend(event.paths),
+                Ok(Err(_)) => {}
+                Err(_) => break,
             }
         }
 
-        println!("Rebuilding...");
-        run_build(site_dir);
+        if dirty.is_empty() {
+            continue;
+        }
+
+        let current = graph.lock().unwrap().clone();
+        let affected_count = dirty
+            .iter()
+            .flat_map(|p| current.affected_outputs(p))
+            .count();
+
+        if affected_count == 0 {
+            // No registered outputs depend on the changed files — skip rebuild
+            continue;
+        }
+
+        println!("Rebuilding {} page(s)...", affected_count);
+        match rebuild_affected(site_dir, &dirty, &current) {
+            Ok(outcome) => {
+                // Merge updated deps into the current graph
+                let mut g = graph.lock().unwrap();
+                g.merge(outcome.dep_graph);
+
+                if outcome.files_failed > 0 {
+                    eprintln!("Rebuild completed with {} error(s)", outcome.files_failed);
+                } else if outcome.files_built > 0 {
+                    println!("Rebuild complete ({} file(s))", outcome.files_built);
+                }
+            }
+            Err(e) => {
+                eprintln!("Rebuild failed: {e} — falling back to full rebuild");
+                match build_site(site_dir) {
+                    Ok(outcome) => {
+                        let mut g = graph.lock().unwrap();
+                        *g = outcome.dep_graph;
+                        println!("Full rebuild complete");
+                    }
+                    Err(e2) => eprintln!("Full rebuild failed: {e2}"),
+                }
+            }
+        }
     }
 }
 

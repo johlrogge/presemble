@@ -121,6 +121,66 @@ fn build_produces_index_html() {
 // ── Test 5: built_pages articles collection has url field ────────────────────
 
 #[test]
+fn build_site_populates_dep_graph_for_article() {
+    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
+    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
+        .expect("build should succeed");
+
+    let article_output = std::path::Path::new(site_dir)
+        .join("output/article/hello-world.html");
+    let schema_path = std::path::Path::new(site_dir).join("schemas/article.md");
+    let content_path = std::path::Path::new(site_dir)
+        .join("content/article/hello-world.md");
+
+    // Changing the schema should affect the article output
+    let affected = outcome.dep_graph.affected_outputs(&schema_path);
+    assert!(
+        affected.contains(&article_output),
+        "schema change should affect article output; affected: {affected:?}"
+    );
+
+    // Changing the content file should affect the article output
+    let affected = outcome.dep_graph.affected_outputs(&content_path);
+    assert!(
+        affected.contains(&article_output),
+        "content change should affect article output"
+    );
+}
+
+#[test]
+fn build_site_dep_graph_index_depends_on_all_content() {
+    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
+    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
+        .expect("build should succeed");
+
+    let index_output = std::path::Path::new(site_dir).join("output/index.html");
+    let content_path = std::path::Path::new(site_dir)
+        .join("content/article/hello-world.md");
+
+    let affected = outcome.dep_graph.affected_outputs(&content_path);
+    assert!(
+        affected.contains(&index_output),
+        "content change should affect index.html; affected: {affected:?}"
+    );
+}
+
+#[test]
+fn build_site_dep_graph_index_depends_on_index_template() {
+    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
+    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
+        .expect("build should succeed");
+
+    let index_output = std::path::Path::new(site_dir).join("output/index.html");
+    let index_template = std::path::Path::new(site_dir).join("templates/index.html");
+
+    let affected = outcome.dep_graph.affected_outputs(&index_template);
+    assert!(
+        affected.contains(&index_output),
+        "template change should affect index; affected: {affected:?}"
+    );
+}
+
+#[test]
 fn build_site_articles_collection_has_url_field() {
     let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
 
