@@ -9,7 +9,7 @@ schema format keeps your content well-formed at build time.
 You will also see how named slots and document grammars give templates reliable, queryable
 fields without any runtime surprises.
 
-[Jo Hlrogge](/authors/johlrogge)
+[Jo Hlrogge](/author/johlrogge)
 
 ![A landscape photo of a desk with a laptop and notebook open side by side](images/cover.jpg)
 
