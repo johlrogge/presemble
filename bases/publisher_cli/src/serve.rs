@@ -26,6 +26,7 @@ pub fn serve_site(site_dir: &Path, port: u16) -> Result<(), CliError> {
 
     println!("Serving at http://{addr}");
     println!("Press Ctrl-C to stop.");
+    print_available_pages(&output_dir, &addr);
 
     for request in server.incoming_requests() {
         let url_path = request.url().to_string();
@@ -51,6 +52,34 @@ fn run_build(site_dir: &Path) {
     }
 }
 
+fn print_available_pages(output_dir: &Path, addr: &str) {
+    let mut pages = Vec::new();
+    collect_html_files(output_dir, output_dir, &mut pages);
+    if pages.is_empty() {
+        println!("  (no pages built yet)");
+    } else {
+        for page in &pages {
+            println!("  http://{addr}/{page}");
+        }
+    }
+}
+
+fn collect_html_files(root: &Path, dir: &Path, pages: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_html_files(root, &path, pages);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("html") {
+            if let Ok(rel) = path.strip_prefix(root) {
+                pages.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+}
+
 fn watch_and_rebuild(site_dir: &Path) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
@@ -61,6 +90,9 @@ fn watch_and_rebuild(site_dir: &Path) {
             return;
         }
     };
+
+    // Brief settle delay — avoids reacting to filesystem events from the initial build
+    std::thread::sleep(Duration::from_millis(500));
 
     // Watch schemas, content, and templates directories
     for subdir in &["schemas", "content", "templates"] {
@@ -131,9 +163,32 @@ fn serve_file(output_dir: &Path, url_path: &str) -> Response<std::io::Cursor<Vec
         }
     }
 
+    // For root, generate an auto-index
+    if url_path == "/" || url_path.is_empty() {
+        return serve_auto_index(output_dir);
+    }
+
     // 404
     let body = b"404 Not Found".to_vec();
     Response::from_data(body).with_status_code(StatusCode(404))
+}
+
+fn serve_auto_index(output_dir: &Path) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut pages = Vec::new();
+    collect_html_files(output_dir, output_dir, &mut pages);
+    let items = pages
+        .iter()
+        .map(|p| format!("  <li><a href=\"/{p}\">{p}</a></li>"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        "<!doctype html><html><head><title>Presemble</title></head>\
+         <body><h1>Pages</h1><ul>\n{items}\n</ul></body></html>"
+    )
+    .into_bytes();
+    Response::from_data(body).with_header(
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], b"text/html; charset=utf-8").unwrap(),
+    )
 }
 
 fn guess_content_type(path: &Path) -> String {
