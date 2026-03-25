@@ -11,15 +11,21 @@ static site. Schema violations in existing content surface real problems, provin
 has teeth.
 
 **Deliverables:**
-- [ ] Schema definition format decided and documented
-- [ ] Read markdown + frontmatter from a content directory
-- [ ] Validate content against schemas — hard fail with clear error messages
+- [x] Schema definition format decided and documented (ADR-001)
+- [x] Read markdown from a content directory
+- [x] Validate content against schemas — hard fail with clear error messages
 - [ ] Cross-content reference validation (e.g. article references author who needs a bio)
-- [ ] Template rendering to static HTML
-- [ ] `presemble build` CLI command
+- [x] Template rendering to static HTML (ADR-004)
+- [x] `presemble build` CLI command
 - [ ] Dogfood test: build a subset of blog.agical.se content
 
 ## Backlog
+
+**M0.5 — "Presemble builds its own site"**
+- Build the presemble.io promotional site using Presemble itself
+- Content: what Presemble is, why it exists, how to get started
+- This is the real dogfood test — if building the site reveals gaps, they get fixed before M1
+- Success gate: `presemble build` produces a deployable presemble.io site with no workarounds
 
 **M1 — "It serves and watches"**
 - `presemble serve` — local HTTP server with file watching and live rebuild
