@@ -1,0 +1,53 @@
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Presemble Blog</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<header class="site-header">
+  <a class="site-header__logo" href="/">Presemble Blog</a>
+  <nav class="site-header__nav">
+    <a href="/">Home</a>
+  </nav>
+</header>
+
+<main class="article">
+  <article>
+    <header class="article__header">
+      <h1 class="article-title">Hello, World: Getting Started With Presemble</h1>
+      <p class="article__byline">
+        By <a href="/author/johlrogge" class="article-author">Jo Hlrogge</a>
+      </p>
+    </header>
+
+    
+      <div>
+        <img src="images/cover.jpg" alt="A landscape photo of a desk with a laptop and notebook open side by side" class="article-cover" />
+      </div>
+    
+
+    <div class="article__summary">
+      <span class="article-summary">Presemble is a site publisher built for editorial teams who care about content structure and semantic safety. This post walks you through the core ideas behind the project.</span><span class="article-summary">In this article you will learn what presemble is, why we built it, and how the annotated markdown schema format keeps your content well-formed at build time.</span><span class="article-summary">You will also see how named slots and document grammars give templates reliable, queryable fields without any runtime surprises.</span>
+    </div>
+
+    <div class="article__body">
+      <h3>What Is Presemble?</h3>
+<p>Presemble combines a static site publisher with an editorial collaboration layer. Content schemas are written in plain markdown, so authors can read them without any training.</p>
+<h4>Why Document Grammars?</h4>
+<p>Most schema formats describe a bag of fields. Presemble instead describes the expected sequence of structural elements in a document — heading, image, paragraph, body — with each position named and constrained.</p>
+<h5>Named Slots in Practice</h5>
+<p>Every named slot becomes a queryable field in templates. A template can reference ${article:title} or ${article:cover} and the publisher guarantees those values exist before the build completes.</p>
+<h6>Constraint Vocabulary</h6>
+<p>The constraint vocabulary covers the most common needs: occurs, content, orientation, alt, and headings. This vocabulary will grow as the experiment matures.</p>
+    </div>
+  </article>
+</main>
+
+<footer class="site-footer">
+  <p class="site-footer__copy">© Presemble Blog</p>
+</footer>
+</body>
+</html>
