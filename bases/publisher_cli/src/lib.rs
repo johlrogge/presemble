@@ -173,7 +173,7 @@ pub fn build_content_page(
         .and_then(|s| s.to_str())
         .unwrap_or("index")
         .to_string();
-    let url = format!("/{schema_stem}/{slug}");
+    let url = format!("/{schema_stem}/{slug}.html");
 
     // Extract title text for the link record (fallback to slug if absent)
     let title_text = match slot_graph.resolve(&["title"]) {
