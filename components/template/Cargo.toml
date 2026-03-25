@@ -6,7 +6,4 @@ edition.workspace = true
 [dependencies]
 schema = { workspace = true }
 content = { workspace = true }
-
-[dev-dependencies]
-schema = { workspace = true }
-content = { workspace = true }
+quick-xml = { workspace = true }

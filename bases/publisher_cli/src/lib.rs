@@ -113,12 +113,9 @@ pub fn run() -> Result<(), CliError> {
                     context.insert(schema_stem, template::Value::Record(article_graph));
 
                     // Load and render the template
-                    let loader = template::FileTemplateLoader::new(&templates_dir);
                     let tmpl_src = std::fs::read_to_string(&template_path)?;
-                    let tmpl = template::parse_template(&tmpl_src)
-                        .map_err(|e| CliError::Template(template::RenderError::ParseError(e)))?;
-                    let html = template::render(&tmpl, &context, &loader)
-                        .map_err(CliError::Template)?;
+                    let html = template::render_template(&tmpl_src, &context)
+                        .map_err(|e| CliError::Render(e.to_string()))?;
 
                     // Write output
                     let output_dir = std::path::Path::new(site_dir)

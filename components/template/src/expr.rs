@@ -1,50 +1,9 @@
-use crate::ast::{Expr, Fragment, Template, Transform};
+use crate::ast::{Expr, Transform};
 use crate::error::TemplateError;
 
-pub fn parse_template(input: &str) -> Result<Template, TemplateError> {
-    let mut fragments = Vec::new();
-    let mut remaining = input;
-
-    loop {
-        match remaining.find("{{") {
-            None => {
-                // No more expression slots — rest is literal
-                fragments.push(Fragment::Literal(remaining.to_string()));
-                break;
-            }
-            Some(open_pos) => {
-                // Emit literal up to the `{{`
-                fragments.push(Fragment::Literal(remaining[..open_pos].to_string()));
-                let after_open = &remaining[open_pos + 2..];
-
-                match after_open.find("}}") {
-                    None => {
-                        return Err(TemplateError::ParseError(
-                            "unclosed `{{` — missing `}}`".to_string(),
-                        ));
-                    }
-                    Some(close_pos) => {
-                        let expr_src = after_open[..close_pos].trim();
-                        if expr_src.is_empty() {
-                            return Err(TemplateError::ParseError(
-                                "empty expression `{{  }}`".to_string(),
-                            ));
-                        }
-                        let expr = parse_expr(expr_src)?;
-                        fragments.push(Fragment::Expression(expr));
-                        remaining = &after_open[close_pos + 2..];
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(Template { fragments })
-}
-
 /// Parse a full expression (possibly pipe-chained).
-fn parse_expr(src: &str) -> Result<Expr, TemplateError> {
-    // Split on ` | ` to get pipe stages. We must be careful not to split inside
+pub fn parse_expr(src: &str) -> Result<Expr, TemplateError> {
+    // Split on `|` to get pipe stages. We must be careful not to split inside
     // parenthesised argument lists (e.g. `match(a => "x | y")`). A simple depth
     // counter on `(` / `)` is sufficient for our grammar.
     let stages = split_pipe_stages(src);
@@ -134,7 +93,6 @@ fn parse_transform(src: &str) -> Result<Transform, TemplateError> {
                 let args = if args_str.is_empty() {
                     vec![]
                 } else {
-                    // Collect quoted string args or bare args
                     parse_generic_args(args_str)
                 };
                 Ok(Transform::Named(other.to_string(), args))
@@ -218,7 +176,7 @@ fn parse_generic_args(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// Split an expression string on ` | ` (pipe) but only at depth 0 (not inside parentheses).
+/// Split an expression string on `|` (pipe) but only at depth 0 (not inside parentheses).
 fn split_pipe_stages(src: &str) -> Vec<&str> {
     let mut stages = Vec::new();
     let mut depth: usize = 0;
@@ -246,48 +204,17 @@ fn split_pipe_stages(src: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Expr, Fragment, Transform};
-
-    /// Assert that a Fragment is a Literal with the given text.
-    fn assert_literal(frag: &Fragment, expected: &str) {
-        match frag {
-            Fragment::Literal(s) => assert_eq!(s, expected, "literal mismatch"),
-            other => panic!("expected Literal({expected:?}), got {other:?}"),
-        }
-    }
-
-    /// Assert that a Fragment is an Expression and return the inner Expr.
-    fn assert_expr(frag: &Fragment) -> &Expr {
-        match frag {
-            Fragment::Expression(e) => e,
-            other => panic!("expected Expression, got {other:?}"),
-        }
-    }
+    use crate::ast::{Expr, Transform};
 
     #[test]
     fn bare_lookup() {
-        let t = parse_template("{{ article:title }}").unwrap();
-        assert_eq!(t.fragments.len(), 3);
-        assert_literal(&t.fragments[0], "");
-        let expr = assert_expr(&t.fragments[1]);
-        assert!(matches!(expr, Expr::Lookup(parts) if parts == &["article", "title"]));
-        assert_literal(&t.fragments[2], "");
-    }
-
-    #[test]
-    fn mixed_literal_and_expression() {
-        let t = parse_template("<h1>{{ article:title }}</h1>").unwrap();
-        assert_eq!(t.fragments.len(), 3);
-        assert_literal(&t.fragments[0], "<h1>");
-        let expr = assert_expr(&t.fragments[1]);
-        assert!(matches!(expr, Expr::Lookup(parts) if parts == &["article", "title"]));
-        assert_literal(&t.fragments[2], "</h1>");
+        let expr = parse_expr("article:title").unwrap();
+        assert!(matches!(expr, Expr::Lookup(parts) if parts == vec!["article", "title"]));
     }
 
     #[test]
     fn maybe_transform() {
-        let t = parse_template("{{ article:cover | maybe(template:article_cover) }}").unwrap();
-        let expr = assert_expr(&t.fragments[1]);
+        let expr = parse_expr("article:cover | maybe(template:article_cover)").unwrap();
         match expr {
             Expr::Pipe(inner, Transform::Maybe(name)) => {
                 assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["article", "cover"]));
@@ -299,8 +226,7 @@ mod tests {
 
     #[test]
     fn each_transform() {
-        let t = parse_template("{{ site:articles | each(template:article_card) }}").unwrap();
-        let expr = assert_expr(&t.fragments[1]);
+        let expr = parse_expr("site:articles | each(template:article_card)").unwrap();
         match expr {
             Expr::Pipe(inner, Transform::Each(name)) => {
                 assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["site", "articles"]));
@@ -312,8 +238,7 @@ mod tests {
 
     #[test]
     fn first_transform() {
-        let t = parse_template("{{ article:summary | first }}").unwrap();
-        let expr = assert_expr(&t.fragments[1]);
+        let expr = parse_expr("article:summary | first").unwrap();
         assert!(
             matches!(expr, Expr::Pipe(inner, Transform::First)
                 if matches!(inner.as_ref(), Expr::Lookup(p) if p == &["article", "summary"]))
@@ -322,11 +247,8 @@ mod tests {
 
     #[test]
     fn rest_then_each_chained() {
-        let t =
-            parse_template("{{ article:summary | rest | each(template:summary_continuation) }}")
-                .unwrap();
-        let expr = assert_expr(&t.fragments[1]);
-        // Should be Pipe(Pipe(Lookup(...), Rest), Each("summary_continuation"))
+        let expr =
+            parse_expr("article:summary | rest | each(template:summary_continuation)").unwrap();
         match expr {
             Expr::Pipe(mid, Transform::Each(name)) => {
                 assert_eq!(name, "summary_continuation");
@@ -345,8 +267,7 @@ mod tests {
 
     #[test]
     fn apply_template_transform() {
-        let t = parse_template("{{ site | template:header }}").unwrap();
-        let expr = assert_expr(&t.fragments[1]);
+        let expr = parse_expr("site | template:header").unwrap();
         match expr {
             Expr::Pipe(inner, Transform::ApplyTemplate(name)) => {
                 assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["site"]));
@@ -358,17 +279,16 @@ mod tests {
 
     #[test]
     fn match_transform() {
-        let t = parse_template(
-            r#"{{ orientation | match(landscape => "cover--landscape", portrait => "cover--portrait") }}"#,
+        let expr = parse_expr(
+            r#"orientation | match(landscape => "cover--landscape", portrait => "cover--portrait")"#,
         )
         .unwrap();
-        let expr = assert_expr(&t.fragments[1]);
         match expr {
             Expr::Pipe(inner, Transform::Match(arms)) => {
                 assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["orientation"]));
                 assert_eq!(
                     arms,
-                    &[
+                    vec![
                         ("landscape".to_string(), "cover--landscape".to_string()),
                         ("portrait".to_string(), "cover--portrait".to_string()),
                     ]
@@ -380,8 +300,7 @@ mod tests {
 
     #[test]
     fn default_transform() {
-        let t = parse_template(r#"{{ subtitle | default("Untitled") }}"#).unwrap();
-        let expr = assert_expr(&t.fragments[1]);
+        let expr = parse_expr(r#"subtitle | default("Untitled")"#).unwrap();
         match expr {
             Expr::Pipe(inner, Transform::Default(val)) => {
                 assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["subtitle"]));
@@ -390,31 +309,4 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
     }
-
-    #[test]
-    fn static_template_no_expressions() {
-        let html = "<h1>Hello world</h1>";
-        let t = parse_template(html).unwrap();
-        assert_eq!(t.fragments.len(), 1);
-        assert_literal(&t.fragments[0], html);
-    }
-
-    #[test]
-    fn unclosed_double_brace() {
-        let result = parse_template("hello {{ world");
-        assert!(
-            matches!(result, Err(TemplateError::ParseError(_))),
-            "expected ParseError"
-        );
-    }
-
-    #[test]
-    fn empty_expression() {
-        let result = parse_template("{{  }}");
-        assert!(
-            matches!(result, Err(TemplateError::ParseError(_))),
-            "expected ParseError for empty expression"
-        );
-    }
-
 }

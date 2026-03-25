@@ -1,24 +1,47 @@
-{{ site | template:header }}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Presemble Blog</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<header class="site-header">
+  <a class="site-header__logo" href="/">Presemble Blog</a>
+  <nav class="site-header__nav">
+    <a href="/">Home</a>
+    <a href="/articles/">Articles</a>
+  </nav>
+</header>
 
 <main class="article">
   <article>
     <header class="article__header">
-      <h1>{{ article:title }}</h1>
+      <presemble:insert data="article:title" as="h1"></presemble:insert>
       <p class="article__byline">
-        By <a href="{{ article:author:href }}">{{ article:author:text }}</a>
+        By <presemble:insert data="article:author" as="a"></presemble:insert>
       </p>
     </header>
 
-    {{ article:cover | maybe(template:article_cover) }}
+    <template data-slot="article:cover">
+      <div presemble:class="article:cover:orientation | match(landscape => &quot;cover--landscape&quot;, portrait => &quot;cover--portrait&quot;)">
+        <presemble:insert data="article:cover"></presemble:insert>
+      </div>
+    </template>
 
     <div class="article__summary">
-      {{ article:summary }}
+      <presemble:insert data="article:summary"></presemble:insert>
     </div>
 
     <div class="article__body">
-      {{ article:body }}
+      <presemble:insert data="article:body"></presemble:insert>
     </div>
   </article>
 </main>
 
-{{ site | template:footer }}
+<footer class="site-footer">
+  <p class="site-footer__copy">&#169; Presemble Blog</p>
+</footer>
+</body>
+</html>

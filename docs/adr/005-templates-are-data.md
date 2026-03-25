@@ -58,19 +58,19 @@ A working vocabulary emerging from experiment:
 
 ```html
 <!-- Insert a slot value as a DOM node -->
-<presemble:insert data="article:title" as="h1" />
+<presemble:insert data="article:title" as="h1"></presemble:insert>
 
 <!-- Attribute binding from the data graph -->
 <div presemble:class="article:cover:orientation | match(landscape: cover--landscape, portrait: cover--portrait)">
 
 <!-- Iteration -->
 <template data-each="site:articles">
-  <presemble:insert data="article:title" as="h3" />
+  <presemble:insert data="article:title" as="h3"></presemble:insert>
 </template>
 
 <!-- Conditional (insert only if value is present) -->
 <template data-slot="article:cover">
-  <presemble:insert data="article:cover" />
+  <presemble:insert data="article:cover"></presemble:insert>
 </template>
 ```
 
@@ -97,8 +97,8 @@ HTML(ish) — natural for designers and visual correspondence:
 
 ```html
 <article>
-  <presemble:insert data="article:title" as="h1" />
-  <presemble:insert data="article:cover" />
+  <presemble:insert data="article:title" as="h1"></presemble:insert>
+  <presemble:insert data="article:cover"></presemble:insert>
 </article>
 ```
 
@@ -165,6 +165,7 @@ annotations are declarative structural descriptions, not imperative code express
   for extensibility
 - Semantic class generation from slot names needs a naming convention (e.g.
   `{content-type}-{slot-name}`)
+- HTML5 does not honour self-closing syntax (`<presemble:insert />`) for non-void custom elements — explicit close tags (`<presemble:insert></presemble:insert>`) are required when using the HTML surface syntax. XML surface syntax (EDN, YAML) does not have this limitation.
 
 ## Experiment scope
 

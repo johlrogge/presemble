@@ -1,17 +1,4 @@
-/// A parsed template: a sequence of literal HTML and expression slots.
-#[derive(Debug, Clone)]
-pub struct Template {
-    pub fragments: Vec<Fragment>,
-}
-
-/// A single fragment — either raw HTML or an expression slot.
-#[derive(Debug, Clone)]
-pub enum Fragment {
-    Literal(String),
-    Expression(Expr),
-}
-
-/// An expression inside `{{ }}`.
+/// An expression inside a pipe expression slot.
 #[derive(Debug, Clone)]
 pub enum Expr {
     /// A colon-separated path lookup: `article:title` → `["article", "title"]`
