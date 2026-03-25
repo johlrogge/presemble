@@ -1,18 +1,76 @@
 mod error;
+mod serve;
 
 pub use error::CliError;
 
+use clap::{Parser, Subcommand};
+use std::path::Path;
+
+pub struct BuildOutcome {
+    pub files_built: usize,
+    pub files_failed: usize,
+}
+
+impl BuildOutcome {
+    pub fn has_errors(&self) -> bool {
+        self.files_failed > 0
+    }
+}
+
+#[derive(Parser)]
+#[command(name = "presemble", about = "A semantic site publisher")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Site directory (backward compat: presemble <site-dir> = presemble build <site-dir>)
+    site_dir: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Build the site from schemas, content, and templates
+    Build {
+        /// Path to the site directory
+        site_dir: String,
+    },
+    /// Serve the site locally with automatic rebuild on changes
+    Serve {
+        /// Path to the site directory
+        site_dir: String,
+    },
+}
+
 pub fn run() -> Result<(), CliError> {
-    let args: Vec<String> = std::env::args().collect();
-    let site_dir = args
-        .get(1)
-        .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?;
+    let cli = Cli::parse();
 
-    println!("Building site: {site_dir}");
+    let site_dir = match &cli.command {
+        Some(Command::Build { site_dir }) => site_dir.clone(),
+        Some(Command::Serve { site_dir }) => {
+            serve::serve_site(std::path::Path::new(site_dir), 3000)?;
+            return Ok(());
+        }
+        None => {
+            // backward compat: presemble <site-dir>
+            cli.site_dir
+                .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?
+        }
+    };
 
-    let schemas_dir = std::path::Path::new(site_dir).join("schemas");
+    let outcome = build_site(Path::new(&site_dir))?;
+    if outcome.has_errors() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
 
-    let mut any_errors = false;
+pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
+    println!("Building site: {}", site_dir.display());
+
+    let schemas_dir = site_dir.join("schemas");
+
+    let mut files_built: usize = 0;
+    let mut files_failed: usize = 0;
 
     // Discover all .md schema files
     let mut schema_entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&schemas_dir)
@@ -43,9 +101,7 @@ pub fn run() -> Result<(), CliError> {
                 ))
             })?;
 
-        let content_dir = std::path::Path::new(site_dir)
-            .join("content")
-            .join(schema_stem);
+        let content_dir = site_dir.join("content").join(schema_stem);
 
         // Read and parse the schema
         let schema_source = std::fs::read_to_string(&schema_path)?;
@@ -53,7 +109,7 @@ pub fn run() -> Result<(), CliError> {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("schema error in {}: {}", schema_path.display(), e);
-                any_errors = true;
+                files_failed += 1;
                 continue;
             }
         };
@@ -92,7 +148,7 @@ pub fn run() -> Result<(), CliError> {
                 Err(e) => {
                     println!("{file_name}: FAIL");
                     println!("  parse error: {e}");
-                    any_errors = true;
+                    files_failed += 1;
                     continue;
                 }
             };
@@ -103,7 +159,7 @@ pub fn run() -> Result<(), CliError> {
                 println!("{file_name}: PASS");
 
                 // Rendering phase — only for valid documents
-                let templates_dir = std::path::Path::new(site_dir).join("templates");
+                let templates_dir = site_dir.join("templates");
                 let template_path = templates_dir.join(format!("{schema_stem}.html"));
 
                 if template_path.exists() {
@@ -118,9 +174,7 @@ pub fn run() -> Result<(), CliError> {
                         .map_err(|e| CliError::Render(e.to_string()))?;
 
                     // Write output
-                    let output_dir = std::path::Path::new(site_dir)
-                        .join("output")
-                        .join(schema_stem);
+                    let output_dir = site_dir.join("output").join(schema_stem);
                     std::fs::create_dir_all(&output_dir)?;
                     let output_path = output_dir.join(
                         content_path.file_stem()
@@ -131,6 +185,8 @@ pub fn run() -> Result<(), CliError> {
                     std::fs::write(&output_path, &html)?;
                     println!("  \u{2192} {}", output_path.display());
                 }
+
+                files_built += 1;
             } else {
                 println!("{file_name}: FAIL");
                 for diagnostic in &result.diagnostics {
@@ -140,16 +196,15 @@ pub fn run() -> Result<(), CliError> {
                         diagnostic.message
                     );
                 }
-                any_errors = true;
+                files_failed += 1;
             }
         }
     }
 
-    if any_errors {
-        std::process::exit(1);
-    }
-
-    Ok(())
+    Ok(BuildOutcome {
+        files_built,
+        files_failed,
+    })
 }
 
 fn format_severity(severity: &content::Severity) -> &'static str {

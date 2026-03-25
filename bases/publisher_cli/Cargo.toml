@@ -7,3 +7,6 @@ edition.workspace = true
 schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
+clap = { workspace = true }
+tiny_http = { workspace = true }
+notify = { workspace = true }

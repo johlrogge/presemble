@@ -19,3 +19,6 @@ publisher_cli = { path = "bases/publisher_cli" }
 editor_server = { path = "bases/editor_server" }
 pulldown-cmark = "0.12"
 quick-xml = { version = "0.36", features = ["serialize"] }
+clap = { version = "4", features = ["derive"] }
+tiny_http = "0.12"
+notify = "7"
