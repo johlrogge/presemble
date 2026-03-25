@@ -8,6 +8,30 @@ pub use error::CliError;
 use clap::{Parser, Subcommand};
 use std::path::Path;
 
+/// The canonical URL and output path for a content page.
+struct PageAddress {
+    slug: String,
+    /// Clean URL, e.g. "/article/hello-world"
+    url_path: String,
+    /// Output file path, e.g. site_dir/output/article/hello-world/index.html
+    output_path: std::path::PathBuf,
+}
+
+fn page_address(site_dir: &std::path::Path, schema_stem: &str, content_path: &std::path::Path) -> PageAddress {
+    let slug = content_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("index")
+        .to_string();
+    let url_path = format!("/{schema_stem}/{slug}");
+    let output_path = site_dir
+        .join("output")
+        .join(schema_stem)
+        .join(&slug)
+        .join("index.html");
+    PageAddress { slug, url_path, output_path }
+}
+
 /// A successfully built content page and its data.
 pub struct BuiltPage {
     /// URL path this page is reachable at, e.g. "/article/hello-world"
@@ -20,6 +44,7 @@ pub struct BuiltPage {
 pub struct PageBuildResult {
     pub built: BuiltPage,
     pub output_path: std::path::PathBuf,
+    pub schema_stem: String,
     /// Source files this page was built from (schema, content, template)
     pub deps: std::collections::HashSet<std::path::PathBuf>,
 }
@@ -129,6 +154,9 @@ pub fn build_content_page(
 
     println!("{file_name}: PASS");
 
+    // Compute canonical address once, before branching on template existence
+    let addr = page_address(site_dir, schema_stem, content_path);
+
     // Rendering phase — only for valid documents
     let templates_dir = site_dir.join("templates");
     let template_path = templates_dir.join(format!("{schema_stem}.html"));
@@ -139,27 +167,16 @@ pub fn build_content_page(
         deps.insert(schema_path.to_path_buf());
         deps.insert(content_path.to_path_buf());
 
-        let slug = content_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("index")
-            .to_string();
-        let url = format!("/{schema_stem}/{slug}.html");
-
         let mut slot_graph = template::build_article_graph(&doc, grammar);
-        slot_graph.insert("url", template::Value::Text(url.clone()));
-
-        let output_path = site_dir
-            .join("output")
-            .join(schema_stem)
-            .join(format!("{slug}.html"));
+        slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
 
         return Ok(Some(PageBuildResult {
             built: BuiltPage {
-                url_path: url,
+                url_path: addr.url_path,
                 data: slot_graph,
             },
-            output_path,
+            output_path: addr.output_path,
+            schema_stem: schema_stem.to_string(),
             deps,
         }));
     }
@@ -167,24 +184,16 @@ pub fn build_content_page(
     // Build data graph — wrap under schema_stem (e.g., "article")
     let mut slot_graph = template::build_article_graph(&doc, grammar);
 
-    // Derive slug and URL from the content file path
-    let slug = content_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("index")
-        .to_string();
-    let url = format!("/{schema_stem}/{slug}.html");
-
     // Extract title text for the link record (fallback to slug if absent)
     let title_text = match slot_graph.resolve(&["title"]) {
         Some(template::Value::Text(t)) => t.clone(),
-        _ => slug.clone(),
+        _ => addr.slug.clone(),
     };
 
     // Add url and link to the article graph
-    slot_graph.insert("url", template::Value::Text(url.clone()));
+    slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
     let mut link_graph = template::DataGraph::new();
-    link_graph.insert("href", template::Value::Text(url.clone()));
+    link_graph.insert("href", template::Value::Text(addr.url_path.clone()));
     link_graph.insert("text", template::Value::Text(title_text));
     slot_graph.insert("link", template::Value::Record(link_graph));
 
@@ -196,12 +205,10 @@ pub fn build_content_page(
     let html = template::render_template(&tmpl_src, &context)
         .map_err(|e| CliError::Render(e.to_string()))?;
 
-    // Write output
-    let output_dir = site_dir.join("output").join(schema_stem);
-    std::fs::create_dir_all(&output_dir)?;
-    let output_path = output_dir.join(format!("{slug}.html"));
-    std::fs::write(&output_path, &html)?;
-    println!("  \u{2192} {}", output_path.display());
+    // Write output — create the per-page directory first (clean URL convention)
+    std::fs::create_dir_all(addr.output_path.parent().unwrap())?;
+    std::fs::write(&addr.output_path, &html)?;
+    println!("  \u{2192} {}", addr.output_path.display());
 
     let mut deps = std::collections::HashSet::new();
     deps.insert(schema_path.to_path_buf());
@@ -210,10 +217,11 @@ pub fn build_content_page(
 
     Ok(Some(PageBuildResult {
         built: BuiltPage {
-            url_path: url,
+            url_path: addr.url_path,
             data: slot_graph,
         },
-        output_path,
+        output_path: addr.output_path,
+        schema_stem: schema_stem.to_string(),
         deps,
     }))
 }
@@ -374,12 +382,12 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
 
     // Collect all built URL paths for link validation
     let mut built_url_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Add content pages
+    // Add content pages — register clean URL and its variants
     for pages in built_pages.values() {
         for page in pages {
-            built_url_paths.insert(page.url_path.clone());
-            // Also add with .html extension
-            built_url_paths.insert(format!("{}.html", page.url_path));
+            built_url_paths.insert(page.url_path.clone());                             // "/article/hello-world"
+            built_url_paths.insert(format!("{}/", page.url_path));                    // "/article/hello-world/"
+            built_url_paths.insert(format!("{}/index.html", page.url_path));          // "/article/hello-world/index.html"
         }
     }
     // Add index
@@ -450,31 +458,40 @@ pub fn rebuild_affected(
     };
 
     // Rebuild affected content pages.
-    // For each affected content output, derive the schema stem and content path
-    // from the output path convention: output/<schema_stem>/<slug>.html
+    // For each affected content output, recover the schema and content paths from the
+    // dependency graph rather than parsing the output path string.
     let schemas_dir = site_dir.join("schemas");
+    let content_base = site_dir.join("content");
     for output_path in &content_outputs {
-        // Extract schema_stem and slug from a path like output/article/hello-world.html
-        let relative = match output_path.strip_prefix(&output_dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let mut parts = relative.components();
-        let schema_stem = match parts.next() {
-            Some(c) => c.as_os_str().to_string_lossy().to_string(),
-            None => continue,
-        };
-        let slug_with_ext = match parts.next() {
-            Some(c) => c.as_os_str().to_string_lossy().to_string(),
-            None => continue,
-        };
-        let slug = slug_with_ext.trim_end_matches(".html");
+        // Look up which source files this output was built from
+        let sources = current_graph.sources_for(output_path);
 
-        let schema_path = schemas_dir.join(format!("{schema_stem}.md"));
-        let content_path = site_dir
-            .join("content")
-            .join(&schema_stem)
-            .join(format!("{slug}.md"));
+        // Find the content file (under site_dir/content/) and schema file (under site_dir/schemas/)
+        let content_path = sources
+            .iter()
+            .find(|p| p.starts_with(&content_base))
+            .cloned();
+        let schema_path = sources
+            .iter()
+            .find(|p| p.starts_with(&schemas_dir))
+            .cloned();
+
+        let (content_path, schema_path) = match (content_path, schema_path) {
+            (Some(c), Some(s)) => (c, s),
+            _ => {
+                eprintln!(
+                    "Warning: could not locate source for {}",
+                    output_path.display()
+                );
+                continue;
+            }
+        };
+
+        // Derive schema_stem from the schema file name
+        let schema_stem = match schema_path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
 
         if !schema_path.exists() || !content_path.exists() {
             eprintln!(

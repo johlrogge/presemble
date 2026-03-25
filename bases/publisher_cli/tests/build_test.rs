@@ -8,7 +8,8 @@ use template;
 #[test]
 fn build_produces_html_output_for_valid_content() {
     let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
-    let output_path = Path::new(site_dir).join("output/article/hello-world.html");
+    // Clean URL convention: output goes to output/article/hello-world/index.html
+    let output_path = Path::new(site_dir).join("output/article/hello-world/index.html");
 
     // Clean up any previous output
     let _ = std::fs::remove_file(&output_path);
@@ -126,8 +127,9 @@ fn build_site_populates_dep_graph_for_article() {
     let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
         .expect("build should succeed");
 
+    // Clean URL convention: output goes to output/article/hello-world/index.html
     let article_output = std::path::Path::new(site_dir)
-        .join("output/article/hello-world.html");
+        .join("output/article/hello-world/index.html");
     let schema_path = std::path::Path::new(site_dir).join("schemas/article.md");
     let content_path = std::path::Path::new(site_dir)
         .join("content/article/hello-world.md");
