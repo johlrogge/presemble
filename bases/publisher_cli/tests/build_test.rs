@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::Path;
+use publisher_cli;
+use template;
 
 // ── Test 3: fixtures are wired up for end-to-end rendering ───────────────────
 
@@ -90,4 +92,53 @@ fn invalid_post_fails_validation_with_title_and_body_errors() {
         "expected a body heading level error for H2, but got: {:#?}",
         result.diagnostics
     );
+}
+
+// ── Test 4: build produces index.html with article links ─────────────────────
+
+#[test]
+fn build_produces_index_html() {
+    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
+    // Clean previous output
+    let _ = std::fs::remove_file(
+        std::path::Path::new(site_dir).join("output/index.html")
+    );
+
+    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
+        .expect("build should succeed");
+
+    let index_path = std::path::Path::new(site_dir).join("output/index.html");
+    assert!(index_path.exists(), "output/index.html should be created");
+
+    let content = std::fs::read_to_string(&index_path).unwrap();
+    assert!(content.contains("article/hello-world"), "index should link to hello-world article: {content}");
+    assert!(content.contains("Hello, World"), "index should contain article title: {content}");
+
+    // hello-world is built
+    assert!(outcome.built_pages.contains_key("article"), "article pages should be collected");
+}
+
+// ── Test 5: built_pages articles collection has url field ────────────────────
+
+#[test]
+fn build_site_articles_collection_has_url_field() {
+    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
+
+    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
+        .expect("build should succeed");
+
+    let articles = outcome.built_pages.get("article").expect("article pages should exist");
+    assert!(!articles.is_empty(), "should have at least one article");
+
+    let article = &articles[0];
+    assert!(!article.url_path.is_empty(), "url_path should be set");
+    assert!(article.url_path.starts_with("/article/"), "url_path should start with /article/: {}", article.url_path);
+
+    // The data graph should contain url and link fields
+    match article.data.resolve(&["url"]) {
+        Some(template::Value::Text(url)) => {
+            assert!(url.starts_with("/article/"), "url field should be a path: {url}");
+        }
+        other => panic!("expected url Text field, got: {other:?}"),
+    }
 }

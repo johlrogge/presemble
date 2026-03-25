@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use crate::{build_site, BuildOutcome};
+use crate::build_site;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
 use std::sync::mpsc;
