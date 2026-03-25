@@ -8,6 +8,10 @@ use std::time::Duration;
 use tiny_http::{Response, Server, StatusCode};
 
 pub fn serve_site(site_dir: &Path, port: u16) -> Result<(), CliError> {
+    let site_dir = std::fs::canonicalize(site_dir)
+        .unwrap_or_else(|_| site_dir.to_path_buf());
+    let site_dir = site_dir.as_path();
+
     let output_dir = site_dir.join("output");
 
     // Initial build — capture the dependency graph

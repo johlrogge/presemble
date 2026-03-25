@@ -227,6 +227,10 @@ pub fn build_content_page(
 }
 
 pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
+    let site_dir = std::fs::canonicalize(site_dir)
+        .unwrap_or_else(|_| site_dir.to_path_buf());
+    let site_dir = site_dir.as_path();
+
     println!("Building site: {}", site_dir.display());
 
     let schemas_dir = site_dir.join("schemas");
@@ -424,6 +428,10 @@ pub fn rebuild_affected(
     current_graph: &DependencyGraph,
 ) -> Result<BuildOutcome, CliError> {
     use std::collections::HashSet;
+
+    let site_dir = std::fs::canonicalize(site_dir)
+        .unwrap_or_else(|_| site_dir.to_path_buf());
+    let site_dir = site_dir.as_path();
 
     // Collect all affected output paths
     let mut affected: HashSet<std::path::PathBuf> = HashSet::new();

@@ -123,16 +123,15 @@ fn build_produces_index_html() {
 
 #[test]
 fn build_site_populates_dep_graph_for_article() {
-    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
-    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
-        .expect("build should succeed");
+    let site_dir = std::fs::canonicalize(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site")
+    ).unwrap();
+    let outcome = publisher_cli::build_site(&site_dir).expect("build should succeed");
 
     // Clean URL convention: output goes to output/article/hello-world/index.html
-    let article_output = std::path::Path::new(site_dir)
-        .join("output/article/hello-world/index.html");
-    let schema_path = std::path::Path::new(site_dir).join("schemas/article.md");
-    let content_path = std::path::Path::new(site_dir)
-        .join("content/article/hello-world.md");
+    let article_output = site_dir.join("output/article/hello-world/index.html");
+    let schema_path = site_dir.join("schemas/article.md");
+    let content_path = site_dir.join("content/article/hello-world.md");
 
     // Changing the schema should affect the article output
     let affected = outcome.dep_graph.affected_outputs(&schema_path);
@@ -151,13 +150,13 @@ fn build_site_populates_dep_graph_for_article() {
 
 #[test]
 fn build_site_dep_graph_index_depends_on_all_content() {
-    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
-    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
-        .expect("build should succeed");
+    let site_dir = std::fs::canonicalize(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site")
+    ).unwrap();
+    let outcome = publisher_cli::build_site(&site_dir).expect("build should succeed");
 
-    let index_output = std::path::Path::new(site_dir).join("output/index.html");
-    let content_path = std::path::Path::new(site_dir)
-        .join("content/article/hello-world.md");
+    let index_output = site_dir.join("output/index.html");
+    let content_path = site_dir.join("content/article/hello-world.md");
 
     let affected = outcome.dep_graph.affected_outputs(&content_path);
     assert!(
@@ -168,12 +167,13 @@ fn build_site_dep_graph_index_depends_on_all_content() {
 
 #[test]
 fn build_site_dep_graph_index_depends_on_index_template() {
-    let site_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site");
-    let outcome = publisher_cli::build_site(std::path::Path::new(site_dir))
-        .expect("build should succeed");
+    let site_dir = std::fs::canonicalize(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/blog-site")
+    ).unwrap();
+    let outcome = publisher_cli::build_site(&site_dir).expect("build should succeed");
 
-    let index_output = std::path::Path::new(site_dir).join("output/index.html");
-    let index_template = std::path::Path::new(site_dir).join("templates/index.html");
+    let index_output = site_dir.join("output/index.html");
+    let index_template = site_dir.join("templates/index.html");
 
     let affected = outcome.dep_graph.affected_outputs(&index_template);
     assert!(

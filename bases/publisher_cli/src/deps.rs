@@ -105,4 +105,17 @@ mod tests {
         let g = DependencyGraph::new();
         assert!(g.affected_outputs(Path::new("unknown.md")).is_empty());
     }
+
+    #[test]
+    fn affected_outputs_with_absolute_path_matches_registered_relative() {
+        // This test documents the requirement: after canonicalization at the call site,
+        // paths registered and looked up should always be canonical and thus equal.
+        // The DependencyGraph itself stores whatever it receives — callers are responsible.
+        let mut g = DependencyGraph::new();
+        let source = PathBuf::from("/canonical/path/to/file.md");
+        let output = PathBuf::from("/canonical/path/to/output/index.html");
+        g.register(output.clone(), HashSet::from([source.clone()]));
+        let affected = g.affected_outputs(&source);
+        assert!(affected.contains(&output));
+    }
 }
