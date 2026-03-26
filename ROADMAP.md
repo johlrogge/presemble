@@ -14,7 +14,7 @@ has teeth.
 - [x] Schema definition format decided and documented (ADR-001)
 - [x] Read markdown from a content directory
 - [x] Validate content against schemas — hard fail with clear error messages
-- [ ] Cross-content reference validation (e.g. article references author who needs a bio)
+- [~] Cross-content reference validation — link validation implemented (pages must exist); automatic name resolution from referenced content deferred
 - [x] Template rendering to static HTML (ADR-004)
 - [x] `presemble build` CLI command
 - [ ] Dogfood test: build a subset of blog.agical.se content
@@ -26,8 +26,12 @@ has teeth.
 - Content: what Presemble is, why it exists, how to get started
 - This is the real dogfood test — if building the site reveals gaps, they get fixed before M1
 - Success gate: `presemble build` produces a deployable presemble.io site with no workarounds
+- DOM template engine (ADR-005): proposed and implemented
 
 **M1 — "It serves and watches"**
+
+**Status: implemented on develop.** presemble serve, file watching with 150ms debounce, incremental rebuild with file-level dependency tracking (ADR-008), clean URLs (ADR-009).
+
 - `presemble serve` — local HTTP server with file watching and live rebuild
 - Equivalent to `hugo serve` — fast feedback loop for template and design iteration
 - No browser editing yet, just viewing

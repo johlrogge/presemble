@@ -2,7 +2,13 @@
 
 ## Status
 
-Under evaluation
+Superseded by ADR-005
+
+## Retirement note
+
+This ADR described a `{{ }}` pipe expression string interpolation model for templates. It is superseded by ADR-005, which establishes a fundamentally different approach: templates are DOM trees, not text with holes. The DOM transformation model guarantees structural validity by construction, which string interpolation cannot.
+
+The pipe expression vocabulary defined here (`each`, `maybe`, `match`, `default`, `first`, `rest`) is preserved in ADR-005 as the data graph query language for attribute-level bindings (`presemble:class`). The string interpolation delivery mechanism (`{{ }}` delimiters, the `template:` pipe, `FileTemplateLoader`) is removed.
 
 ## Context
 
@@ -20,12 +26,6 @@ cross-content references as `${author(johlrogge):bio}`, computed fields as
 or introduce a separate template syntax.
 
 ## Decision
-
-> **Note:** ADR-005 establishes the DOM transformation model as the architectural foundation
-> for templates. The pipe expression vocabulary defined here (`each`, `maybe`, `match`,
-> `default`, `first`, `rest`, `template:` composition) is preserved as the data graph query
-> language, but the string-interpolation `{{ }}` delivery mechanism is superseded by the
-> structural annotation model in ADR-005. Read ADR-005 first.
 
 Templates are **HTML files with embedded expression slots**. The HTML provides the document
 structure (designers read templates as pages). Expression slots handle all dynamic content: graph
