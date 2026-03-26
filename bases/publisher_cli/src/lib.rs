@@ -256,6 +256,33 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
 
     schema_entries.sort_by_key(|e| e.file_name());
 
+    // Discover and copy referenced assets from templates
+    let templates_dir = site_dir.join("templates");
+    let mut all_asset_paths = std::collections::BTreeSet::new();
+    if templates_dir.exists() {
+        let mut template_entries: Vec<_> = std::fs::read_dir(&templates_dir)?
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("html"))
+            .collect();
+        template_entries.sort_by_key(|e| e.file_name());
+        for entry in template_entries {
+            let tmpl_src = std::fs::read_to_string(entry.path())?;
+            match template::parse_template_xml(&tmpl_src) {
+                Ok(nodes) => {
+                    let assets = template::extract_asset_paths(&nodes);
+                    all_asset_paths.extend(assets);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: skipping asset scan for {} (parse error: {e})",
+                        entry.path().display()
+                    );
+                }
+            }
+        }
+    }
+    copy_referenced_assets(site_dir, &all_asset_paths)?;
+
     for schema_entry in schema_entries {
         let schema_path = schema_entry.path();
 
@@ -587,7 +614,8 @@ fn validate_internal_links(
             let with_html = format!("{normalised}.html");
             let bare = normalised.to_string();
 
-            // Skip asset paths
+            // Asset paths are validated during asset discovery in build_site();
+            // skip them here since they are not page URLs.
             if normalised.starts_with("/assets") {
                 continue;
             }
@@ -643,6 +671,31 @@ fn extract_internal_links(html: &str) -> Vec<String> {
         }
     }
     links
+}
+
+/// Verify that each referenced asset exists and copy it to the output directory.
+/// Returns an error if any referenced asset is missing.
+fn copy_referenced_assets(
+    site_dir: &std::path::Path,
+    asset_paths: &std::collections::BTreeSet<String>,
+) -> Result<(), CliError> {
+    for path in asset_paths {
+        let relative = path.trim_start_matches('/');
+        let src = site_dir.join(relative);
+        if !src.exists() {
+            return Err(CliError::Render(format!(
+                "referenced asset not found: {path} (expected at {})",
+                src.display()
+            )));
+        }
+        let dest = site_dir.join("output").join(relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&src, &dest)?;
+        println!("  asset: {path}");
+    }
+    Ok(())
 }
 
 fn format_severity(severity: &content::Severity) -> &'static str {

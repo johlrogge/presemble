@@ -10,7 +10,7 @@ pub use data::{build_article_graph, DataGraph, Value};
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};
-pub use dom::{parse_template_xml, serialize_nodes};
+pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths};
 
 /// Parse, transform, and serialize an XML/XHTML template against a data graph.
 /// This is the primary entry point for template rendering.

@@ -187,3 +187,16 @@ fn build_site_articles_collection_has_url_field() {
         other => panic!("expected url Text field, got: {other:?}"),
     }
 }
+
+#[test]
+fn build_site_copies_assets_to_output() {
+    let (_tmp, site_dir) = copy_fixture_site();
+
+    publisher_cli::build_site(&site_dir).expect("build should succeed");
+
+    let asset = site_dir.join("output/assets/style.css");
+    assert!(
+        asset.exists(),
+        "output/assets/style.css should be copied from assets/style.css"
+    );
+}

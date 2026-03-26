@@ -216,6 +216,50 @@ fn html_escape_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Attribute names on specific elements that may contain local asset paths.
+/// (element_name, attr_name)
+const ASSET_ATTRS: &[(&str, &str)] = &[
+    ("link", "href"),
+    ("img", "src"),
+    ("script", "src"),
+];
+
+/// Extract local asset paths referenced in element attributes.
+///
+/// Walks the node tree and collects values of `href` (on `<link>`),
+/// `src` (on `<img>`, `<script>`) that start with `/`.
+/// Presemble annotation elements are skipped entirely.
+/// Results are deduplicated and sorted.
+pub fn extract_asset_paths(nodes: &[Node]) -> Vec<String> {
+    let mut found = std::collections::HashSet::new();
+    extract_asset_paths_recursive(nodes, &mut found);
+    let mut result: Vec<String> = found.into_iter().collect();
+    result.sort();
+    result
+}
+
+fn extract_asset_paths_recursive(nodes: &[Node], found: &mut std::collections::HashSet<String>) {
+    for node in nodes {
+        if let Node::Element(el) = node {
+            if el.is_presemble() {
+                continue; // presemble annotations are data-graph paths, not asset references
+            }
+            // Check if this element/attribute combination is an asset reference
+            for (elem_name, attr_name) in ASSET_ATTRS {
+                if el.name == *elem_name {
+                    if let Some(value) = el.attr(attr_name) {
+                        if value.starts_with('/') && !value.contains("://") {
+                            found.insert(value.to_string());
+                        }
+                    }
+                }
+            }
+            // Recurse into children
+            extract_asset_paths_recursive(&el.children, found);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +338,49 @@ mod tests {
         assert_eq!(el.attr("class"), Some("hero"));
         assert_eq!(el.attr("id"), Some("main"));
         assert_eq!(el.attr("missing"), None);
+    }
+
+    #[test]
+    fn extract_asset_paths_finds_link_href() {
+        let src = r#"<head><link rel="stylesheet" href="/assets/style.css" /></head>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let assets = extract_asset_paths(&nodes);
+        assert_eq!(assets, vec!["/assets/style.css"]);
+    }
+
+    #[test]
+    fn extract_asset_paths_finds_img_src() {
+        let src = r#"<img src="/images/photo.jpg" alt="photo" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_asset_paths(&nodes), vec!["/images/photo.jpg"]);
+    }
+
+    #[test]
+    fn extract_asset_paths_ignores_external_urls() {
+        let src = r#"<script src="https://cdn.example.com/lib.js"></script>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert!(extract_asset_paths(&nodes).is_empty());
+    }
+
+    #[test]
+    fn extract_asset_paths_ignores_page_links() {
+        let src = r#"<a href="/article/hello-world">Link</a>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        // <a href> is not in ASSET_ATTRS — not collected
+        assert!(extract_asset_paths(&nodes).is_empty());
+    }
+
+    #[test]
+    fn extract_asset_paths_ignores_presemble_elements() {
+        let src = r#"<presemble:insert data="feature:cover" src="/assets/icon.svg" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert!(extract_asset_paths(&nodes).is_empty());
+    }
+
+    #[test]
+    fn extract_asset_paths_deduplicates() {
+        let src = r#"<div><link href="/assets/a.css" /><link href="/assets/a.css" /></div>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_asset_paths(&nodes), vec!["/assets/a.css"]);
     }
 }
