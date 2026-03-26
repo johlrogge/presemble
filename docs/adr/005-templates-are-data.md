@@ -165,7 +165,7 @@ annotations are declarative structural descriptions, not imperative code express
   for extensibility
 - Semantic class generation from slot names needs a naming convention (e.g.
   `{content-type}-{slot-name}`)
-- Templates are parsed as XML (via quick-xml), not as HTML5. Self-closing syntax (`<presemble:insert />`) works correctly. The HTML5 self-closing limitation does not apply — templates are XHTML-compatible, not HTML5.
+- Templates are structured data, not HTML or XHTML. The current implementation uses XML as the surface syntax (via quick-xml) because it is familiar to designers and developers. XML supports self-closing syntax for any element (`<presemble:insert />`), so there is no "void element" restriction. The same internal DOM model could be expressed in EDN, YAML, JSON, or any format that can represent a tree — XML is an implementation choice, not a constraint.
 
 ## Experiment scope
 
