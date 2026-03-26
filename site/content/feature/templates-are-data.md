@@ -2,7 +2,7 @@
 
 Your templates are trees, not text with holes.
 
-Presemble parses templates as XML DOM trees and transforms them — string manipulation only at the final serialization step. Structural validity is guaranteed by construction: mismatched tags and broken nesting are caught at parse time, not in production.
+Presemble parses templates as structured DOM trees and transforms them — string manipulation only at the final serialization step. Structural validity is guaranteed by construction: mismatched tags and broken nesting are caught at parse time, not in production.
 
 ----
 
@@ -28,8 +28,9 @@ Because the schema defines every slot by name, the compiler can annotate output 
 </main>
 ```
 
-This is valid XML. The publisher parses it into a DOM tree, replaces each
-`<presemble:insert>` with a typed node from the data graph, and serialises the result.
+The current surface syntax is XML, but the internal model supports any format that can
+represent a DOM tree — EDN, YAML, JSON. The publisher parses it into a DOM tree, replaces
+each `<presemble:insert>` with a typed node from the data graph, and serialises the result.
 No string interpolation occurs at any point.
 
 ### The output

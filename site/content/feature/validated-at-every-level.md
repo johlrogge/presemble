@@ -2,10 +2,10 @@
 
 A broken link fails the build — in content, in templates, and in output.
 
-Because templates are XML DOM trees, the publisher can extract every asset reference
-and internal link by walking the tree — no string scanning, no guessing. If a
-`<link href="/assets/style.css">` references a file that does not exist, the build
-fails before any output is written.
+Because templates are structured data, the publisher can extract every asset reference
+and internal link by walking the tree — no string scanning, no guessing, regardless of
+surface syntax. If a `<link href="/assets/style.css">` references a file that does not
+exist, the build fails before any output is written.
 
 The same applies to content: if an article links to an author page that has not been
 built, the link validator catches it. Every internal reference is verified against the
