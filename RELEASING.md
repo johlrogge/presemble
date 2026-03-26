@@ -81,3 +81,45 @@ Run these agents in order before cutting a release:
 - Multiple code-minions can run in parallel on different tasks within the same feature
 - The commit agent reads `.claude/skills/conventional-commits/SKILL.md` for format
 - The architect never writes code — it designs and reviews only
+- Version is declared in `[workspace.package]` in `Cargo.toml` — bump it on the release branch before finishing
+
+---
+
+## Release History
+
+### v0.2.0 (upcoming)
+
+Covers milestones M0.5 and M1.
+
+**`presemble serve` with live reload**
+Local HTTP server with file watching and 150 ms debounce. Changes trigger incremental rebuild; the browser receives a reload signal only for affected pages.
+
+**Incremental rebuild with file-level dependency tracking (ADR-008)**
+`build_site()` populates a `DependencyGraph` that maps each output page to the source files it depends on. `rebuild_affected()` consults the reverse index to rebuild only the pages touched by a changed file. Cold start always does a full build; the graph is in-memory only.
+
+**Clean URL routing (ADR-009)**
+Pages are written to `/{type}/{slug}/index.html` and served at `/{type}/{slug}`. No `.html` in links or the `url` data-graph field.
+
+**Data-driven asset discovery from template DOM trees (ADR-010)**
+`<link href>`, `<img src>`, and `<script src>` references are extracted from parsed template DOM trees at build time. Only referenced assets are copied to output; a missing referenced asset is a build error rather than a silent failure.
+
+**Hiccup/EDN as second template surface syntax (ADR-011)**
+`.hiccup` files express the same internal DOM tree as `.html` templates using EDN vectors (`:tag`, optional attribute map, children). Implemented with a hand-written minimal EDN parser; no new dependency. The transformer, serializer, and asset extractor are unmodified — proving that surface syntax and internal model are orthogonal (ADR-005).
+
+**Fenced code block rendering**
+Fenced code blocks in content body sections are rendered as `<pre><code>` elements.
+
+**presemble.io dogfood site built with Presemble (M0.5)**
+`site/` contains the presemble.io promotional site: three content types (feature, post, author), six pages, nature-inspired CSS, and passing link validation. Built entirely with `presemble build` — no workarounds.
+
+**Dot-path separator for data graph paths**
+Data graph references use dot-path notation (`article.title`, `post.author.name`) throughout templates and content files.
+
+**Cross-content reference resolution (ADR-012)**
+After all pages are built, a post-build phase merges referenced page data into link records. A template rendering an article can access `post.author.name`, `post.author.bio`, and `post.author.avatar` without duplicating data in the article's content file. Resolution is one level deep; cycles are not possible.
+
+---
+
+### v0.1.0
+
+Initial release. Schema format (ADR-001), content validation with hard fail, DOM template engine (ADR-005), `presemble build` CLI, clean URLs.

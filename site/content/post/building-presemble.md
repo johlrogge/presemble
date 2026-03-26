@@ -15,3 +15,17 @@ Using Presemble to publish the Presemble site is the earliest possible dogfoodin
 ### What the fixture proves
 
 The `presemble-site` fixture demonstrates three things. First, schemas work for promotional content just as well as for editorial content — the feature and post schemas are as strict as any blog article schema. Second, the template vocabulary covers a site with multiple content types and an index page that aggregates them both. Third, Presemble can describe itself: the tool is coherent enough to serve as its own editorial platform.
+
+### The development loop
+
+Building this site was done with `presemble serve site/` running in a terminal.
+Every content edit triggered a partial rebuild in under a second. The feature pages
+went through many drafts — each save rebuilt only the changed feature page and the
+index, not the whole site.
+
+The same validation that runs at publish time runs on every save. Typos in schema
+constraints, broken links between pages, missing asset files — all caught immediately,
+not at deploy. There is no separate "dev mode" that skips checks.
+
+This is what "hard gate" means in practice: the feedback loop is fast enough that
+you find out about problems before you leave the file.
