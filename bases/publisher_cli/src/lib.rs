@@ -1,8 +1,7 @@
-mod deps;
 mod error;
 mod serve;
 
-pub use deps::DependencyGraph;
+pub use dep_graph::DependencyGraph;
 pub use error::CliError;
 
 use clap::{Parser, Subcommand};

@@ -3,6 +3,9 @@ name = "template"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.polylith]
+interface = "template"
+
 [dependencies]
 schema = { workspace = true }
 content = { workspace = true }

@@ -1,0 +1,9 @@
+[package]
+name = "dep_graph"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.polylith]
+interface = "dep_graph"
+
+[dependencies]
