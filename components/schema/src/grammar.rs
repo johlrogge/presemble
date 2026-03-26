@@ -16,7 +16,7 @@ pub struct Slot {
     pub hint_text: Option<String>,
 }
 
-/// A semantic name for a slot, used for template references (e.g. `${article:title}`).
+/// A semantic name for a slot, used for template references (e.g. `${article.title}`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SlotName(String);
 

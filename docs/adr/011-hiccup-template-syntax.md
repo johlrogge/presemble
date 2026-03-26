@@ -29,7 +29,7 @@ strings, `nil`, or nested vectors. The format is compact, unambiguous, and alrea
 no XML parser is needed, and there are no void-element rules to handle.
 
 Presemble elements in HTML use a namespace prefix: `<presemble:insert>`. The natural Hiccup
-equivalent is an EDN namespaced keyword: `[:presemble/insert {:data "article:title" :as "h1"}]`.
+equivalent is an EDN namespaced keyword: `[:presemble/insert {:data "article.title" :as "h1"}]`.
 The `/` namespace separator in EDN maps directly to `:` in the HTML element name.
 
 ## Decision
@@ -47,10 +47,10 @@ A Hiccup template is a single top-level EDN vector:
 
 ```clojure
 [:article
-  [:presemble/insert {:data "article:title" :as "h1"}]
-  [:presemble/insert {:data "article:cover"}]
+  [:presemble/insert {:data "article.title" :as "h1"}]
+  [:presemble/insert {:data "article.cover"}]
   [:section {:class "body"}
-    [:presemble/insert {:data "article:body"}]]]
+    [:presemble/insert {:data "article.body"}]]]
 ```
 
 **Tag names** are EDN keywords. Simple keywords (`:div`, `:h1`, `:article`) map to HTML elements of

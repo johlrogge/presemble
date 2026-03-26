@@ -12,7 +12,7 @@ The default template format uses HTML with `presemble:insert` directives. The pu
 
 ```xml
 <main class="feature-grid">
-  <template data-each="site:features">
+  <template data-each="site.features">
     <article class="feature-card">
       <presemble:insert data="title" as="h3" />
       <presemble:insert data="tagline" />
@@ -28,7 +28,7 @@ Because the internal model is a labelled tree, the same transformation logic can
 
 ```clojure
 [:main.feature-grid
- [:template {:data-each "site:features"}
+ [:template {:data-each "site.features"}
   [:article.feature-card
    [:presemble/insert {:data "title" :as "h3"}]
    [:presemble/insert {:data "tagline"}]
@@ -37,7 +37,7 @@ Because the internal model is a labelled tree, the same transformation logic can
 
 ### Schema-derived semantic classes
 
-Because the schema defines every slot by name, the compiler annotates output elements with semantic CSS classes derived from the slot path. A `feature:title` slot becomes an `h3` carrying the class `feature__title`. Styling follows structure — you never need to guess which element carries which content.
+Because the schema defines every slot by name, the compiler annotates output elements with semantic CSS classes derived from the slot path. A `feature.title` slot becomes an `h3` carrying the class `feature__title`. Styling follows structure — you never need to guess which element carries which content.
 
 ### The output
 

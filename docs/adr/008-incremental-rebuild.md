@@ -56,7 +56,7 @@ it returns a fresh `BuildOutcome` (including an updated graph) that the caller m
 
 ### Collection pages
 
-Collection pages (e.g. `index.html` rendered from `site:articles`) depend on every content file
+Collection pages (e.g. `index.html` rendered from `site.articles`) depend on every content file
 of their constituent types. Any change to an article therefore triggers a collection page rebuild.
 This is correct by construction: the graph is populated during the crawl, and the crawl already
 gathers all items for a collection reference.

@@ -44,7 +44,7 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph) -> Result<Vec<Node>, Rende
                 } else if el.name == "template" && el.attr("data-slot").is_some() {
                     // Conditional block: render children only if the slot is present.
                     let slot_path = el.attr("data-slot").unwrap().to_string();
-                    let path_segments: Vec<&str> = slot_path.split(':').collect();
+                    let path_segments: Vec<&str> = slot_path.split('.').collect();
                     let value = graph.resolve(&path_segments);
                     match value {
                         None | Some(Value::Absent) => {
@@ -59,7 +59,7 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph) -> Result<Vec<Node>, Rende
                 } else if el.name == "template" && el.attr("data-each").is_some() {
                     // Iteration block: repeat children once per item in the list.
                     let each_path = el.attr("data-each").unwrap().to_string();
-                    let path_segments: Vec<&str> = each_path.split(':').collect();
+                    let path_segments: Vec<&str> = each_path.split('.').collect();
                     let value = graph.resolve(&path_segments);
                     if let Some(Value::List(items)) = value {
                         for item in items {
@@ -215,7 +215,7 @@ fn apply_transform_to_string(value: &EvalValue<'_>, transform: &Transform) -> St
 /// Derive the semantic class from the `data` attribute path.
 /// Takes the last two segments joined with `-`, or the last one if only one segment.
 fn semantic_class(data_path: &str) -> String {
-    let segments: Vec<&str> = data_path.split(':').collect();
+    let segments: Vec<&str> = data_path.split('.').collect();
     match segments.as_slice() {
         [] => String::new(),
         [only] => only.to_string(),
@@ -230,7 +230,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
         None => return Ok(Vec::new()),
     };
 
-    let path_segments: Vec<&str> = data_path.split(':').collect();
+    let path_segments: Vec<&str> = data_path.split('.').collect();
     let class = semantic_class(data_path);
     let as_tag = el.attr("as");
 
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn insert_text_value_as_h1() {
         let graph = make_graph_with_title("Hello World");
-        let src = r#"<presemble:insert data="article:title" as="h1" />"#;
+        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -433,7 +433,7 @@ mod tests {
         article.insert("body", Value::Html("<p>Body text</p>".to_string()));
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article:body" />"#;
+        let src = r#"<presemble:insert data="article.body" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -450,7 +450,7 @@ mod tests {
         article.insert("author", Value::Record(author));
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article:author" />"#;
+        let src = r#"<presemble:insert data="article.author" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -470,7 +470,7 @@ mod tests {
         article.insert("cover", Value::Record(cover));
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article:cover" />"#;
+        let src = r#"<presemble:insert data="article.cover" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn insert_absent_removes_node() {
         let graph = DataGraph::new();
-        let src = r#"<presemble:insert data="article:missing" />"#;
+        let src = r#"<presemble:insert data="article.missing" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         assert!(result.is_empty());
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn recursive_transform_on_regular_elements() {
         let graph = make_graph_with_title("Hello World");
-        let src = r#"<div><presemble:insert data="article:title" as="h1" /></div>"#;
+        let src = r#"<div><presemble:insert data="article.title" as="h1" /></div>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -517,7 +517,7 @@ mod tests {
             name: "div".to_string(),
             attrs: vec![(
                 "presemble:class".to_string(),
-                r#"article:cover:orientation | match(landscape => "wide", portrait => "tall")"#
+                r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
                     .to_string(),
             )],
             children: vec![],
@@ -542,7 +542,7 @@ mod tests {
                 ("class".to_string(), "base".to_string()),
                 (
                     "presemble:class".to_string(),
-                    r#"article:cover:orientation | match(landscape => "wide", portrait => "tall")"#
+                    r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
                         .to_string(),
                 ),
             ],
@@ -559,7 +559,7 @@ mod tests {
 
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), "article:missing".to_string())],
+            attrs: vec![("presemble:class".to_string(), "article.missing".to_string())],
             children: vec![],
         })];
         let result = transform(nodes, &graph).unwrap();
@@ -575,7 +575,7 @@ mod tests {
 
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), "article:title".to_string())],
+            attrs: vec![("presemble:class".to_string(), "article.title".to_string())],
             children: vec![],
         })];
         let result = transform(nodes, &graph).unwrap();
@@ -596,7 +596,7 @@ mod tests {
         );
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article:summary" as="p" />"#;
+        let src = r#"<presemble:insert data="article.summary" as="p" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn data_slot_present_renders_children() {
         let graph = make_cover_graph();
-        let src = r#"<template data-slot="article:cover"><p>Has cover</p></template>"#;
+        let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn data_slot_absent_removes_block() {
         let graph = DataGraph::new();
-        let src = r#"<template data-slot="article:cover"><p>Has cover</p></template>"#;
+        let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         assert!(result.is_empty());
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn data_slot_children_are_transformed() {
         let graph = make_cover_graph();
-        let src = r#"<template data-slot="article:cover"><presemble:insert data="article:cover" /></template>"#;
+        let src = r#"<template data-slot="article.cover"><presemble:insert data="article.cover" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -668,7 +668,7 @@ mod tests {
         );
         graph.insert("site", Value::Record(site));
 
-        let src = r#"<template data-each="site:articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="site.articles"><presemble:insert data="title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -685,7 +685,7 @@ mod tests {
         site.insert("articles", Value::List(vec![]));
         graph.insert("site", Value::Record(site));
 
-        let src = r#"<template data-each="site:articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="site.articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
@@ -695,7 +695,7 @@ mod tests {
     fn data_each_absent_produces_nothing() {
         let graph = DataGraph::new();
 
-        let src = r#"<template data-each="site:articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="site.articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
@@ -710,7 +710,7 @@ mod tests {
         site.insert("articles", Value::List(vec![Value::Record(a1)]));
         graph.insert("site", Value::Record(site));
 
-        let src = r#"<template data-each="site:articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="site.articles"><presemble:insert data="title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);

@@ -429,10 +429,10 @@ mod tests {
 
     #[test]
     fn presemble_namespace() {
-        let nodes = parse("[:presemble/insert {:data \"article:title\" :as \"h1\"}]");
+        let nodes = parse("[:presemble/insert {:data \"article.title\" :as \"h1\"}]");
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:insert");
-            assert_eq!(el.attr("data"), Some("article:title"));
+            assert_eq!(el.attr("data"), Some("article.title"));
             assert_eq!(el.attr("as"), Some("h1"));
             assert!(el.is_presemble());
         }
@@ -440,10 +440,10 @@ mod tests {
 
     #[test]
     fn data_each_attr() {
-        let nodes = parse("[:template {:data-each \"site:features\"} [:li \"item\"]]");
+        let nodes = parse("[:template {:data-each \"site.features\"} [:li \"item\"]]");
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "template");
-            assert_eq!(el.attr("data-each"), Some("site:features"));
+            assert_eq!(el.attr("data-each"), Some("site.features"));
             assert_eq!(el.children.len(), 1);
         }
     }

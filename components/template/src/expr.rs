@@ -26,7 +26,7 @@ pub fn parse_expr(src: &str) -> Result<Expr, TemplateError> {
     Ok(expr)
 }
 
-/// The first (left-hand) part of an expression: a colon-path lookup or `template:name`.
+/// The first (left-hand) part of an expression: a dot-path lookup or `template:name`.
 fn parse_primary(src: &str) -> Result<Expr, TemplateError> {
     if let Some(name) = src.strip_prefix("template:") {
         return Ok(Expr::TemplateRef(name.to_string()));
@@ -38,8 +38,8 @@ fn parse_primary(src: &str) -> Result<Expr, TemplateError> {
         ));
     }
 
-    // A colon-separated path like `article:title` or `article:cover:average_color`.
-    let parts: Vec<String> = src.split(':').map(|s| s.to_string()).collect();
+    // A dot-separated path like `article.title` or `article.cover.average_color`.
+    let parts: Vec<String> = src.split('.').map(|s| s.to_string()).collect();
     Ok(Expr::Lookup(parts))
 }
 
@@ -208,13 +208,13 @@ mod tests {
 
     #[test]
     fn bare_lookup() {
-        let expr = parse_expr("article:title").unwrap();
+        let expr = parse_expr("article.title").unwrap();
         assert!(matches!(expr, Expr::Lookup(parts) if parts == vec!["article", "title"]));
     }
 
     #[test]
     fn maybe_transform() {
-        let expr = parse_expr("article:cover | maybe(template:article_cover)").unwrap();
+        let expr = parse_expr("article.cover | maybe(template:article_cover)").unwrap();
         match expr {
             Expr::Pipe(inner, Transform::Maybe(name)) => {
                 assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["article", "cover"]));
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn each_transform() {
-        let expr = parse_expr("site:articles | each(template:article_card)").unwrap();
+        let expr = parse_expr("site.articles | each(template:article_card)").unwrap();
         match expr {
             Expr::Pipe(inner, Transform::Each(name)) => {
                 assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["site", "articles"]));
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn first_transform() {
-        let expr = parse_expr("article:summary | first").unwrap();
+        let expr = parse_expr("article.summary | first").unwrap();
         assert!(
             matches!(expr, Expr::Pipe(inner, Transform::First)
                 if matches!(inner.as_ref(), Expr::Lookup(p) if p == &["article", "summary"]))
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn rest_then_each_chained() {
         let expr =
-            parse_expr("article:summary | rest | each(template:summary_continuation)").unwrap();
+            parse_expr("article.summary | rest | each(template:summary_continuation)").unwrap();
         match expr {
             Expr::Pipe(mid, Transform::Each(name)) => {
                 assert_eq!(name, "summary_continuation");

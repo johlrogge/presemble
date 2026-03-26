@@ -281,12 +281,12 @@ mod tests {
 
     #[test]
     fn self_closing_presemble_element() {
-        let src = r#"<presemble:insert data="article:title" as="h1" />"#;
+        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         assert_eq!(nodes.len(), 1);
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:insert");
-            assert_eq!(el.attr("data"), Some("article:title"));
+            assert_eq!(el.attr("data"), Some("article.title"));
             assert_eq!(el.attr("as"), Some("h1"));
             assert!(el.is_presemble());
         } else {
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn namespace_prefix_preserved() {
-        let src = r#"<presemble:insert data="article:cover"></presemble:insert>"#;
+        let src = r#"<presemble:insert data="article.cover"></presemble:insert>"#;
         let nodes = parse_template_xml(src).unwrap();
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:insert");
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn extract_asset_paths_ignores_presemble_elements() {
-        let src = r#"<presemble:insert data="feature:cover" src="/assets/icon.svg" />"#;
+        let src = r#"<presemble:insert data="feature.cover" src="/assets/icon.svg" />"#;
         let nodes = parse_template_xml(src).unwrap();
         assert!(extract_asset_paths(&nodes).is_empty());
     }

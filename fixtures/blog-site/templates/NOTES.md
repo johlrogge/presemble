@@ -31,7 +31,7 @@ specified to make the evaluation concrete.
 ### Summary: multi-occurrence slot
 
 The article schema declares `summary` with `occurs: 1..3` — up to three paragraphs. In
-`article.html`, rendering all of them as a block with just `{{ article:summary }}` works if the
+`article.html`, rendering all of them as a block with just `{{ article.summary }}` works if the
 renderer emits each paragraph wrapped in `<p>` tags. But the template cannot control wrapping,
 add classes to individual paragraphs, or interleave other HTML between paragraphs. If the
 designer wants:
@@ -47,25 +47,25 @@ there is no way to express this. The pipe model only has `each` (map over collec
 (zero-or-one). There is no way to say "take the second element" or "wrap each occurrence
 differently based on its index."
 
-The `first` filter used in `article_card.html` (`{{ article:summary | first }}`) is a useful
+The `first` filter used in `article_card.html` (`{{ article.summary | first }}`) is a useful
 escape hatch when you only need one item. But it is the inverse problem: you cannot say "all
 except the first" or "the last."
 
 ### Cover image context-dependence
 
-`article_cover.html` and `cover_thumbnail.html` both reference `article:cover:path` and
-`article:cover:alt`. This means both fragment templates are implicitly scoped to an article
+`article_cover.html` and `cover_thumbnail.html` both reference `article.cover.path` and
+`article.cover.alt`. This means both fragment templates are implicitly scoped to an article
 context. If the same cover fragment were needed for a different content type (say, `event:cover`),
 you would need duplicate templates. The pipe model has no mechanism for abstracting over the
 source of a value — the path is always hardcoded into the fragment.
 
 A possible fix would be to pass the cover value itself as the context for the fragment, so the
-fragment could say `{{ cover:path }}` and `{{ cover:alt }}` rather than `{{ article:cover:path }}`.
+fragment could say `{{ cover.path }}` and `{{ cover.alt }}` rather than `{{ article.cover.path }}`.
 But ADR-004 does not specify how `maybe` establishes the context for the fragment it calls.
 
-This is a genuine underspecification: when `{{ article:cover | maybe(template:article_cover) }}`
-invokes `article_cover.html`, what is the context? The full `article`, or just `article:cover`?
-If the latter, the inner template cannot access `article:title` anymore — but cover fragments
+This is a genuine underspecification: when `{{ article.cover | maybe(template:article_cover) }}`
+invokes `article_cover.html`, what is the context? The full `article`, or just `article.cover`?
+If the latter, the inner template cannot access `article.title` anymore — but cover fragments
 probably should not need it. The ADR is silent on this.
 
 ---
@@ -87,7 +87,7 @@ content field value requires branching. CSS classes are a frequent target.
 A `when` or `match` pipe transform could handle this:
 
 ```
-{{ article:cover:orientation | match(landscape => "cover--landscape", portrait => "cover--portrait") }}
+{{ article.cover.orientation | match(landscape => "cover--landscape", portrait => "cover--portrait") }}
 ```
 
 That would fit the pipe model without introducing block directives. Whether it is sufficient
@@ -106,17 +106,17 @@ absent.
 
 ## Cases where the syntax was unclear
 
-### What does `{{ article:author:text }}` mean?
+### What does `{{ article.author.text }}` mean?
 
-The schema defines author as a link: `[<name>](/authors/<name>)`. The sub-fields `:text` and
-`:href` are not declared in the schema — they are implied by the link structure. It is not
-obvious to a template author reading the schema that `:text` and `:href` are valid slot paths,
-or whether the field names are conventional (`:text`/`:href`), structural (`:label`/`:url`), or
+The schema defines author as a link: `[<name>](/authors/<name>)`. The sub-fields `.text` and
+`.href` are not declared in the schema — they are implied by the link structure. It is not
+obvious to a template author reading the schema that `.text` and `.href` are valid slot paths,
+or whether the field names are conventional (`.text`/`.href`), structural (`.label`/`.url`), or
 implementation-defined. The data graph needs a way to communicate its shape to template authors.
 
-### `site:articles` provenance
+### `site.articles` provenance
 
-`{{ site:articles | each(template:article_card) }}` assumes there is a `site` object with an
+`{{ site.articles | each(template:article_card) }}` assumes there is a `site` object with an
 `articles` collection. Where does `site` come from, and how is it scoped into a template? The
 `article.html` template uses both `site` (for header/footer) and `article` (for content). The
 ADR does not specify how template context is established — whether it is a single root value or
@@ -137,8 +137,8 @@ prevent fragments from being treated as page roots.
 
 ## What felt natural and ergonomic
 
-The basic lookup and pipe chaining is genuinely clean. `{{ article:title }}` in a heading and
-`{{ article:body }}` in a div read exactly like the output they produce. There is no boilerplate,
+The basic lookup and pipe chaining is genuinely clean. `{{ article.title }}` in a heading and
+`{{ article.body }}` in a div read exactly like the output they produce. There is no boilerplate,
 no escaping, no noise.
 
 The `each` pattern for lists is a good idea. It keeps the list template (`article_list.html`)

@@ -80,24 +80,24 @@ fn element_with_attrs() {
 Input:
 
 ```edn
-[:presemble/insert {:data "article:title" :as "h1"}]
+[:presemble/insert {:data "article.title" :as "h1"}]
 ```
 
 Expected output: `Node::Element` with:
 - `name` = `"presemble:insert"` (the EDN namespace separator `/` maps to XML namespace `:`)
-- `attrs` = `[("data", "article:title"), ("as", "h1")]`
+- `attrs` = `[("data", "article.title"), ("as", "h1")]`
 - `children` = `[]`
 - `el.is_presemble()` returns `true`
 
 ```rust
 #[test]
 fn presemble_namespace() {
-    let nodes = parse_hiccup(r#"[:presemble/insert {:data "article:title" :as "h1"}]"#).unwrap();
+    let nodes = parse_hiccup(r#"[:presemble/insert {:data "article.title" :as "h1"}]"#).unwrap();
     assert_eq!(nodes.len(), 1);
     let Node::Element(ref el) = nodes[0] else { panic!() };
     assert_eq!(el.name, "presemble:insert");
     assert!(el.is_presemble());
-    assert_eq!(el.attr("data"), Some("article:title"));
+    assert_eq!(el.attr("data"), Some("article.title"));
     assert_eq!(el.attr("as"), Some("h1"));
 }
 ```
@@ -109,22 +109,22 @@ fn presemble_namespace() {
 Input:
 
 ```edn
-[:template {:data-each "site:features"} [:li "item"]]
+[:template {:data-each "site.features"} [:li "item"]]
 ```
 
 Expected output: `Node::Element` with:
 - `name` = `"template"`
-- `attrs` = `[("data-each", "site:features")]`
+- `attrs` = `[("data-each", "site.features")]`
 - `children` = one `Node::Element` with `name` = `"li"` and text child `"item"`
 
 ```rust
 #[test]
 fn data_each_attribute() {
-    let nodes = parse_hiccup(r#"[:template {:data-each "site:features"} [:li "item"]]"#).unwrap();
+    let nodes = parse_hiccup(r#"[:template {:data-each "site.features"} [:li "item"]]"#).unwrap();
     assert_eq!(nodes.len(), 1);
     let Node::Element(ref tmpl) = nodes[0] else { panic!() };
     assert_eq!(tmpl.name, "template");
-    assert_eq!(tmpl.attr("data-each"), Some("site:features"));
+    assert_eq!(tmpl.attr("data-each"), Some("site.features"));
     assert_eq!(tmpl.children.len(), 1);
 }
 ```
@@ -207,10 +207,10 @@ Input: a representative multi-element template (e.g. an article layout):
 
 ```edn
 [:article
-  [:presemble/insert {:data "article:title" :as "h1"}]
-  [:presemble/insert {:data "article:cover"}]
+  [:presemble/insert {:data "article.title" :as "h1"}]
+  [:presemble/insert {:data "article.cover"}]
   [:section {:class "body"}
-    [:presemble/insert {:data "article:body"}]]]
+    [:presemble/insert {:data "article.body"}]]]
 ```
 
 Expected: `parse_hiccup(src)` returns `Ok(nodes)` where `nodes` is non-empty and the first
@@ -221,10 +221,10 @@ element is named `"article"`.
 fn full_template_parses_non_empty() {
     let src = r#"
     [:article
-      [:presemble/insert {:data "article:title" :as "h1"}]
-      [:presemble/insert {:data "article:cover"}]
+      [:presemble/insert {:data "article.title" :as "h1"}]
+      [:presemble/insert {:data "article.cover"}]
       [:section {:class "body"}
-        [:presemble/insert {:data "article:body"}]]]
+        [:presemble/insert {:data "article.body"}]]]
     "#;
     let nodes = parse_hiccup(src).unwrap();
     assert!(!nodes.is_empty());
@@ -243,12 +243,12 @@ The placeholder below documents the intended test once the convention is decided
 Tentative input (preferred convention):
 
 ```edn
-[:div {:presemble/class "feature:title | match(active => \"active\")"}]
+[:div {:presemble/class "feature.title | match(active => \"active\")"}]
 ```
 
 Tentative expected output: `Node::Element` with:
 - `name` = `"div"`
-- `attrs` = `[("presemble:class", "feature:title | match(active => \"active\")")]`
+- `attrs` = `[("presemble:class", "feature.title | match(active => \"active\")")]`
 
 That is, the EDN namespace separator `/` in an attribute keyword (`:presemble/class`) maps to `:`,
 producing the HTML attribute name `"presemble:class"` — the same mapping used for element names.
@@ -334,7 +334,7 @@ This is the most important unresolved question for the Hiccup surface syntax.
 In XML/HTML templates, the `presemble:class` attribute uses a colon as a namespace separator:
 
 ```html
-<div presemble:class="article:cover:orientation | match(...)">
+<div presemble:class="article.cover.orientation | match(...)">
 ```
 
 In EDN, the colon is the namespace separator for *namespaced keywords* — but it separates a
@@ -350,13 +350,13 @@ Use the EDN namespace separator `/`. The parser maps `/` to `:` when constructin
 exactly as it does for element tag names (`:presemble/insert` → `"presemble:insert"`).
 
 ```edn
-[:div {:presemble/class "article:cover:orientation | match(...)"}]
+[:div {:presemble/class "article.cover.orientation | match(...)"}]
 ```
 
 Produces:
 
 ```
-attrs: [("presemble:class", "article:cover:orientation | match(...)")]
+attrs: [("presemble:class", "article.cover.orientation | match(...)")]
 ```
 
 This is valid EDN. It is consistent with how element namespaces are expressed. It requires the
@@ -367,7 +367,7 @@ same `/` → `:` mapping rule to apply uniformly to both tag keywords and attrib
 Use string map keys instead of keywords:
 
 ```edn
-[:div {"presemble:class" "article:cover:orientation | match(...)"}]
+[:div {"presemble:class" "article.cover.orientation | match(...)"}]
 ```
 
 This is valid EDN but unusual. EDN map keys are idiomatically keywords, not strings. Mixing

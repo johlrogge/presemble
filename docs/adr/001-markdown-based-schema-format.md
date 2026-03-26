@@ -80,8 +80,8 @@ the definition-list constraints below the line, eliminating the old `paragraphs 
 bracket-count syntax.
 
 **Named slots via anchors**: `{#title}`, `{#cover}`, `{#summary}` make structural positions
-queryable. Templates and content documents reference them as `${article:title}`,
-`${article:cover}`, `${article:summary}`.
+queryable. Templates and content documents reference them as `${article.title}`,
+`${article.cover}`, `${article.summary}`.
 
 **Definition list constraints**: attached to the element immediately above. `occurs: exactly once`,
 `orientation: landscape`, `headings: h3..h6`. Unambiguously parsed as schema metadata, not content.
@@ -89,7 +89,7 @@ queryable. Templates and content documents reference them as `${article:title}`,
 **Generation hints**: `thumbnail: generate[(1024x768),(800x600)]` instructs the publisher to
 produce image derivatives. Generated and computed fields (including intrinsic properties like
 `width`, `height`, `average_color`) join the data graph and are referenceable:
-`${article:cover:average_color}`, `${article:cover:thumbnail:1024x768}`.
+`${article.cover.average_color}`, `${article.cover.thumbnail.1024x768}`.
 
 **Content documents are plain markdown**: `{#name}` anchors appear only in schema files. Content
 editors write ordinary markdown with no schema annotations. The publisher infers which slot each
