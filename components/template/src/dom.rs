@@ -159,6 +159,7 @@ fn html_escape_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn serialize_element(el: &Element, out: &mut String) {
