@@ -1,5 +1,6 @@
 use crate::error::CliError;
 use crate::{build_site, rebuild_affected, DependencyGraph};
+use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
 use std::sync::mpsc;
@@ -84,6 +85,36 @@ fn collect_html_files(root: &Path, dir: &Path, pages: &mut Vec<String>) {
     }
 }
 
+/// Only process events that indicate actual file content changes.
+/// Access events (reads) are excluded — they fire when the rebuild reads source files,
+/// which would create a feedback loop.
+fn is_relevant_event(event: &notify::Event) -> bool {
+    use notify::EventKind;
+    matches!(
+        event.kind,
+        EventKind::Create(CreateKind::File)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Any)  // cross-platform fallback
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Remove(_)
+    )
+}
+
+/// Only process changes to source file types; skip hidden files and editor temp files.
+fn is_relevant_path(path: &std::path::Path) -> bool {
+    let file_name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    if file_name.starts_with('.') {
+        return false;
+    }
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("md" | "html")
+    )
+}
+
 fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
@@ -109,16 +140,27 @@ fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
     }
 
     loop {
+        // Wait for the first RELEVANT event (skip access events and non-source files).
+        let first_paths: Vec<std::path::PathBuf> = loop {
+            match rx.recv() {
+                Ok(Ok(event)) if is_relevant_event(&event) => {
+                    let paths: Vec<_> = event.paths.iter()
+                        .filter(|p| is_relevant_path(p))
+                        .cloned()
+                        .collect();
+                    if !paths.is_empty() {
+                        break paths;
+                    }
+                }
+                Ok(Ok(_)) => continue, // irrelevant event kind or path — keep waiting
+                Ok(Err(_)) | Err(_) => return, // channel closed
+            }
+        };
+
         let mut dirty: std::collections::HashSet<std::path::PathBuf> =
-            std::collections::HashSet::new();
+            first_paths.into_iter().collect();
 
-        // Wait for first event, collect its paths
-        match rx.recv() {
-            Ok(Ok(event)) => dirty.extend(event.paths),
-            Ok(Err(_)) | Err(_) => break,
-        }
-
-        // Debounce: drain additional events within 150ms, collecting paths
+        // Debounce: drain additional relevant events within 150ms
         let deadline = std::time::Instant::now() + Duration::from_millis(150);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -126,7 +168,14 @@ fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
                 break;
             }
             match rx.recv_timeout(remaining) {
-                Ok(Ok(event)) => dirty.extend(event.paths),
+                Ok(Ok(event)) if is_relevant_event(&event) => {
+                    dirty.extend(
+                        event.paths.iter()
+                            .filter(|p| is_relevant_path(p))
+                            .cloned()
+                    );
+                }
+                Ok(Ok(_)) => {} // irrelevant event kind — skip, keep draining
                 Ok(Err(_)) => {}
                 Err(_) => break,
             }
@@ -143,17 +192,14 @@ fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
             .count();
 
         if affected_count == 0 {
-            // No registered outputs depend on the changed files — skip rebuild
             continue;
         }
 
         println!("Rebuilding {} page(s)...", affected_count);
         match rebuild_affected(site_dir, &dirty, &current) {
             Ok(outcome) => {
-                // Merge updated deps into the current graph
                 let mut g = graph.lock().unwrap();
                 g.merge(outcome.dep_graph);
-
                 if outcome.files_failed > 0 {
                     eprintln!("Rebuild completed with {} error(s)", outcome.files_failed);
                 } else if outcome.files_built > 0 {

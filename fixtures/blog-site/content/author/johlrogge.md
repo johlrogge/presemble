@@ -1,4 +1,4 @@
-# Jo Hlrogge
+# Joakim Ohlrogge
 
 Joakim Ohlrogge is a software developer and open source contributor based in Sweden.
 He works on developer tooling, programming languages, and structured publishing systems.
