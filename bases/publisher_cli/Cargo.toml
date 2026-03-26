@@ -11,3 +11,6 @@ dep_graph = { workspace = true }
 clap = { workspace = true }
 tiny_http = { workspace = true }
 notify = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
