@@ -17,16 +17,21 @@
 <main class="post">
   <article>
     <header class="post__header">
-      <presemble:insert data="post:title" as="h1" />
+      <presemble:insert data="post.title" as="h1" />
     </header>
     <div class="post__summary">
-      <presemble:insert data="post:summary" as="p" />
+      <presemble:insert data="post.summary" as="p" />
     </div>
     <div class="post__author">
-      <presemble:insert data="post:author" />
+      <p class="post__byline">
+        By <presemble:insert data="post.author" as="a" />
+      </p>
+      <div class="post__author-bio">
+        <presemble:insert data="post.author.bio" as="p" />
+      </div>
     </div>
     <div class="post__body">
-      <presemble:insert data="post:body" />
+      <presemble:insert data="post.body" />
     </div>
   </article>
 </main>

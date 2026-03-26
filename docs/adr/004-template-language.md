@@ -20,9 +20,9 @@ lineage: string templates with `{{ variable }}` holes and `{% for %}` / `{% if %
 directives. These are well-understood but treat templates as strings with control flow, not as
 composable functions.
 
-Presemble's data model is already graph-oriented — named slots are queryable as `${article:title}`,
-cross-content references as `${author(johlrogge):bio}`, computed fields as
-`${article:cover:average_color}`. The question is whether templates should speak the same language,
+Presemble's data model is already graph-oriented — named slots are queryable as `${article.title}`,
+cross-content references as `${author(johlrogge).bio}`, computed fields as
+`${article.cover.average_color}`. The question is whether templates should speak the same language,
 or introduce a separate template syntax.
 
 ## Decision
@@ -40,9 +40,9 @@ Everything inside is a Presemble expression.
 ### Graph lookups
 
 ```
-{{ article:title }}
-{{ author(johlrogge):bio }}
-{{ article:cover:average_color }}
+{{ article.title }}
+{{ author(johlrogge).bio }}
+{{ article.cover.average_color }}
 ```
 
 Same reference syntax as content documents — uniform across the whole system.
@@ -52,12 +52,12 @@ Same reference syntax as content documents — uniform across the whole system.
 Transformations are chained via `|`. Each transformation takes a value and produces a new value:
 
 ```
-{{ article:title | uppercase }}
-{{ article:cover | thumbnail(800x600) | url }}
-{{ article:published_at | date_format("MMMM d, yyyy") }}
-{{ article:cover:orientation | match(landscape => "cover--landscape", portrait => "cover--portrait") }}
-{{ article:subtitle | default("Untitled") }}
-{{ article:summary | rest }}
+{{ article.title | uppercase }}
+{{ article.cover | thumbnail(800x600) | url }}
+{{ article.published_at | date_format("MMMM d, yyyy") }}
+{{ article.cover.orientation | match(landscape => "cover--landscape", portrait => "cover--portrait") }}
+{{ article.subtitle | default("Untitled") }}
+{{ article.summary | rest }}
 ```
 
 ### Iteration via `each`
@@ -66,7 +66,7 @@ Iteration is not a block directive — it is a pipe transformation. `each` maps 
 collection:
 
 ```
-{{ site:articles | each(template:article_card) }}
+{{ site.articles | each(template:article_card) }}
 ```
 
 `template:article_card` references another template file. That file receives one article from the
@@ -77,8 +77,8 @@ collection and produces an HTML fragment. The fragments are concatenated at the 
 Collection values (multi-occurrence slots) support positional access via pipe transforms:
 
 ```
-{{ article:summary | first }}
-{{ article:summary | rest | each(template:summary_continuation) }}
+{{ article.summary | first }}
+{{ article.summary | rest | each(template:summary_continuation) }}
 ```
 
 `first` returns the first element. `rest` returns all elements except the first. Together with
@@ -92,7 +92,7 @@ Additional transforms (`last`, `nth(N)`, `take(N)`, `skip(N)`) are reserved for 
 `maybe` applies a template only if the value is present (non-null):
 
 ```
-{{ article:cover | maybe(template:cover_block) }}
+{{ article.cover | maybe(template:cover_block) }}
 ```
 
 `each` and `maybe` are the same concept: "how many times to apply a template" — zero-or-many and
@@ -119,7 +119,7 @@ piped value becomes the template's context root. The fragment sees only the valu
 not the caller's full context. Fields are accessed as bare names on the context root.
 
 This makes fragments pure functions of their input — a cover fragment says `{{ path }}` and
-`{{ alt }}`, not `{{ article:cover:path }}`. The same fragment works for any content type that
+`{{ alt }}`, not `{{ article.cover.path }}`. The same fragment works for any content type that
 has a cover slot.
 
 ### Template context map

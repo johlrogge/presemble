@@ -1,6 +1,6 @@
 use crate::document::{ContentElement, Document};
 use crate::error::ContentError;
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use schema::HeadingLevel;
 
 /// Convert a pulldown-cmark HeadingLevel to schema's HeadingLevel.
@@ -60,6 +60,11 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
         Link {
             text: String,
             href: String,
+        },
+        /// Inside a fenced or indented code block.
+        CodeBlock {
+            language: Option<String>,
+            code: String,
         },
     }
 
@@ -173,6 +178,21 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
                 }
             }
 
+            // ── Code blocks ─────────────────────────────────────────────────
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let language = match &kind {
+                    CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
+                    _ => None,
+                };
+                state = State::CodeBlock { language, code: String::new() };
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let State::CodeBlock { language, code } = state {
+                    elements.push(ContentElement::CodeBlock { language, code });
+                    state = State::Idle;
+                }
+            }
+
             // ── Separator (thematic break / horizontal rule) ─────────────────
             Event::Rule => {
                 elements.push(ContentElement::Separator);
@@ -187,6 +207,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
                     State::Paragraph { text: buf, .. } => buf.push_str(s),
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
+                    State::CodeBlock { code, .. } => code.push_str(s),
                     State::Idle => {}
                 }
             }
@@ -442,6 +463,34 @@ Body paragraph."#;
             matches!(e, ContentElement::Heading { level, .. } if level.value() == 3)
         });
         assert!(h3.is_some(), "expected an H3 heading in the mixed document");
+    }
+
+    // ── Code blocks ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn fenced_code_block_with_language() {
+        let content = "```rust\nfn main() {}\n```\n";
+        let doc = super::parse_document(content).expect("parses");
+        assert_element_count(&doc, 1);
+        if let ContentElement::CodeBlock { language, code } = &doc.elements[0] {
+            assert_eq!(language.as_deref(), Some("rust"));
+            assert!(code.contains("fn main()"));
+        } else {
+            panic!("expected CodeBlock");
+        }
+    }
+
+    #[test]
+    fn fenced_code_block_without_language() {
+        let content = "```\nsome code\n```\n";
+        let doc = super::parse_document(content).expect("parses");
+        assert_element_count(&doc, 1);
+        if let ContentElement::CodeBlock { language, code } = &doc.elements[0] {
+            assert!(language.is_none());
+            assert!(code.contains("some code"));
+        } else {
+            panic!("expected CodeBlock");
+        }
     }
 
     #[test]

@@ -23,7 +23,7 @@
   <section class="feature-grid">
     <h2>Core Principles</h2>
     <ul class="feature-grid__items">
-      <template data-each="site:features">
+      <template data-each="site.features">
         <li class="feature-card">
           <presemble:insert data="title" as="h3" />
           <presemble:insert data="tagline" />
@@ -36,7 +36,7 @@
   <section class="latest-posts">
     <h2>From the Blog</h2>
     <ul class="latest-posts__items">
-      <template data-each="site:posts">
+      <template data-each="site.posts">
         <li class="post-card">
           <presemble:insert data="title" as="h3" />
           <presemble:insert data="summary" />

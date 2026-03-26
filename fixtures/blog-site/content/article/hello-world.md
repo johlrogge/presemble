@@ -29,7 +29,7 @@ named and constrained.
 ##### Named Slots in Practice
 
 Every named slot becomes a queryable field in templates. A template can reference
-`${article:title}` or `${article:cover}` and the publisher guarantees those values exist before
+`${article.title}` or `${article.cover}` and the publisher guarantees those values exist before
 the build completes.
 
 ###### Constraint Vocabulary

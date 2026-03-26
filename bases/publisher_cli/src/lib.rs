@@ -16,6 +16,26 @@ struct PageAddress {
     output_path: std::path::PathBuf,
 }
 
+/// Metadata needed to render a page after reference resolution.
+struct CollectedPage {
+    schema_stem: String,
+    page_index: usize,  // index into built_pages[schema_stem] after collection
+    output_path: std::path::PathBuf,
+    template_path: Option<std::path::PathBuf>,
+}
+
+/// Find a template for the given schema stem, trying extensions in order.
+/// Tries .html first (XML), then .hiccup (Hiccup/EDN).
+fn find_template(templates_dir: &std::path::Path, schema_stem: &str) -> Option<std::path::PathBuf> {
+    for ext in &["html", "hiccup"] {
+        let path = templates_dir.join(format!("{schema_stem}.{ext}"));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn page_address(site_dir: &std::path::Path, schema_stem: &str, content_path: &std::path::Path) -> PageAddress {
     let slug = content_path
         .file_stem()
@@ -46,6 +66,7 @@ pub struct PageBuildResult {
     pub schema_stem: String,
     /// Source files this page was built from (schema, content, template)
     pub deps: std::collections::HashSet<std::path::PathBuf>,
+    pub template_path: Option<std::path::PathBuf>,
 }
 
 pub struct BuildOutcome {
@@ -156,31 +177,11 @@ pub fn build_content_page(
     // Compute canonical address once, before branching on template existence
     let addr = page_address(site_dir, schema_stem, content_path);
 
-    // Rendering phase — only for valid documents
+    // Look up template path — rendering is deferred until after reference resolution
     let templates_dir = site_dir.join("templates");
-    let template_path = templates_dir.join(format!("{schema_stem}.html"));
+    let template_path = find_template(&templates_dir, schema_stem);
 
-    if !template_path.exists() {
-        // No template — page validated but nothing rendered; treat as built with no output
-        let mut deps = std::collections::HashSet::new();
-        deps.insert(schema_path.to_path_buf());
-        deps.insert(content_path.to_path_buf());
-
-        let mut slot_graph = template::build_article_graph(&doc, grammar);
-        slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
-
-        return Ok(Some(PageBuildResult {
-            built: BuiltPage {
-                url_path: addr.url_path,
-                data: slot_graph,
-            },
-            output_path: addr.output_path,
-            schema_stem: schema_stem.to_string(),
-            deps,
-        }));
-    }
-
-    // Build data graph — wrap under schema_stem (e.g., "article")
+    // Build data graph
     let mut slot_graph = template::build_article_graph(&doc, grammar);
 
     // Extract title text for the link record (fallback to slug if absent)
@@ -196,23 +197,12 @@ pub fn build_content_page(
     link_graph.insert("text", template::Value::Text(title_text));
     slot_graph.insert("link", template::Value::Record(link_graph));
 
-    let mut context = template::DataGraph::new();
-    context.insert(schema_stem, template::Value::Record(slot_graph.clone()));
-
-    // Load and render the template
-    let tmpl_src = std::fs::read_to_string(&template_path)?;
-    let html = template::render_template(&tmpl_src, &context)
-        .map_err(|e| CliError::Render(e.to_string()))?;
-
-    // Write output — create the per-page directory first (clean URL convention)
-    std::fs::create_dir_all(addr.output_path.parent().unwrap())?;
-    std::fs::write(&addr.output_path, &html)?;
-    println!("  \u{2192} {}", addr.output_path.display());
-
     let mut deps = std::collections::HashSet::new();
     deps.insert(schema_path.to_path_buf());
     deps.insert(content_path.to_path_buf());
-    deps.insert(template_path.to_path_buf());
+    if let Some(ref tp) = template_path {
+        deps.insert(tp.to_path_buf());
+    }
 
     Ok(Some(PageBuildResult {
         built: BuiltPage {
@@ -222,7 +212,90 @@ pub fn build_content_page(
         output_path: addr.output_path,
         schema_stem: schema_stem.to_string(),
         deps,
+        template_path,
     }))
+}
+
+/// After all pages are built, walk each page's DataGraph and resolve
+/// cross-content references: when a Value::Record has an `href` that matches
+/// another BuiltPage's url_path, merge the referenced page's data fields in.
+///
+/// This makes post.author.name, post.author.bio etc. available in templates.
+/// Resolution is one level deep — no transitive resolution.
+fn resolve_references(built_pages: &mut std::collections::HashMap<String, Vec<BuiltPage>>) {
+    // Build url_path -> DataGraph index (snapshot before mutation)
+    let url_index: std::collections::HashMap<String, template::DataGraph> = built_pages
+        .values()
+        .flatten()
+        .map(|p| (p.url_path.clone(), p.data.clone()))
+        .collect();
+
+    if url_index.is_empty() {
+        return;
+    }
+
+    // Walk each page's DataGraph resolving records whose href matches a built page
+    for pages in built_pages.values_mut() {
+        for page in pages.iter_mut() {
+            resolve_graph(&mut page.data, &url_index);
+        }
+    }
+}
+
+/// Resolve cross-content references in a single DataGraph (one level deep).
+fn resolve_graph(
+    graph: &mut template::DataGraph,
+    url_index: &std::collections::HashMap<String, template::DataGraph>,
+) {
+    // Collect keys to resolve and the href values to look up
+    let to_resolve: Vec<(String, String)> = graph
+        .iter()
+        .filter_map(|(key, value)| {
+            if let template::Value::Record(sub) = value {
+                if let Some(template::Value::Text(href)) = sub.resolve(&["href"]) {
+                    if url_index.contains_key(href) {
+                        return Some((key.clone(), href.clone()));
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Merge referenced page data into each identified record
+    for (key, href) in to_resolve {
+        if let Some(referenced) = url_index.get(&href) {
+            if let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key]) {
+                // Preserve href and text (they belong to the link, not the reference)
+                sub.merge_from(referenced, &["href", "text"]);
+            }
+        }
+    }
+}
+
+fn render_page(
+    data: &template::DataGraph,
+    schema_stem: &str,
+    template_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> Result<(), CliError> {
+    let mut context = template::DataGraph::new();
+    context.insert(schema_stem, template::Value::Record(data.clone()));
+
+    let tmpl_src = std::fs::read_to_string(template_path)?;
+    let nodes = match template_path.extension().and_then(|e| e.to_str()) {
+        Some("hiccup") => template::parse_template_hiccup(&tmpl_src)
+            .map_err(|e| CliError::Render(e.to_string()))?,
+        _ => template::parse_template_xml(&tmpl_src)
+            .map_err(|e| CliError::Render(e.to_string()))?,
+    };
+    let html = template::render_from_nodes(nodes, &context)
+        .map_err(|e| CliError::Render(e.to_string()))?;
+
+    std::fs::create_dir_all(output_path.parent().unwrap())?;
+    std::fs::write(output_path, &html)?;
+    println!("  \u{2192} {}", output_path.display());
+    Ok(())
 }
 
 pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
@@ -240,6 +313,7 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     let mut dep_graph = DependencyGraph::new();
     let mut all_content_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut all_schema_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut collected_pages: Vec<CollectedPage> = Vec::new();
 
     // Discover all .md schema files
     let mut schema_entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&schemas_dir)
@@ -255,6 +329,57 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
         .collect();
 
     schema_entries.sort_by_key(|e| e.file_name());
+
+    // Discover and copy referenced assets from templates
+    let templates_dir = site_dir.join("templates");
+    let mut all_asset_paths = std::collections::BTreeSet::new();
+    if templates_dir.exists() {
+        let mut template_entries: Vec<_> = std::fs::read_dir(&templates_dir)?
+            .flatten()
+            .filter(|e| {
+                matches!(
+                    e.path().extension().and_then(|x| x.to_str()),
+                    Some("html" | "hiccup")
+                )
+            })
+            .collect();
+        template_entries.sort_by_key(|e| e.file_name());
+        for entry in template_entries {
+            let template_path = entry.path();
+            let tmpl_src = std::fs::read_to_string(&template_path)?;
+            match template_path.extension().and_then(|e| e.to_str()) {
+                Some("hiccup") => {
+                    match template::parse_template_hiccup(&tmpl_src) {
+                        Ok(nodes) => {
+                            let assets = template::extract_asset_paths(&nodes);
+                            all_asset_paths.extend(assets);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: skipping asset scan for {} (parse error: {e})",
+                                template_path.display()
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    match template::parse_template_xml(&tmpl_src) {
+                        Ok(nodes) => {
+                            let assets = template::extract_asset_paths(&nodes);
+                            all_asset_paths.extend(assets);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: skipping asset scan for {} (parse error: {e})",
+                                template_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    copy_referenced_assets(site_dir, &all_asset_paths)?;
 
     for schema_entry in schema_entries {
         let schema_path = schema_entry.path();
@@ -320,16 +445,39 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
             )? {
                 Some(page_result) => {
                     dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
+                    let schema_stem_str = schema_stem.to_string();
+                    let page_index = built_pages
+                        .entry(schema_stem_str.clone())
+                        .or_default()
+                        .len();
                     built_pages
-                        .entry(schema_stem.to_string())
+                        .entry(schema_stem_str.clone())
                         .or_default()
                         .push(page_result.built);
+
+                    collected_pages.push(CollectedPage {
+                        schema_stem: schema_stem_str,
+                        page_index,
+                        output_path: page_result.output_path,
+                        template_path: page_result.template_path,
+                    });
                     files_built += 1;
                 }
                 None => {
                     files_failed += 1;
                 }
             }
+        }
+    }
+
+    // Phase 2: Resolve cross-content references (e.g. post.author.name from the author page)
+    resolve_references(&mut built_pages);
+
+    // Phase 3: Render all collected pages with resolved data
+    for collected in &collected_pages {
+        if let Some(tmpl_path) = &collected.template_path {
+            let page_data = &built_pages[&collected.schema_stem][collected.page_index].data;
+            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path)?;
         }
     }
 
@@ -463,6 +611,7 @@ pub fn rebuild_affected(
         built_pages: std::collections::HashMap::new(),
         dep_graph: DependencyGraph::new(),
     };
+    let mut rebuild_collected: Vec<CollectedPage> = Vec::new();
 
     // Rebuild affected content pages.
     // For each affected content output, recover the schema and content paths from the
@@ -519,22 +668,46 @@ pub fn rebuild_affected(
             }
         };
 
-        // Build the page
+        // Build the page (collect only — rendering deferred until after reference resolution)
         match build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar)? {
             Some(result) => {
                 outcome
                     .dep_graph
                     .register(result.output_path.clone(), result.deps.clone());
+                let page_index = outcome
+                    .built_pages
+                    .entry(schema_stem.clone())
+                    .or_default()
+                    .len();
                 outcome
                     .built_pages
                     .entry(schema_stem.clone())
                     .or_default()
                     .push(result.built);
+                rebuild_collected.push(CollectedPage {
+                    schema_stem: schema_stem.clone(),
+                    page_index,
+                    output_path: result.output_path,
+                    template_path: result.template_path,
+                });
                 outcome.files_built += 1;
             }
             None => {
                 outcome.files_failed += 1;
             }
+        }
+    }
+
+    // Phase 2: Re-resolve references within rebuilt pages.
+    // Note: this only resolves within the partial set — if a *referenced* page changed,
+    // a full rebuild is needed for complete resolution.
+    resolve_references(&mut outcome.built_pages);
+
+    // Phase 3: Render all collected pages with resolved data
+    for collected in &rebuild_collected {
+        if let Some(tmpl_path) = &collected.template_path {
+            let page_data = &outcome.built_pages[&collected.schema_stem][collected.page_index].data;
+            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path)?;
         }
     }
 
@@ -587,7 +760,8 @@ fn validate_internal_links(
             let with_html = format!("{normalised}.html");
             let bare = normalised.to_string();
 
-            // Skip asset paths
+            // Asset paths are validated during asset discovery in build_site();
+            // skip them here since they are not page URLs.
             if normalised.starts_with("/assets") {
                 continue;
             }
@@ -643,6 +817,31 @@ fn extract_internal_links(html: &str) -> Vec<String> {
         }
     }
     links
+}
+
+/// Verify that each referenced asset exists and copy it to the output directory.
+/// Returns an error if any referenced asset is missing.
+fn copy_referenced_assets(
+    site_dir: &std::path::Path,
+    asset_paths: &std::collections::BTreeSet<String>,
+) -> Result<(), CliError> {
+    for path in asset_paths {
+        let relative = path.trim_start_matches('/');
+        let src = site_dir.join(relative);
+        if !src.exists() {
+            return Err(CliError::Render(format!(
+                "referenced asset not found: {path} (expected at {})",
+                src.display()
+            )));
+        }
+        let dest = site_dir.join("output").join(relative);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&src, &dest)?;
+        println!("  asset: {path}");
+    }
+    Ok(())
 }
 
 fn format_severity(severity: &content::Severity) -> &'static str {

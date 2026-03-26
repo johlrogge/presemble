@@ -58,19 +58,19 @@ A working vocabulary emerging from experiment:
 
 ```html
 <!-- Insert a slot value as a DOM node -->
-<presemble:insert data="article:title" as="h1"></presemble:insert>
+<presemble:insert data="article.title" as="h1"></presemble:insert>
 
 <!-- Attribute binding from the data graph -->
-<div presemble:class="article:cover:orientation | match(landscape: cover--landscape, portrait: cover--portrait)">
+<div presemble:class="article.cover.orientation | match(landscape: cover--landscape, portrait: cover--portrait)">
 
 <!-- Iteration -->
-<template data-each="site:articles">
-  <presemble:insert data="article:title" as="h3"></presemble:insert>
+<template data-each="site.articles">
+  <presemble:insert data="article.title" as="h3"></presemble:insert>
 </template>
 
 <!-- Conditional (insert only if value is present) -->
-<template data-slot="article:cover">
-  <presemble:insert data="article:cover"></presemble:insert>
+<template data-slot="article.cover">
+  <presemble:insert data="article.cover"></presemble:insert>
 </template>
 ```
 
@@ -97,8 +97,8 @@ HTML(ish) — natural for designers and visual correspondence:
 
 ```html
 <article>
-  <presemble:insert data="article:title" as="h1"></presemble:insert>
-  <presemble:insert data="article:cover"></presemble:insert>
+  <presemble:insert data="article.title" as="h1"></presemble:insert>
+  <presemble:insert data="article.cover"></presemble:insert>
 </article>
 ```
 
@@ -106,8 +106,8 @@ EDN/Hiccup — natural for developers, concise, already data:
 
 ```clojure
 [:article
-  [presemble/insert {:data "article:title" :as :h1}]
-  [presemble/insert {:data "article:cover"}]]
+  [presemble/insert {:data "article.title" :as :h1}]
+  [presemble/insert {:data "article.cover"}]]
 ```
 
 YAML — readable structured data:
@@ -116,10 +116,10 @@ YAML — readable structured data:
 tag: article
 children:
   - presemble: insert
-    data: article:title
+    data: article.title
     as: h1
   - presemble: insert
-    data: article:cover
+    data: article.cover
 ```
 
 **The choice of surface syntax is the developer's.** Projects may mix syntaxes — one developer

@@ -150,9 +150,16 @@ pub fn serialize_nodes(nodes: &[Node]) -> String {
 
 fn serialize_node(node: &Node, out: &mut String) {
     match node {
-        Node::Text(text) => out.push_str(text),
+        Node::Text(text) => out.push_str(&html_escape_text(text)),
         Node::Element(el) => serialize_element(el, out),
     }
+}
+
+fn html_escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn serialize_element(el: &Element, out: &mut String) {
@@ -216,6 +223,50 @@ fn html_escape_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Attribute names on specific elements that may contain local asset paths.
+/// (element_name, attr_name)
+const ASSET_ATTRS: &[(&str, &str)] = &[
+    ("link", "href"),
+    ("img", "src"),
+    ("script", "src"),
+];
+
+/// Extract local asset paths referenced in element attributes.
+///
+/// Walks the node tree and collects values of `href` (on `<link>`),
+/// `src` (on `<img>`, `<script>`) that start with `/`.
+/// Presemble annotation elements are skipped entirely.
+/// Results are deduplicated and sorted.
+pub fn extract_asset_paths(nodes: &[Node]) -> Vec<String> {
+    let mut found = std::collections::HashSet::new();
+    extract_asset_paths_recursive(nodes, &mut found);
+    let mut result: Vec<String> = found.into_iter().collect();
+    result.sort();
+    result
+}
+
+fn extract_asset_paths_recursive(nodes: &[Node], found: &mut std::collections::HashSet<String>) {
+    for node in nodes {
+        if let Node::Element(el) = node {
+            if el.is_presemble() {
+                continue; // presemble annotations are data-graph paths, not asset references
+            }
+            // Check if this element/attribute combination is an asset reference
+            for (elem_name, attr_name) in ASSET_ATTRS {
+                if el.name == *elem_name {
+                    if let Some(value) = el.attr(attr_name) {
+                        if value.starts_with('/') && !value.contains("://") {
+                            found.insert(value.to_string());
+                        }
+                    }
+                }
+            }
+            // Recurse into children
+            extract_asset_paths_recursive(&el.children, found);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,12 +281,12 @@ mod tests {
 
     #[test]
     fn self_closing_presemble_element() {
-        let src = r#"<presemble:insert data="article:title" as="h1" />"#;
+        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         assert_eq!(nodes.len(), 1);
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:insert");
-            assert_eq!(el.attr("data"), Some("article:title"));
+            assert_eq!(el.attr("data"), Some("article.title"));
             assert_eq!(el.attr("as"), Some("h1"));
             assert!(el.is_presemble());
         } else {
@@ -245,7 +296,7 @@ mod tests {
 
     #[test]
     fn namespace_prefix_preserved() {
-        let src = r#"<presemble:insert data="article:cover"></presemble:insert>"#;
+        let src = r#"<presemble:insert data="article.cover"></presemble:insert>"#;
         let nodes = parse_template_xml(src).unwrap();
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:insert");
@@ -294,5 +345,68 @@ mod tests {
         assert_eq!(el.attr("class"), Some("hero"));
         assert_eq!(el.attr("id"), Some("main"));
         assert_eq!(el.attr("missing"), None);
+    }
+
+    #[test]
+    fn extract_asset_paths_finds_link_href() {
+        let src = r#"<head><link rel="stylesheet" href="/assets/style.css" /></head>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let assets = extract_asset_paths(&nodes);
+        assert_eq!(assets, vec!["/assets/style.css"]);
+    }
+
+    #[test]
+    fn extract_asset_paths_finds_img_src() {
+        let src = r#"<img src="/images/photo.jpg" alt="photo" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_asset_paths(&nodes), vec!["/images/photo.jpg"]);
+    }
+
+    #[test]
+    fn extract_asset_paths_ignores_external_urls() {
+        let src = r#"<script src="https://cdn.example.com/lib.js"></script>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert!(extract_asset_paths(&nodes).is_empty());
+    }
+
+    #[test]
+    fn extract_asset_paths_ignores_page_links() {
+        let src = r#"<a href="/article/hello-world">Link</a>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        // <a href> is not in ASSET_ATTRS — not collected
+        assert!(extract_asset_paths(&nodes).is_empty());
+    }
+
+    #[test]
+    fn extract_asset_paths_ignores_presemble_elements() {
+        let src = r#"<presemble:insert data="feature.cover" src="/assets/icon.svg" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert!(extract_asset_paths(&nodes).is_empty());
+    }
+
+    #[test]
+    fn extract_asset_paths_deduplicates() {
+        let src = r#"<div><link href="/assets/a.css" /><link href="/assets/a.css" /></div>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_asset_paths(&nodes), vec!["/assets/a.css"]);
+    }
+
+    #[test]
+    fn text_content_with_angle_brackets_is_escaped() {
+        // A text node containing literal angle brackets must be escaped in output
+        let src = "<p>Use &lt;div&gt; for blocks</p>";
+        let nodes = parse_template_xml(src).unwrap();
+        let out = serialize_nodes(&nodes);
+        assert!(out.contains("&lt;div&gt;"), "angle brackets must be escaped: {out}");
+        assert!(!out.contains("<div>"), "raw tag must not appear: {out}");
+    }
+
+    #[test]
+    fn code_block_body_serializes_correctly() {
+        // Simulate what happens when code block HTML (with escaped content) is parsed and re-serialized
+        let src = "<pre><code>&lt;presemble:insert data=\"title\" /&gt;</code></pre>";
+        let nodes = parse_template_xml(src).unwrap();
+        let out = serialize_nodes(&nodes);
+        assert!(out.contains("&lt;presemble:insert"), "presemble tag must be escaped in output: {out}");
     }
 }

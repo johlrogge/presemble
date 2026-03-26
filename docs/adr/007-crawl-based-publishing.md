@@ -41,12 +41,12 @@ content to build.
 
 1. **Start** at each entry point template
 2. **Parse** the template to find all outbound references:
-   - `<presemble:insert data="article:title">` → depends on an `article` data item
-   - `<template data-each="site:articles">` → depends on the full `article` collection
+   - `<presemble:insert data="article.title">` → depends on an `article` data item
+   - `<template data-each="site.articles">` → depends on the full `article` collection
    - Rendered `<a href="/authors/johlrogge">` links → depends on the `/authors/johlrogge` page
 3. **Resolve** each reference:
-   - Collection references (`site:articles`) → gather all content items matching that schema
-   - Item references (`article:author`) → find the content item at the referenced path
+   - Collection references (`site.articles`) → gather all content items matching that schema
+   - Item references (`article.author`) → find the content item at the referenced path
    - URL links in output → schedule the linked page for building if it maps to a known
      template/content
 4. **Schedule** unbuilt dependencies for building (depth-first)
@@ -62,8 +62,8 @@ content to build.
 Some pages have no associated content file — they are derived from collections. The `index.html`
 template has access to the full `site` data graph, including:
 
-- `site:articles` — all content items matching the `article` schema
-- `site:authors` — all content items matching the `author` schema
+- `site.articles` — all content items matching the `article` schema
+- `site.authors` — all content items matching the `author` schema
 
 The publisher resolves these collection references by gathering all content of the matching type.
 Collection pages are rendered last (after their members are built), so the data graph is complete
@@ -83,7 +83,7 @@ when they render.
 - With `--check-links` flag: HTTP HEAD request for each external URL, warning (not error) on
   non-200
 
-**Unresolved schema slot references** (e.g. `article:author` points to `/authors/johlrogge` but
+**Unresolved schema slot references** (e.g. `article.author` points to `/authors/johlrogge` but
 no author content exists at that path):
 
 - Hard fail at build time (this is a cross-content reference violation, already part of M0 scope)
@@ -117,7 +117,7 @@ maintaining a sitemap separately from content, creating a second source of truth
 
 - Dead links are impossible to publish — internal link validation is structural
 - Collection pages (index, feeds, archives) have a natural model: templates with access to
-  `site:*` collections
+  `site.*` collections
 - Cross-content references are validated by construction — the crawler fails if a referenced item
   cannot be built
 - Build order is deterministic and correct — dependencies built before dependents
@@ -128,7 +128,7 @@ maintaining a sitemap separately from content, creating a second source of truth
 - Requires a crawler / build graph component — significant new infrastructure
 - Cycle detection adds complexity; the policy for circular references (error vs. placeholder)
   needs specification
-- `site:articles` collection resolution needs a query model — how does the publisher know which
+- `site.articles` collection resolution needs a query model — how does the publisher know which
   content items belong to which collection? (By schema name matching the collection name is the
   simplest answer)
 - URL mapping from content paths to output paths needs a convention or configuration
@@ -142,6 +142,6 @@ Before full implementation:
 
 1. Implement `templates/index.html` as the default entry point — the publisher starts there
    instead of scanning
-2. Expose `site:articles` as a collection in the data graph (gathered by schema name convention)
+2. Expose `site.articles` as a collection in the data graph (gathered by schema name convention)
 3. Validate that internal links in rendered output resolve to built pages
 4. Defer: cycle detection, external link checking, `--check-links` flag

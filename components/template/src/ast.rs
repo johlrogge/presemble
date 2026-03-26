@@ -1,7 +1,7 @@
 /// An expression inside a pipe expression slot.
 #[derive(Debug, Clone)]
 pub enum Expr {
-    /// A colon-separated path lookup: `article:title` → `["article", "title"]`
+    /// A dot-separated path lookup: `article.title` → `["article", "title"]`
     Lookup(Vec<String>),
     /// A pipe chain: `expr | transform`
     Pipe(Box<Expr>, Transform),

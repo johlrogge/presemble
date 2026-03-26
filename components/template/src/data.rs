@@ -45,6 +45,35 @@ impl DataGraph {
             },
         }
     }
+
+    /// Iterate over all top-level entries in the graph.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.entries.iter()
+    }
+
+    /// Mutable path resolution — same semantics as `resolve` but returns a mutable reference.
+    pub fn resolve_mut(&mut self, path: &[&str]) -> Option<&mut Value> {
+        match path {
+            [] => None,
+            [key] => self.entries.get_mut(*key),
+            [key, rest @ ..] => match self.entries.get_mut(*key) {
+                Some(Value::Record(sub)) => sub.resolve_mut(rest),
+                _ => None,
+            },
+        }
+    }
+
+    /// Merge all entries from `other` into this graph.
+    /// Keys listed in `preserve` are not overwritten.
+    /// All other keys from `other` overwrite keys in `self`.
+    pub fn merge_from(&mut self, other: &DataGraph, preserve: &[&str]) {
+        for (key, value) in other.entries.iter() {
+            if preserve.contains(&key.as_str()) {
+                continue;
+            }
+            self.entries.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +200,7 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn render_body_html(elements: &[ContentElement]) -> String {
+pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for element in elements {
         let html = match element {
@@ -193,6 +222,17 @@ fn render_body_html(elements: &[ContentElement]) -> String {
                     escape_html(href),
                     escape_html(text)
                 )
+            }
+            ContentElement::CodeBlock { language, code } => {
+                let escaped = escape_html(code);
+                match language {
+                    Some(lang) => format!(
+                        "<pre><code class=\"language-{}\">{}</code></pre>",
+                        escape_html(lang),
+                        escaped
+                    ),
+                    None => format!("<pre><code>{}</code></pre>", escaped),
+                }
             }
             ContentElement::Separator => continue,
         };
@@ -290,6 +330,40 @@ mod tests {
     }
 
     #[test]
+    fn body_code_block_renders_as_pre_code() {
+        let code_block = ContentElement::CodeBlock {
+            language: Some("rust".to_string()),
+            code: "fn main() {}\n".to_string(),
+        };
+        let html = super::render_body_html(&[code_block]);
+        assert!(
+            html.contains("<pre><code class=\"language-rust\">"),
+            "expected language class in output; got: {html}"
+        );
+        assert!(
+            html.contains("fn main()"),
+            "expected code content in output; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_code_block_without_language_renders_plain_pre_code() {
+        let code_block = ContentElement::CodeBlock {
+            language: None,
+            code: "some code\n".to_string(),
+        };
+        let html = super::render_body_html(&[code_block]);
+        assert!(
+            html.contains("<pre><code>"),
+            "expected plain pre/code in output; got: {html}"
+        );
+        assert!(
+            html.contains("some code"),
+            "expected code content in output; got: {html}"
+        );
+    }
+
+    #[test]
     fn escape_html_replaces_special_characters() {
         assert_eq!(escape_html("a < b & c > d"), "a &lt; b &amp; c &gt; d");
         assert_eq!(
@@ -350,5 +424,52 @@ mod tests {
         let wrapped = format!("<body>{body_html}</body>");
         parse_template_xml(&wrapped)
             .expect("body HTML with escaped angle brackets should be valid XML");
+    }
+
+    #[test]
+    fn merge_from_copies_keys() {
+        let mut target = DataGraph::new();
+        target.insert("existing", Value::Text("keep".to_string()));
+
+        let mut source = DataGraph::new();
+        source.insert("new_key", Value::Text("new_value".to_string()));
+        source.insert("existing", Value::Text("overwrite".to_string()));
+
+        target.merge_from(&source, &[]);
+
+        assert!(matches!(target.resolve(&["new_key"]), Some(Value::Text(v)) if v == "new_value"));
+        assert!(matches!(target.resolve(&["existing"]), Some(Value::Text(v)) if v == "overwrite"));
+    }
+
+    #[test]
+    fn merge_from_preserves_listed_keys() {
+        let mut target = DataGraph::new();
+        target.insert("href", Value::Text("/original".to_string()));
+        target.insert("text", Value::Text("Original".to_string()));
+
+        let mut source = DataGraph::new();
+        source.insert("href", Value::Text("/new".to_string()));
+        source.insert("text", Value::Text("New".to_string()));
+        source.insert("name", Value::Text("Canonical Name".to_string()));
+
+        target.merge_from(&source, &["href", "text"]);
+
+        // href and text preserved
+        assert!(matches!(target.resolve(&["href"]), Some(Value::Text(v)) if v == "/original"));
+        assert!(matches!(target.resolve(&["text"]), Some(Value::Text(v)) if v == "Original"));
+        // name merged in
+        assert!(matches!(target.resolve(&["name"]), Some(Value::Text(v)) if v == "Canonical Name"));
+    }
+
+    #[test]
+    fn resolve_mut_updates_value() {
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("Old Title".to_string()));
+
+        if let Some(v) = graph.resolve_mut(&["title"]) {
+            *v = Value::Text("New Title".to_string());
+        }
+
+        assert!(matches!(graph.resolve(&["title"]), Some(Value::Text(v)) if v == "New Title"));
     }
 }
