@@ -150,9 +150,15 @@ pub fn serialize_nodes(nodes: &[Node]) -> String {
 
 fn serialize_node(node: &Node, out: &mut String) {
     match node {
-        Node::Text(text) => out.push_str(text),
+        Node::Text(text) => out.push_str(&html_escape_text(text)),
         Node::Element(el) => serialize_element(el, out),
     }
+}
+
+fn html_escape_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn serialize_element(el: &Element, out: &mut String) {
@@ -382,5 +388,24 @@ mod tests {
         let src = r#"<div><link href="/assets/a.css" /><link href="/assets/a.css" /></div>"#;
         let nodes = parse_template_xml(src).unwrap();
         assert_eq!(extract_asset_paths(&nodes), vec!["/assets/a.css"]);
+    }
+
+    #[test]
+    fn text_content_with_angle_brackets_is_escaped() {
+        // A text node containing literal angle brackets must be escaped in output
+        let src = "<p>Use &lt;div&gt; for blocks</p>";
+        let nodes = parse_template_xml(src).unwrap();
+        let out = serialize_nodes(&nodes);
+        assert!(out.contains("&lt;div&gt;"), "angle brackets must be escaped: {out}");
+        assert!(!out.contains("<div>"), "raw tag must not appear: {out}");
+    }
+
+    #[test]
+    fn code_block_body_serializes_correctly() {
+        // Simulate what happens when code block HTML (with escaped content) is parsed and re-serialized
+        let src = "<pre><code>&lt;presemble:insert data=\"title\" /&gt;</code></pre>";
+        let nodes = parse_template_xml(src).unwrap();
+        let out = serialize_nodes(&nodes);
+        assert!(out.contains("&lt;presemble:insert"), "presemble tag must be escaped in output: {out}");
     }
 }
