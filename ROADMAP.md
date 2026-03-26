@@ -22,6 +22,9 @@ has teeth.
 ## Backlog
 
 **M0.5 — "Presemble builds its own site"**
+
+**Status: complete.** site/ contains the presemble.io promotional site with three content types (feature, post, author), six pages, clean URLs, and Link validation: OK.
+
 - Build the presemble.io promotional site using Presemble itself
 - Content: what Presemble is, why it exists, how to get started
 - This is the real dogfood test — if building the site reveals gaps, they get fixed before M1
@@ -65,3 +68,5 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 ## Done
 
 <!-- Completed milestones -->
+
+**M0 — "It compiles a site"** — schema format (ADR-001), content validation, DOM template engine (ADR-005), presemble build CLI, clean URLs (ADR-009).
