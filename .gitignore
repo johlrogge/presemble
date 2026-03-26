@@ -5,3 +5,4 @@
 /.claude/agents/metadev.md
 /.mcp.json
 fixtures/*/output/
+site/output/
