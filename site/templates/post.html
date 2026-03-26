@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Presemble</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<header class="site-header">
+  <a class="site-header__logo" href="/">Presemble</a>
+  <nav class="site-header__nav">
+    <a href="/">Home</a>
+  </nav>
+</header>
+
+<main class="post">
+  <article>
+    <header class="post__header">
+      <presemble:insert data="post:title" as="h1" />
+    </header>
+    <div class="post__summary">
+      <presemble:insert data="post:summary" as="p" />
+    </div>
+    <div class="post__author">
+      <presemble:insert data="post:author" />
+    </div>
+    <div class="post__body">
+      <presemble:insert data="post:body" />
+    </div>
+  </article>
+</main>
+
+<footer class="site-footer">
+  <p class="site-footer__copy">&#169; Presemble</p>
+</footer>
+</body>
+</html>

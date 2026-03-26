@@ -1,0 +1,8 @@
+# Polylith profiles — named sets of interface-to-implementation mappings.
+#
+# "development" is implicit: the root workspace Cargo.toml IS the development profile.
+# "live" wires real-world implementations (disk writes, network, etc.)
+
+[profiles.live]
+# Add mappings as components are created, e.g.:
+# storage = "components/storage_disk"

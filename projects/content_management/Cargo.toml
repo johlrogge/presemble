@@ -1,0 +1,11 @@
+[package]
+name = "content_management"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "content_management"
+path = "src/main.rs"
+
+[dependencies]
+editor_server = { workspace = true }

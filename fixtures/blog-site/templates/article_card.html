@@ -1,0 +1,26 @@
+<!-- article_card: used in listing pages to render a summary card for each article.
+     Iteration at the call site:
+
+  <template data-each="site:articles">
+    ... article_card content here ...
+  </template>
+
+     When template composition is implemented, the listing template will compose this
+     file as a sub-template. For now the vocabulary is documented below.
+
+  <article class="article-card">
+    <template data-slot="article:cover">
+      <div presemble:class="article:cover:orientation | match(landscape: cover--landscape, portrait: cover--portrait)">
+        <presemble:insert data="article:cover" />
+      </div>
+    </template>
+
+    <div class="article-card__content">
+      <h2 class="article-card__title">
+        <presemble:insert data="article:title" as="a" />
+      </h2>
+
+      <presemble:insert data="article:summary | first" as="p" />
+    </div>
+  </article>
+-->

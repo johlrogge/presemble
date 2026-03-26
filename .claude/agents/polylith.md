@@ -1,1 +1,1 @@
-/nix/store/8dsvv1mkz0zjqj91qllyz0cknkz1ppy3-claude-agents-polylith.md
+/nix/store/j67ff98a6zg23w3xkpzz98z0bngi2f74-claude-agents-polylith.md

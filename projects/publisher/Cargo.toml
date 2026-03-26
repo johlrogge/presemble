@@ -1,0 +1,11 @@
+[package]
+name = "publisher"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "presemble"
+path = "src/main.rs"
+
+[dependencies]
+publisher_cli = { workspace = true }

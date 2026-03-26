@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+  "bases/*",
+  "components/*",
+  "projects/publisher",
+  "projects/content_management",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+schema = { path = "components/schema" }
+content = { path = "components/content" }
+template = { path = "components/template" }
+dep_graph = { path = "components/dep_graph" }
+publisher_cli = { path = "bases/publisher_cli" }
+editor_server = { path = "bases/editor_server" }
+pulldown-cmark = "0.12"
+quick-xml = { version = "0.36", features = ["serialize"] }
+clap = { version = "4", features = ["derive"] }
+tiny_http = "0.12"
+notify = "7"

@@ -1,0 +1,8 @@
+/target
+/.devenv
+/.claude/memory
+/.claude/agents/devenv.md
+/.claude/agents/metadev.md
+/.mcp.json
+fixtures/*/output/
+site/output/

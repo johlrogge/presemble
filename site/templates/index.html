@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Presemble — Data Not Text</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<header class="site-header">
+  <a class="site-header__logo" href="/">Presemble</a>
+  <nav class="site-header__nav">
+    <a href="/">Home</a>
+  </nav>
+</header>
+
+<main class="home">
+  <section class="hero">
+    <h1>Data Not Text</h1>
+    <p class="hero__lead">Content is data. Templates are data. Schemas are the contracts between them.</p>
+  </section>
+
+  <section class="feature-grid">
+    <h2>Core Principles</h2>
+    <ul class="feature-grid__items">
+      <template data-each="site:features">
+        <li class="feature-card">
+          <presemble:insert data="title" as="h3" />
+          <presemble:insert data="tagline" />
+          <presemble:insert data="link" />
+        </li>
+      </template>
+    </ul>
+  </section>
+
+  <section class="latest-posts">
+    <h2>From the Blog</h2>
+    <ul class="latest-posts__items">
+      <template data-each="site:posts">
+        <li class="post-card">
+          <presemble:insert data="title" as="h3" />
+          <presemble:insert data="summary" />
+          <presemble:insert data="link" />
+        </li>
+      </template>
+    </ul>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <p class="site-footer__copy">&#169; Presemble</p>
+</footer>
+</body>
+</html>
