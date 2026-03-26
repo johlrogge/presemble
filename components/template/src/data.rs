@@ -80,6 +80,22 @@ impl DataGraph {
 // Constructor
 // ---------------------------------------------------------------------------
 
+/// Returns the maximum number of paragraphs to consume for this slot,
+/// based on its `occurs` constraint. Defaults to 1 if no constraint.
+fn max_paragraphs(slot: &schema::Slot) -> usize {
+    for constraint in &slot.constraints {
+        if let schema::Constraint::Occurs(count_range) = constraint {
+            return match count_range {
+                schema::CountRange::Exactly(n) => *n,
+                schema::CountRange::AtLeast(_) => usize::MAX,
+                schema::CountRange::AtMost(n) => *n,
+                schema::CountRange::Between { max, .. } => *max,
+            };
+        }
+    }
+    1 // default: consume exactly 1
+}
+
 /// Returns true if the paragraph text is a bare slot anchor annotation (e.g. `{#cover}`).
 fn is_annotation_paragraph(text: &str) -> bool {
     let t = text.trim();
@@ -127,8 +143,9 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             }
 
             Element::Paragraph => {
+                let max = max_paragraphs(slot);
                 let mut paragraphs: Vec<Value> = Vec::new();
-                while cursor < elements.len() {
+                while cursor < elements.len() && paragraphs.len() < max {
                     match &elements[cursor] {
                         ContentElement::Paragraph { text } => {
                             paragraphs.push(Value::Text(text.clone()));
@@ -138,7 +155,14 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
                         _ => break,
                     }
                 }
-                graph.insert(slot_key, Value::List(paragraphs));
+                // For single-value slots (exactly once), store as Text not List
+                // so templates don't need `as` to avoid span concatenation.
+                let value = if max == 1 {
+                    paragraphs.into_iter().next().unwrap_or(Value::Absent)
+                } else {
+                    Value::List(paragraphs)
+                };
+                graph.insert(slot_key, value);
             }
 
             Element::Link { .. } => {
@@ -471,5 +495,46 @@ mod tests {
         }
 
         assert!(matches!(graph.resolve(&["title"]), Some(Value::Text(v)) if v == "New Title"));
+    }
+
+    #[test]
+    fn build_graph_respects_exactly_once_for_tagline() {
+        // A schema with tagline (exactly once) then description (1..3)
+        // and a content file with 2 paragraphs should put only the first
+        // paragraph in tagline and the second in description.
+        let schema_src = "# Title {#title}\noccurs\n: exactly once\n\nTagline text. {#tagline}\noccurs\n: exactly once\n\nDescription. {#description}\noccurs\n: 1..3\n\n----\nheadings\n: h3..h6\n";
+        let content_src = "# My Title\n\nMy tagline.\n\nMy description paragraph.\n";
+
+        let grammar = parse_schema(schema_src).expect("schema parses");
+        let doc = parse_document(content_src).expect("content parses");
+        let graph = build_article_graph(&doc, &grammar);
+
+        // tagline should be exactly one text value
+        match graph.resolve(&["tagline"]) {
+            Some(Value::Text(t)) => assert_eq!(t, "My tagline."),
+            other => panic!("expected tagline as Text, got: {other:?}"),
+        }
+
+        // description should be a list with the second paragraph
+        match graph.resolve(&["description"]) {
+            Some(Value::List(items)) => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(&items[0], Value::Text(t) if t.contains("description")));
+            }
+            other => panic!("expected description as List, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_graph_tagline_absent_when_no_paragraphs() {
+        let schema_src = "# Title {#title}\noccurs\n: exactly once\n\nTagline. {#tagline}\noccurs\n: exactly once\n\n----\n";
+        let content_src = "# My Title\n\n----\n\n### Body\n";
+
+        let grammar = parse_schema(schema_src).expect("schema parses");
+        let doc = parse_document(content_src).expect("content parses");
+        let graph = build_article_graph(&doc, &grammar);
+
+        // tagline absent when no paragraph in content
+        assert!(matches!(graph.resolve(&["tagline"]), Some(Value::Absent) | None));
     }
 }
