@@ -16,6 +16,18 @@ struct PageAddress {
     output_path: std::path::PathBuf,
 }
 
+/// Find a template for the given schema stem, trying extensions in order.
+/// Tries .html first (XML), then .hiccup (Hiccup/EDN).
+fn find_template(templates_dir: &std::path::Path, schema_stem: &str) -> Option<std::path::PathBuf> {
+    for ext in &["html", "hiccup"] {
+        let path = templates_dir.join(format!("{schema_stem}.{ext}"));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn page_address(site_dir: &std::path::Path, schema_stem: &str, content_path: &std::path::Path) -> PageAddress {
     let slug = content_path
         .file_stem()
@@ -158,27 +170,28 @@ pub fn build_content_page(
 
     // Rendering phase — only for valid documents
     let templates_dir = site_dir.join("templates");
-    let template_path = templates_dir.join(format!("{schema_stem}.html"));
+    let template_path = match find_template(&templates_dir, schema_stem) {
+        Some(p) => p,
+        None => {
+            // No template — page validated but nothing rendered; treat as built with no output
+            let mut deps = std::collections::HashSet::new();
+            deps.insert(schema_path.to_path_buf());
+            deps.insert(content_path.to_path_buf());
 
-    if !template_path.exists() {
-        // No template — page validated but nothing rendered; treat as built with no output
-        let mut deps = std::collections::HashSet::new();
-        deps.insert(schema_path.to_path_buf());
-        deps.insert(content_path.to_path_buf());
+            let mut slot_graph = template::build_article_graph(&doc, grammar);
+            slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
 
-        let mut slot_graph = template::build_article_graph(&doc, grammar);
-        slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
-
-        return Ok(Some(PageBuildResult {
-            built: BuiltPage {
-                url_path: addr.url_path,
-                data: slot_graph,
-            },
-            output_path: addr.output_path,
-            schema_stem: schema_stem.to_string(),
-            deps,
-        }));
-    }
+            return Ok(Some(PageBuildResult {
+                built: BuiltPage {
+                    url_path: addr.url_path,
+                    data: slot_graph,
+                },
+                output_path: addr.output_path,
+                schema_stem: schema_stem.to_string(),
+                deps,
+            }));
+        }
+    };
 
     // Build data graph — wrap under schema_stem (e.g., "article")
     let mut slot_graph = template::build_article_graph(&doc, grammar);
@@ -199,9 +212,15 @@ pub fn build_content_page(
     let mut context = template::DataGraph::new();
     context.insert(schema_stem, template::Value::Record(slot_graph.clone()));
 
-    // Load and render the template
+    // Load and render the template — dispatch on file extension
     let tmpl_src = std::fs::read_to_string(&template_path)?;
-    let html = template::render_template(&tmpl_src, &context)
+    let nodes = match template_path.extension().and_then(|e| e.to_str()) {
+        Some("hiccup") => template::parse_template_hiccup(&tmpl_src)
+            .map_err(|e| CliError::Render(e.to_string()))?,
+        _ => template::parse_template_xml(&tmpl_src)
+            .map_err(|e| CliError::Render(e.to_string()))?,
+    };
+    let html = template::render_from_nodes(nodes, &context)
         .map_err(|e| CliError::Render(e.to_string()))?;
 
     // Write output — create the per-page directory first (clean URL convention)
@@ -262,21 +281,45 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     if templates_dir.exists() {
         let mut template_entries: Vec<_> = std::fs::read_dir(&templates_dir)?
             .flatten()
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("html"))
+            .filter(|e| {
+                matches!(
+                    e.path().extension().and_then(|x| x.to_str()),
+                    Some("html" | "hiccup")
+                )
+            })
             .collect();
         template_entries.sort_by_key(|e| e.file_name());
         for entry in template_entries {
-            let tmpl_src = std::fs::read_to_string(entry.path())?;
-            match template::parse_template_xml(&tmpl_src) {
-                Ok(nodes) => {
-                    let assets = template::extract_asset_paths(&nodes);
-                    all_asset_paths.extend(assets);
+            let template_path = entry.path();
+            let tmpl_src = std::fs::read_to_string(&template_path)?;
+            match template_path.extension().and_then(|e| e.to_str()) {
+                Some("hiccup") => {
+                    match template::parse_template_hiccup(&tmpl_src) {
+                        Ok(nodes) => {
+                            let assets = template::extract_asset_paths(&nodes);
+                            all_asset_paths.extend(assets);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: skipping asset scan for {} (parse error: {e})",
+                                template_path.display()
+                            );
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "warning: skipping asset scan for {} (parse error: {e})",
-                        entry.path().display()
-                    );
+                _ => {
+                    match template::parse_template_xml(&tmpl_src) {
+                        Ok(nodes) => {
+                            let assets = template::extract_asset_paths(&nodes);
+                            all_asset_paths.extend(assets);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "warning: skipping asset scan for {} (parse error: {e})",
+                                template_path.display()
+                            );
+                        }
+                    }
                 }
             }
         }

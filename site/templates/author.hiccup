@@ -1,0 +1,18 @@
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Presemble"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]]
+  [:body
+    [:header {:class "site-header"}
+      [:a {:class "site-header__logo" :href "/"} "Presemble"]
+      [:nav {:class "site-header__nav"}
+        [:a {:href "/"} "Home"]]]
+    [:main {:class "author"}
+      [:article {:class "author__profile"}
+        [:presemble/insert {:data "author:name" :as "h1"}]
+        [:div {:class "author__bio"}
+          [:presemble/insert {:data "author:bio" :as "p"}]]]]
+    [:footer {:class "site-footer"}
+      [:p {:class "site-footer__copy"} "© Presemble"]]]]
