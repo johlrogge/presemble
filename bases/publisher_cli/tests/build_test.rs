@@ -200,3 +200,33 @@ fn build_site_copies_assets_to_output() {
         "output/assets/style.css should be copied from assets/style.css"
     );
 }
+
+#[test]
+fn cross_content_reference_resolves_author_data() {
+    let (_tmp, site_dir) = copy_fixture_site();
+    let site_dir = std::fs::canonicalize(&site_dir).unwrap();
+
+    let outcome = publisher_cli::build_site(&site_dir).expect("build should succeed");
+
+    // The post should have its author resolved with data from the author page
+    let posts = outcome.built_pages.get("article").expect("article pages exist");
+    assert!(!posts.is_empty(), "at least one article should exist");
+
+    let post = &posts[0];
+
+    // author.href should still be the original link href
+    match post.data.resolve(&["author", "href"]) {
+        Some(template::Value::Text(href)) => {
+            assert!(href.starts_with("/author/"), "author href should be a path: {href}");
+        }
+        other => panic!("expected author.href Text, got: {other:?}"),
+    }
+
+    // author.name should be resolved from the author page
+    match post.data.resolve(&["author", "name"]) {
+        Some(template::Value::Text(name)) => {
+            assert!(!name.is_empty(), "author name should be non-empty after resolution");
+        }
+        other => panic!("expected author.name Text after resolution, got: {other:?}"),
+    }
+}

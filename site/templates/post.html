@@ -23,7 +23,12 @@
       <presemble:insert data="post.summary" as="p" />
     </div>
     <div class="post__author">
-      <presemble:insert data="post.author" />
+      <p class="post__byline">
+        By <presemble:insert data="post.author" as="a" />
+      </p>
+      <div class="post__author-bio">
+        <presemble:insert data="post.author.bio" as="p" />
+      </div>
     </div>
     <div class="post__body">
       <presemble:insert data="post.body" />
