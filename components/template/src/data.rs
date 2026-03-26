@@ -164,20 +164,35 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     graph
 }
 
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn render_body_html(elements: &[ContentElement]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for element in elements {
         let html = match element {
             ContentElement::Heading { level, text } => {
-                format!("<h{l}>{text}</h{l}>", l = level.value())
+                format!("<h{l}>{}</h{l}>", escape_html(text), l = level.value())
             }
-            ContentElement::Paragraph { text } => format!("<p>{text}</p>"),
+            ContentElement::Paragraph { text } => format!("<p>{}</p>", escape_html(text)),
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
-                format!("<img src=\"{path}\" alt=\"{alt_text}\">")
+                format!(
+                    "<img src=\"{}\" alt=\"{}\">",
+                    escape_html(path),
+                    escape_html(alt_text)
+                )
             }
             ContentElement::Link { text, href } => {
-                format!("<a href=\"{href}\">{text}</a>")
+                format!(
+                    "<a href=\"{}\">{}</a>",
+                    escape_html(href),
+                    escape_html(text)
+                )
             }
             ContentElement::Separator => continue,
         };
@@ -272,5 +287,68 @@ mod tests {
             Some(Value::Html(html)) => assert!(!html.is_empty(), "body HTML should not be empty"),
             other => panic!("expected Some(Html) for body, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn escape_html_replaces_special_characters() {
+        assert_eq!(escape_html("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+        assert_eq!(
+            escape_html("<presemble:insert>"),
+            "&lt;presemble:insert&gt;"
+        );
+        assert_eq!(escape_html("say \"hi\""), "say &quot;hi&quot;");
+        // & must be replaced first to avoid double-escaping
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+    }
+
+    #[test]
+    fn body_html_is_parseable_xml_when_content_has_angle_brackets() {
+        use crate::dom::parse_template_xml;
+        use content::parse_document;
+        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName};
+
+        // Build a minimal document whose body paragraph contains angle brackets.
+        // The separator (---) separates preamble from body.
+        let doc_input = "# My Title\n\n---\n\nUse `<presemble:insert>` to insert values.\n";
+        let doc = parse_document(doc_input).expect("document should parse");
+
+        // Construct a grammar directly with a single heading-1 slot called "title".
+        let grammar = Grammar {
+            preamble: vec![Slot {
+                name: SlotName::new("title"),
+                element: Element::Heading {
+                    level: HeadingLevelRange {
+                        min: HeadingLevel::new(1).unwrap(),
+                        max: HeadingLevel::new(1).unwrap(),
+                    },
+                },
+                constraints: vec![],
+                hint_text: None,
+            }],
+            body: Some(BodyRules {
+                heading_range: None,
+            }),
+        };
+
+        let graph = build_article_graph(&doc, &grammar);
+        let body_html = match graph.resolve(&["body"]) {
+            Some(Value::Html(html)) => html.clone(),
+            other => panic!("expected Some(Html) for body, got {other:?}"),
+        };
+
+        // The body HTML must not contain literal unescaped angle brackets.
+        assert!(
+            !body_html.contains("<presemble:insert>"),
+            "body HTML must not contain unescaped angle brackets; got: {body_html}"
+        );
+        assert!(
+            body_html.contains("&lt;presemble:insert&gt;"),
+            "body HTML must contain escaped angle brackets; got: {body_html}"
+        );
+
+        // Wrap in a root element so parse_template_xml can handle it as XML.
+        let wrapped = format!("<body>{body_html}</body>");
+        parse_template_xml(&wrapped)
+            .expect("body HTML with escaped angle brackets should be valid XML");
     }
 }
