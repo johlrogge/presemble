@@ -165,7 +165,7 @@ annotations are declarative structural descriptions, not imperative code express
   for extensibility
 - Semantic class generation from slot names needs a naming convention (e.g.
   `{content-type}-{slot-name}`)
-- HTML5 does not honour self-closing syntax (`<presemble:insert />`) for non-void custom elements — explicit close tags (`<presemble:insert></presemble:insert>`) are required when using the HTML surface syntax. XML surface syntax (EDN, YAML) does not have this limitation.
+- Templates are parsed as XML (via quick-xml), not as HTML5. Self-closing syntax (`<presemble:insert />`) works correctly. The HTML5 self-closing limitation does not apply — templates are XHTML-compatible, not HTML5.
 
 ## Experiment scope
 
