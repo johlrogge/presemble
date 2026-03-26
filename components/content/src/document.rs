@@ -14,4 +14,5 @@ pub enum ContentElement {
     Image { alt: Option<String>, path: String },
     Link { text: String, href: String },
     Separator,
+    CodeBlock { language: Option<String>, code: String },
 }

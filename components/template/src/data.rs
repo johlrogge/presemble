@@ -171,7 +171,7 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn render_body_html(elements: &[ContentElement]) -> String {
+pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for element in elements {
         let html = match element {
@@ -193,6 +193,17 @@ fn render_body_html(elements: &[ContentElement]) -> String {
                     escape_html(href),
                     escape_html(text)
                 )
+            }
+            ContentElement::CodeBlock { language, code } => {
+                let escaped = escape_html(code);
+                match language {
+                    Some(lang) => format!(
+                        "<pre><code class=\"language-{}\">{}</code></pre>",
+                        escape_html(lang),
+                        escaped
+                    ),
+                    None => format!("<pre><code>{}</code></pre>", escaped),
+                }
             }
             ContentElement::Separator => continue,
         };
@@ -287,6 +298,40 @@ mod tests {
             Some(Value::Html(html)) => assert!(!html.is_empty(), "body HTML should not be empty"),
             other => panic!("expected Some(Html) for body, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn body_code_block_renders_as_pre_code() {
+        let code_block = ContentElement::CodeBlock {
+            language: Some("rust".to_string()),
+            code: "fn main() {}\n".to_string(),
+        };
+        let html = super::render_body_html(&[code_block]);
+        assert!(
+            html.contains("<pre><code class=\"language-rust\">"),
+            "expected language class in output; got: {html}"
+        );
+        assert!(
+            html.contains("fn main()"),
+            "expected code content in output; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_code_block_without_language_renders_plain_pre_code() {
+        let code_block = ContentElement::CodeBlock {
+            language: None,
+            code: "some code\n".to_string(),
+        };
+        let html = super::render_body_html(&[code_block]);
+        assert!(
+            html.contains("<pre><code>"),
+            "expected plain pre/code in output; got: {html}"
+        );
+        assert!(
+            html.contains("some code"),
+            "expected code content in output; got: {html}"
+        );
     }
 
     #[test]
