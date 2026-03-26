@@ -1,38 +1,37 @@
 # Validated at Every Level
 
-A broken link fails the build — in content, in templates, and in output.
+You cannot publish a broken site.
 
-Because templates are structured data, the publisher can extract every asset reference
-and internal link by walking the tree — no string scanning, no guessing, regardless of
-surface syntax. If a `<link href="/assets/style.css">` references a file that does not
-exist, the build fails before any output is written.
-
-The same applies to content: if an article links to an author page that has not been
-built, the link validator catches it. Every internal reference is verified against the
-set of built pages.
+The build fails if any content violates its schema, any internal link points to a page that does not exist, or any template references an asset file that is missing. Every constraint is checked before a single output file is written. There is no partial publish, no silent degradation, no 404 waiting in production.
 
 ----
 
-### What string templates cannot do
+### Asset discovery from the DOM
 
-A Jinja or Handlebars template is a text file. To find links, you scan strings — fragile
-and easy to miss. With structured templates, link discovery is a tree walk:
+Because templates are structured trees, the publisher discovers every asset reference by walking the DOM — no string scanning, no fragile regex. Referenced files are verified to exist and copied to output; unreferenced files are not.
 
 ```xml
 <link rel="stylesheet" href="/assets/style.css" />
 <img src="/images/hero.jpg" alt="Hero" />
 ```
 
-The publisher extracts `/assets/style.css` and `/images/hero.jpg` from the DOM, verifies
-each file exists, and copies only referenced assets to output.
+The publisher extracts `/assets/style.css` and `/images/hero.jpg`, verifies each file exists, and fails the build if either is missing.
 
-### Content links are validated too
+### Broken links are build errors
 
-An article can link to an author:
-
-```markdown
-[Joakim Ohlrogge](/author/johlrogge)
+```
+building-presemble.md: FAIL
+  [BROKEN LINK] post/building-presemble/index.html: broken link → /author/unknown
 ```
 
-If the author page does not exist, the build reports a broken link — not a 404 at runtime.
-The data graph knows which pages were built.
+The author page `/author/unknown` was not built. The build stops here. Fix the link or add the author document — then try again.
+
+### Schema violations are build errors
+
+```
+building-presemble.md: FAIL
+  [SCHEMA] post/title: expected capitalized, got lowercase
+  [SCHEMA] post/author: expected exactly once, found 0
+```
+
+The content file does not satisfy its schema. Each violation is reported with the slot path and the constraint that failed. No guessing, no reading between the lines.
