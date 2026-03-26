@@ -2,11 +2,7 @@
 
 Your content is data, not text.
 
-Schemas define document grammars in plain markdown. Each heading, paragraph, and list item has a named slot, and the schema declares exactly which slots exist, how many times they may appear, and what constraints they carry.
-
-The publisher enforces schemas at build time. If a content file is missing a required slot or contains disallowed content, the build fails before any output is written. This is a compile-time guarantee, not a runtime surprise.
-
-The schema is a contract between authors and templates. Authors know precisely what to write because the schema names every slot. Templates know precisely what they will receive because the schema guarantees completeness. Neither side can surprise the other.
+A Presemble schema is a document grammar in plain markdown — it defines the exact sequence of elements a document must contain, with each position named, typed, and constrained. The publisher enforces it at build time. No runtime surprises.
 
 ----
 

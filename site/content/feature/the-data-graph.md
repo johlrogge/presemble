@@ -2,11 +2,7 @@
 
 Schemas, content, and templates meet in a single data graph.
 
-Everything in a Presemble site is structured data. Schemas define the shapes. Content files fill those shapes with values. Templates describe how to traverse the shapes and emit output. All three are nodes in a single graph connected by named paths.
-
-Templates traverse the graph rather than interpolate strings. A `presemble:insert data="feature:title"` directive is a graph traversal: follow the edge labelled `feature`, then follow the edge labelled `title`, and insert whatever node you find. There is no string manipulation; the path is resolved against a typed data structure.
-
-The path from schema to content to template is traceable and type-safe. The schema declares that `feature:title` is a capitalized heading occurring exactly once. The content file is validated to carry exactly that. The template is checked to reference only paths the schema declares. Every connection is verified before a single byte of output is written.
+Every named slot, every content value, and every cross-content reference is a node in the data graph. Templates traverse it by path — `post:title`, `author:name`, `site:posts`. Every connection is verified before any output is written.
 
 ----
 
