@@ -55,7 +55,7 @@ Introduce proper template composition and collection query support.
 article to its author page automatically, without any workarounds in the content files.
 
 **Deliverables:**
-- [ ] Cross-content reference resolution — templates can pull data from linked content items (e.g. render author name from author page, not hardcoded in article)
+- [x] Cross-content reference resolution — templates can pull data from linked content items (e.g. render author name from author page, not hardcoded in article) (ADR-012, shipped v0.2.0)
 - [ ] `site.*` as ordinary content — `site.md` is a normal content file with a schema, not a special-cased config mechanism. No separate `site.yaml`. Site metadata is just another content item in the data graph.
 - [x] Collection queries — filter/sort collections. Collections live at the **root level** of the data graph: `data-each="features"` not `data-each="site.features"`.
 - [ ] Template composition — callable templates defined with `presemble:define`, invoked with `presemble:apply`. File-qualified references use `::` separator (e.g. `templates/common::header`). `presemble.self` carries the passed context; `presemble.item` carries the current iteration item. The publisher infers the callable contract from field references (duck-typing by use) — no explicit signature declaration needed.
