@@ -45,20 +45,21 @@ Deliverables shipped:
 
 ---
 
-## Current milestone — M2: "Cross-content references and site configuration"
+## Current milestone — M2: "Cross-content references and template composition"
 
 **Goal:** make content items aware of each other at render time, so templates can pull data from
 linked content (e.g. show an author's name from the author page, not hardcoded in the article).
-Introduce a site configuration file and basic collection query support.
+Introduce proper template composition and collection query support.
 
 **Success gate:** a template can render `author.name` by following a content reference from an
 article to its author page automatically, without any workarounds in the content files.
 
 **Deliverables:**
 - [ ] Cross-content reference resolution — templates can pull data from linked content items (e.g. render author name from author page, not hardcoded in article)
-- [ ] Site configuration file (`site.yaml` or similar) — declare entry points, site metadata available as `site.name`, `site.url` etc.
-- [ ] Collection queries — filter/sort collections (currently `site.posts` returns all posts unsorted)
-- [ ] Improve template composition — calling one template from another cleanly (currently done via index page's `data-each`, but no explicit template include mechanism)
+- [ ] `site.*` as ordinary content — `site.md` is a normal content file with a schema, not a special-cased config mechanism. No separate `site.yaml`. Site metadata is just another content item in the data graph.
+- [ ] Collection queries — filter/sort collections. Collections live at the **root level** of the data graph: `data-each="features"` not `data-each="site.features"`. The current `site.*` namespace for collections is a bug to be fixed.
+- [ ] Template composition — callable templates defined with `presemble:define`, invoked with `presemble:apply`. File-qualified references use `::` separator (e.g. `templates/common::header`). `presemble.self` carries the passed context; `presemble.item` carries the current iteration item. The publisher infers the callable contract from field references (duck-typing by use) — no explicit signature declaration needed.
+- [ ] Semantic types with display defaults — e.g. `iso-date` renders as a human-readable date by default, overridable with `| format(...)`. Localization strategy is an open question deferred to a later milestone.
 
 ---
 
