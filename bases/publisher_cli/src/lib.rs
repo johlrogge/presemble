@@ -254,12 +254,11 @@ fn resolve_graph(
     let to_resolve: Vec<(String, String)> = graph
         .iter()
         .filter_map(|(key, value)| {
-            if let template::Value::Record(sub) = value {
-                if let Some(template::Value::Text(href)) = sub.resolve(&["href"]) {
-                    if url_index.contains_key(href) {
-                        return Some((key.clone(), href.clone()));
-                    }
-                }
+            if let template::Value::Record(sub) = value
+                && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                && url_index.contains_key(href)
+            {
+                return Some((key.clone(), href.clone()));
             }
             None
         })
@@ -267,11 +266,11 @@ fn resolve_graph(
 
     // Merge referenced page data into each identified record
     for (key, href) in to_resolve {
-        if let Some(referenced) = url_index.get(&href) {
-            if let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key]) {
-                // Preserve href and text (they belong to the link, not the reference)
-                sub.merge_from(referenced, &["href", "text"]);
-            }
+        if let Some(referenced) = url_index.get(&href)
+            && let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key])
+        {
+            // Preserve href and text (they belong to the link, not the reference)
+            sub.merge_from(referenced, &["href", "text"]);
         }
     }
 }

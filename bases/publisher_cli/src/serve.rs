@@ -77,10 +77,10 @@ fn collect_html_files(root: &Path, dir: &Path, pages: &mut Vec<String>) {
         let path = entry.path();
         if path.is_dir() {
             collect_html_files(root, &path, pages);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("html") {
-            if let Ok(rel) = path.strip_prefix(root) {
-                pages.push(rel.to_string_lossy().into_owned());
-            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("html")
+            && let Ok(rel) = path.strip_prefix(root)
+        {
+            pages.push(rel.to_string_lossy().into_owned());
         }
     }
 }
@@ -132,10 +132,10 @@ fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
     // Watch schemas, content, and templates directories
     for subdir in &["schemas", "content", "templates"] {
         let path = site_dir.join(subdir);
-        if path.exists() {
-            if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
-                eprintln!("Warning: could not watch {}: {e}", path.display());
-            }
+        if path.exists()
+            && let Err(e) = watcher.watch(&path, RecursiveMode::Recursive)
+        {
+            eprintln!("Warning: could not watch {}: {e}", path.display());
         }
     }
 
@@ -237,21 +237,18 @@ fn serve_file(output_dir: &Path, url_path: &str) -> Response<std::io::Cursor<Vec
     ];
 
     for path in &candidates {
-        if path.is_file() {
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    let content_type = guess_content_type(path);
-                    return Response::from_data(bytes)
-                        .with_header(
-                            tiny_http::Header::from_bytes(
-                                &b"Content-Type"[..],
-                                content_type.as_bytes(),
-                            )
-                            .unwrap(),
-                        );
-                }
-                Err(_) => {}
-            }
+        if path.is_file()
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            let content_type = guess_content_type(path);
+            return Response::from_data(bytes)
+                .with_header(
+                    tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        content_type.as_bytes(),
+                    )
+                    .unwrap(),
+                );
         }
     }
 

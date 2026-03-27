@@ -2,10 +2,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use template::{
-    dom::{parse_template_xml, Node},
+    dom::{Node, parse_template_xml},
     hiccup::parse_template_hiccup,
     registry::extract_definitions,
 };
+
+/// The parsed result of loading a template file.
+/// Contains the main node tree and any named callable definitions found within it.
+type ParsedTemplate = (Vec<Node>, HashMap<String, Vec<Node>>);
 
 /// A TemplateRegistry backed by the filesystem.
 ///
@@ -17,8 +21,8 @@ use template::{
 /// Note: file-qualified paths are relative to the templates_dir's parent (site root).
 pub struct FileTemplateRegistry {
     templates_dir: PathBuf,
-    /// Cache: file_stem -> (main_nodes, definitions_map)
-    cache: RefCell<HashMap<String, (Vec<Node>, HashMap<String, Vec<Node>>)>>,
+    /// Cache: file_stem -> parsed template (main nodes + named definitions)
+    cache: RefCell<HashMap<String, ParsedTemplate>>,
 }
 
 impl FileTemplateRegistry {
@@ -31,7 +35,7 @@ impl FileTemplateRegistry {
 
     /// Load, parse, and cache a template file by stem.
     /// Returns (main_nodes, definitions).
-    fn load_file(&self, file_stem: &str) -> Option<(Vec<Node>, HashMap<String, Vec<Node>>)> {
+    fn load_file(&self, file_stem: &str) -> Option<ParsedTemplate> {
         {
             let cache = self.cache.borrow();
             if let Some(cached) = cache.get(file_stem) {
@@ -77,11 +81,7 @@ impl template::TemplateRegistry for FileTemplateRegistry {
         } else {
             // Bare name: try as standalone file
             let (main, _) = self.load_file(name)?;
-            if main.is_empty() {
-                None
-            } else {
-                Some(main)
-            }
+            if main.is_empty() { None } else { Some(main) }
         }
     }
 }
@@ -89,8 +89,8 @@ impl template::TemplateRegistry for FileTemplateRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use template::TemplateRegistry;
     use tempfile::TempDir;
+    use template::TemplateRegistry;
 
     fn write_file(dir: &TempDir, name: &str, content: &str) {
         let path = dir.path().join(name);
