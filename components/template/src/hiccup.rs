@@ -215,18 +215,6 @@ impl Parser {
         }
     }
 
-    fn expect(&mut self, expected: &Token) -> Result<(), TemplateError> {
-        match self.next() {
-            Some(ref tok) if tok == expected => Ok(()),
-            Some(other) => Err(TemplateError::ParseError(format!(
-                "expected {expected:?}, got {other:?}"
-            ))),
-            None => Err(TemplateError::ParseError(format!(
-                "expected {expected:?}, got end of input"
-            ))),
-        }
-    }
-
     /// Parse a single node from the current position. Returns `None` if the
     /// next token closes a parent context (RBracket / RBrace) or there is no
     /// more input.

@@ -113,11 +113,11 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     for slot in &grammar.preamble {
         // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
         while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor] {
-                if is_annotation_paragraph(text) {
-                    cursor += 1;
-                    continue;
-                }
+            if let ContentElement::Paragraph { text } = &elements[cursor]
+                && is_annotation_paragraph(text)
+            {
+                cursor += 1;
+                continue;
             }
             break;
         }

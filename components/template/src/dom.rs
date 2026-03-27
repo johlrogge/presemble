@@ -38,6 +38,7 @@ impl Element {
 
 /// Parse XML/XHTML template source into a list of top-level nodes.
 /// Templates are well-formed XML fragments (may have multiple root elements).
+#[allow(clippy::type_complexity)]
 pub fn parse_template_xml(src: &str) -> Result<Vec<Node>, crate::error::TemplateError> {
     // Wrap in a synthetic root so multi-root fragments parse cleanly.
     let wrapped = format!("<_presemble_root>{src}</_presemble_root>");
@@ -253,12 +254,11 @@ fn extract_asset_paths_recursive(nodes: &[Node], found: &mut std::collections::H
             }
             // Check if this element/attribute combination is an asset reference
             for (elem_name, attr_name) in ASSET_ATTRS {
-                if el.name == *elem_name {
-                    if let Some(value) = el.attr(attr_name) {
-                        if value.starts_with('/') && !value.contains("://") {
-                            found.insert(value.to_string());
-                        }
-                    }
+                if el.name == *elem_name
+                    && let Some(value) = el.attr(attr_name)
+                    && value.starts_with('/') && !value.contains("://")
+                {
+                    found.insert(value.to_string());
                 }
             }
             // Recurse into children
