@@ -145,3 +145,12 @@ Before full implementation:
 2. Expose `site.articles` as a collection in the data graph (gathered by schema name convention)
 3. Validate that internal links in rendered output resolve to built pages
 4. Defer: cycle detection, external link checking, `--check-links` flag
+
+---
+
+## Addendum — 2026-03-27
+
+Collections moved to the root-level namespace. All references to `site.articles`, `site.authors`,
+and similar `site.*` collection names throughout this ADR are superseded. The correct form is
+bare collection names (`articles`, `authors`) looked up directly from the data graph root. The
+`site.*` prefix was a transitional design that has been removed.

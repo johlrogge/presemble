@@ -109,3 +109,12 @@ is always available as a fallback.
   restart
 - Granularity is file-level, not block-level; a change anywhere in a large content file triggers
   rebuild of all outputs that depend on it
+
+---
+
+## Addendum — 2026-03-27
+
+Collections moved to the root-level namespace. The reference to `site.articles` in the
+"Collection pages" section of this ADR is superseded. Collection names are now bare (e.g.
+`articles`), looked up directly from the data graph root rather than under a `site` prefix.
+The dependency tracking behaviour described is unchanged.

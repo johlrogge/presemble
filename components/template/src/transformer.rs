@@ -2,6 +2,7 @@ use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, Value};
 use crate::dom::{Element, Node};
 use crate::expr::parse_expr;
+use crate::registry::RenderContext;
 
 // ---------------------------------------------------------------------------
 // RenderError
@@ -32,7 +33,7 @@ impl std::error::Error for RenderError {}
 
 /// Transform a list of template nodes using the data graph.
 /// Replaces presemble annotation nodes with generated content.
-pub fn transform(nodes: Vec<Node>, graph: &DataGraph) -> Result<Vec<Node>, RenderError> {
+pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
     let mut output = Vec::new();
     for node in nodes {
         match node {
@@ -41,6 +42,27 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph) -> Result<Vec<Node>, Rende
                 if el.is_presemble() && el.name == "presemble:insert" {
                     let mut rendered = render_insert(&el, graph)?;
                     output.append(&mut rendered);
+                } else if el.is_presemble() && el.name == "presemble:include" {
+                    if ctx.is_too_deep() {
+                        return Err(RenderError::Render(
+                            format!("template include depth limit ({}) exceeded", ctx.max_depth)
+                        ));
+                    }
+                    let src = el.attr("src").ok_or_else(|| RenderError::Render(
+                        "presemble:include requires a 'src' attribute".into()
+                    ))?;
+                    match ctx.registry.resolve(src) {
+                        Some(included_nodes) => {
+                            let child_ctx = ctx.descend();
+                            let rendered = transform(included_nodes, graph, &child_ctx)?;
+                            output.extend(rendered);
+                        }
+                        None => {
+                            return Err(RenderError::Render(
+                                format!("presemble:include: template not found: '{src}'")
+                            ));
+                        }
+                    }
                 } else if el.name == "template" && el.attr("data-slot").is_some() {
                     // Conditional block: render children only if the slot is present.
                     let slot_path = el.attr("data-slot").unwrap().to_string();
@@ -52,7 +74,7 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph) -> Result<Vec<Node>, Rende
                         }
                         Some(_) => {
                             // Slot present — unwrap template wrapper, recursively transform children.
-                            let mut rendered = transform(el.children, graph)?;
+                            let mut rendered = transform(el.children, graph, ctx)?;
                             output.append(&mut rendered);
                         }
                     }
@@ -64,7 +86,7 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph) -> Result<Vec<Node>, Rende
                     if let Some(Value::List(items)) = value {
                         for item in items {
                             if let Value::Record(item_graph) = item {
-                                let mut rendered = transform(el.children.clone(), item_graph)?;
+                                let mut rendered = transform(el.children.clone(), item_graph, ctx)?;
                                 output.append(&mut rendered);
                             }
                         }
@@ -72,7 +94,7 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph) -> Result<Vec<Node>, Rende
                     // Absent, non-list, or empty list — produce nothing.
                 } else {
                     // Recursively transform children of regular elements.
-                    let transformed_children = transform(el.children, graph)?;
+                    let transformed_children = transform(el.children, graph, ctx)?;
                     let attrs = apply_presemble_class(el.attrs, graph);
                     output.push(Node::Element(Element {
                         name: el.name,
@@ -407,6 +429,7 @@ mod tests {
     use super::*;
     use crate::data::{DataGraph, Value};
     use crate::dom::{parse_template_xml, serialize_nodes, Element, Node};
+    use crate::registry::{NullRegistry, RenderContext};
 
     fn make_graph_with_title(title: &str) -> DataGraph {
         let mut graph = DataGraph::new();
@@ -421,7 +444,9 @@ mod tests {
         let graph = make_graph_with_title("Hello World");
         let src = r#"<presemble:insert data="article.title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<h1 class="article-title">Hello World</h1>"#);
     }
@@ -435,7 +460,9 @@ mod tests {
 
         let src = r#"<presemble:insert data="article.body" />"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, "<p>Body text</p>");
     }
@@ -452,7 +479,9 @@ mod tests {
 
         let src = r#"<presemble:insert data="article.author" />"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
@@ -472,7 +501,9 @@ mod tests {
 
         let src = r#"<presemble:insert data="article.cover" />"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
@@ -485,7 +516,9 @@ mod tests {
         let graph = DataGraph::new();
         let src = r#"<presemble:insert data="article.missing" />"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty());
     }
 
@@ -494,7 +527,9 @@ mod tests {
         let graph = make_graph_with_title("Hello World");
         let src = r#"<div><presemble:insert data="article.title" as="h1" /></div>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
@@ -522,7 +557,9 @@ mod tests {
             )],
             children: vec![],
         })];
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<div class="wide"></div>"#);
     }
@@ -548,7 +585,9 @@ mod tests {
             ],
             children: vec![],
         })];
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<div class="base tall"></div>"#);
     }
@@ -562,7 +601,9 @@ mod tests {
             attrs: vec![("presemble:class".to_string(), "article.missing".to_string())],
             children: vec![],
         })];
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         // No class attribute when value is absent; presemble:class is removed
         assert_eq!(html, r#"<div></div>"#);
@@ -578,7 +619,9 @@ mod tests {
             attrs: vec![("presemble:class".to_string(), "article.title".to_string())],
             children: vec![],
         })];
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(!html.contains("presemble:class"), "presemble:class should not appear in output");
     }
@@ -598,7 +641,9 @@ mod tests {
 
         let src = r#"<presemble:insert data="article.summary" as="p" />"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
@@ -626,7 +671,9 @@ mod tests {
         let graph = make_cover_graph();
         let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, "<p>Has cover</p>");
     }
@@ -636,7 +683,9 @@ mod tests {
         let graph = DataGraph::new();
         let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty());
     }
 
@@ -645,7 +694,9 @@ mod tests {
         let graph = make_cover_graph();
         let src = r#"<template data-slot="article.cover"><presemble:insert data="article.cover" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<img src="img.jpg" alt="Photo" class="article-cover" />"#);
     }
@@ -657,20 +708,20 @@ mod tests {
     #[test]
     fn data_each_renders_each_item() {
         let mut graph = DataGraph::new();
-        let mut site = DataGraph::new();
         let mut a1 = DataGraph::new();
         a1.insert("title", Value::Text("Article 1".to_string()));
         let mut a2 = DataGraph::new();
         a2.insert("title", Value::Text("Article 2".to_string()));
-        site.insert(
+        graph.insert(
             "articles",
             Value::List(vec![Value::Record(a1), Value::Record(a2)]),
         );
-        graph.insert("site", Value::Record(site));
 
-        let src = r#"<template data-each="site.articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="articles"><presemble:insert data="title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
@@ -681,13 +732,13 @@ mod tests {
     #[test]
     fn data_each_empty_list_produces_nothing() {
         let mut graph = DataGraph::new();
-        let mut site = DataGraph::new();
-        site.insert("articles", Value::List(vec![]));
-        graph.insert("site", Value::Record(site));
+        graph.insert("articles", Value::List(vec![]));
 
-        let src = r#"<template data-each="site.articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
     }
 
@@ -695,26 +746,66 @@ mod tests {
     fn data_each_absent_produces_nothing() {
         let graph = DataGraph::new();
 
-        let src = r#"<template data-each="site.articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
     }
 
     #[test]
     fn data_each_template_wrapper_not_in_output() {
         let mut graph = DataGraph::new();
-        let mut site = DataGraph::new();
         let mut a1 = DataGraph::new();
         a1.insert("title", Value::Text("Only Article".to_string()));
-        site.insert("articles", Value::List(vec![Value::Record(a1)]));
-        graph.insert("site", Value::Record(site));
+        graph.insert("articles", Value::List(vec![Value::Record(a1)]));
 
-        let src = r#"<template data-each="site.articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="articles"><presemble:insert data="title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(!html.contains("<template"), "output should not contain <template>: {html}");
         assert_eq!(html, r#"<h3 class="title">Only Article</h3>"#);
+    }
+
+    // ---------------------------------------------------------------------------
+    // presemble:include tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn include_missing_template_returns_error() {
+        let src = r#"<presemble:include src="missing" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let graph = DataGraph::new();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn include_with_mock_registry_renders_fragment() {
+        struct MockReg;
+        impl crate::registry::TemplateRegistry for MockReg {
+            fn resolve(&self, name: &str) -> Option<Vec<Node>> {
+                if name == "greeting" {
+                    Some(parse_template_xml("<p>Hello</p>").unwrap())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let src = r#"<div><presemble:include src="greeting" /></div>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let graph = DataGraph::new();
+        let reg = MockReg;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("<p>Hello</p>"), "included fragment should appear: {html}");
     }
 }

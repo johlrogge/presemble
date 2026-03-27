@@ -1,5 +1,8 @@
 mod error;
 mod serve;
+pub mod template_registry;
+
+pub use template_registry::FileTemplateRegistry;
 
 pub use dep_graph::DependencyGraph;
 pub use error::CliError;
@@ -251,12 +254,11 @@ fn resolve_graph(
     let to_resolve: Vec<(String, String)> = graph
         .iter()
         .filter_map(|(key, value)| {
-            if let template::Value::Record(sub) = value {
-                if let Some(template::Value::Text(href)) = sub.resolve(&["href"]) {
-                    if url_index.contains_key(href) {
-                        return Some((key.clone(), href.clone()));
-                    }
-                }
+            if let template::Value::Record(sub) = value
+                && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                && url_index.contains_key(href)
+            {
+                return Some((key.clone(), href.clone()));
             }
             None
         })
@@ -264,11 +266,11 @@ fn resolve_graph(
 
     // Merge referenced page data into each identified record
     for (key, href) in to_resolve {
-        if let Some(referenced) = url_index.get(&href) {
-            if let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key]) {
-                // Preserve href and text (they belong to the link, not the reference)
-                sub.merge_from(referenced, &["href", "text"]);
-            }
+        if let Some(referenced) = url_index.get(&href)
+            && let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key])
+        {
+            // Preserve href and text (they belong to the link, not the reference)
+            sub.merge_from(referenced, &["href", "text"]);
         }
     }
 }
@@ -278,6 +280,7 @@ fn render_page(
     schema_stem: &str,
     template_path: &std::path::Path,
     output_path: &std::path::Path,
+    registry: &dyn template::TemplateRegistry,
 ) -> Result<(), CliError> {
     let mut context = template::DataGraph::new();
     context.insert(schema_stem, template::Value::Record(data.clone()));
@@ -289,7 +292,7 @@ fn render_page(
         _ => template::parse_template_xml(&tmpl_src)
             .map_err(|e| CliError::Render(e.to_string()))?,
     };
-    let html = template::render_from_nodes(nodes, &context)
+    let html = template::render_from_nodes_with_registry(nodes, &context, registry)
         .map_err(|e| CliError::Render(e.to_string()))?;
 
     std::fs::create_dir_all(output_path.parent().unwrap())?;
@@ -332,6 +335,7 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
 
     // Discover and copy referenced assets from templates
     let templates_dir = site_dir.join("templates");
+    let registry = FileTemplateRegistry::new(&templates_dir);
     let mut all_asset_paths = std::collections::BTreeSet::new();
     if templates_dir.exists() {
         let mut template_entries: Vec<_> = std::fs::read_dir(&templates_dir)?
@@ -477,23 +481,19 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     for collected in &collected_pages {
         if let Some(tmpl_path) = &collected.template_path {
             let page_data = &built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path)?;
+            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path, &registry)?;
         }
     }
 
-    // Assemble site:* collections from built pages
-    let mut site_graph = template::DataGraph::new();
+    // Assemble collections from built pages at the root level
+    let mut site_context = template::DataGraph::new();
     for (schema_stem, pages) in &built_pages {
         let collection: Vec<template::Value> = pages.iter()
             .map(|p| template::Value::Record(p.data.clone()))
             .collect();
-        // Naive pluralisation: "article" -> "articles"
         let collection_key = format!("{schema_stem}s");
-        site_graph.insert(collection_key, template::Value::List(collection));
+        site_context.insert(collection_key, template::Value::List(collection));
     }
-
-    let mut site_context = template::DataGraph::new();
-    site_context.insert("site", template::Value::Record(site_graph));
 
     // Render templates/index.html if it exists
     let index_template_path = site_dir.join("templates").join("index.html");
@@ -501,7 +501,12 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     if index_template_path.exists() {
         match std::fs::read_to_string(&index_template_path) {
             Ok(tmpl_src) => {
-                match template::render_template(&tmpl_src, &site_context) {
+                match template::parse_template_xml(&tmpl_src)
+                    .map_err(|e| CliError::Render(format!("index template parse error: {e}")))
+                    .and_then(|nodes| {
+                        template::render_from_nodes_with_registry(nodes, &site_context, &registry)
+                            .map_err(|e| CliError::Render(e.to_string()))
+                    }) {
                     Ok(html) => {
                         let output_dir = site_dir.join("output");
                         std::fs::create_dir_all(&output_dir)?;
@@ -617,6 +622,8 @@ pub fn rebuild_affected(
     // For each affected content output, recover the schema and content paths from the
     // dependency graph rather than parsing the output path string.
     let schemas_dir = site_dir.join("schemas");
+    let templates_dir = site_dir.join("templates");
+    let registry = FileTemplateRegistry::new(&templates_dir);
     let content_base = site_dir.join("content");
     for output_path in &content_outputs {
         // Look up which source files this output was built from
@@ -707,7 +714,7 @@ pub fn rebuild_affected(
     for collected in &rebuild_collected {
         if let Some(tmpl_path) = &collected.template_path {
             let page_data = &outcome.built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path)?;
+            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path, &registry)?;
         }
     }
 

@@ -215,18 +215,6 @@ impl Parser {
         }
     }
 
-    fn expect(&mut self, expected: &Token) -> Result<(), TemplateError> {
-        match self.next() {
-            Some(ref tok) if tok == expected => Ok(()),
-            Some(other) => Err(TemplateError::ParseError(format!(
-                "expected {expected:?}, got {other:?}"
-            ))),
-            None => Err(TemplateError::ParseError(format!(
-                "expected {expected:?}, got end of input"
-            ))),
-        }
-    }
-
     /// Parse a single node from the current position. Returns `None` if the
     /// next token closes a parent context (RBracket / RBrace) or there is no
     /// more input.
@@ -440,10 +428,10 @@ mod tests {
 
     #[test]
     fn data_each_attr() {
-        let nodes = parse("[:template {:data-each \"site.features\"} [:li \"item\"]]");
+        let nodes = parse("[:template {:data-each \"features\"} [:li \"item\"]]");
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "template");
-            assert_eq!(el.attr("data-each"), Some("site.features"));
+            assert_eq!(el.attr("data-each"), Some("features"));
             assert_eq!(el.children.len(), 1);
         }
     }

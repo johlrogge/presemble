@@ -239,3 +239,12 @@ The pipe model is validated. The four gaps are resolved by specification additio
 transforms — no block-level syntax or second mechanism is required. Proceed to implementation
 of a minimal expression interpreter covering: graph lookups, pipes, `each`, `maybe`, `match`,
 `default`, `first`, `rest`, and `template:` composition.
+
+---
+
+## Addendum — 2026-03-27
+
+Collections moved to the root-level namespace. References of the form `site.articles` in this
+ADR (e.g. `{{ site.articles | each(template:article_card) }}`) are superseded. The correct form
+is `{{ articles | each(template:article_card) }}` — collection names are looked up directly from
+the data graph root, not under a `site` prefix.

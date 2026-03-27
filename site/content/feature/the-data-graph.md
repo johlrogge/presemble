@@ -2,7 +2,7 @@
 
 Schemas, content, and templates meet in a single data graph.
 
-Every named slot, every content value, and every cross-content reference is a node in the data graph. Templates traverse it by path — `post.title`, `author.name`, `site.posts`. Every connection is verified before any output is written.
+Every named slot, every content value, and every cross-content reference is a node in the data graph. Templates traverse it by path — `post.title`, `author.name`, `posts`. Every connection is verified before any output is written.
 
 ----
 

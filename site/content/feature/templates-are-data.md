@@ -12,7 +12,7 @@ The default template format uses HTML with `presemble:insert` directives. The pu
 
 ```xml
 <main class="feature-grid">
-  <template data-each="site.features">
+  <template data-each="features">
     <article class="feature-card">
       <presemble:insert data="title" as="h3" />
       <presemble:insert data="tagline" />
@@ -28,7 +28,7 @@ Because the internal model is a labelled tree, the same transformation logic can
 
 ```clojure
 [:main.feature-grid
- [:template {:data-each "site.features"}
+ [:template {:data-each "features"}
   [:article.feature-card
    [:presemble/insert {:data "title" :as "h3"}]
    [:presemble/insert {:data "tagline"}]

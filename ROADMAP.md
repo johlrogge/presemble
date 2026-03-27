@@ -45,33 +45,61 @@ Deliverables shipped:
 
 ---
 
-## Current milestone — M2: "Cross-content references and site configuration"
+## Current milestone — M2: "Cross-content references and template composition"
 
 **Goal:** make content items aware of each other at render time, so templates can pull data from
 linked content (e.g. show an author's name from the author page, not hardcoded in the article).
-Introduce a site configuration file and basic collection query support.
+Introduce proper template composition and collection query support.
 
 **Success gate:** a template can render `author.name` by following a content reference from an
 article to its author page automatically, without any workarounds in the content files.
 
 **Deliverables:**
-- [ ] Cross-content reference resolution — templates can pull data from linked content items (e.g. render author name from author page, not hardcoded in article)
-- [ ] Site configuration file (`site.yaml` or similar) — declare entry points, site metadata available as `site.name`, `site.url` etc.
-- [ ] Collection queries — filter/sort collections (currently `site.posts` returns all posts unsorted)
-- [ ] Improve template composition — calling one template from another cleanly (currently done via index page's `data-each`, but no explicit template include mechanism)
+- [x] Cross-content reference resolution — templates can pull data from linked content items (e.g. render author name from author page, not hardcoded in article) (ADR-012, shipped v0.2.0)
+- [ ] `site.*` as ordinary content — `site.md` is a normal content file with a schema, not a special-cased config mechanism. No separate `site.yaml`. Site metadata is just another content item in the data graph.
+- [x] Collection queries — filter/sort collections. Collections live at the **root level** of the data graph: `data-each="features"` not `data-each="site.features"`.
+- [ ] Template composition — callable templates defined with `presemble:define`, invoked with `presemble:apply`. File-qualified references use `::` separator (e.g. `templates/common::header`). `presemble.self` carries the passed context; `presemble.item` carries the current iteration item. The publisher infers the callable contract from field references (duck-typing by use) — no explicit signature declaration needed.
+- [ ] Semantic types with display defaults — e.g. `iso-date` renders as a human-readable date by default, overridable with `| format(...)`. Localization strategy is an open question deferred to a later milestone.
 
 ---
 
 ## Backlog
 
-**M3 — "Content as a separate concern"**
+**M3 — "Live editorial feedback loop"**
+
+The dependency graph (ADR-008) already tracks which outputs depend on which sources — it doubles
+as the subscription/notification system. No separate pub/sub needed.
+
+*Phase 1: WebSocket + live reload*
+- Inject a small script into served pages during `presemble serve`
+- Push reload events over WebSocket when the dep_graph detects changed outputs
+- The browser reloads only affected pages, not the whole site
+
+*Phase 2: Source map annotations + in-memory fast path*
+- Annotate rendered DOM elements with source-file provenance (which content/template produced this node)
+- In-memory rebuild fast path: DOM diffs served directly to the browser, no disk write required for preview
+- Enables "I changed this line, I see the result instantly" without a full page reload
+
+*Phase 3: LSP server in `presemble serve`*
+- `presemble serve` exposes an LSP-compatible interface alongside HTTP
+- Shared between browser clients and editor clients (Helix, VSCode)
+- Schema diagnostics: errors and warnings surface in both browser overlay and editor gutter
+- Schema-driven completions: content references, slot fields, template variables
+
+*Phase 4: Structural browser editor*
+- Floating edit button on served pages — click any content region to edit it in-browser
+- Schema-driven affordances: the editor knows what fields exist and what values are valid
+- Template tree editing: navigate and edit the content structure, not raw text
+- Homoiconic editing model: the edit surface and the content model are the same structure
+
+**M4 — "Content as a separate concern"**
 - Introduce the content system as a local service (not remote yet)
 - Content stored separately from templates and design — the key architectural separation from git
 - `presemble serve` pulls content from the local content store
 - Basic browser UI: view content, edit markdown, save back to the content store
 - Schema validation on save (the rust-analyzer side of the analogy — real-time guidance)
 
-**M4 — "Time enters the picture"**
+**M5 — "Time enters the picture"**
 - Publish timestamps on content items
 - `presemble build --at <datetime>` — render the site as it will appear at a given moment
 - Timeline scrubber in the `presemble serve` UI
@@ -85,7 +113,6 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 
 - Real-time multiplayer editing
 - Comments, suggestions, track changes
-- LSP / Helix integration
 - Remote content system (cloud hosting)
 - Security, OAuth, role-based access
 - Data-shaped content (typed records, e.g. product catalog)

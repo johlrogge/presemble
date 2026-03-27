@@ -175,3 +175,12 @@ annotations are declarative structural descriptions, not imperative code express
 3. Validate that the same content renders correctly
 4. Confirm that the template parser rejects structurally invalid HTML at parse time
 5. Assess whether the vocabulary covers the cases validated in ADR-004's experiment
+
+---
+
+## Addendum — 2026-03-27
+
+Collections moved to the root-level namespace. The `data-each="site.articles"` example in the
+annotation vocabulary section of this ADR is superseded. The correct form is
+`data-each="articles"` — collection names are looked up directly from the data graph root,
+not under a `site` prefix.

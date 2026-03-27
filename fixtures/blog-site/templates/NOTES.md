@@ -114,15 +114,15 @@ obvious to a template author reading the schema that `.text` and `.href` are val
 or whether the field names are conventional (`.text`/`.href`), structural (`.label`/`.url`), or
 implementation-defined. The data graph needs a way to communicate its shape to template authors.
 
-### `site.articles` provenance
+### `articles` provenance
 
-`{{ site.articles | each(template:article_card) }}` assumes there is a `site` object with an
-`articles` collection. Where does `site` come from, and how is it scoped into a template? The
+`{{ articles | each(template:article_card) }}` assumes there is an `articles` collection at the
+root level of the data graph. Where does it come from, and how is it scoped into a template? The
 `article.html` template uses both `site` (for header/footer) and `article` (for content). The
 ADR does not specify how template context is established — whether it is a single root value or
 a named map of values. If it is a single root, then `article.html` and `article_list.html`
-cannot both work, because one needs an `article` root and the other needs a `site` root. If it
-is a named map, the composition syntax `{{ site | template:header }}` needs clarification:
+cannot both work, because one needs an `article` root and the other needs an `articles` root. If
+it is a named map, the composition syntax `{{ site | template:header }}` needs clarification:
 `site` is looked up from the map, then piped into `template:header` — that reading is coherent,
 but it should be stated explicitly.
 

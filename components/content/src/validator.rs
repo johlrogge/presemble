@@ -57,11 +57,11 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     for slot in &grammar.preamble {
         // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
         while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor] {
-                if is_annotation_paragraph(text) {
-                    cursor += 1;
-                    continue;
-                }
+            if let ContentElement::Paragraph { text } = &elements[cursor]
+                && is_annotation_paragraph(text)
+            {
+                cursor += 1;
+                continue;
             }
             break;
         }
@@ -268,10 +268,8 @@ fn consume_headings(
     let max = expected.max();
 
     loop {
-        if let Some(limit) = max {
-            if count >= limit {
-                break;
-            }
+        if let Some(limit) = max && count >= limit {
+            break;
         }
         if *cursor >= elements.len() {
             break;
@@ -325,10 +323,8 @@ fn consume_paragraphs(
     let mut count = 0usize;
 
     loop {
-        if let Some(limit) = max {
-            if count >= limit {
-                break;
-            }
+        if let Some(limit) = max && count >= limit {
+            break;
         }
         if *cursor >= elements.len() {
             break;
@@ -352,17 +348,15 @@ fn consume_paragraphs(
             ),
             slot: Some(slot.name.clone()),
         });
-    } else if let Some(limit) = max {
-        if count > limit {
-            diagnostics.push(ValidationDiagnostic {
-                severity: Severity::Error,
-                message: format!(
-                    "slot '{}': expected at most {limit} paragraph(s), found {count}",
-                    slot.name
-                ),
-                slot: Some(slot.name.clone()),
-            });
-        }
+    } else if let Some(limit) = max && count > limit {
+        diagnostics.push(ValidationDiagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "slot '{}': expected at most {limit} paragraph(s), found {count}",
+                slot.name
+            ),
+            slot: Some(slot.name.clone()),
+        });
     }
 
     count
@@ -381,10 +375,8 @@ fn consume_links(
     let max = expected.max();
 
     loop {
-        if let Some(limit) = max {
-            if count >= limit {
-                break;
-            }
+        if let Some(limit) = max && count >= limit {
+            break;
         }
         if *cursor >= elements.len() {
             break;
@@ -423,10 +415,8 @@ fn consume_images(
     let max = expected.max();
 
     loop {
-        if let Some(limit) = max {
-            if count >= limit {
-                break;
-            }
+        if let Some(limit) = max && count >= limit {
+            break;
         }
         if *cursor >= elements.len() {
             break;
