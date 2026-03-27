@@ -57,7 +57,7 @@ article to its author page automatically, without any workarounds in the content
 **Deliverables:**
 - [ ] Cross-content reference resolution — templates can pull data from linked content items (e.g. render author name from author page, not hardcoded in article)
 - [ ] `site.*` as ordinary content — `site.md` is a normal content file with a schema, not a special-cased config mechanism. No separate `site.yaml`. Site metadata is just another content item in the data graph.
-- [ ] Collection queries — filter/sort collections. Collections live at the **root level** of the data graph: `data-each="features"` not `data-each="site.features"`. The current `site.*` namespace for collections is a bug to be fixed.
+- [x] Collection queries — filter/sort collections. Collections live at the **root level** of the data graph: `data-each="features"` not `data-each="site.features"`.
 - [ ] Template composition — callable templates defined with `presemble:define`, invoked with `presemble:apply`. File-qualified references use `::` separator (e.g. `templates/common::header`). `presemble.self` carries the passed context; `presemble.item` carries the current iteration item. The publisher infers the callable contract from field references (duck-typing by use) — no explicit signature declaration needed.
 - [ ] Semantic types with display defaults — e.g. `iso-date` renders as a human-readable date by default, overridable with `| format(...)`. Localization strategy is an open question deferred to a later milestone.
 

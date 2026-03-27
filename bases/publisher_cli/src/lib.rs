@@ -481,19 +481,15 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
         }
     }
 
-    // Assemble site:* collections from built pages
-    let mut site_graph = template::DataGraph::new();
+    // Assemble collections from built pages at the root level
+    let mut site_context = template::DataGraph::new();
     for (schema_stem, pages) in &built_pages {
         let collection: Vec<template::Value> = pages.iter()
             .map(|p| template::Value::Record(p.data.clone()))
             .collect();
-        // Naive pluralisation: "article" -> "articles"
         let collection_key = format!("{schema_stem}s");
-        site_graph.insert(collection_key, template::Value::List(collection));
+        site_context.insert(collection_key, template::Value::List(collection));
     }
-
-    let mut site_context = template::DataGraph::new();
-    site_context.insert("site", template::Value::Record(site_graph));
 
     // Render templates/index.html if it exists
     let index_template_path = site_dir.join("templates").join("index.html");

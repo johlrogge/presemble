@@ -109,22 +109,22 @@ fn presemble_namespace() {
 Input:
 
 ```edn
-[:template {:data-each "site.features"} [:li "item"]]
+[:template {:data-each "features"} [:li "item"]]
 ```
 
 Expected output: `Node::Element` with:
 - `name` = `"template"`
-- `attrs` = `[("data-each", "site.features")]`
+- `attrs` = `[("data-each", "features")]`
 - `children` = one `Node::Element` with `name` = `"li"` and text child `"item"`
 
 ```rust
 #[test]
 fn data_each_attribute() {
-    let nodes = parse_hiccup(r#"[:template {:data-each "site.features"} [:li "item"]]"#).unwrap();
+    let nodes = parse_hiccup(r#"[:template {:data-each "features"} [:li "item"]]"#).unwrap();
     assert_eq!(nodes.len(), 1);
     let Node::Element(ref tmpl) = nodes[0] else { panic!() };
     assert_eq!(tmpl.name, "template");
-    assert_eq!(tmpl.attr("data-each"), Some("site.features"));
+    assert_eq!(tmpl.attr("data-each"), Some("features"));
     assert_eq!(tmpl.children.len(), 1);
 }
 ```

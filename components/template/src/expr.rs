@@ -226,10 +226,10 @@ mod tests {
 
     #[test]
     fn each_transform() {
-        let expr = parse_expr("site.articles | each(template:article_card)").unwrap();
+        let expr = parse_expr("articles | each(template:article_card)").unwrap();
         match expr {
             Expr::Pipe(inner, Transform::Each(name)) => {
-                assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["site", "articles"]));
+                assert!(matches!(inner.as_ref(), Expr::Lookup(p) if p == &["articles"]));
                 assert_eq!(name, "article_card");
             }
             other => panic!("unexpected: {other:?}"),

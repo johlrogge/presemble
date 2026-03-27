@@ -657,18 +657,16 @@ mod tests {
     #[test]
     fn data_each_renders_each_item() {
         let mut graph = DataGraph::new();
-        let mut site = DataGraph::new();
         let mut a1 = DataGraph::new();
         a1.insert("title", Value::Text("Article 1".to_string()));
         let mut a2 = DataGraph::new();
         a2.insert("title", Value::Text("Article 2".to_string()));
-        site.insert(
+        graph.insert(
             "articles",
             Value::List(vec![Value::Record(a1), Value::Record(a2)]),
         );
-        graph.insert("site", Value::Record(site));
 
-        let src = r#"<template data-each="site.articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="articles"><presemble:insert data="title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
@@ -681,11 +679,9 @@ mod tests {
     #[test]
     fn data_each_empty_list_produces_nothing() {
         let mut graph = DataGraph::new();
-        let mut site = DataGraph::new();
-        site.insert("articles", Value::List(vec![]));
-        graph.insert("site", Value::Record(site));
+        graph.insert("articles", Value::List(vec![]));
 
-        let src = r#"<template data-each="site.articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
@@ -695,7 +691,7 @@ mod tests {
     fn data_each_absent_produces_nothing() {
         let graph = DataGraph::new();
 
-        let src = r#"<template data-each="site.articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
@@ -704,13 +700,11 @@ mod tests {
     #[test]
     fn data_each_template_wrapper_not_in_output() {
         let mut graph = DataGraph::new();
-        let mut site = DataGraph::new();
         let mut a1 = DataGraph::new();
         a1.insert("title", Value::Text("Only Article".to_string()));
-        site.insert("articles", Value::List(vec![Value::Record(a1)]));
-        graph.insert("site", Value::Record(site));
+        graph.insert("articles", Value::List(vec![Value::Record(a1)]));
 
-        let src = r#"<template data-each="site.articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="articles"><presemble:insert data="title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph).unwrap();
         let html = serialize_nodes(&result);
