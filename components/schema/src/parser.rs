@@ -88,10 +88,10 @@ pub fn parse_schema(input: &str) -> Result<Grammar, SchemaError> {
 
                 // A definition list value line starts with `: `
                 if let Some(value) = trimmed.strip_prefix(": ") {
-                    if let Some(key) = pending_constraint_key.take() {
-                        if let Some(slot) = preamble.last_mut() {
-                            apply_constraint(slot, &key, value)?;
-                        }
+                    if let Some(key) = pending_constraint_key.take()
+                        && let Some(slot) = preamble.last_mut()
+                    {
+                        apply_constraint(slot, &key, value)?;
                     }
                     // Stay in ReadingConstraints; more key/value pairs may follow
                 } else {
@@ -288,11 +288,8 @@ fn apply_constraint(slot: &mut Slot, key: &str, value: &str) -> Result<(), Schem
 }
 
 fn apply_body_rule(rules: &mut BodyRules, key: &str, value: &str) -> Result<(), SchemaError> {
-    match key {
-        "headings" => {
-            rules.heading_range = Some(parse_heading_range(value)?);
-        }
-        _ => {}
+    if key == "headings" {
+        rules.heading_range = Some(parse_heading_range(value)?);
     }
     Ok(())
 }
