@@ -1,5 +1,8 @@
 mod error;
 mod serve;
+pub mod template_registry;
+
+pub use template_registry::FileTemplateRegistry;
 
 pub use dep_graph::DependencyGraph;
 pub use error::CliError;
@@ -278,6 +281,7 @@ fn render_page(
     schema_stem: &str,
     template_path: &std::path::Path,
     output_path: &std::path::Path,
+    registry: &dyn template::TemplateRegistry,
 ) -> Result<(), CliError> {
     let mut context = template::DataGraph::new();
     context.insert(schema_stem, template::Value::Record(data.clone()));
@@ -289,7 +293,7 @@ fn render_page(
         _ => template::parse_template_xml(&tmpl_src)
             .map_err(|e| CliError::Render(e.to_string()))?,
     };
-    let html = template::render_from_nodes(nodes, &context)
+    let html = template::render_from_nodes_with_registry(nodes, &context, registry)
         .map_err(|e| CliError::Render(e.to_string()))?;
 
     std::fs::create_dir_all(output_path.parent().unwrap())?;
@@ -332,6 +336,7 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
 
     // Discover and copy referenced assets from templates
     let templates_dir = site_dir.join("templates");
+    let registry = FileTemplateRegistry::new(&templates_dir);
     let mut all_asset_paths = std::collections::BTreeSet::new();
     if templates_dir.exists() {
         let mut template_entries: Vec<_> = std::fs::read_dir(&templates_dir)?
@@ -477,7 +482,7 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     for collected in &collected_pages {
         if let Some(tmpl_path) = &collected.template_path {
             let page_data = &built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path)?;
+            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path, &registry)?;
         }
     }
 
@@ -497,7 +502,12 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     if index_template_path.exists() {
         match std::fs::read_to_string(&index_template_path) {
             Ok(tmpl_src) => {
-                match template::render_template(&tmpl_src, &site_context) {
+                match template::parse_template_xml(&tmpl_src)
+                    .map_err(|e| CliError::Render(format!("index template parse error: {e}")))
+                    .and_then(|nodes| {
+                        template::render_from_nodes_with_registry(nodes, &site_context, &registry)
+                            .map_err(|e| CliError::Render(e.to_string()))
+                    }) {
                     Ok(html) => {
                         let output_dir = site_dir.join("output");
                         std::fs::create_dir_all(&output_dir)?;
@@ -613,6 +623,8 @@ pub fn rebuild_affected(
     // For each affected content output, recover the schema and content paths from the
     // dependency graph rather than parsing the output path string.
     let schemas_dir = site_dir.join("schemas");
+    let templates_dir = site_dir.join("templates");
+    let registry = FileTemplateRegistry::new(&templates_dir);
     let content_base = site_dir.join("content");
     for output_path in &content_outputs {
         // Look up which source files this output was built from
@@ -703,7 +715,7 @@ pub fn rebuild_affected(
     for collected in &rebuild_collected {
         if let Some(tmpl_path) = &collected.template_path {
             let page_data = &outcome.built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path)?;
+            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path, &registry)?;
         }
     }
 

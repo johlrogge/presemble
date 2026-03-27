@@ -202,6 +202,110 @@ fn build_site_copies_assets_to_output() {
 }
 
 #[test]
+fn presemble_include_inlines_header_and_footer_fragments() {
+    // Build a minimal site where the index template uses presemble:include
+    // for header and footer fragments, and verify the output HTML contains
+    // the fragment content rather than the include directive.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("include-site");
+
+    // Create directory structure
+    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    // Schema
+    fs::write(
+        site.join("schemas/article.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+
+    // Content
+    fs::write(
+        site.join("content/article/test-post.md"),
+        "# Test Post\n",
+    )
+    .unwrap();
+
+    // Fragment templates
+    fs::write(
+        site.join("templates/header.html"),
+        r#"<header class="site-header"><a href="/">MySite</a></header>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/footer.html"),
+        r#"<footer class="site-footer"><p>Footer text</p></footer>"#,
+    )
+    .unwrap();
+
+    // Article template using presemble:include
+    fs::write(
+        site.join("templates/article.html"),
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><title>Test</title></head>
+<body>
+<presemble:include src="header" />
+<main><presemble:insert data="article.title" as="h1" /></main>
+<presemble:include src="footer" />
+</body>
+</html>"#,
+    )
+    .unwrap();
+
+    // Index template using presemble:include
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><title>Index</title></head>
+<body>
+<presemble:include src="header" />
+<main>Home</main>
+<presemble:include src="footer" />
+</body>
+</html>"#,
+    )
+    .unwrap();
+
+    // Minimal CSS asset so asset copy doesn't fail
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let outcome = publisher_cli::build_site(&site).expect("build should succeed");
+    assert_eq!(outcome.files_failed, 0, "no pages should fail");
+
+    // Verify article output contains header and footer content
+    let article_html =
+        fs::read_to_string(site.join("output/article/test-post/index.html")).unwrap();
+    assert!(
+        article_html.contains("MySite"),
+        "article output should contain header content from include: {article_html}"
+    );
+    assert!(
+        article_html.contains("Footer text"),
+        "article output should contain footer content from include: {article_html}"
+    );
+    assert!(
+        !article_html.contains("presemble:include"),
+        "article output should not contain presemble:include directive: {article_html}"
+    );
+
+    // Verify index output also inlines the fragments
+    let index_html = fs::read_to_string(site.join("output/index.html")).unwrap();
+    assert!(
+        index_html.contains("MySite"),
+        "index output should contain header content from include: {index_html}"
+    );
+    assert!(
+        index_html.contains("Footer text"),
+        "index output should contain footer content from include: {index_html}"
+    );
+}
+
+#[test]
 fn cross_content_reference_resolves_author_data() {
     let (_tmp, site_dir) = copy_fixture_site();
     let site_dir = std::fs::canonicalize(&site_dir).unwrap();
