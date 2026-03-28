@@ -9,7 +9,8 @@ content = { workspace = true }
 template = { workspace = true }
 dep_graph = { workspace = true }
 clap = { workspace = true }
-tiny_http = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
 notify = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

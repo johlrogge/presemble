@@ -98,3 +98,46 @@ output for free.
   library choice must be revisited.
 - The `notify` debounce value of ~100ms is a starting point chosen empirically; it may need
   adjustment based on editor save patterns observed in practice.
+
+## M3 Update (2026-03-29)
+
+The M1 decisions above have been revised for M3 to support live reload.
+
+### Migration from `tiny_http` to `axum` + `tokio`
+
+`tiny_http` does not support WebSocket connections, which are required for live reload: the browser
+must receive a push notification when the site is rebuilt so it can refresh without polling.
+
+`axum` is the standard async web framework in the Tokio ecosystem with first-class WebSocket
+support via `axum::extract::WebSocketUpgrade`. The public `serve_site` function remains
+synchronous at its boundary (it wraps a `tokio::runtime::Runtime`) so callers do not need to
+change.
+
+The router exposes:
+- `GET /_presemble/ws` — WebSocket endpoint for live reload signals
+- `GET /*` (fallback) — static file handler with HTML injection of the reload script
+
+A `tokio::sync::broadcast` channel carries `()` reload signals. The file watcher thread (the
+unchanged synchronous `notify` loop) sends a signal after each successful rebuild. Each connected
+browser tab subscribes to the channel via `ws_handler` and reloads on receipt. If the WebSocket
+connection drops (e.g. server restart), the browser retries after 1 second.
+
+`axum` is the right foundation for M3–M4 features (editor WebSocket, SSE, collaborative editing API).
+
+### Output directory moved to sibling `output/<site-name>/`
+
+Previously output was written to `<site-dir>/output/`. The file watcher watched the source
+subdirectories inside `<site-dir>`. With watch events using broad path matching, the watcher
+could react to changes in the output directory when output files matched the watched extensions,
+creating a potential feedback loop.
+
+The new output location is `<parent-of-site-dir>/output/<site-dir-name>/`:
+
+```
+site/           <- source (watched)
+output/
+  site/         <- output (not watched)
+```
+
+The public helper `publisher_cli::output_dir(site_dir: &Path) -> PathBuf` computes this path
+consistently across `lib.rs` and `serve.rs`. The root `.gitignore` was updated to add `/output/`.
