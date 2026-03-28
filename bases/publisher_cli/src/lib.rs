@@ -187,7 +187,7 @@ pub fn run() -> Result<(), CliError> {
                 base_url.as_deref(),
             )?;
             serve::serve_site(site_path, 3000, &url_config)?;
-            return Ok(());
+            Ok(())
         }
         None => {
             // backward compat: presemble <site-dir>
