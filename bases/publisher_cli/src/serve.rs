@@ -7,8 +7,10 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use content::{parse_document, ContentElement};
 use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -21,12 +23,17 @@ use tokio::sync::broadcast;
 #[derive(Clone, Debug)]
 struct ReloadMessage {
     pages: Vec<String>,
+    anchor: Option<String>,
 }
 
 impl ReloadMessage {
     fn to_json(&self) -> String {
+        let anchor_json = match &self.anchor {
+            Some(a) => format!(r#","anchor":"{}""#, a.replace('\\', "\\\\").replace('"', "\\\"")),
+            None => String::new(),
+        };
         if self.pages.is_empty() {
-            r#"{"pages":[],"primary":""}"#.to_string()
+            format!(r#"{{"pages":[],"primary":""{}}}"#, anchor_json)
         } else {
             let pages_json = self.pages
                 .iter()
@@ -34,9 +41,10 @@ impl ReloadMessage {
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                r#"{{"pages":[{}],"primary":"{}"}}"#,
+                r#"{{"pages":[{}],"primary":"{}"{}}}"#,
                 pages_json,
-                self.pages[0].replace('\\', "\\\\").replace('"', "\\\"")
+                self.pages[0].replace('\\', "\\\\").replace('"', "\\\""),
+                anchor_json
             )
         }
     }
@@ -80,13 +88,29 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
 
     let (reload_tx, _) = broadcast::channel::<ReloadMessage>(16);
 
+    let snapshot: ContentSnapshot = Arc::new(Mutex::new(HashMap::new()));
+    {
+        let content_dir = site_dir.join("content");
+        if content_dir.exists() {
+            let mut files = Vec::new();
+            collect_content_md_files(&content_dir, &mut files);
+            let mut snap = snapshot.lock().unwrap();
+            for path in files {
+                if let Some(elems) = body_elements_from_path(&path) {
+                    snap.insert(path, elems);
+                }
+            }
+        }
+    }
+
     // Start file watcher in background thread
     let site_dir_owned = site_dir.to_path_buf();
     let graph_clone = Arc::clone(&current_graph);
     let url_config_owned = url_config.clone();
     let reload_tx_clone = reload_tx.clone();
+    let snapshot_clone = Arc::clone(&snapshot);
     std::thread::spawn(move || {
-        watch_and_rebuild(&site_dir_owned, graph_clone, &url_config_owned, reload_tx_clone);
+        watch_and_rebuild(&site_dir_owned, graph_clone, &url_config_owned, reload_tx_clone, snapshot_clone);
     });
 
     let state = AppState {
@@ -183,26 +207,44 @@ async fn file_handler(
     (StatusCode::NOT_FOUND, "404 Not Found").into_response()
 }
 
+const INJECT: &str = concat!(
+    "<style>",
+    "@keyframes presemble-flash{0%,100%{background:transparent}50%{background:#fffbe6}}",
+    ".presemble-changed{animation:presemble-flash 1s ease;outline:2px solid #f90;outline-offset:2px}",
+    "</style>",
+    "<script>(function(){",
+    "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
+    "ws.onmessage=function(e){",
+      "var m=JSON.parse(e.data);",
+      "if(m.anchor){sessionStorage.setItem('presemble-anchor',m.anchor);}",
+      "if(!m.pages.length||m.pages.indexOf(location.pathname)!==-1){location.reload();}",
+      "else{location.href=m.primary;}",
+    "};",
+    "ws.onclose=function(){setTimeout(function(){location.reload();},1000);};",
+    "(function(){",
+      "var anchor=sessionStorage.getItem('presemble-anchor');",
+      "if(!anchor){return;}",
+      "sessionStorage.removeItem('presemble-anchor');",
+      "function tryScroll(n){",
+        "var el=document.getElementById(anchor);",
+        "if(el){",
+          "el.scrollIntoView({behavior:'smooth',block:'center'});",
+          "el.classList.add('presemble-changed');",
+          "setTimeout(function(){el.classList.remove('presemble-changed');},1500);",
+        "}else if(n>0){setTimeout(function(){tryScroll(n-1);},50);}",
+      "}",
+      "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){tryScroll(10);});}",
+      "else{tryScroll(10);}",
+    "})();",
+    "})();</script>"
+);
+
 fn inject_reload_script(bytes: Vec<u8>) -> Vec<u8> {
-    const SCRIPT: &str = concat!(
-        "<script>(function(){",
-        "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
-        "ws.onmessage=function(e){",
-          "var m=JSON.parse(e.data);",
-          "if(!m.pages.length||m.pages.indexOf(location.pathname)!==-1){",
-            "location.reload();",
-          "}else{",
-            "location.href=m.primary;",
-          "}",
-        "};",
-        "ws.onclose=function(){setTimeout(function(){location.reload();},1000);};",
-        "})();</script>"
-    );
     let html = String::from_utf8_lossy(&bytes);
     let result = if let Some(pos) = html.rfind("</body>") {
-        format!("{}{}{}", &html[..pos], SCRIPT, &html[pos..])
+        format!("{}{}{}", &html[..pos], INJECT, &html[pos..])
     } else {
-        format!("{}{}", html, SCRIPT)
+        format!("{}{}", html, INJECT)
     };
     result.into_bytes()
 }
@@ -280,11 +322,48 @@ fn is_relevant_path(path: &std::path::Path) -> bool {
     )
 }
 
+type ContentSnapshot = Arc<Mutex<HashMap<std::path::PathBuf, Vec<ContentElement>>>>;
+
+fn body_elements_from_path(path: &std::path::Path) -> Option<Vec<ContentElement>> {
+    let src = std::fs::read_to_string(path).ok()?;
+    let doc = parse_document(&src).ok()?;
+    let start = doc.elements.iter().position(|e| matches!(e, ContentElement::Separator))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    Some(doc.elements[start..].to_vec())
+}
+
+fn collect_content_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_content_md_files(&path, files);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            files.push(path);
+        }
+    }
+}
+
+fn first_changed_body_idx(old: &[ContentElement], new: &[ContentElement]) -> Option<usize> {
+    let min_len = old.len().min(new.len());
+    for i in 0..min_len {
+        if old[i] != new[i] {
+            return Some(i);
+        }
+    }
+    if new.len() > old.len() {
+        return Some(old.len());
+    }
+    None
+}
+
 fn watch_and_rebuild(
     site_dir: &Path,
     graph: Arc<Mutex<DependencyGraph>>,
     url_config: &UrlConfig,
     reload_tx: broadcast::Sender<ReloadMessage>,
+    snapshot: ContentSnapshot,
 ) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
@@ -379,7 +458,38 @@ fn watch_and_rebuild(
                         .flat_map(|pages| pages.iter().map(|p| p.url_path.clone()))
                         .collect();
                     pages.sort();
-                    let _ = reload_tx.send(ReloadMessage { pages });
+
+                    let content_base = site_dir.join("content");
+                    let dirty_content: Vec<std::path::PathBuf> = dirty
+                        .iter()
+                        .filter(|p| p.starts_with(&content_base) && p.extension().and_then(|e| e.to_str()) == Some("md"))
+                        .cloned()
+                        .collect();
+
+                    let anchor: Option<String> = if dirty_content.len() == 1 {
+                        let changed_path = &dirty_content[0];
+                        let old_elements = snapshot.lock().unwrap().get(changed_path).cloned();
+                        let new_elements = body_elements_from_path(changed_path);
+                        match (old_elements, new_elements) {
+                            (Some(old), Some(new)) => first_changed_body_idx(&old, &new).map(|idx| format!("presemble-body-{idx}")),
+                            (None, Some(new)) if !new.is_empty() => Some("presemble-body-0".to_string()),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Update snapshot
+                    {
+                        let mut snap = snapshot.lock().unwrap();
+                        for path in &dirty_content {
+                            if let Some(elems) = body_elements_from_path(path) {
+                                snap.insert(path.clone(), elems);
+                            }
+                        }
+                    }
+
+                    let _ = reload_tx.send(ReloadMessage { pages, anchor });
                 }
             }
             Err(e) => {
@@ -389,7 +499,7 @@ fn watch_and_rebuild(
                         let mut g = graph.lock().unwrap();
                         *g = outcome.dep_graph;
                         println!("Full rebuild complete");
-                        let _ = reload_tx.send(ReloadMessage { pages: Vec::new() });
+                        let _ = reload_tx.send(ReloadMessage { pages: Vec::new(), anchor: None });
                     }
                     Err(e2) => eprintln!("Full rebuild failed: {e2}"),
                 }
@@ -418,13 +528,13 @@ mod tests {
 
     #[test]
     fn reload_message_full_rebuild_json() {
-        let msg = ReloadMessage { pages: vec![] };
+        let msg = ReloadMessage { pages: vec![], anchor: None };
         assert_eq!(msg.to_json(), r#"{"pages":[],"primary":""}"#);
     }
 
     #[test]
     fn reload_message_single_page_json() {
-        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()] };
+        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()], anchor: None };
         let json = msg.to_json();
         assert_eq!(json, r#"{"pages":["/article/hello"],"primary":"/article/hello"}"#);
     }
@@ -433,6 +543,7 @@ mod tests {
     fn reload_message_multiple_pages_primary_is_first() {
         let msg = ReloadMessage {
             pages: vec!["/article/a".to_string(), "/article/b".to_string()],
+            anchor: None,
         };
         let json = msg.to_json();
         assert!(json.contains(r#""primary":"/article/a""#));
@@ -440,8 +551,40 @@ mod tests {
 
     #[test]
     fn reload_message_escapes_double_quote_in_url() {
-        let msg = ReloadMessage { pages: vec!["/bad\"path".to_string()] };
+        let msg = ReloadMessage { pages: vec!["/bad\"path".to_string()], anchor: None };
         let json = msg.to_json();
         assert!(json.contains(r#"\/bad\"path"#) || json.contains(r#"/bad\""#));
+    }
+
+    #[test]
+    fn reload_message_with_anchor_includes_field() {
+        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()], anchor: Some("presemble-body-3".to_string()) };
+        assert!(msg.to_json().contains(r#""anchor":"presemble-body-3""#));
+    }
+
+    #[test]
+    fn reload_message_without_anchor_omits_field() {
+        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()], anchor: None };
+        assert!(!msg.to_json().contains("anchor"));
+    }
+
+    #[test]
+    fn first_changed_idx_finds_first_diff() {
+        let old = vec![ContentElement::Paragraph { text: "a".to_string() }, ContentElement::Paragraph { text: "b".to_string() }];
+        let new = vec![ContentElement::Paragraph { text: "a".to_string() }, ContentElement::Paragraph { text: "changed".to_string() }];
+        assert_eq!(first_changed_body_idx(&old, &new), Some(1));
+    }
+
+    #[test]
+    fn first_changed_idx_append_returns_old_len() {
+        let old = vec![ContentElement::Paragraph { text: "a".to_string() }];
+        let new = vec![ContentElement::Paragraph { text: "a".to_string() }, ContentElement::Paragraph { text: "new".to_string() }];
+        assert_eq!(first_changed_body_idx(&old, &new), Some(1));
+    }
+
+    #[test]
+    fn first_changed_idx_identical_returns_none() {
+        let elems = vec![ContentElement::Paragraph { text: "x".to_string() }];
+        assert_eq!(first_changed_body_idx(&elems, &elems.clone()), None);
     }
 }
