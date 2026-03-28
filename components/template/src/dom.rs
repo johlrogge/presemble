@@ -357,6 +357,51 @@ fn extract_asset_paths_recursive(nodes: &[Node], found: &mut std::collections::H
     }
 }
 
+/// Extract the names of templates referenced via `<presemble:include src="...">` elements.
+///
+/// Walks the node tree recursively. For each `presemble:include` element, extracts the `src`
+/// attribute and normalises it to a file stem:
+/// - If `src` contains `"::"`, takes the part before `"::"` as the file path portion and
+///   extracts the file stem (without extension), stripping any leading `"templates/"` prefix.
+/// - If `src` has no `"::"`, uses it as-is (already a stem).
+///
+/// Returns a deduplicated, sorted list of template stems.
+pub fn extract_include_names(nodes: &[Node]) -> Vec<String> {
+    let mut found = std::collections::HashSet::new();
+    extract_include_names_recursive(nodes, &mut found);
+    let mut result: Vec<String> = found.into_iter().collect();
+    result.sort();
+    result
+}
+
+fn extract_include_names_recursive(nodes: &[Node], found: &mut std::collections::HashSet<String>) {
+    for node in nodes {
+        if let Node::Element(el) = node {
+            if el.name == "presemble:include"
+                && let Some(src) = el.attr("src")
+            {
+                let stem = if let Some(pos) = src.find("::") {
+                    let file_part = &src[..pos];
+                    // Strip leading "templates/" if present
+                    let file_part = file_part.strip_prefix("templates/").unwrap_or(file_part);
+                    // Extract file stem (drop extension)
+                    std::path::Path::new(file_part)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                } else {
+                    Some(src.to_string())
+                };
+                if let Some(s) = stem {
+                    found.insert(s);
+                }
+            }
+            // Recurse into children for all elements
+            extract_include_names_recursive(&el.children, found);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +543,41 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let out = serialize_nodes(&nodes);
         assert!(out.contains("&lt;presemble:insert"), "presemble tag must be escaped in output: {out}");
+    }
+
+    #[test]
+    fn extract_include_names_bare_name() {
+        let src = r#"<presemble:include src="header" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_include_names(&nodes), vec!["header"]);
+    }
+
+    #[test]
+    fn extract_include_names_file_qualified() {
+        let src = r#"<presemble:include src="common::card" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_include_names(&nodes), vec!["common"]);
+    }
+
+    #[test]
+    fn extract_include_names_templates_prefix() {
+        let src = r#"<presemble:include src="templates/common::hero" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_include_names(&nodes), vec!["common"]);
+    }
+
+    #[test]
+    fn extract_include_names_deduplication() {
+        let src = r#"<div><presemble:include src="header" /><presemble:include src="header" /></div>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_include_names(&nodes), vec!["header"]);
+    }
+
+    #[test]
+    fn extract_include_names_no_src_attr() {
+        let src = r#"<presemble:include />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert!(extract_include_names(&nodes).is_empty());
     }
 
     #[test]

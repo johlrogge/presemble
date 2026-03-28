@@ -169,6 +169,11 @@ enum Command {
         #[arg(long)]
         base_url: Option<String>,
     },
+    /// Scaffold a new hello-world Presemble site
+    Init {
+        /// Directory to create the site in (created if it does not exist)
+        site_dir: String,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -201,6 +206,9 @@ pub fn run() -> Result<(), CliError> {
             )?;
             serve::serve_site(site_path, 3000, &url_config)?;
             Ok(())
+        }
+        Some(Command::Init { site_dir }) => {
+            init_site(Path::new(&site_dir))
         }
         None => {
             // backward compat: presemble <site-dir>
@@ -443,6 +451,70 @@ fn render_page(
     Ok(())
 }
 
+fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
+    // Guard: if any of schemas/, content/, or templates/ exist as non-empty directories
+    for sub in ["schemas", "content", "templates"] {
+        let sub_path = site_dir.join(sub);
+        if sub_path.exists() {
+            let is_nonempty = std::fs::read_dir(&sub_path)
+                .ok()
+                .and_then(|mut d| d.next())
+                .is_some();
+            if is_nonempty {
+                return Err(CliError::Usage(format!(
+                    "{} already contains a site ({sub}/ exists). Run `presemble build` to build it.",
+                    site_dir.display(),
+                )));
+            }
+        }
+    }
+
+    // Create directories
+    for sub in ["schemas", "content/note", "templates", "assets"] {
+        std::fs::create_dir_all(site_dir.join(sub))?;
+    }
+
+    // Write scaffold files
+    std::fs::write(
+        site_dir.join("schemas/note.md"),
+        "# Note title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody content.\nheadings\n: h2..h6\n",
+    )?;
+
+    std::fs::write(
+        site_dir.join("content/note/hello-world.md"),
+        "# Hello, World! {#title}\n\n----\n\n## Welcome\n\nThis is your first Presemble note. Edit this file, add more in `content/note/`,\nor define new content types in `schemas/`.\n",
+    )?;
+
+    std::fs::write(
+        site_dir.join("templates/index.html"),
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>My Site</title>\n  <link rel=\"stylesheet\" href=\"/assets/style.css\">\n</head>\n<body>\n  <h1>My Site</h1>\n  <ul>\n    <template data-each=\"notes\">\n      <li><a data=\"note.title\" data-href=\"note.url_path\"></a></li>\n    </template>\n  </ul>\n</body>\n</html>\n",
+    )?;
+
+    std::fs::write(
+        site_dir.join("templates/note.html"),
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title data=\"note.title\"></title>\n  <link rel=\"stylesheet\" href=\"/assets/style.css\">\n</head>\n<body>\n  <a href=\"/\">\u{2190} Home</a>\n  <presemble:insert data=\"note.title\" as=\"h1\" />\n  <presemble:insert data=\"note.body\" />\n</body>\n</html>\n",
+    )?;
+
+    std::fs::write(
+        site_dir.join("assets/style.css"),
+        "body {\n  font-family: sans-serif;\n  max-width: 40rem;\n  margin: 2rem auto;\n  padding: 0 1rem;\n  line-height: 1.6;\n}\na { color: #2a7; }\n",
+    )?;
+
+    let dir_display = site_dir.display();
+    println!("Created {dir_display}/");
+    println!("  schemas/note.md              \u{2014} defines the \"note\" content type");
+    println!("  content/note/hello-world.md  \u{2014} your first note");
+    println!("  templates/index.html         \u{2014} home page listing all notes");
+    println!("  templates/note.html          \u{2014} template for individual notes");
+    println!("  assets/style.css             \u{2014} minimal stylesheet");
+    println!();
+    println!("Run:");
+    println!("  presemble build {dir_display}/");
+    println!("  presemble serve {dir_display}/");
+
+    Ok(())
+}
+
 pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir)
         .unwrap_or_else(|_| site_dir.to_path_buf());
@@ -479,6 +551,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     let templates_dir = site_dir.join("templates");
     let registry = FileTemplateRegistry::new(&templates_dir);
     let mut all_asset_paths = std::collections::BTreeSet::new();
+    let mut all_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut included_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if templates_dir.exists() {
         let mut template_entries: Vec<_> = std::fs::read_dir(&templates_dir)?
             .flatten()
@@ -492,6 +566,10 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
         template_entries.sort_by_key(|e| e.file_name());
         for entry in template_entries {
             let template_path = entry.path();
+            // Track the file stem of every template file
+            if let Some(stem) = template_path.file_stem().and_then(|s| s.to_str()) {
+                all_template_stems.insert(stem.to_string());
+            }
             let tmpl_src = std::fs::read_to_string(&template_path)?;
             match template_path.extension().and_then(|e| e.to_str()) {
                 Some("hiccup") => {
@@ -499,6 +577,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                         Ok(nodes) => {
                             let assets = template::extract_asset_paths(&nodes);
                             all_asset_paths.extend(assets);
+                            let includes = template::extract_include_names(&nodes);
+                            included_template_stems.extend(includes);
                         }
                         Err(e) => {
                             eprintln!(
@@ -513,6 +593,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                         Ok(nodes) => {
                             let assets = template::extract_asset_paths(&nodes);
                             all_asset_paths.extend(assets);
+                            let includes = template::extract_include_names(&nodes);
+                            included_template_stems.extend(includes);
                         }
                         Err(e) => {
                             eprintln!(
@@ -526,6 +608,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
         }
     }
     copy_referenced_assets(site_dir, &all_asset_paths)?;
+
+    let mut schema_stems: Vec<String> = Vec::new();
 
     for schema_entry in schema_entries {
         let schema_path = schema_entry.path();
@@ -542,6 +626,9 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
             })?;
 
         let content_dir = site_dir.join("content").join(schema_stem);
+
+        // Track schema stem for unused-source warnings
+        schema_stems.push(schema_stem.to_string());
 
         // Track schema path for index deps
         all_schema_paths.push(schema_path.clone());
@@ -729,6 +816,14 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
             }
         }
     }
+
+    warn_unused_sources(
+        site_dir,
+        &schema_stems,
+        &all_template_stems,
+        &included_template_stems,
+        &all_asset_paths,
+    );
 
     Ok(BuildOutcome {
         files_built,
@@ -1027,6 +1122,100 @@ fn copy_referenced_assets(
         println!("  asset: {path}");
     }
     Ok(())
+}
+
+fn collect_files_recursive(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+fn warn_unused_sources(
+    site_dir: &std::path::Path,
+    schema_stems: &[String],
+    all_template_stems: &std::collections::BTreeSet<String>,
+    included_template_stems: &std::collections::BTreeSet<String>,
+    all_asset_paths: &std::collections::BTreeSet<String>,
+) {
+    // A. Unused assets
+    let assets_dir = site_dir.join("assets");
+    if assets_dir.exists() {
+        let mut asset_files = Vec::new();
+        collect_files_recursive(&assets_dir, &mut asset_files);
+        for file_path in asset_files {
+            // Compute root-relative path: strip site_dir prefix, normalise separators to /
+            let rel = file_path
+                .strip_prefix(site_dir)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            let root_rel = if rel.starts_with('/') {
+                rel
+            } else {
+                format!("/{rel}")
+            };
+            if !all_asset_paths.contains(&root_rel) {
+                // Show path relative to site_dir without leading slash
+                let display = root_rel.trim_start_matches('/');
+                eprintln!("warning: {display} is not referenced by any template, consider deleting it");
+            }
+        }
+    }
+
+    // B. Unused templates
+    for stem in all_template_stems {
+        let is_used = schema_stems.iter().any(|s| s == stem)
+            || stem == "index"
+            || included_template_stems.contains(stem);
+        if !is_used {
+            // Reconstruct filename
+            let html_path = site_dir.join("templates").join(format!("{stem}.html"));
+            let filename = if html_path.exists() {
+                format!("{stem}.html")
+            } else {
+                format!("{stem}.hiccup")
+            };
+            eprintln!("warning: templates/{filename} is not used by any schema or include, consider deleting it");
+        }
+    }
+
+    // C. Schemas with no content
+    for stem in schema_stems {
+        let content_dir = site_dir.join("content").join(stem);
+        let has_md = if content_dir.exists() {
+            let mut files = Vec::new();
+            collect_files_recursive(&content_dir, &mut files);
+            files.iter().any(|f| f.extension().and_then(|e| e.to_str()) == Some("md"))
+        } else {
+            false
+        };
+        if !has_md {
+            eprintln!("warning: schemas/{stem}.md has no content files in content/{stem}/, consider deleting it");
+        }
+    }
+
+    // D. Content dirs with no schema
+    let content_root = site_dir.join("content");
+    if content_root.exists() && let Ok(entries) = std::fs::read_dir(&content_root) {
+        let mut dirs: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for dir_entry in dirs {
+            let dir_name = dir_entry.file_name();
+            let name = dir_name.to_string_lossy();
+            if !schema_stems.iter().any(|s| s == name.as_ref()) {
+                eprintln!("warning: content/{name}/ has no matching schema, consider deleting it");
+            }
+        }
+    }
 }
 
 fn format_severity(severity: &content::Severity) -> &'static str {

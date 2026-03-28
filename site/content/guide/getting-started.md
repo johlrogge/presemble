@@ -1,113 +1,54 @@
 # Getting Started
 
-Go from zero to a published Presemble site.
+Scaffold and build a Presemble site in two commands.
 
 ----
 
 ## Install
 
-Presemble is built with Rust. Install from source for now:
+Presemble is built with Rust. Install from source:
 
 ```
-git clone https://github.com/presemble/presemble
 cargo install --path projects/publisher
 ```
 
 Once the project reaches its first release, `cargo install presemble` will work directly.
 
-## Create a site
+## Scaffold a site
 
-A Presemble site is a directory with four subdirectories:
-
-```
-my-site/
-  schemas/      # document grammars
-  content/      # content files validated against schemas
-  templates/    # HTML templates that consume content data
-  assets/       # CSS, images, fonts — copied verbatim to output
-```
-
-Start by creating the directories:
+Run `presemble init my-site/` to generate a working hello-world site:
 
 ```
-mkdir -p my-site/{schemas,content,templates,assets}
+presemble init my-site/
 ```
 
-## Define a schema
+This creates the following files:
 
-A schema is a plain markdown file that describes the structure of a content type. Create `schemas/note.md`:
-
-```markdown
-# Note title {#title}
-occurs
-: exactly once
-content
-: capitalized
-
-A short description. {#body}
-occurs
-: 1..3
-```
-
-Every named field (`{#title}`, `{#body}`) becomes a data path you can reference from templates. See [schemas as contracts](/feature/schemas-as-contracts) for the full grammar.
-
-## Write content
-
-Content files match the schema by position and structure — no annotations needed in the author's document. Create `content/note/hello.md`:
-
-```markdown
-# Hello, Presemble
-
-This is my first note built with Presemble.
-```
-
-The publisher validates this file against `schemas/note.md` at build time. A mismatch fails the build with a clear error message.
-
-## Write a template
-
-Templates are HTML files with `presemble:insert` elements that pull in named data. Create `templates/note.html`:
-
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Presemble</title>
-  <link rel="stylesheet" href="/assets/style.css" />
-</head>
-<body>
-  <main>
-    <presemble:insert data="note.title" as="h1" />
-    <presemble:insert data="note.body" as="p" />
-  </main>
-</body>
-</html>
-```
-
-The template vocabulary is finite and verifiable: only data paths that exist in the schema are valid.
+- `schemas/note.md` — defines the "note" content type with a title and body. See [schemas](/feature/schemas-as-contracts) for details.
+- `content/note/hello-world.md` — your first note, validated against the schema at build time.
+- `templates/index.html` — home page, iterates over all notes. See [templates](/feature/templates-are-data) for details.
+- `templates/note.html` — renders an individual note.
+- `assets/style.css` — only files *referenced by templates* are copied to output.
 
 ## Build
-
-Run the build command from your workspace root:
 
 ```
 presemble build my-site/
 ```
 
-Output lands in `my-site/output/`. Each content file becomes a clean URL directory:
-
-```
-my-site/output/note/hello/index.html
-```
-
-Zero schema violations, zero runtime surprises. See [instant feedback](/feature/instant-feedback) for details on build output and error reporting.
+Output goes to `my-site/output/`. The publisher validates content against schemas, renders templates with the content data, and copies only the assets referenced by templates.
 
 ## Serve locally
-
-Start the development server with:
 
 ```
 presemble serve my-site/
 ```
 
-The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds incrementally. Refresh the browser to see updates. A future release will add live reload.
+Starts a local server with file watching and live rebuild on every change. Refresh the browser to see updates.
+
+## Next steps
+
+- [Schemas](/feature/schemas-as-contracts) — learn the schema grammar and compile-time content safety
+- [Templates](/feature/templates-are-data) — data-bound HTML templates without a template language
+- [The Data Graph](/feature/the-data-graph) — how content is structured and accessed in templates
+- [User Guide](/guide/user-guide) — full reference for all Presemble features
