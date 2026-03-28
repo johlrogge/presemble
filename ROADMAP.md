@@ -86,6 +86,12 @@ as the subscription/notification system. No separate pub/sub needed.
 - Schema diagnostics: errors and warnings surface in both browser overlay and editor gutter
 - Schema-driven completions: content references, slot fields, template variables
 
+*Phase 3.5: Cider-compatible REPL*
+- Builds on the LSP server's structured communication protocol
+- Interactive REPL for exploring schemas, templates, and the data graph from an editor
+- Emacs/Cider first-class; extensible to other editor REPL clients
+- Query the data graph, test template fragments, inspect schema validation — without leaving the editor
+
 *Phase 4: Structural browser editor*
 - Floating edit button on served pages — click any content region to edit it in-browser
 - Schema-driven affordances: the editor knows what fields exist and what values are valid
