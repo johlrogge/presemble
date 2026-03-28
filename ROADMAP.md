@@ -45,7 +45,7 @@ Deliverables shipped:
 
 ---
 
-## Current milestone — M2: "Cross-content references and template composition"
+## Done — M2: "Cross-content references and template composition"
 
 **Goal:** make content items aware of each other at render time, so templates can pull data from
 linked content (e.g. show an author's name from the author page, not hardcoded in the article).
@@ -63,9 +63,9 @@ article to its author page automatically, without any workarounds in the content
 
 ---
 
-## Backlog
+---
 
-**M3 — "Live editorial feedback loop"**
+## Current milestone — M3: "Live editorial feedback loop"
 
 The dependency graph (ADR-008) already tracks which outputs depend on which sources — it doubles
 as the subscription/notification system. No separate pub/sub needed.
@@ -75,13 +75,13 @@ as the subscription/notification system. No separate pub/sub needed.
 - Push reload events over WebSocket when the dep_graph detects changed outputs
 - The browser reloads only affected pages, not the whole site
 
-*Phase 1.1: Smart navigation*
+*Phase 1.1: Smart navigation* ✓ shipped v0.4.1
 - Server sends changed page URL(s) in WebSocket message (JSON: `{type, pages, primary}`)
 - If current page changed → reload in place; otherwise navigate to the first changed page
 - Protocol is forward-compatible: `anchor` field added in Phase 2 for element focus
 - Full-rebuild path falls back to reload-in-place
 
-*Phase 2: Source map annotations + focus on changed element*
+*Phase 2: Source map annotations + focus on changed element* ✓ shipped v0.4.2
 - Annotate rendered DOM elements with source-file provenance (which content/template produced this node)
 - In-memory rebuild fast path: DOM diffs served directly to the browser, no disk write required for preview
 - On navigate, scroll to and highlight the changed element using the source map anchor

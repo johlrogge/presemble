@@ -226,23 +226,26 @@ fn escape_html(s: &str) -> String {
 
 pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for element in elements {
+    for (idx, element) in elements.iter().enumerate() {
         let html = match element {
             ContentElement::Heading { level, text } => {
-                format!("<h{l}>{}</h{l}>", escape_html(text), l = level.value())
+                let l = level.value();
+                format!("<h{l} id=\"presemble-body-{idx}\">{}</h{l}>", escape_html(text))
             }
-            ContentElement::Paragraph { text } => format!("<p>{}</p>", escape_html(text)),
+            ContentElement::Paragraph { text } => {
+                format!("<p id=\"presemble-body-{idx}\">{}</p>", escape_html(text))
+            }
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
                 format!(
-                    "<img src=\"{}\" alt=\"{}\">",
+                    "<img id=\"presemble-body-{idx}\" src=\"{}\" alt=\"{}\">",
                     escape_html(path),
                     escape_html(alt_text)
                 )
             }
             ContentElement::Link { text, href } => {
                 format!(
-                    "<a href=\"{}\">{}</a>",
+                    "<a id=\"presemble-body-{idx}\" href=\"{}\">{}</a>",
                     escape_html(href),
                     escape_html(text)
                 )
@@ -251,11 +254,11 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
                 let escaped = escape_html(code);
                 match language {
                     Some(lang) => format!(
-                        "<pre><code class=\"language-{}\">{}</code></pre>",
+                        "<pre id=\"presemble-body-{idx}\"><code class=\"language-{}\">{}</code></pre>",
                         escape_html(lang),
                         escaped
                     ),
-                    None => format!("<pre><code>{}</code></pre>", escaped),
+                    None => format!("<pre id=\"presemble-body-{idx}\"><code>{}</code></pre>", escaped),
                 }
             }
             ContentElement::Separator => continue,
@@ -278,7 +281,7 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "<table><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
+                    "<table id=\"presemble-body-{idx}\"><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
                     header_cells, body_rows
                 )
             }
@@ -384,7 +387,7 @@ mod tests {
         };
         let html = super::render_body_html(&[code_block]);
         assert!(
-            html.contains("<pre><code class=\"language-rust\">"),
+            html.contains("<pre id=\"presemble-body-0\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
         );
         assert!(
@@ -401,13 +404,26 @@ mod tests {
         };
         let html = super::render_body_html(&[code_block]);
         assert!(
-            html.contains("<pre><code>"),
+            html.contains("<pre id=\"presemble-body-0\"><code>"),
             "expected plain pre/code in output; got: {html}"
         );
         assert!(
             html.contains("some code"),
             "expected code content in output; got: {html}"
         );
+    }
+
+    #[test]
+    fn render_body_html_assigns_sequential_ids() {
+        let elements = vec![
+            ContentElement::Paragraph { text: "first".to_string() },
+            ContentElement::Separator,
+            ContentElement::Paragraph { text: "second".to_string() },
+        ];
+        let html = render_body_html(&elements);
+        assert!(html.contains("id=\"presemble-body-0\""), "first paragraph gets id 0");
+        assert!(html.contains("id=\"presemble-body-2\""), "element after separator gets id 2");
+        assert!(!html.contains("id=\"presemble-body-1\""), "separator produces no HTML");
     }
 
     #[test]
