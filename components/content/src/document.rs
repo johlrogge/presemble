@@ -15,4 +15,8 @@ pub enum ContentElement {
     Link { text: String, href: String },
     Separator,
     CodeBlock { language: Option<String>, code: String },
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
 }

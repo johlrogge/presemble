@@ -259,6 +259,29 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
                 }
             }
             ContentElement::Separator => continue,
+            ContentElement::Table { headers, rows } => {
+                let header_cells = headers
+                    .iter()
+                    .map(|h| format!("<th>{}</th>", escape_html(h)))
+                    .collect::<Vec<_>>()
+                    .join("");
+                let body_rows = rows
+                    .iter()
+                    .map(|row| {
+                        let cells = row
+                            .iter()
+                            .map(|c| format!("<td>{}</td>", c))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        format!("<tr>{}</tr>", cells)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "<table><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
+                    header_cells, body_rows
+                )
+            }
         };
         parts.push(html);
     }

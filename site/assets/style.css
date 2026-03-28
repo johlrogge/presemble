@@ -405,6 +405,28 @@ main {
   margin-top: var(--space-lg);
 }
 
+/* ─── Tables ────────────────────────────────────────── */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: var(--space) 0;
+  font-size: 0.9em;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  background: var(--bg-soft);
+  font-weight: 600;
+}
+tr:nth-child(even) td {
+  background: var(--bg-alt, #fafafa);
+}
+
 /* ─── Responsiveness ────────────────────────────────── */
 
 @media (max-width: 640px) {
