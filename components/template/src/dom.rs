@@ -224,6 +224,96 @@ fn html_escape_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// URL rewriting strategy applied at HTML serialization time.
+/// Sources always use root-relative paths; the rewriter adjusts them for deployment.
+#[derive(Debug, Clone)]
+pub enum UrlRewriter {
+    /// Rewrite root-relative URLs to relative paths based on page depth.
+    /// The string is the page's URL path (e.g. "/article/hello-world").
+    Relative(String),
+    /// Prepend a base path to root-relative URLs (e.g. "/presemble").
+    RootWithBase(String),
+    /// Prepend a full base URL (e.g. "https://presemble.io").
+    Absolute(String),
+    /// No rewriting — pass through root-relative URLs as-is (current behavior).
+    Identity,
+}
+
+impl UrlRewriter {
+    /// Rewrite a single URL value. Returns the original if not root-relative.
+    pub fn rewrite(&self, url: &str) -> String {
+        if !url.starts_with('/') {
+            return url.to_string(); // external or relative — unchanged
+        }
+        match self {
+            UrlRewriter::Identity => url.to_string(),
+            UrlRewriter::Relative(page_url) => {
+                let depth = page_url
+                    .trim_matches('/')
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .count();
+                if depth == 0 {
+                    // Page is at root — strip leading / and prefix ./
+                    format!("./{}", url.trim_start_matches('/'))
+                } else {
+                    format!("{}{}", "../".repeat(depth), url.trim_start_matches('/'))
+                }
+            }
+            UrlRewriter::RootWithBase(base_path) => {
+                format!("{}{url}", base_path.trim_end_matches('/'))
+            }
+            UrlRewriter::Absolute(base_url) => {
+                format!("{}{url}", base_url.trim_end_matches('/'))
+            }
+        }
+    }
+}
+
+/// Attributes on specific elements that contain URLs to rewrite.
+const URL_ATTRS: &[(&str, &[&str])] = &[
+    ("a", &["href"]),
+    ("link", &["href"]),
+    ("img", &["src"]),
+    ("script", &["src"]),
+    ("source", &["src"]),
+    ("form", &["action"]),
+];
+
+/// Rewrite root-relative URLs in the node tree according to the given strategy.
+/// Called after transform(), before serialize_nodes().
+pub fn rewrite_urls(nodes: Vec<Node>, rewriter: &UrlRewriter) -> Vec<Node> {
+    if matches!(rewriter, UrlRewriter::Identity) {
+        return nodes; // fast path: no work needed
+    }
+    nodes.into_iter().map(|node| rewrite_node(node, rewriter)).collect()
+}
+
+fn rewrite_node(node: Node, rewriter: &UrlRewriter) -> Node {
+    match node {
+        Node::Text(_) => node,
+        Node::Element(mut el) => {
+            // Rewrite URL attributes on matching elements
+            if let Some(attr_names) = URL_ATTRS
+                .iter()
+                .find(|(elem, _)| *elem == el.name.as_str())
+                .map(|(_, attrs)| *attrs)
+            {
+                for (key, value) in &mut el.attrs {
+                    if attr_names.contains(&key.as_str()) {
+                        *value = rewriter.rewrite(value);
+                    }
+                }
+            }
+            // Recurse into children
+            el.children = el.children.into_iter()
+                .map(|child| rewrite_node(child, rewriter))
+                .collect();
+            Node::Element(el)
+        }
+    }
+}
+
 /// Attribute names on specific elements that may contain local asset paths.
 /// (element_name, attr_name)
 const ASSET_ATTRS: &[(&str, &str)] = &[
@@ -408,5 +498,61 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let out = serialize_nodes(&nodes);
         assert!(out.contains("&lt;presemble:insert"), "presemble tag must be escaped in output: {out}");
+    }
+
+    #[test]
+    fn rewrite_relative_depth_2() {
+        let r = UrlRewriter::Relative("/article/hello-world".to_string());
+        assert_eq!(r.rewrite("/assets/style.css"), "../../assets/style.css");
+        assert_eq!(r.rewrite("/author/johlrogge"), "../../author/johlrogge");
+    }
+
+    #[test]
+    fn rewrite_relative_depth_0() {
+        let r = UrlRewriter::Relative("/".to_string());
+        assert_eq!(r.rewrite("/assets/style.css"), "./assets/style.css");
+    }
+
+    #[test]
+    fn rewrite_relative_depth_1() {
+        let r = UrlRewriter::Relative("/about".to_string());
+        assert_eq!(r.rewrite("/assets/style.css"), "../assets/style.css");
+    }
+
+    #[test]
+    fn rewrite_root_with_base() {
+        let r = UrlRewriter::RootWithBase("/presemble".to_string());
+        assert_eq!(r.rewrite("/assets/style.css"), "/presemble/assets/style.css");
+        assert_eq!(r.rewrite("/feature/slug"), "/presemble/feature/slug");
+    }
+
+    #[test]
+    fn rewrite_absolute() {
+        let r = UrlRewriter::Absolute("https://presemble.io".to_string());
+        assert_eq!(r.rewrite("/assets/style.css"), "https://presemble.io/assets/style.css");
+    }
+
+    #[test]
+    fn rewrite_skips_external_urls() {
+        let r = UrlRewriter::Relative("/article/hello".to_string());
+        assert_eq!(r.rewrite("https://example.com"), "https://example.com");
+        assert_eq!(r.rewrite("mailto:info@example.com"), "mailto:info@example.com");
+    }
+
+    #[test]
+    fn rewrite_identity_passthrough() {
+        let r = UrlRewriter::Identity;
+        assert_eq!(r.rewrite("/assets/style.css"), "/assets/style.css");
+    }
+
+    #[test]
+    fn rewrite_urls_in_node_tree() {
+        let src = r#"<div><a href="/author/jo">Jo</a><link href="/assets/style.css" /></div>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let r = UrlRewriter::Relative("/article/hello-world".to_string());
+        let rewritten = rewrite_urls(nodes, &r);
+        let html = serialize_nodes(&rewritten);
+        assert!(html.contains(r#"href="../../author/jo""#), "got: {html}");
+        assert!(html.contains(r#"href="../../assets/style.css""#), "got: {html}");
     }
 }

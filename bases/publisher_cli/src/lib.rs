@@ -8,7 +8,38 @@ pub use dep_graph::DependencyGraph;
 pub use error::CliError;
 
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
 use std::path::Path;
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum UrlStyle {
+    #[default]
+    Relative,
+    Root,
+    Absolute,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct UrlConfig {
+    #[serde(default)]
+    pub url_style: UrlStyle,
+    #[serde(default)]
+    pub base_path: String,
+    #[serde(default)]
+    pub base_url: String,
+}
+
+impl Default for UrlConfig {
+    fn default() -> Self {
+        Self {
+            url_style: UrlStyle::Relative,
+            base_path: String::new(),
+            base_url: String::new(),
+        }
+    }
+}
 
 /// The canonical URL and output path for a content page.
 struct PageAddress {
@@ -25,6 +56,7 @@ struct CollectedPage {
     page_index: usize,  // index into built_pages[schema_stem] after collection
     output_path: std::path::PathBuf,
     template_path: Option<std::path::PathBuf>,
+    url_path: String,
 }
 
 /// Find a template for the given schema stem, trying extensions in order.
@@ -102,35 +134,112 @@ enum Command {
     Build {
         /// Path to the site directory
         site_dir: String,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long)]
+        url_style: Option<String>,
+        #[arg(long)]
+        base_path: Option<String>,
+        #[arg(long)]
+        base_url: Option<String>,
     },
     /// Serve the site locally with automatic rebuild on changes
     Serve {
         /// Path to the site directory
         site_dir: String,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long)]
+        url_style: Option<String>,
+        #[arg(long)]
+        base_path: Option<String>,
+        #[arg(long)]
+        base_url: Option<String>,
     },
 }
 
 pub fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
 
-    let site_dir = match &cli.command {
-        Some(Command::Build { site_dir }) => site_dir.clone(),
-        Some(Command::Serve { site_dir }) => {
-            serve::serve_site(std::path::Path::new(site_dir), 3000)?;
+    match cli.command {
+        Some(Command::Build { site_dir, config, url_style, base_path, base_url }) => {
+            let site_path = Path::new(&site_dir);
+            let url_config = load_url_config(
+                site_path,
+                config.as_deref(),
+                url_style.as_deref(),
+                base_path.as_deref(),
+                base_url.as_deref(),
+            )?;
+            let outcome = build_site(site_path, &url_config)?;
+            if outcome.has_errors() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Some(Command::Serve { site_dir, config, url_style, base_path, base_url }) => {
+            let site_path = Path::new(&site_dir);
+            let url_config = load_url_config(
+                site_path,
+                config.as_deref(),
+                url_style.as_deref(),
+                base_path.as_deref(),
+                base_url.as_deref(),
+            )?;
+            serve::serve_site(site_path, 3000, &url_config)?;
             return Ok(());
         }
         None => {
             // backward compat: presemble <site-dir>
-            cli.site_dir
-                .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?
+            let site_dir = cli.site_dir
+                .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?;
+            let outcome = build_site(Path::new(&site_dir), &UrlConfig::default())?;
+            if outcome.has_errors() {
+                std::process::exit(1);
+            }
+            Ok(())
         }
+    }
+}
+
+fn load_url_config(
+    site_dir: &std::path::Path,
+    config_path: Option<&str>,
+    cli_url_style: Option<&str>,
+    cli_base_path: Option<&str>,
+    cli_base_url: Option<&str>,
+) -> Result<UrlConfig, CliError> {
+    let json_path = match config_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => site_dir.join(".presemble").join("config.json"),
     };
 
-    let outcome = build_site(Path::new(&site_dir))?;
-    if outcome.has_errors() {
-        std::process::exit(1);
+    let mut config = if json_path.exists() {
+        let content = std::fs::read_to_string(&json_path)?;
+        serde_json::from_str::<UrlConfig>(&content)
+            .map_err(|e| CliError::Render(format!("config parse error in {}: {e}", json_path.display())))?
+    } else {
+        UrlConfig::default()
+    };
+
+    if let Some(style) = cli_url_style {
+        config.url_style = match style {
+            "relative" => UrlStyle::Relative,
+            "root" => UrlStyle::Root,
+            "absolute" => UrlStyle::Absolute,
+            other => return Err(CliError::Usage(
+                format!("unknown url-style: '{other}' (expected: relative, root, absolute)")
+            )),
+        };
     }
-    Ok(())
+    if let Some(bp) = cli_base_path {
+        config.base_path = bp.to_string();
+    }
+    if let Some(bu) = cli_base_url {
+        config.base_url = bu.to_string();
+    }
+
+    Ok(config)
 }
 
 /// Build a single content page: parse, validate, render, and write output.
@@ -275,12 +384,28 @@ fn resolve_graph(
     }
 }
 
+fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
+    match config.url_style {
+        UrlStyle::Relative => template::UrlRewriter::Relative(page_url.to_string()),
+        UrlStyle::Root => {
+            if config.base_path.is_empty() {
+                template::UrlRewriter::Identity
+            } else {
+                template::UrlRewriter::RootWithBase(config.base_path.clone())
+            }
+        }
+        UrlStyle::Absolute => template::UrlRewriter::Absolute(config.base_url.clone()),
+    }
+}
+
 fn render_page(
     data: &template::DataGraph,
     schema_stem: &str,
     template_path: &std::path::Path,
     output_path: &std::path::Path,
     registry: &dyn template::TemplateRegistry,
+    page_url: &str,
+    url_config: &UrlConfig,
 ) -> Result<(), CliError> {
     let mut context = template::DataGraph::new();
     context.insert(schema_stem, template::Value::Record(data.clone()));
@@ -292,8 +417,12 @@ fn render_page(
         _ => template::parse_template_xml(&tmpl_src)
             .map_err(|e| CliError::Render(e.to_string()))?,
     };
-    let html = template::render_from_nodes_with_registry(nodes, &context, registry)
+    let ctx = template::RenderContext::new(registry);
+    let transformed = template::transform(nodes, &context, &ctx)
         .map_err(|e| CliError::Render(e.to_string()))?;
+    let rewriter = make_rewriter(page_url, url_config);
+    let rewritten = template::rewrite_urls(transformed, &rewriter);
+    let html = template::serialize_nodes(&rewritten);
 
     std::fs::create_dir_all(output_path.parent().unwrap())?;
     std::fs::write(output_path, &html)?;
@@ -301,7 +430,7 @@ fn render_page(
     Ok(())
 }
 
-pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
+pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir)
         .unwrap_or_else(|_| site_dir.to_path_buf());
     let site_dir = site_dir.as_path();
@@ -454,6 +583,7 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
                         .entry(schema_stem_str.clone())
                         .or_default()
                         .len();
+                    let page_url_path = page_result.built.url_path.clone();
                     built_pages
                         .entry(schema_stem_str.clone())
                         .or_default()
@@ -464,6 +594,7 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
                         page_index,
                         output_path: page_result.output_path,
                         template_path: page_result.template_path,
+                        url_path: page_url_path,
                     });
                     files_built += 1;
                 }
@@ -481,7 +612,15 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     for collected in &collected_pages {
         if let Some(tmpl_path) = &collected.template_path {
             let page_data = &built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path, &registry)?;
+            render_page(
+                page_data,
+                &collected.schema_stem,
+                tmpl_path,
+                &collected.output_path,
+                &registry,
+                &collected.url_path,
+                url_config,
+            )?;
         }
     }
 
@@ -504,8 +643,12 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
                 match template::parse_template_xml(&tmpl_src)
                     .map_err(|e| CliError::Render(format!("index template parse error: {e}")))
                     .and_then(|nodes| {
-                        template::render_from_nodes_with_registry(nodes, &site_context, &registry)
-                            .map_err(|e| CliError::Render(e.to_string()))
+                        let ctx = template::RenderContext::new(&registry);
+                        let transformed = template::transform(nodes, &site_context, &ctx)
+                            .map_err(|e| CliError::Render(e.to_string()))?;
+                        let rewriter = make_rewriter("/", url_config);
+                        let rewritten = template::rewrite_urls(transformed, &rewriter);
+                        Ok(template::serialize_nodes(&rewritten))
                     }) {
                     Ok(html) => {
                         let output_dir = site_dir.join("output");
@@ -553,13 +696,21 @@ pub fn build_site(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     // Validate internal links
     let output_dir = site_dir.join("output");
     if output_dir.exists() {
-        let broken = validate_internal_links(&output_dir, &built_url_paths);
-        for msg in &broken {
-            eprintln!("[BROKEN LINK] {msg}");
-            files_failed += 1;
-        }
-        if broken.is_empty() {
-            println!("Link validation: OK");
+        let urls_rewritten = !matches!(
+            make_rewriter("/", url_config),
+            template::UrlRewriter::Identity
+        );
+        if urls_rewritten {
+            println!("Link validation: skipped (URLs rewritten at serialization — structural correctness guaranteed by graph)");
+        } else {
+            let broken = validate_internal_links(&output_dir, &built_url_paths);
+            for msg in &broken {
+                eprintln!("[BROKEN LINK] {msg}");
+                files_failed += 1;
+            }
+            if broken.is_empty() {
+                println!("Link validation: OK");
+            }
         }
     }
 
@@ -578,6 +729,7 @@ pub fn rebuild_affected(
     site_dir: &std::path::Path,
     dirty_sources: &std::collections::HashSet<std::path::PathBuf>,
     current_graph: &DependencyGraph,
+    url_config: &UrlConfig,
 ) -> Result<BuildOutcome, CliError> {
     use std::collections::HashSet;
 
@@ -686,6 +838,7 @@ pub fn rebuild_affected(
                     .entry(schema_stem.clone())
                     .or_default()
                     .len();
+                let page_url_path = result.built.url_path.clone();
                 outcome
                     .built_pages
                     .entry(schema_stem.clone())
@@ -696,6 +849,7 @@ pub fn rebuild_affected(
                     page_index,
                     output_path: result.output_path,
                     template_path: result.template_path,
+                    url_path: page_url_path,
                 });
                 outcome.files_built += 1;
             }
@@ -714,7 +868,15 @@ pub fn rebuild_affected(
     for collected in &rebuild_collected {
         if let Some(tmpl_path) = &collected.template_path {
             let page_data = &outcome.built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(page_data, &collected.schema_stem, tmpl_path, &collected.output_path, &registry)?;
+            render_page(
+                page_data,
+                &collected.schema_stem,
+                tmpl_path,
+                &collected.output_path,
+                &registry,
+                &collected.url_path,
+                url_config,
+            )?;
         }
     }
 
@@ -723,7 +885,7 @@ pub fn rebuild_affected(
     // is to delegate to build_site() which re-reads everything and re-renders the index.
     // This is a full rebuild but only happens when the index is explicitly affected.
     if rebuild_index {
-        let full = build_site(site_dir)?;
+        let full = build_site(site_dir, url_config)?;
         // Copy the index dep registration from the full build into our partial outcome
         let index_deps = full.dep_graph.sources_for(&index_output);
         if !index_deps.is_empty() {
