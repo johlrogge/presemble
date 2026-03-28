@@ -6,3 +6,4 @@
 /.mcp.json
 fixtures/*/output/
 site/output/
+/output/

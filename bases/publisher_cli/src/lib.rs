@@ -59,6 +59,13 @@ struct CollectedPage {
     url_path: String,
 }
 
+/// Compute the output directory for a site: `<parent-of-site-dir>/output/<site-dir-name>/`
+/// e.g. `presemble build site/` → `output/site/`
+pub fn output_dir(site_dir: &Path) -> std::path::PathBuf {
+    let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
+    site_dir.parent().unwrap_or(site_dir).join("output").join(name)
+}
+
 /// Find a template for the given schema stem, trying extensions in order.
 /// Tries .html first (XML), then .hiccup (Hiccup/EDN).
 fn find_template(templates_dir: &std::path::Path, schema_stem: &str) -> Option<std::path::PathBuf> {
@@ -82,15 +89,13 @@ fn page_address(site_dir: &std::path::Path, schema_stem: &str, content_path: &st
     // `{schema}/index/index.html` (which would be served at `/{schema}/index/`).
     let (url_path, output_path) = if slug == "index" {
         let url = format!("/{schema_stem}/");
-        let path = site_dir
-            .join("output")
+        let path = output_dir(site_dir)
             .join(schema_stem)
             .join("index.html");
         (url, path)
     } else {
         let url = format!("/{schema_stem}/{slug}");
-        let path = site_dir
-            .join("output")
+        let path = output_dir(site_dir)
             .join(schema_stem)
             .join(&slug)
             .join("index.html");
@@ -757,9 +762,9 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                         Ok(template::serialize_nodes(&rewritten))
                     }) {
                     Ok(html) => {
-                        let output_dir = site_dir.join("output");
-                        std::fs::create_dir_all(&output_dir)?;
-                        let index_output = output_dir.join("index.html");
+                        let out_dir = output_dir(site_dir);
+                        std::fs::create_dir_all(&out_dir)?;
+                        let index_output = out_dir.join("index.html");
                         std::fs::write(&index_output, &html)?;
                         println!("index.html: PASS");
                         println!("  \u{2192} {}", index_output.display());
@@ -803,7 +808,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     built_url_paths.insert("/index.html".to_string());
 
     // Validate internal links
-    let output_dir = site_dir.join("output");
+    let output_dir = output_dir(site_dir);
     if output_dir.exists() {
         let urls_rewritten = !matches!(
             make_rewriter("/", url_config),
@@ -870,8 +875,8 @@ pub fn rebuild_affected(
     }
 
     // Separate content pages from the index page
-    let output_dir = site_dir.join("output");
-    let index_output = output_dir.join("index.html");
+    let out_dir = output_dir(site_dir);
+    let index_output = out_dir.join("index.html");
     let rebuild_index = affected.contains(&index_output);
     let content_outputs: HashSet<_> = affected
         .iter()
@@ -1120,7 +1125,7 @@ fn copy_referenced_assets(
                 src.display()
             )));
         }
-        let dest = site_dir.join("output").join(relative);
+        let dest = output_dir(site_dir).join(relative);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1246,7 +1251,7 @@ mod tests {
         assert_eq!(addr.url_path, "/docs/hello-world");
         assert_eq!(
             addr.output_path,
-            Path::new("/site/output/docs/hello-world/index.html")
+            Path::new("/output/site/docs/hello-world/index.html")
         );
     }
 
@@ -1259,10 +1264,10 @@ mod tests {
         assert_eq!(addr.slug, "index");
         // URL should be the schema directory, not /docs/index
         assert_eq!(addr.url_path, "/docs/");
-        // Output should be output/docs/index.html, not output/docs/index/index.html
+        // Output should be output/site/docs/index.html, not output/site/docs/index/index.html
         assert_eq!(
             addr.output_path,
-            Path::new("/site/output/docs/index.html")
+            Path::new("/output/site/docs/index.html")
         );
     }
 }
