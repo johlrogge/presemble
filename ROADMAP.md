@@ -56,10 +56,10 @@ article to its author page automatically, without any workarounds in the content
 
 **Deliverables:**
 - [x] Cross-content reference resolution — templates can pull data from linked content items (e.g. render author name from author page, not hardcoded in article) (ADR-012, shipped v0.2.0)
-- [ ] `site.*` as ordinary content — `site.md` is a normal content file with a schema, not a special-cased config mechanism. No separate `site.yaml`. Site metadata is just another content item in the data graph.
-- [x] Collection queries — filter/sort collections. Collections live at the **root level** of the data graph: `data-each="features"` not `data-each="site.features"`.
-- [ ] Template composition — callable templates defined with `presemble:define`, invoked with `presemble:apply`. File-qualified references use `::` separator (e.g. `templates/common::header`). `presemble.self` carries the passed context; `presemble.item` carries the current iteration item. The publisher infers the callable contract from field references (duck-typing by use) — no explicit signature declaration needed.
-- [ ] Semantic types with display defaults — e.g. `iso-date` renders as a human-readable date by default, overridable with `| format(...)`. Localization strategy is an open question deferred to a later milestone.
+- [x] `site.*` as ordinary content — `site.md` is a normal content file with a schema, no special-casing. Any user can declare `schemas/site.md` and it works like any other content type.
+- [x] Collection queries — collections live at the **root level** of the data graph: `data-each="features"` not `data-each="site.features"`.
+- [x] Template composition — `presemble:define` declares named callable fragments; `presemble:apply` invokes them with explicit data context. File-qualified references (`templates/common::header`). `presemble.self` carries the passed context. Duck-typing validation deferred.
+- [ ] Semantic types with display defaults — deferred to a future milestone.
 
 ---
 
