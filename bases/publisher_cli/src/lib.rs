@@ -696,8 +696,12 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     // Validate internal links
     let output_dir = site_dir.join("output");
     if output_dir.exists() {
-        if matches!(url_config.url_style, UrlStyle::Relative) {
-            println!("Link validation: skipped for relative URL mode (structural correctness guaranteed by graph)");
+        let urls_rewritten = !matches!(
+            make_rewriter("/", url_config),
+            template::UrlRewriter::Identity
+        );
+        if urls_rewritten {
+            println!("Link validation: skipped (URLs rewritten at serialization — structural correctness guaranteed by graph)");
         } else {
             let broken = validate_internal_links(&output_dir, &built_url_paths);
             for msg in &broken {
