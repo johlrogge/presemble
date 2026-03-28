@@ -41,7 +41,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build site
-        run: devenv shell -- cargo run -p publisher -- site --config site/.presemble/github-pages.json
+        run: devenv shell -- cargo run -p publisher -- build site --config site/.presemble/github-pages.json
 
       - uses: actions/upload-pages-artifact@v3
         with:
