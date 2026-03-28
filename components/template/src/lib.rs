@@ -12,7 +12,7 @@ pub use data::{build_article_graph, DataGraph, Value};
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};
-pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, rewrite_urls, UrlRewriter};
+pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, rewrite_urls, UrlRewriter};
 pub use hiccup::parse_template_hiccup;
 pub use registry::{extract_definitions, NullRegistry, RenderContext, TemplateRegistry};
 
