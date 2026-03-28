@@ -12,7 +12,7 @@ pub use data::{build_article_graph, DataGraph, Value};
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};
-pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, rewrite_urls, UrlRewriter};
+pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter};
 pub use hiccup::parse_template_hiccup;
 pub use registry::{extract_definitions, NullRegistry, RenderContext, TemplateRegistry};
 
@@ -49,5 +49,18 @@ pub fn render_from_nodes_with_registry(
 ) -> Result<String, transformer::RenderError> {
     let ctx = RenderContext::new(registry);
     let transformed = transformer::transform(nodes, graph, &ctx)?;
+    Ok(dom::serialize_nodes(&transformed))
+}
+
+/// Render pre-parsed template nodes using an existing `RenderContext`.
+///
+/// Use this when you need full control over the context — e.g. when passing
+/// local callable definitions via `RenderContext::with_local_defs`.
+pub fn render_from_nodes_with_context(
+    nodes: Vec<dom::Node>,
+    graph: &DataGraph,
+    ctx: &registry::RenderContext<'_>,
+) -> Result<String, transformer::RenderError> {
+    let transformed = transformer::transform(nodes, graph, ctx)?;
     Ok(dom::serialize_nodes(&transformed))
 }

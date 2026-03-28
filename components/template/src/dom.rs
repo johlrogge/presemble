@@ -402,6 +402,48 @@ fn extract_include_names_recursive(nodes: &[Node], found: &mut std::collections:
     }
 }
 
+/// Extract the names of template files referenced via `<presemble:apply template="...">` elements.
+///
+/// Only file-qualified names (containing "::") contribute a file stem — bare names resolve from
+/// local definitions and do not correspond to a file. Results are deduplicated and sorted.
+pub fn extract_apply_template_names(nodes: &[Node]) -> Vec<String> {
+    let mut found = std::collections::HashSet::new();
+    extract_apply_template_names_recursive(nodes, &mut found);
+    let mut result: Vec<String> = found.into_iter().collect();
+    result.sort();
+    result
+}
+
+fn extract_apply_template_names_recursive(
+    nodes: &[Node],
+    found: &mut std::collections::HashSet<String>,
+) {
+    for node in nodes {
+        if let Node::Element(el) = node {
+            if el.name == "presemble:apply"
+                && let Some(template_attr) = el.attr("template")
+            {
+                // Only file-qualified names (with "::") contribute a file stem
+                if let Some(pos) = template_attr.find("::") {
+                    let file_part = &template_attr[..pos];
+                    // Strip leading "templates/" if present
+                    let file_part = file_part.strip_prefix("templates/").unwrap_or(file_part);
+                    // Extract file stem (drop extension)
+                    if let Some(stem) = std::path::Path::new(file_part)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                    {
+                        found.insert(stem.to_string());
+                    }
+                }
+                // Bare names contribute nothing — they resolve from local defs
+            }
+            // Recurse into children for all elements
+            extract_apply_template_names_recursive(&el.children, found);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +620,41 @@ mod tests {
         let src = r#"<presemble:include />"#;
         let nodes = parse_template_xml(src).unwrap();
         assert!(extract_include_names(&nodes).is_empty());
+    }
+
+    #[test]
+    fn extract_apply_template_names_bare_name_contributes_nothing() {
+        let src = r#"<presemble:apply template="feature-card" data="item" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert!(extract_apply_template_names(&nodes).is_empty(), "bare names should not contribute file stems");
+    }
+
+    #[test]
+    fn extract_apply_template_names_file_qualified() {
+        let src = r#"<presemble:apply template="components::card" data="item" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_apply_template_names(&nodes), vec!["components"]);
+    }
+
+    #[test]
+    fn extract_apply_template_names_templates_prefix() {
+        let src = r#"<presemble:apply template="templates/components::card" data="item" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_apply_template_names(&nodes), vec!["components"]);
+    }
+
+    #[test]
+    fn extract_apply_template_names_deduplicates() {
+        let src = r#"<div><presemble:apply template="components::card" data="a" /><presemble:apply template="components::hero" data="b" /></div>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert_eq!(extract_apply_template_names(&nodes), vec!["components"]);
+    }
+
+    #[test]
+    fn extract_apply_template_names_no_template_attr() {
+        let src = r#"<presemble:apply data="item" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        assert!(extract_apply_template_names(&nodes).is_empty());
     }
 
     #[test]

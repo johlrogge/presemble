@@ -59,10 +59,12 @@ Run these agents in order before cutting a release:
 3. **documenter** — update README files to reflect the release
    > "Update docs for release 0.x.0"
 
-4. **devops** — start and finish the release branch
+4. **Update `ROADMAP.md`** — mark any newly completed deliverables as `[x]` and move semantic-types or other explicitly deferred items out of the current milestone so M2/M3/etc. have a clean definition of done.
+
+5. **devops** — start and finish the release branch
    > "Start release 0.x.0" → confirm → "Finish release 0.x.0"
 
-5. **Human** — push to remote
+6. **Human** — push to remote
    ```
    git push origin master develop --tags
    ```
