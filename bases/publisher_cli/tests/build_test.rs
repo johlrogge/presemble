@@ -84,7 +84,7 @@ fn build_produces_index_html() {
 
     let outcome = publisher_cli::build_site(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let index_path = site_dir.join("output/index.html");
+    let index_path = publisher_cli::output_dir(&site_dir).join("index.html");
     assert!(index_path.exists(), "output/index.html should be created");
 
     let content = fs::read_to_string(&index_path).unwrap();
@@ -108,7 +108,7 @@ fn build_site_populates_dep_graph_for_article() {
     let site_dir = fs::canonicalize(&site_dir).unwrap();
     let outcome = publisher_cli::build_site(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let article_output = site_dir.join("output/article/hello-world/index.html");
+    let article_output = publisher_cli::output_dir(&site_dir).join("article/hello-world/index.html");
     let schema_path = site_dir.join("schemas/article.md");
     let content_path = site_dir.join("content/article/hello-world.md");
 
@@ -131,7 +131,7 @@ fn build_site_dep_graph_index_depends_on_all_content() {
     let site_dir = fs::canonicalize(&site_dir).unwrap();
     let outcome = publisher_cli::build_site(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let index_output = site_dir.join("output/index.html");
+    let index_output = publisher_cli::output_dir(&site_dir).join("index.html");
     let content_path = site_dir.join("content/article/hello-world.md");
 
     let affected = outcome.dep_graph.affected_outputs(&content_path);
@@ -147,7 +147,7 @@ fn build_site_dep_graph_index_depends_on_index_template() {
     let site_dir = fs::canonicalize(&site_dir).unwrap();
     let outcome = publisher_cli::build_site(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let index_output = site_dir.join("output/index.html");
+    let index_output = publisher_cli::output_dir(&site_dir).join("index.html");
     let index_template = site_dir.join("templates/index.html");
 
     let affected = outcome.dep_graph.affected_outputs(&index_template);
@@ -194,7 +194,7 @@ fn build_site_copies_assets_to_output() {
 
     publisher_cli::build_site(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let asset = site_dir.join("output/assets/style.css");
+    let asset = publisher_cli::output_dir(&site_dir).join("assets/style.css");
     assert!(
         asset.exists(),
         "output/assets/style.css should be copied from assets/style.css"
@@ -279,7 +279,7 @@ fn presemble_include_inlines_header_and_footer_fragments() {
 
     // Verify article output contains header and footer content
     let article_html =
-        fs::read_to_string(site.join("output/article/test-post/index.html")).unwrap();
+        fs::read_to_string(publisher_cli::output_dir(&site).join("article/test-post/index.html")).unwrap();
     assert!(
         article_html.contains("MySite"),
         "article output should contain header content from include: {article_html}"
@@ -294,7 +294,7 @@ fn presemble_include_inlines_header_and_footer_fragments() {
     );
 
     // Verify index output also inlines the fragments
-    let index_html = fs::read_to_string(site.join("output/index.html")).unwrap();
+    let index_html = fs::read_to_string(publisher_cli::output_dir(&site).join("index.html")).unwrap();
     assert!(
         index_html.contains("MySite"),
         "index output should contain header content from include: {index_html}"
