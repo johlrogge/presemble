@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Presemble — Documentation</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<presemble:include src="header" />
+
+<main class="docs">
+  <presemble:insert data="docs.title" as="h1" />
+  <presemble:insert data="docs.lead" as="p" class="docs__lead" />
+  <ul class="docs__cards">
+    <li>
+      <a href="/guide/getting-started" class="docs__card">
+        <h2>Getting Started</h2>
+        <p>Go from zero to a published site in minutes.</p>
+      </a>
+    </li>
+    <li>
+      <a href="/guide/user-guide" class="docs__card">
+        <h2>User Guide</h2>
+        <p>Complete reference for schemas, templates, content, and the build pipeline.</p>
+      </a>
+    </li>
+  </ul>
+</main>
+
+<presemble:include src="footer" />
+</body>
+</html>

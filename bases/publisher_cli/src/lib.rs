@@ -77,12 +77,25 @@ fn page_address(site_dir: &std::path::Path, schema_stem: &str, content_path: &st
         .and_then(|s| s.to_str())
         .unwrap_or("index")
         .to_string();
-    let url_path = format!("/{schema_stem}/{slug}");
-    let output_path = site_dir
-        .join("output")
-        .join(schema_stem)
-        .join(&slug)
-        .join("index.html");
+    // When the file is named `index.md`, it acts as the directory index for the schema.
+    // Output to `{schema}/index.html` directly (served at `/{schema}/`), not
+    // `{schema}/index/index.html` (which would be served at `/{schema}/index/`).
+    let (url_path, output_path) = if slug == "index" {
+        let url = format!("/{schema_stem}/");
+        let path = site_dir
+            .join("output")
+            .join(schema_stem)
+            .join("index.html");
+        (url, path)
+    } else {
+        let url = format!("/{schema_stem}/{slug}");
+        let path = site_dir
+            .join("output")
+            .join(schema_stem)
+            .join(&slug)
+            .join("index.html");
+        (url, path)
+    };
     PageAddress { slug, url_path, output_path }
 }
 
@@ -684,9 +697,12 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     // Add content pages — register clean URL and its variants
     for pages in built_pages.values() {
         for page in pages {
-            built_url_paths.insert(page.url_path.clone());                             // "/article/hello-world"
-            built_url_paths.insert(format!("{}/", page.url_path));                    // "/article/hello-world/"
-            built_url_paths.insert(format!("{}/index.html", page.url_path));          // "/article/hello-world/index.html"
+            // Normalise to bare path (no trailing slash) for consistent lookup.
+            // page.url_path may be "/article/hello-world" or "/docs/" (index page).
+            let bare = page.url_path.trim_end_matches('/').to_string();
+            built_url_paths.insert(bare.clone());                        // "/article/hello-world" or "/docs"
+            built_url_paths.insert(format!("{bare}/"));                  // "/article/hello-world/" or "/docs/"
+            built_url_paths.insert(format!("{bare}/index.html"));        // "/article/hello-world/index.html" or "/docs/index.html"
         }
     }
     // Add index
@@ -1017,5 +1033,41 @@ fn format_severity(severity: &content::Severity) -> &'static str {
     match severity {
         content::Severity::Error => "ERROR",
         content::Severity::Warning => "WARN",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn page_address_regular_slug() {
+        let site_dir = Path::new("/site");
+        let content_path = Path::new("content/docs/hello-world.md");
+        let addr = page_address(site_dir, "docs", content_path);
+
+        assert_eq!(addr.slug, "hello-world");
+        assert_eq!(addr.url_path, "/docs/hello-world");
+        assert_eq!(
+            addr.output_path,
+            Path::new("/site/output/docs/hello-world/index.html")
+        );
+    }
+
+    #[test]
+    fn page_address_index_slug_routes_to_schema_directory() {
+        let site_dir = Path::new("/site");
+        let content_path = Path::new("content/docs/index.md");
+        let addr = page_address(site_dir, "docs", content_path);
+
+        assert_eq!(addr.slug, "index");
+        // URL should be the schema directory, not /docs/index
+        assert_eq!(addr.url_path, "/docs/");
+        // Output should be output/docs/index.html, not output/docs/index/index.html
+        assert_eq!(
+            addr.output_path,
+            Path::new("/site/output/docs/index.html")
+        );
     }
 }
