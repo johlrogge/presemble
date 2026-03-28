@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use crate::{build_site, rebuild_affected, DependencyGraph};
+use crate::{build_site, rebuild_affected, DependencyGraph, UrlConfig};
 use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tiny_http::{Response, Server, StatusCode};
 
-pub fn serve_site(site_dir: &Path, port: u16) -> Result<(), CliError> {
+pub fn serve_site(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
     let site_dir = std::fs::canonicalize(site_dir)
         .unwrap_or_else(|_| site_dir.to_path_buf());
     let site_dir = site_dir.as_path();
@@ -18,7 +18,7 @@ pub fn serve_site(site_dir: &Path, port: u16) -> Result<(), CliError> {
     // Initial build — capture the dependency graph
     println!("Building site...");
     let current_graph = Arc::new(Mutex::new(DependencyGraph::new()));
-    match build_site(site_dir) {
+    match build_site(site_dir, url_config) {
         Ok(outcome) => {
             *current_graph.lock().unwrap() = outcome.dep_graph;
             if outcome.files_failed > 0 {
@@ -35,8 +35,9 @@ pub fn serve_site(site_dir: &Path, port: u16) -> Result<(), CliError> {
     // Start file watcher in background thread
     let site_dir_owned = site_dir.to_path_buf();
     let graph_clone = Arc::clone(&current_graph);
+    let url_config_owned = url_config.clone();
     std::thread::spawn(move || {
-        watch_and_rebuild(&site_dir_owned, graph_clone);
+        watch_and_rebuild(&site_dir_owned, graph_clone, &url_config_owned);
     });
 
     // Start HTTP server
@@ -115,7 +116,7 @@ fn is_relevant_path(path: &std::path::Path) -> bool {
     )
 }
 
-fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
+fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>, url_config: &UrlConfig) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
     let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
@@ -196,7 +197,7 @@ fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
         }
 
         println!("Rebuilding {} page(s)...", affected_count);
-        match rebuild_affected(site_dir, &dirty, &current) {
+        match rebuild_affected(site_dir, &dirty, &current, url_config) {
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
                 g.merge(outcome.dep_graph);
@@ -208,7 +209,7 @@ fn watch_and_rebuild(site_dir: &Path, graph: Arc<Mutex<DependencyGraph>>) {
             }
             Err(e) => {
                 eprintln!("Rebuild failed: {e} — falling back to full rebuild");
-                match build_site(site_dir) {
+                match build_site(site_dir, url_config) {
                     Ok(outcome) => {
                         let mut g = graph.lock().unwrap();
                         *g = outcome.dep_graph;

@@ -11,6 +11,8 @@ dep_graph = { workspace = true }
 clap = { workspace = true }
 tiny_http = { workspace = true }
 notify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
