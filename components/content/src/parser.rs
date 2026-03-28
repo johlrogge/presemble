@@ -27,7 +27,7 @@ fn convert_heading_level(
 /// Uses pulldown-cmark to parse the markdown and extracts structural
 /// elements (headings, paragraphs, images, links, separators).
 pub fn parse_document(input: &str) -> Result<Document, ContentError> {
-    let parser = Parser::new_ext(input, Options::empty());
+    let parser = Parser::new_ext(input, Options::ENABLE_TABLES);
     let mut elements: Vec<ContentElement> = Vec::new();
 
     // State machine for tracking what block we're inside.
@@ -65,6 +65,15 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
         CodeBlock {
             language: Option<String>,
             code: String,
+        },
+        /// Inside a table.
+        Table {
+            headers: Vec<String>,
+            rows: Vec<Vec<String>>,
+            /// The current row being accumulated.
+            current_row: Vec<String>,
+            /// The current cell buffer.
+            current_cell: String,
         },
     }
 
@@ -193,6 +202,66 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
                 }
             }
 
+            // ── Tables ──────────────────────────────────────────────────────
+            // Event sequence from pulldown-cmark for a table:
+            //   Start(Table) → Start(TableHead) → Start(TableCell)/End(TableCell) × N
+            //   → End(TableHead) → Start(TableRow)/cells/End(TableRow) × M → End(Table)
+            // Note: TableHead contains TableCell elements directly (no TableRow wrapper).
+            Event::Start(Tag::Table(_)) => {
+                state = State::Table {
+                    headers: Vec::new(),
+                    rows: Vec::new(),
+                    current_row: Vec::new(),
+                    current_cell: String::new(),
+                };
+            }
+            Event::Start(Tag::TableHead) => {
+                // No setup needed; cells are collected directly into current_row.
+            }
+            Event::End(TagEnd::TableHead) => {
+                // Header row is complete; move current_row into headers.
+                if let State::Table {
+                    ref mut headers,
+                    ref mut current_row,
+                    ..
+                } = state
+                {
+                    *headers = std::mem::take(current_row);
+                }
+            }
+            Event::Start(Tag::TableRow) | Event::Start(Tag::TableCell) => {
+                // No special action needed on row/cell open — handled on close
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let State::Table {
+                    ref mut current_row,
+                    ref mut current_cell,
+                    ..
+                } = state
+                {
+                    let cell = std::mem::take(current_cell).trim().to_string();
+                    current_row.push(cell);
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                // Body row complete; push into rows.
+                if let State::Table {
+                    ref mut rows,
+                    ref mut current_row,
+                    ..
+                } = state
+                {
+                    let row = std::mem::take(current_row);
+                    rows.push(row);
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let State::Table { headers, rows, .. } = state {
+                    elements.push(ContentElement::Table { headers, rows });
+                    state = State::Idle;
+                }
+            }
+
             // ── Separator (thematic break / horizontal rule) ─────────────────
             Event::Rule => {
                 elements.push(ContentElement::Separator);
@@ -200,7 +269,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
             }
 
             // ── Text events ─────────────────────────────────────────────────
-            Event::Text(text) | Event::Code(text) => {
+            Event::Text(text) => {
                 let s = text.as_ref();
                 match &mut state {
                     State::Heading { text: buf, .. } => buf.push_str(s),
@@ -208,6 +277,29 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
+                    State::Table { current_cell, .. } => current_cell.push_str(s),
+                    State::Idle => {}
+                }
+            }
+            Event::Code(text) => {
+                let s = text.as_ref();
+                // Escape the text for HTML, then wrap in <code> tags.
+                let escaped = s
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;");
+                match &mut state {
+                    State::Heading { text: buf, .. } => buf.push_str(s),
+                    State::Paragraph { text: buf, .. } => buf.push_str(s),
+                    State::Image { alt, .. } => alt.push_str(s),
+                    State::Link { text: buf, .. } => buf.push_str(s),
+                    State::CodeBlock { code, .. } => code.push_str(s),
+                    State::Table { current_cell, .. } => {
+                        current_cell.push_str("<code>");
+                        current_cell.push_str(&escaped);
+                        current_cell.push_str("</code>");
+                    }
                     State::Idle => {}
                 }
             }
@@ -514,5 +606,57 @@ Body paragraph."#;
             !doc.elements.is_empty(),
             "invalid-post.md should produce at least one element"
         );
+    }
+
+    // ── Tables ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn table_parses_headers_and_rows() {
+        let input = "| Name | Value |\n|------|-------|\n| Alpha | 1 |\n| Beta | 2 |\n";
+        let doc = parse_document(input).expect("table markdown should parse");
+        let table = doc
+            .elements
+            .iter()
+            .find(|e| matches!(e, ContentElement::Table { .. }))
+            .expect("expected a Table element");
+        match table {
+            ContentElement::Table { headers, rows } => {
+                assert_eq!(headers, &["Name", "Value"], "headers should match column names");
+                assert_eq!(rows.len(), 2, "expected two body rows");
+                assert_eq!(rows[0], vec!["Alpha".to_string(), "1".to_string()]);
+                assert_eq!(rows[1], vec!["Beta".to_string(), "2".to_string()]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn table_with_inline_code_in_cell() {
+        let input = "| Command | Description |\n|---------|-------------|\n| `cargo test` | Run tests |\n";
+        let doc = parse_document(input).expect("table with inline code should parse");
+        let table = doc
+            .elements
+            .iter()
+            .find(|e| matches!(e, ContentElement::Table { .. }))
+            .expect("expected a Table element");
+        match table {
+            ContentElement::Table { headers: _, rows } => {
+                assert_eq!(rows.len(), 1, "expected one body row");
+                let cell = &rows[0][0];
+                assert!(
+                    cell.contains("<code>"),
+                    "cell with inline code should contain <code> tag; got: {cell}"
+                );
+                assert!(
+                    cell.contains("cargo test"),
+                    "cell should contain code content; got: {cell}"
+                );
+                assert!(
+                    cell.contains("</code>"),
+                    "cell should close <code> tag; got: {cell}"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 }
