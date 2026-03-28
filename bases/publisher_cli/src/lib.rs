@@ -432,13 +432,14 @@ fn render_page(
     context.insert(schema_stem, template::Value::Record(data.clone()));
 
     let tmpl_src = std::fs::read_to_string(template_path)?;
-    let nodes = match template_path.extension().and_then(|e| e.to_str()) {
+    let raw_nodes = match template_path.extension().and_then(|e| e.to_str()) {
         Some("hiccup") => template::parse_template_hiccup(&tmpl_src)
             .map_err(|e| CliError::Render(e.to_string()))?,
         _ => template::parse_template_xml(&tmpl_src)
             .map_err(|e| CliError::Render(e.to_string()))?,
     };
-    let ctx = template::RenderContext::new(registry);
+    let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+    let ctx = template::RenderContext::with_local_defs(registry, &local_defs);
     let transformed = template::transform(nodes, &context, &ctx)
         .map_err(|e| CliError::Render(e.to_string()))?;
     let rewriter = make_rewriter(page_url, url_config);
@@ -579,6 +580,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                             all_asset_paths.extend(assets);
                             let includes = template::extract_include_names(&nodes);
                             included_template_stems.extend(includes);
+                            let apply_names = template::extract_apply_template_names(&nodes);
+                            included_template_stems.extend(apply_names);
                         }
                         Err(e) => {
                             eprintln!(
@@ -595,6 +598,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                             all_asset_paths.extend(assets);
                             let includes = template::extract_include_names(&nodes);
                             included_template_stems.extend(includes);
+                            let apply_names = template::extract_apply_template_names(&nodes);
+                            included_template_stems.extend(apply_names);
                         }
                         Err(e) => {
                             eprintln!(
@@ -742,8 +747,9 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
             Ok(tmpl_src) => {
                 match template::parse_template_xml(&tmpl_src)
                     .map_err(|e| CliError::Render(format!("index template parse error: {e}")))
-                    .and_then(|nodes| {
-                        let ctx = template::RenderContext::new(&registry);
+                    .and_then(|raw_nodes| {
+                        let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+                        let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
                         let transformed = template::transform(nodes, &site_context, &ctx)
                             .map_err(|e| CliError::Render(e.to_string()))?;
                         let rewriter = make_rewriter("/", url_config);
