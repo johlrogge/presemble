@@ -63,6 +63,9 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
                             ));
                         }
                     }
+                } else if el.is_presemble() && el.name == "presemble:apply" {
+                    let mut rendered = render_apply(&el, graph, ctx)?;
+                    output.append(&mut rendered);
                 } else if el.name == "template" && el.attr("data-slot").is_some() {
                     // Conditional block: render children only if the slot is present.
                     let slot_path = el.attr("data-slot").unwrap().to_string();
@@ -291,6 +294,54 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             Ok(result)
         }
     }
+}
+
+/// Handle a `<presemble:apply>` element.
+/// Invokes a named callable template fragment with an explicit data context.
+fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
+    let template_name = el
+        .attr("template")
+        .ok_or_else(|| RenderError::Render("presemble:apply requires a 'template' attribute".into()))?
+        .to_string();
+
+    let data_path = el
+        .attr("data")
+        .ok_or_else(|| RenderError::Render("presemble:apply requires a 'data' attribute".into()))?
+        .to_string();
+
+    if ctx.is_too_deep() {
+        return Err(RenderError::Render("max depth exceeded".into()));
+    }
+
+    let callable_nodes = ctx
+        .resolve_callable(&template_name)
+        .ok_or_else(|| RenderError::Render(format!("callable not found: '{template_name}'")))?;
+
+    // Resolve the data value. If absent, produce no output.
+    let segments: Vec<&str> = data_path.split('.').collect();
+    let resolved_value = graph.resolve(&segments);
+    match resolved_value {
+        None | Some(Value::Absent) => return Ok(Vec::new()),
+        _ => {}
+    }
+    let resolved_value = resolved_value.unwrap();
+
+    // Build the effective data graph for the callable.
+    let mut effective_graph = match resolved_value {
+        Value::Record(sub) => sub.clone(),
+        other => {
+            let mut g = DataGraph::new();
+            g.insert("value", other.clone());
+            g
+        }
+    };
+
+    // Inject presemble.self = the resolved value
+    let mut presemble_ns = DataGraph::new();
+    presemble_ns.insert("self", resolved_value.clone());
+    effective_graph.insert("presemble", Value::Record(presemble_ns));
+
+    transform(callable_nodes, &effective_graph, &ctx.descend())
 }
 
 /// Render a Record value as a link or image.
@@ -774,6 +825,169 @@ mod tests {
     // ---------------------------------------------------------------------------
     // presemble:include tests
     // ---------------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------------
+    // presemble:apply tests
+    // ---------------------------------------------------------------------------
+
+    struct MockCallableRegistry {
+        name: &'static str,
+        src: &'static str,
+    }
+    impl crate::registry::TemplateRegistry for MockCallableRegistry {
+        fn resolve(&self, name: &str) -> Option<Vec<Node>> {
+            if name == self.name {
+                Some(parse_template_xml(self.src).unwrap())
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn apply_callable_inlines_body() {
+        let mut graph = DataGraph::new();
+        let mut item = DataGraph::new();
+        item.insert("title", Value::Text("My Feature".to_string()));
+        graph.insert("feature", Value::Record(item));
+
+        let reg = MockCallableRegistry {
+            name: "feature-card",
+            src: r#"<li><presemble:insert data="title" as="h3" /></li>"#,
+        };
+        let ctx = RenderContext::new(&reg);
+
+        let src = r#"<presemble:apply template="feature-card" data="feature" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("<h3"), "callable body should be rendered: {html}");
+        assert!(html.contains("My Feature"), "data should flow into callable: {html}");
+    }
+
+    #[test]
+    fn apply_with_missing_template_attr_returns_error() {
+        let graph = DataGraph::new();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let src = r#"<presemble:apply data="feature" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx);
+        assert!(result.is_err(), "missing template attr should error");
+    }
+
+    #[test]
+    fn apply_with_missing_data_attr_returns_error() {
+        let graph = DataGraph::new();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let src = r#"<presemble:apply template="feature-card" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx);
+        assert!(result.is_err(), "missing data attr should error");
+    }
+
+    #[test]
+    fn apply_with_unknown_template_returns_error() {
+        let mut graph = DataGraph::new();
+        graph.insert("feature", Value::Record(DataGraph::new()));
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let src = r#"<presemble:apply template="unknown-callable" data="feature" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx);
+        assert!(result.is_err(), "unknown template should error");
+    }
+
+    #[test]
+    fn apply_with_absent_data_produces_no_output() {
+        let graph = DataGraph::new(); // nothing in graph
+        let reg = MockCallableRegistry {
+            name: "card",
+            src: "<li>card</li>",
+        };
+        let ctx = RenderContext::new(&reg);
+        let src = r#"<presemble:apply template="card" data="missing.path" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        assert!(result.is_empty(), "absent data should produce no output");
+    }
+
+    #[test]
+    fn apply_passes_correct_context_to_callable() {
+        // Callable should resolve fields relative to the passed data record
+        let mut graph = DataGraph::new();
+        let mut author = DataGraph::new();
+        author.insert("name", Value::Text("Jo".to_string()));
+        graph.insert("author", Value::Record(author));
+
+        let reg = MockCallableRegistry {
+            name: "author-card",
+            src: r#"<span><presemble:insert data="name" as="strong" /></span>"#,
+        };
+        let ctx = RenderContext::new(&reg);
+
+        let src = r#"<presemble:apply template="author-card" data="author" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("Jo"), "field inside callable should resolve against passed data: {html}");
+    }
+
+    #[test]
+    fn apply_presemble_self_accessible_inside_callable() {
+        let mut graph = DataGraph::new();
+        let mut item = DataGraph::new();
+        item.insert("label", Value::Text("Click me".to_string()));
+        graph.insert("btn", Value::Record(item));
+
+        // Inside the callable, presemble.self.label should equal the top-level label
+        let reg = MockCallableRegistry {
+            name: "btn-template",
+            src: r#"<button><presemble:insert data="presemble.self.label" as="span" /></button>"#,
+        };
+        let ctx = RenderContext::new(&reg);
+
+        let src = r#"<presemble:apply template="btn-template" data="btn" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("Click me"), "presemble.self should be accessible: {html}");
+    }
+
+    #[test]
+    fn apply_depth_limit_prevents_infinite_recursion() {
+        // A self-referencing callable that passes its received value back to itself.
+        // When the resolved value is not a Record, it is stored under "value".
+        // The callable then re-applies itself with data="value", which always resolves —
+        // so without the depth guard this would recurse forever.
+        struct SelfRefRegistry;
+        impl crate::registry::TemplateRegistry for SelfRefRegistry {
+            fn resolve(&self, name: &str) -> Option<Vec<Node>> {
+                if name == "recurse" {
+                    // Re-applies itself using the "value" key (populated for non-Record inputs)
+                    Some(parse_template_xml(
+                        r#"<div><presemble:apply template="recurse" data="value" /></div>"#
+                    ).unwrap())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut graph = DataGraph::new();
+        // Use a Text value so the callable graph has `value = Text("x")`
+        graph.insert("item", Value::Text("x".to_string()));
+
+        let reg = SelfRefRegistry;
+        let mut ctx = RenderContext::new(&reg);
+        ctx.max_depth = 5; // Low limit so the test is fast
+
+        let src = r#"<presemble:apply template="recurse" data="item" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let result = transform(nodes, &graph, &ctx);
+        assert!(result.is_err(), "self-referencing callable should hit depth limit");
+    }
 
     #[test]
     fn include_missing_template_returns_error() {
