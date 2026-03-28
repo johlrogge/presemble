@@ -52,14 +52,17 @@ Rust monorepo using cargo-polylith.
 
 **Components** (shared library code):
 - `schema` — grammar types and schema parser
-- `content` — document parser and validator
+- `content` — document parser and validator (depends on `schema`)
+- `template` — template rendering engine (depends on `schema`, `content`)
+- `dep_graph` — dependency tracking for incremental builds
 
 **Bases** (runtime entry points):
-- `publisher_cli` — CLI wiring for the build command
+- `publisher_cli` — CLI wiring for build and serve modes
+- `editor_server` — stub base for the multiplayer editing service (in progress)
 
 **Projects** (deployable binaries):
 - `publisher` — `presemble build <site-dir>` CLI
-- `content_management` — long-running multiplayer editing service (future)
+- `content_management` — long-running multiplayer editing service (in progress, backed by `editor_server`)
 
 ADRs live in `docs/adr/`. Read relevant ADRs before making significant design decisions.
 

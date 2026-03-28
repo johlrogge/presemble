@@ -1,1 +1,1 @@
-/nix/store/n34ns6qi7ijm1bkln7awlkw296zy3b35-claude-agents-commit.md
+/nix/store/fb5lq2ip219l0bq1i51p3msgx8ragmjf-claude-agents-commit.md
