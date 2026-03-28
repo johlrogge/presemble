@@ -16,6 +16,32 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
+/// Message sent over the WebSocket reload channel.
+/// Empty `pages` = full rebuild → reload in place.
+#[derive(Clone, Debug)]
+struct ReloadMessage {
+    pages: Vec<String>,
+}
+
+impl ReloadMessage {
+    fn to_json(&self) -> String {
+        if self.pages.is_empty() {
+            r#"{"pages":[],"primary":""}"#.to_string()
+        } else {
+            let pages_json = self.pages
+                .iter()
+                .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"pages":[{}],"primary":"{}"}}"#,
+                pages_json,
+                self.pages[0].replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        }
+    }
+}
+
 pub fn serve_site(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
     tokio::runtime::Runtime::new()
         .map_err(|e| CliError::Render(format!("failed to create tokio runtime: {e}")))?
@@ -25,7 +51,7 @@ pub fn serve_site(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<
 #[derive(Clone)]
 struct AppState {
     output_dir: std::path::PathBuf,
-    reload_tx: broadcast::Sender<()>,
+    reload_tx: broadcast::Sender<ReloadMessage>,
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
@@ -52,7 +78,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         }
     }
 
-    let (reload_tx, _) = broadcast::channel::<()>(16);
+    let (reload_tx, _) = broadcast::channel::<ReloadMessage>(16);
 
     // Start file watcher in background thread
     let site_dir_owned = site_dir.to_path_buf();
@@ -94,12 +120,18 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws(socket, state.reload_tx.subscribe()))
 }
 
-async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<()>) {
+async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<ReloadMessage>) {
     loop {
         tokio::select! {
             result = rx.recv() => {
-                if result.is_err() { break; }
-                if socket.send(Message::Text("reload".into())).await.is_err() { break; }
+                match result {
+                    Err(_) => break,
+                    Ok(msg) => {
+                        if socket.send(Message::Text(msg.to_json().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
             }
             msg = socket.recv() => {
                 if msg.is_none() { break; }
@@ -152,7 +184,20 @@ async fn file_handler(
 }
 
 fn inject_reload_script(bytes: Vec<u8>) -> Vec<u8> {
-    const SCRIPT: &str = "<script>(function(){var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');ws.onmessage=function(){location.reload();};ws.onclose=function(){setTimeout(function(){location.reload();},1000);};})();</script>";
+    const SCRIPT: &str = concat!(
+        "<script>(function(){",
+        "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
+        "ws.onmessage=function(e){",
+          "var m=JSON.parse(e.data);",
+          "if(!m.pages.length||m.pages.indexOf(location.pathname)!==-1){",
+            "location.reload();",
+          "}else{",
+            "location.href=m.primary;",
+          "}",
+        "};",
+        "ws.onclose=function(){setTimeout(function(){location.reload();},1000);};",
+        "})();</script>"
+    );
     let html = String::from_utf8_lossy(&bytes);
     let result = if let Some(pos) = html.rfind("</body>") {
         format!("{}{}{}", &html[..pos], SCRIPT, &html[pos..])
@@ -239,7 +284,7 @@ fn watch_and_rebuild(
     site_dir: &Path,
     graph: Arc<Mutex<DependencyGraph>>,
     url_config: &UrlConfig,
-    reload_tx: broadcast::Sender<()>,
+    reload_tx: broadcast::Sender<ReloadMessage>,
 ) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
@@ -329,7 +374,12 @@ fn watch_and_rebuild(
                     eprintln!("Rebuild completed with {} error(s)", outcome.files_failed);
                 } else if outcome.files_built > 0 {
                     println!("Rebuild complete ({} file(s))", outcome.files_built);
-                    let _ = reload_tx.send(());
+                    let mut pages: Vec<String> = outcome.built_pages
+                        .values()
+                        .flat_map(|pages| pages.iter().map(|p| p.url_path.clone()))
+                        .collect();
+                    pages.sort();
+                    let _ = reload_tx.send(ReloadMessage { pages });
                 }
             }
             Err(e) => {
@@ -339,7 +389,7 @@ fn watch_and_rebuild(
                         let mut g = graph.lock().unwrap();
                         *g = outcome.dep_graph;
                         println!("Full rebuild complete");
-                        let _ = reload_tx.send(());
+                        let _ = reload_tx.send(ReloadMessage { pages: Vec::new() });
                     }
                     Err(e2) => eprintln!("Full rebuild failed: {e2}"),
                 }
@@ -359,5 +409,39 @@ fn guess_content_type(path: &Path) -> String {
         Some("svg") => "image/svg+xml".to_string(),
         Some("ico") => "image/x-icon".to_string(),
         _ => "application/octet-stream".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reload_message_full_rebuild_json() {
+        let msg = ReloadMessage { pages: vec![] };
+        assert_eq!(msg.to_json(), r#"{"pages":[],"primary":""}"#);
+    }
+
+    #[test]
+    fn reload_message_single_page_json() {
+        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()] };
+        let json = msg.to_json();
+        assert_eq!(json, r#"{"pages":["/article/hello"],"primary":"/article/hello"}"#);
+    }
+
+    #[test]
+    fn reload_message_multiple_pages_primary_is_first() {
+        let msg = ReloadMessage {
+            pages: vec!["/article/a".to_string(), "/article/b".to_string()],
+        };
+        let json = msg.to_json();
+        assert!(json.contains(r#""primary":"/article/a""#));
+    }
+
+    #[test]
+    fn reload_message_escapes_double_quote_in_url() {
+        let msg = ReloadMessage { pages: vec!["/bad\"path".to_string()] };
+        let json = msg.to_json();
+        assert!(json.contains(r#"\/bad\"path"#) || json.contains(r#"/bad\""#));
     }
 }
