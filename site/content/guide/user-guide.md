@@ -297,14 +297,14 @@ presemble build <site-dir>
 presemble build <site-dir> --config <config-file>
 ```
 
-The publisher reads every content file, validates it against its schema, resolves the template, and writes output to `<site-dir>/output/`. Each content file becomes a clean URL:
+The publisher reads every content file, validates it against its schema, resolves the template, and writes output to a sibling `output/<site-dir-name>/` directory. Each content file becomes a clean URL:
 
 ```
-content/post/my-post.md  →  output/post/my-post/index.html  →  /post/my-post
-content/docs/index.md    →  output/docs/index.html           →  /docs/
+my-site/content/post/my-post.md  →  output/my-site/post/my-post/index.html  →  /post/my-post
+my-site/content/docs/index.md    →  output/my-site/docs/index.html           →  /docs/
 ```
 
-Only assets referenced by templates are copied to `output/assets/`. Unreferenced files are reported as warnings.
+Output lives outside the source tree so the file watcher never sees its own writes. Only assets referenced by templates are copied to `output/assets/`. Unreferenced files are reported as warnings.
 
 ### CLI flags
 
@@ -330,6 +330,10 @@ presemble serve <site-dir>
 ```
 
 Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors are reported to the terminal on every rebuild.
+
+### Live reload
+
+When a file changes and the rebuild completes, the browser reloads automatically — no manual refresh needed. If the changed page is different from the one currently open, the browser navigates directly to the changed page. If multiple pages changed, the browser navigates to the first one.
 
 ## URL rewriting
 

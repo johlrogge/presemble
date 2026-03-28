@@ -70,14 +70,21 @@ article to its author page automatically, without any workarounds in the content
 The dependency graph (ADR-008) already tracks which outputs depend on which sources — it doubles
 as the subscription/notification system. No separate pub/sub needed.
 
-*Phase 1: WebSocket + live reload*
+*Phase 1: WebSocket + live reload* ✓ shipped v0.4.0
 - Inject a small script into served pages during `presemble serve`
 - Push reload events over WebSocket when the dep_graph detects changed outputs
 - The browser reloads only affected pages, not the whole site
 
-*Phase 2: Source map annotations + in-memory fast path*
+*Phase 1.1: Smart navigation*
+- Server sends changed page URL(s) in WebSocket message (JSON: `{type, pages, primary}`)
+- If current page changed → reload in place; otherwise navigate to the first changed page
+- Protocol is forward-compatible: `anchor` field added in Phase 2 for element focus
+- Full-rebuild path falls back to reload-in-place
+
+*Phase 2: Source map annotations + focus on changed element*
 - Annotate rendered DOM elements with source-file provenance (which content/template produced this node)
 - In-memory rebuild fast path: DOM diffs served directly to the browser, no disk write required for preview
+- On navigate, scroll to and highlight the changed element using the source map anchor
 - Enables "I changed this line, I see the result instantly" without a full page reload
 
 *Phase 3: LSP server in `presemble serve`*
@@ -85,6 +92,12 @@ as the subscription/notification system. No separate pub/sub needed.
 - Shared between browser clients and editor clients (Helix, VSCode)
 - Schema diagnostics: errors and warnings surface in both browser overlay and editor gutter
 - Schema-driven completions: content references, slot fields, template variables
+
+*Phase 3.5: Cider-compatible REPL*
+- Builds on the LSP server's structured communication protocol
+- Interactive REPL for exploring schemas, templates, and the data graph from an editor
+- Emacs/Cider first-class; extensible to other editor REPL clients
+- Query the data graph, test template fragments, inspect schema validation — without leaving the editor
 
 *Phase 4: Structural browser editor*
 - Floating edit button on served pages — click any content region to edit it in-browser

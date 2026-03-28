@@ -36,7 +36,7 @@ This creates the following files:
 presemble build my-site/
 ```
 
-Output goes to `my-site/output/`. The publisher validates content against schemas, renders templates with the content data, and copies only the assets referenced by templates.
+Output goes to `output/my-site/` (a sibling of your site directory). The publisher validates content against schemas, renders templates with the content data, and copies only the assets referenced by templates.
 
 ## Serve locally
 
@@ -44,7 +44,7 @@ Output goes to `my-site/output/`. The publisher validates content against schema
 presemble serve my-site/
 ```
 
-Starts a local server with file watching and live rebuild on every change. Refresh the browser to see updates.
+Starts a local server with file watching and live rebuild on every change. The browser reloads automatically — and navigates directly to the changed page if you were on a different one.
 
 ## Next steps
 
