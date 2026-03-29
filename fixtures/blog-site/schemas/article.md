@@ -8,7 +8,7 @@ Your article summary. Tell the reader what they will learn. {#summary}
 occurs
 : 1..3
 
-[<name>](/authors/<name>) {#author}
+[<name>](/author/<name>) {#author}
 occurs
 : exactly once
 
