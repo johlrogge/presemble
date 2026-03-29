@@ -1,4 +1,5 @@
 mod error;
+mod lsp;
 mod serve;
 pub mod template_registry;
 
@@ -184,6 +185,11 @@ enum Command {
         /// Directory to create the site in (created if it does not exist)
         site_dir: String,
     },
+    /// Start the Presemble LSP server (reads JSON-RPC from stdin, writes to stdout)
+    Lsp {
+        /// Path to the site directory
+        site_dir: String,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -220,6 +226,7 @@ pub fn run() -> Result<(), CliError> {
         Some(Command::Init { site_dir }) => {
             init_site(Path::new(&site_dir))
         }
+        Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
         None => {
             // backward compat: presemble <site-dir>
             let site_dir = cli.site_dir

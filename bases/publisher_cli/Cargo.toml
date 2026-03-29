@@ -8,9 +8,11 @@ schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 dep_graph = { workspace = true }
+lsp_service = { workspace = true }
 clap = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+tower-lsp = { workspace = true }
 notify = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

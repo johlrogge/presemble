@@ -1,6 +1,6 @@
 # Getting Started
 
-Scaffold and build a Presemble site in two commands.
+scaffold and build a Presemble site in two commands.
 
 ----
 

@@ -1,0 +1,11 @@
+[package]
+name = "lsp_capabilities"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.polylith]
+interface = "lsp_capabilities"
+
+[dependencies]
+schema = { path = "../../components/schema" }
+content = { path = "../../components/content" }
