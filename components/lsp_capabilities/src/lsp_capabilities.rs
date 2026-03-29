@@ -1,4 +1,4 @@
-use content::{byte_to_position, parse_document_with_offsets, validate, ContentElement};
+use content::{byte_to_position, parse_document_with_offsets, ContentElement};
 use schema::{Element, Grammar};
 use template::Expr;
 
@@ -391,53 +391,47 @@ pub fn schema_completions(src: &str, cursor_line: u32) -> Vec<SlotCompletion> {
     ]
 }
 
+/// Map a `validation::Severity` to `DiagnosticSeverity`.
+fn map_severity(s: &validation::Severity) -> DiagnosticSeverity {
+    match s {
+        validation::Severity::Error => DiagnosticSeverity::Error,
+        validation::Severity::Warning => DiagnosticSeverity::Warning,
+    }
+}
+
+/// Convert an optional byte `Range<usize>` to `((line, col), (line, col))` positions.
+/// Falls back to `(0,0)..(0,0)` when no span is provided.
+fn span_to_positions(src: &str, span: Option<&std::ops::Range<usize>>) -> ((u32, u32), (u32, u32)) {
+    match span {
+        Some(range) => {
+            let start = byte_to_position(src, range.start);
+            let end = byte_to_position(src, range.end);
+            (start, end)
+        }
+        None => ((0, 0), (0, 0)),
+    }
+}
+
 /// Validate a content source against its grammar and return positioned diagnostics.
 pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDiagnostic> {
+    // Still needed for quickfix computation (capitalization fix, template fix).
     let elements_with_offsets = match parse_document_with_offsets(src) {
         Ok(e) => e,
         Err(_) => return vec![],
     };
 
-    let doc = match content::parse_document(src) {
-        Ok(d) => d,
-        Err(_) => return vec![],
-    };
-
-    let result = validate(&doc, grammar);
+    // Validation decisions come from the `validation` component.
+    let raw_diagnostics = validation::validate_content(src, grammar);
 
     let mut positioned = Vec::new();
 
-    for diag in &result.diagnostics {
-        let severity = match diag.severity {
-            content::Severity::Error => DiagnosticSeverity::Error,
-            content::Severity::Warning => DiagnosticSeverity::Warning,
-        };
-
-        let byte_range = if let Some(slot_name) = &diag.slot {
-            let slot = grammar.preamble.iter().find(|s| &s.name == slot_name);
-            if let Some(slot) = slot {
-                elements_with_offsets
-                    .iter()
-                    .find(|e| element_matches_slot_type(&e.element, &slot.element))
-                    .map(|e| e.byte_range.clone())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let (start, end) = if let Some(range) = byte_range {
-            let start = byte_to_position(src, range.start);
-            let end = byte_to_position(src, range.end);
-            (start, end)
-        } else {
-            ((0, 0), (0, 0))
-        };
+    for diag in &raw_diagnostics {
+        let severity = map_severity(&diag.severity);
+        let (start, end) = span_to_positions(src, diag.span.as_ref());
 
         let capitalization_fix = if diag.message.contains("uppercase") {
-            if let Some(slot_name) = &diag.slot {
-                let slot = grammar.preamble.iter().find(|s| &s.name == slot_name);
+            if let Some(slot_name_str) = &diag.slot {
+                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name_str);
                 if let Some(slot) = slot {
                     let elem_with_offset = elements_with_offsets
                         .iter()
@@ -481,8 +475,8 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
 
         // Compute template_fix for "missing" diagnostics
         let template_fix = if diag.message.contains("missing") {
-            if let Some(slot_name) = &diag.slot {
-                let slot = grammar.preamble.iter().find(|s| &s.name == slot_name);
+            if let Some(slot_name_str) = &diag.slot {
+                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name_str);
                 if let Some(slot) = slot {
                     let template = template_for_slot(slot);
                     let insert_position = find_separator_insert_position(src);
@@ -598,6 +592,7 @@ pub struct TemplateDataRef {
 /// Find all occurrences of `attr_name="..."` in `src`.
 /// Returns `(start_byte, end_byte, value_str)` for each match, where start/end
 /// are the byte offsets of the content inside the quotes (excluding the quotes).
+#[allow(dead_code)]
 fn find_attr_values<'a>(src: &'a str, attr_name: &str) -> Vec<(usize, usize, &'a str)> {
     let needle = format!("{attr_name}=\"");
     let mut results = Vec::new();
@@ -621,6 +616,7 @@ fn find_attr_values<'a>(src: &'a str, attr_name: &str) -> Vec<(usize, usize, &'a
 
 /// Extract the root lookup path from an `Expr`.
 /// Returns the path parts for `Lookup` and `Pipe(Lookup, _)`.
+#[allow(dead_code)]
 fn lookup_path(expr: &Expr) -> Option<Vec<String>> {
     match expr {
         Expr::Lookup(parts) => Some(parts.clone()),
@@ -639,6 +635,7 @@ fn lookup_path(expr: &Expr) -> Option<Vec<String>> {
 /// - `data-slot="..."` (template elements)
 /// - `data-each="..."` (template elements)
 /// - `presemble:class="..."` (any element)
+#[allow(dead_code)]
 pub fn extract_template_data_refs(src: &str) -> Vec<TemplateDataRef> {
     let attr_names = ["data", "data-slot", "data-each", "presemble:class"];
     let mut refs = Vec::new();
@@ -647,18 +644,18 @@ pub fn extract_template_data_refs(src: &str) -> Vec<TemplateDataRef> {
         for (start, end, value) in find_attr_values(src, attr_name) {
             let expr_src = value.to_string();
             let parsed = template::parse_expr(value);
-            if let Ok(expr) = parsed {
-                if let Some(path) = lookup_path(&expr) {
-                    let (line, character) = byte_to_position(src, start);
-                    refs.push(TemplateDataRef {
-                        expr_src,
-                        path,
-                        attr_value_start: start,
-                        attr_value_end: end,
-                        line,
-                        character,
-                    });
-                }
+            if let Ok(expr) = parsed
+                && let Some(path) = lookup_path(&expr)
+            {
+                let (line, character) = byte_to_position(src, start);
+                refs.push(TemplateDataRef {
+                    expr_src,
+                    path,
+                    attr_value_start: start,
+                    attr_value_end: end,
+                    line,
+                    character,
+                });
             }
         }
     }
@@ -758,42 +755,21 @@ pub fn validate_template_paths(
     grammar: &schema::Grammar,
     stem: &str,
 ) -> Vec<PositionedDiagnostic> {
-    let refs = extract_template_data_refs(src);
-    let mut diagnostics = Vec::new();
-
-    for data_ref in &refs {
-        if data_ref.path.is_empty() {
-            continue;
-        }
-        if data_ref.path[0] != stem {
-            continue;
-        }
-        if data_ref.path.len() < 2 {
-            continue;
-        }
-
-        let field = &data_ref.path[1];
-        let valid_slot = grammar.preamble.iter().any(|s| s.name.as_str() == field.as_str());
-        let valid_body = field == "body" && grammar.body.is_some();
-
-        if !valid_slot && !valid_body {
-            let start = (data_ref.line, data_ref.character);
-            let end = (
-                data_ref.line,
-                data_ref.character + data_ref.expr_src.len() as u32,
-            );
-            diagnostics.push(PositionedDiagnostic {
-                message: format!("unknown field '{}' in {} schema", field, stem),
-                severity: DiagnosticSeverity::Error,
+    validation::validate_template(src, grammar, stem)
+        .into_iter()
+        .map(|d| {
+            let severity = map_severity(&d.severity);
+            let (start, end) = span_to_positions(src, d.span.as_ref());
+            PositionedDiagnostic {
+                message: d.message,
+                severity,
                 start,
                 end,
                 capitalization_fix: None,
                 template_fix: None,
-            });
-        }
-    }
-
-    diagnostics
+            }
+        })
+        .collect()
 }
 
 /// The target of a go-to-definition on a template reference.
@@ -835,21 +811,21 @@ pub fn template_definition(
     // 2. In-file definition scan
     for (i, l) in src.lines().enumerate() {
         if l.contains("<template") {
-            if let Some(val) = extract_attr_value_on_line(l, "presemble:define") {
-                if val == name {
-                    return Some(TemplateDefinitionTarget::InFile {
-                        line: i as u32,
-                        character: 0,
-                    });
-                }
+            if let Some(val) = extract_attr_value_on_line(l, "presemble:define")
+                && val == name
+            {
+                return Some(TemplateDefinitionTarget::InFile {
+                    line: i as u32,
+                    character: 0,
+                });
             }
-            if let Some(val) = extract_attr_value_on_line(l, "name") {
-                if val == name {
-                    return Some(TemplateDefinitionTarget::InFile {
-                        line: i as u32,
-                        character: 0,
-                    });
-                }
+            if let Some(val) = extract_attr_value_on_line(l, "name")
+                && val == name
+            {
+                return Some(TemplateDefinitionTarget::InFile {
+                    line: i as u32,
+                    character: 0,
+                });
             }
         }
     }
@@ -876,17 +852,21 @@ fn extract_attr_value_on_line<'a>(line: &'a str, attr_name: &str) -> Option<&'a 
 /// Returns an empty vec if the schema is valid, or a single error diagnostic
 /// at position (0, 0) if parsing fails.
 pub fn validate_schema_with_positions(src: &str) -> Vec<PositionedDiagnostic> {
-    match schema::parse_schema(src) {
-        Ok(_) => vec![],
-        Err(err) => vec![PositionedDiagnostic {
-            message: err.to_string(),
-            severity: DiagnosticSeverity::Error,
-            start: (0, 0),
-            end: (0, 0),
-            capitalization_fix: None,
-            template_fix: None,
-        }],
-    }
+    validation::validate_schema(src)
+        .into_iter()
+        .map(|d| {
+            let severity = map_severity(&d.severity);
+            let (start, end) = span_to_positions(src, d.span.as_ref());
+            PositionedDiagnostic {
+                message: d.message,
+                severity,
+                start,
+                end,
+                capitalization_fix: None,
+                template_fix: None,
+            }
+        })
+        .collect()
 }
 
 fn find_text_start_in_src(src: &str, element_start: usize) -> Option<usize> {
@@ -1035,7 +1015,7 @@ mod tests {
 
     #[test]
     fn extract_data_refs_pipe_expression() {
-        let src = r#"<img presemble:class="article.cover.orientation | match(landscape => &quot;cover--landscape&quot;, portrait => &quot;cover--portrait&quot;)" />"#;
+        let _src = r#"<img presemble:class="article.cover.orientation | match(landscape => &quot;cover--landscape&quot;, portrait => &quot;cover--portrait&quot;)" />"#;
         // The value is stored literally in the attribute; we test with a simpler pipe
         let src2 = r#"<img presemble:class="article.cover.orientation | first" />"#;
         let refs = extract_template_data_refs(src2);

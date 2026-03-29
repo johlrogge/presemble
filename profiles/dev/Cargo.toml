@@ -8,7 +8,9 @@ members = [
     "components/lsp_capabilities",
     "components/lsp_service",
     "components/schema",
+    "components/site_index",
     "components/template",
+    "components/validation",
     "bases/editor_server",
     "bases/publisher_cli",
     "projects/content_management",
@@ -17,7 +19,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 
 [workspace.dependencies]
@@ -28,7 +30,9 @@ lsp_capabilities = { path = "components/lsp_capabilities" }
 lsp_service = { path = "components/lsp_service" }
 publisher_cli = { path = "bases/publisher_cli" }
 schema = { path = "components/schema" }
+site_index = { path = "components/site_index" }
 template = { path = "components/template" }
+validation = { path = "components/validation" }
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
 notify = "7"

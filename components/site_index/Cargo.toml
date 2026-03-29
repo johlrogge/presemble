@@ -1,9 +1,10 @@
 [package]
-name = "dep_graph"
+name = "site_index"
 version = "0.6.1"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "dep_graph"
+interface = "site_index"
 
 [dependencies]
+schema = { workspace = true }

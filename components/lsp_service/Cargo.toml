@@ -1,6 +1,6 @@
 [package]
 name = "lsp_service"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 
 [package.metadata.polylith]
@@ -10,5 +10,6 @@ interface = "lsp_service"
 lsp_capabilities = { workspace = true }
 content = { workspace = true }
 schema = { workspace = true }
+site_index = { workspace = true }
 tower-lsp = { workspace = true }
 tokio = { workspace = true }

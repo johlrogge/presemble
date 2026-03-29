@@ -1,13 +1,12 @@
 [package]
-name = "lsp_capabilities"
+name = "validation"
 version = "0.6.1"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "lsp_capabilities"
+interface = "validation"
 
 [dependencies]
 schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
-validation = { workspace = true }
