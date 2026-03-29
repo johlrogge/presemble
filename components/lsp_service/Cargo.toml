@@ -1,0 +1,9 @@
+[package]
+name = "lsp_service"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.polylith]
+interface = "lsp_service"
+
+[dependencies]

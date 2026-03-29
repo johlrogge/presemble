@@ -1,0 +1,9 @@
+[package]
+name = "lsp_capabilities"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.polylith]
+interface = "lsp_capabilities"
+
+[dependencies]

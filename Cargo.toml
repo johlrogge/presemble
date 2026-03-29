@@ -4,7 +4,7 @@ members = [
   "bases/*",
   "components/*",
   "projects/publisher",
-  "projects/content_management",
+  "projects/content_management", "components/lsp_capabilities", "components/lsp_service",
 ]
 
 [workspace.package]
