@@ -46,9 +46,22 @@ presemble serve my-site/
 
 Starts a local server with file watching and live rebuild on every change. The browser reloads automatically — and navigates directly to the changed page if you were on a different one.
 
+## Editor support
+
+```
+presemble lsp my-site/
+```
+
+Point your editor's LSP configuration at this binary. The server provides completions,
+diagnostics, hover, and go-to-definition for content files, template files, and schema
+files from a single process.
+
+See [Editor LSP Support](/feature/editor-lsp-support) for setup instructions.
+
 ## Next steps
 
 - [Schemas](/feature/schemas-as-contracts) — learn the schema grammar and compile-time content safety
 - [Templates](/feature/templates-are-data) — data-bound HTML templates without a template language
 - [The Data Graph](/feature/the-data-graph) — how content is structured and accessed in templates
+- [Editor LSP Support](/feature/editor-lsp-support) — completions and diagnostics in your editor
 - [User Guide](/guide/user-guide) — full reference for all Presemble features

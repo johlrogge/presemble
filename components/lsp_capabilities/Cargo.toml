@@ -7,6 +7,6 @@ edition = "2024"
 interface = "lsp_capabilities"
 
 [dependencies]
-schema = { path = "../../components/schema" }
-content = { path = "../../components/content" }
-template = { path = "../../components/template" }
+schema = { workspace = true }
+content = { workspace = true }
+template = { workspace = true }
