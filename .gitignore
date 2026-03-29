@@ -4,6 +4,8 @@
 /.claude/agents/devenv.md
 /.claude/agents/metadev.md
 /.mcp.json
+/.claude/worktrees/
 fixtures/*/output/
 site/output/
+site/.devenv/
 /output/

@@ -1,6 +1,6 @@
 use lsp_capabilities::{
-    completions_for_schema, hover_for_line, validate_with_positions, CapitalizationFix,
-    DiagnosticSeverity,
+    completions_for_schema, definition_for_position, hover_for_line, validate_with_positions,
+    CapitalizationFix, DiagnosticSeverity, TemplateFix,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,6 +12,7 @@ use tower_lsp::{async_trait, Client, LanguageServer};
 struct StoredDiagnostic {
     lsp_diag: Diagnostic,
     cap_fix: Option<CapitalizationFix>,
+    template_fix: Option<TemplateFix>,
 }
 
 pub struct PresembleLsp {
@@ -23,6 +24,8 @@ pub struct PresembleLsp {
 
 impl PresembleLsp {
     pub fn new(client: Client, site_dir: PathBuf) -> Self {
+        // Canonicalize to absolute path so it can be matched against absolute file URIs from editors.
+        let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         Self {
             client,
             site_dir,
@@ -65,13 +68,29 @@ impl PresembleLsp {
                     message: p.message.clone(),
                     ..Default::default()
                 };
-                StoredDiagnostic { lsp_diag, cap_fix: p.capitalization_fix.clone() }
+                StoredDiagnostic {
+                    lsp_diag,
+                    cap_fix: p.capitalization_fix.clone(),
+                    template_fix: p.template_fix.clone(),
+                }
             })
             .collect();
         let diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
         *self.doc_diagnostics.lock().await.entry(uri.to_string()).or_default() = stored;
         self.client.publish_diagnostics(uri, diags, None).await;
     }
+}
+
+/// Extract slot name from a diagnostic message (e.g. "slot 'author': missing required link" → "author")
+fn slot_name_from_message(msg: &str) -> &str {
+    // Messages follow the pattern: "slot 'NAME': ..."
+    if let Some(start) = msg.find("slot '") {
+        let after = &msg[start + 6..];
+        if let Some(end) = after.find('\'') {
+            return &after[..end];
+        }
+    }
+    msg
 }
 
 #[async_trait]
@@ -86,6 +105,7 @@ impl LanguageServer for PresembleLsp {
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -119,7 +139,7 @@ impl LanguageServer for PresembleLsp {
     async fn completion(&self, p: CompletionParams) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
         let uri = &p.text_document_position.text_document.uri;
         let Some((grammar, stem)) = self.grammar_for_uri(uri) else { return Ok(None); };
-        let items: Vec<CompletionItem> = completions_for_schema(&grammar, &stem)
+        let items: Vec<CompletionItem> = completions_for_schema(&grammar, &stem, Some(&self.site_dir))
             .into_iter()
             .map(|c| CompletionItem {
                 label: c.label,
@@ -152,13 +172,17 @@ impl LanguageServer for PresembleLsp {
     async fn code_action(&self, p: CodeActionParams) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
         let uri = &p.text_document.uri;
         let diags = self.doc_diagnostics.lock().await;
-        let stored: Vec<(Diagnostic, Option<CapitalizationFix>)> = diags
+        let stored: Vec<(Diagnostic, Option<CapitalizationFix>, Option<TemplateFix>)> = diags
             .get(&uri.to_string())
-            .map(|v| v.iter().map(|sd| (sd.lsp_diag.clone(), sd.cap_fix.clone())).collect())
+            .map(|v| {
+                v.iter()
+                    .map(|sd| (sd.lsp_diag.clone(), sd.cap_fix.clone(), sd.template_fix.clone()))
+                    .collect()
+            })
             .unwrap_or_default();
         drop(diags);
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
-        for (lsp_diag, cap_fix) in &stored {
+        for (lsp_diag, cap_fix, template_fix) in &stored {
             if let Some(fix) = cap_fix {
                 let mut changes = HashMap::new();
                 changes.insert(uri.clone(), vec![TextEdit {
@@ -176,7 +200,44 @@ impl LanguageServer for PresembleLsp {
                     ..Default::default()
                 }));
             }
+            if let Some(fix) = template_fix {
+                let mut changes = HashMap::new();
+                changes.insert(uri.clone(), vec![TextEdit {
+                    range: Range {
+                        start: Position { line: fix.insert_position.0, character: fix.insert_position.1 },
+                        end: Position { line: fix.insert_position.0, character: fix.insert_position.1 },
+                    },
+                    new_text: fix.insert_text.clone(),
+                }]);
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: format!("Insert {} template", slot_name_from_message(&lsp_diag.message)),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics: Some(vec![lsp_diag.clone()]),
+                    edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                    ..Default::default()
+                }));
+            }
         }
         Ok(Some(actions))
+    }
+
+    async fn goto_definition(
+        &self,
+        p: GotoDefinitionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        let uri = &p.text_document_position_params.text_document.uri;
+        let line = p.text_document_position_params.position.line;
+        let sources = self.doc_sources.lock().await;
+        let src = sources.get(&uri.to_string()).cloned().unwrap_or_default();
+        drop(sources);
+        let Some(target_path) = definition_for_position(&src, line, &self.site_dir) else {
+            return Ok(None);
+        };
+        let target_uri = Url::from_file_path(&target_path)
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: target_uri,
+            range: Range::default(),
+        })))
     }
 }
