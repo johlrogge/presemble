@@ -1,0 +1,10 @@
+[package]
+name = "site_index"
+version = "0.6.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "site_index"
+
+[dependencies]
+schema = { workspace = true }

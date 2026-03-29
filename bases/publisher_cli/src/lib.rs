@@ -8,6 +8,8 @@ pub use template_registry::FileTemplateRegistry;
 pub use dep_graph::DependencyGraph;
 pub use error::CliError;
 
+use site_index::SiteIndex;
+
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::path::Path;
@@ -546,7 +548,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
 
     println!("Building site: {}", site_dir.display());
 
-    let schemas_dir = site_dir.join("schemas");
+    let site_index = SiteIndex::new(site_dir.to_path_buf());
 
     let mut files_built: usize = 0;
     let mut files_failed: usize = 0;
@@ -557,20 +559,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     let mut collected_pages: Vec<CollectedPage> = Vec::new();
     let mut build_errors: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
-    // Discover all .md schema files
-    let mut schema_entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&schemas_dir)
-        .map_err(CliError::Io)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .map(|ext| ext == "md")
-                .unwrap_or(false)
-        })
-        .collect();
-
-    schema_entries.sort_by_key(|e| e.file_name());
+    // Discover all schema stems via site_index
+    let schema_stems_list = site_index.schema_stems();
 
     // Discover and copy referenced assets from templates
     let templates_dir = site_dir.join("templates");
@@ -640,21 +630,9 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
 
     let mut schema_stems: Vec<String> = Vec::new();
 
-    for schema_entry in schema_entries {
-        let schema_path = schema_entry.path();
-
-        // Derive the content directory from the schema file stem
-        let schema_stem = schema_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| {
-                CliError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("schema file has no valid stem: {}", schema_path.display()),
-                ))
-            })?;
-
-        let content_dir = site_dir.join("content").join(schema_stem);
+    for schema_stem in &schema_stems_list {
+        let schema_stem: &str = schema_stem;
+        let schema_path = site_index.schema_path(schema_stem);
 
         // Track schema stem for unused-source warnings
         schema_stems.push(schema_stem.to_string());
@@ -673,26 +651,16 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
             }
         };
 
-        // Discover content files for this schema
-        let content_entries = match std::fs::read_dir(&content_dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                eprintln!(
-                    "warning: could not read content dir {}: {}",
-                    content_dir.display(),
-                    e
-                );
-                continue;
-            }
-        };
-
-        let mut content_paths: Vec<std::path::PathBuf> = content_entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().map(|ext| ext == "md").unwrap_or(false))
-            .collect();
-
-        content_paths.sort();
+        // Discover content files for this schema via site_index
+        let content_dir = site_dir.join("content").join(schema_stem);
+        if !content_dir.exists() {
+            eprintln!(
+                "warning: could not read content dir {}: directory not found",
+                content_dir.display()
+            );
+            continue;
+        }
+        let content_paths = site_index.content_files(schema_stem);
 
         for content_path in content_paths {
             // Track content path for index deps

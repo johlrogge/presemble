@@ -5,37 +5,10 @@ use lsp_capabilities::{
     TemplateFix, TemplateDefinitionTarget,
 };
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
-
-#[derive(Clone, Copy)]
-enum FileKind {
-    Content,
-    Template,
-    Schema,
-    Unknown,
-}
-
-fn classify_file(uri: &Url, site_dir: &Path) -> FileKind {
-    let Ok(path) = uri.to_file_path() else {
-        return FileKind::Unknown;
-    };
-    let Ok(rel) = path.strip_prefix(site_dir) else {
-        return FileKind::Unknown;
-    };
-    if rel.starts_with("content") {
-        FileKind::Content
-    } else if rel.starts_with("templates") {
-        FileKind::Template
-    } else if rel.starts_with("schemas") {
-        FileKind::Schema
-    } else {
-        FileKind::Unknown
-    }
-}
 
 struct StoredDiagnostic {
     lsp_diag: Diagnostic,
@@ -45,17 +18,19 @@ struct StoredDiagnostic {
 
 pub struct PresembleLsp {
     client: Client,
-    pub site_dir: PathBuf,
+    site_index: site_index::SiteIndex,
+    pub site_dir: std::path::PathBuf,
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
 }
 
 impl PresembleLsp {
-    pub fn new(client: Client, site_dir: PathBuf) -> Self {
-        // Canonicalize to absolute path so it can be matched against absolute file URIs from editors.
+    pub fn new(client: Client, site_dir: std::path::PathBuf) -> Self {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
+        let site_index = site_index::SiteIndex::new(site_dir.clone());
         Self {
             client,
+            site_index,
             site_dir,
             doc_sources: Arc::new(Mutex::new(HashMap::new())),
             doc_diagnostics: Arc::new(Mutex::new(HashMap::new())),
@@ -64,24 +39,32 @@ impl PresembleLsp {
 
     fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
-        let content_dir = self.site_dir.join("content");
-        let rel = path.strip_prefix(&content_dir).ok()?;
-        let stem = rel.components().next()?.as_os_str().to_str()?.to_string();
-        let schema_path = self.site_dir.join("schemas").join(format!("{stem}.md"));
-        let src = std::fs::read_to_string(&schema_path).ok()?;
-        let grammar = schema::parse_schema(&src).ok()?;
+        let kind = self.site_index.classify(&path);
+        let stem = match kind {
+            site_index::FileKind::Content { schema_stem } => schema_stem,
+            _ => return None,
+        };
+        let grammar = self.site_index.load_grammar(&stem)?;
         Some((grammar, stem))
     }
 
     fn grammar_for_template_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
-        let templates_dir = self.site_dir.join("templates");
-        let rel = path.strip_prefix(&templates_dir).ok()?;
-        let stem = rel.file_stem()?.to_str()?.to_string();
-        let schema_path = self.site_dir.join("schemas").join(format!("{stem}.md"));
-        let src = std::fs::read_to_string(&schema_path).ok()?;
-        let grammar = schema::parse_schema(&src).ok()?;
+        let kind = self.site_index.classify(&path);
+        let stem = match kind {
+            site_index::FileKind::Template { schema_stem } => schema_stem,
+            _ => return None,
+        };
+        let grammar = self.site_index.load_grammar(&stem)?;
         Some((grammar, stem))
+    }
+
+    fn schema_stem(&self, uri: &Url) -> Option<String> {
+        let path = uri.to_file_path().ok()?;
+        match self.site_index.classify(&path) {
+            site_index::FileKind::Schema { stem } => Some(stem),
+            _ => None,
+        }
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
@@ -166,53 +149,30 @@ impl PresembleLsp {
         self.client.publish_diagnostics(uri, diags, None).await;
     }
 
-    fn schema_stem(&self, uri: &Url) -> Option<String> {
-        let path = uri.to_file_path().ok()?;
-        let schemas_dir = self.site_dir.join("schemas");
-        let rel = path.strip_prefix(&schemas_dir).ok()?;
-        rel.file_stem()?.to_str().map(|s| s.to_string())
-    }
-
     async fn revalidate_dependents(&self, schema_stem: &str) {
+        let dependents = self.site_index.dependents_of_schema(schema_stem);
         let sources = self.doc_sources.lock().await;
-        let dependents: Vec<(Url, String, FileKind)> = sources
-            .iter()
-            .filter_map(|(uri_str, src)| {
-                let uri = Url::parse(uri_str).ok()?;
-                let kind = classify_file(&uri, &self.site_dir);
-                match kind {
-                    FileKind::Template => {
-                        let path = uri.to_file_path().ok()?;
-                        let templates_dir = self.site_dir.join("templates");
-                        let rel = path.strip_prefix(&templates_dir).ok()?;
-                        let stem = rel.file_stem()?.to_str()?;
-                        if stem == schema_stem {
-                            Some((uri, src.clone(), kind))
-                        } else {
-                            None
-                        }
-                    }
-                    FileKind::Content => {
-                        let path = uri.to_file_path().ok()?;
-                        let content_dir = self.site_dir.join("content");
-                        let rel = path.strip_prefix(&content_dir).ok()?;
-                        let first = rel.components().next()?.as_os_str().to_str()?;
-                        if first == schema_stem {
-                            Some((uri, src.clone(), kind))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
+
+        let to_validate: Vec<(Url, String, site_index::FileKind)> = dependents
+            .into_iter()
+            .filter(|f| !matches!(f.kind, site_index::FileKind::Schema { .. }))
+            .filter_map(|site_file| {
+                let uri = Url::from_file_path(&site_file.path).ok()?;
+                let src = sources.get(&uri.to_string()).cloned()
+                    .or_else(|| std::fs::read_to_string(&site_file.path).ok())?;
+                Some((uri, src, site_file.kind))
             })
             .collect();
         drop(sources);
 
-        for (uri, src, kind) in dependents {
+        for (uri, src, kind) in to_validate {
             match kind {
-                FileKind::Template => self.validate_template_and_publish(uri, src).await,
-                FileKind::Content => self.validate_and_publish(uri, src).await,
+                site_index::FileKind::Template { .. } => {
+                    self.validate_template_and_publish(uri, src).await;
+                }
+                site_index::FileKind::Content { .. } => {
+                    self.validate_and_publish(uri, src).await;
+                }
                 _ => {}
             }
         }
@@ -261,9 +221,11 @@ impl LanguageServer for PresembleLsp {
     async fn did_open(&self, p: DidOpenTextDocumentParams) {
         let uri = p.text_document.uri;
         let src = p.text_document.text;
-        match classify_file(&uri, &self.site_dir) {
-            FileKind::Template => self.validate_template_and_publish(uri, src).await,
-            FileKind::Schema => {
+        let path = uri.to_file_path().unwrap_or_default();
+        let kind = self.site_index.classify(&path);
+        match kind {
+            site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, src).await,
+            site_index::FileKind::Schema { .. } => {
                 self.validate_schema_and_publish(uri.clone(), src).await;
                 if let Some(stem) = self.schema_stem(&uri) {
                     self.revalidate_dependents(&stem).await;
@@ -276,9 +238,11 @@ impl LanguageServer for PresembleLsp {
     async fn did_change(&self, p: DidChangeTextDocumentParams) {
         if let Some(c) = p.content_changes.into_iter().last() {
             let uri = p.text_document.uri;
-            match classify_file(&uri, &self.site_dir) {
-                FileKind::Template => self.validate_template_and_publish(uri, c.text).await,
-                FileKind::Schema => {
+            let path = uri.to_file_path().unwrap_or_default();
+            let kind = self.site_index.classify(&path);
+            match kind {
+                site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, c.text).await,
+                site_index::FileKind::Schema { .. } => {
                     self.validate_schema_and_publish(uri.clone(), c.text).await;
                     if let Some(stem) = self.schema_stem(&uri) {
                         self.revalidate_dependents(&stem).await;
@@ -292,9 +256,11 @@ impl LanguageServer for PresembleLsp {
     async fn did_save(&self, p: DidSaveTextDocumentParams) {
         if let Ok(src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
             let uri = p.text_document.uri;
-            match classify_file(&uri, &self.site_dir) {
-                FileKind::Template => self.validate_template_and_publish(uri, src).await,
-                FileKind::Schema => {
+            let path = uri.to_file_path().unwrap_or_default();
+            let kind = self.site_index.classify(&path);
+            match kind {
+                site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, src).await,
+                site_index::FileKind::Schema { .. } => {
                     self.validate_schema_and_publish(uri.clone(), src).await;
                     if let Some(stem) = self.schema_stem(&uri) {
                         self.revalidate_dependents(&stem).await;
@@ -307,8 +273,10 @@ impl LanguageServer for PresembleLsp {
 
     async fn completion(&self, p: CompletionParams) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
         let uri = &p.text_document_position.text_document.uri;
-        match classify_file(uri, &self.site_dir) {
-            FileKind::Schema => {
+        let path = uri.to_file_path().unwrap_or_default();
+        let kind = self.site_index.classify(&path);
+        match kind {
+            site_index::FileKind::Schema { .. } => {
                 let pos = p.text_document_position.position;
                 let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
                 let items: Vec<CompletionItem> = schema_completions(&src, pos.line)
@@ -327,7 +295,7 @@ impl LanguageServer for PresembleLsp {
                     .collect();
                 Ok(Some(CompletionResponse::Array(items)))
             }
-            FileKind::Template => {
+            site_index::FileKind::Template { .. } => {
                 let Some((grammar, stem)) = self.grammar_for_template_uri(uri) else {
                     return Ok(None);
                 };
@@ -358,7 +326,7 @@ impl LanguageServer for PresembleLsp {
                 let Some((grammar, stem)) = self.grammar_for_uri(uri) else {
                     return Ok(None);
                 };
-                let items: Vec<CompletionItem> = completions_for_schema(&grammar, &stem, Some(&self.site_dir))
+                let items: Vec<CompletionItem> = completions_for_schema(&grammar, &stem, Some(self.site_index.site_dir()))
                     .into_iter()
                     .map(|c| CompletionItem {
                         label: c.label,
@@ -383,8 +351,10 @@ impl LanguageServer for PresembleLsp {
         let src = sources.get(&uri.to_string()).cloned().unwrap_or_default();
         drop(sources);
         let line = p.text_document_position_params.position.line;
-        match classify_file(uri, &self.site_dir) {
-            FileKind::Template => {
+        let path = uri.to_file_path().unwrap_or_default();
+        let kind = self.site_index.classify(&path);
+        match kind {
+            site_index::FileKind::Template { .. } => {
                 let Some((grammar, stem)) = self.grammar_for_template_uri(uri) else {
                     return Ok(None);
                 };
@@ -406,16 +376,16 @@ impl LanguageServer for PresembleLsp {
                     let parts: Vec<&str> = path_str.splitn(3, '.').collect();
                     if parts.len() >= 2 && parts[0] == stem {
                         let field = parts[1];
-                        if let Some(slot) = grammar.preamble.iter().find(|s| s.name.as_str() == field) {
-                            if let Some(hint) = &slot.hint_text {
-                                return Ok(Some(Hover {
-                                    contents: HoverContents::Markup(MarkupContent {
-                                        kind: MarkupKind::Markdown,
-                                        value: hint.clone(),
-                                    }),
-                                    range: None,
-                                }));
-                            }
+                        if let Some(slot) = grammar.preamble.iter().find(|s| s.name.as_str() == field)
+                            && let Some(hint) = &slot.hint_text
+                        {
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: hint.clone(),
+                                }),
+                                range: None,
+                            }));
                         }
                     }
                 }
@@ -494,9 +464,11 @@ impl LanguageServer for PresembleLsp {
         let sources = self.doc_sources.lock().await;
         let src = sources.get(&uri.to_string()).cloned().unwrap_or_default();
         drop(sources);
-        match classify_file(uri, &self.site_dir) {
-            FileKind::Template => {
-                match template_definition(&src, line, &self.site_dir) {
+        let path = uri.to_file_path().unwrap_or_default();
+        let kind = self.site_index.classify(&path);
+        match kind {
+            site_index::FileKind::Template { .. } => {
+                match template_definition(&src, line, self.site_index.site_dir()) {
                     Some(TemplateDefinitionTarget::File(path)) => {
                         let target_uri = Url::from_file_path(&path)
                             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -518,7 +490,7 @@ impl LanguageServer for PresembleLsp {
                 }
             }
             _ => {
-                let Some(target_path) = definition_for_position(&src, line, &self.site_dir) else {
+                let Some(target_path) = definition_for_position(&src, line, self.site_index.site_dir()) else {
                     return Ok(None);
                 };
                 let target_uri = Url::from_file_path(&target_path)

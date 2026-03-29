@@ -8,6 +8,7 @@ schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 dep_graph = { workspace = true }
+site_index = { workspace = true }
 lsp_service = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 axum = { version = "0.8", features = ["ws"] }
