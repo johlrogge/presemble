@@ -25,12 +25,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/
+            profiles/dev/target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Run tests
-        run: devenv shell -- cargo test --workspace
+        run: devenv shell -- cargo polylith cargo --profile dev test
 
       - name: Clippy
-        run: devenv shell -- cargo clippy --workspace -- -D warnings
+        run: devenv shell -- cargo polylith cargo --profile dev clippy -- -D warnings
