@@ -1,9 +1,19 @@
 [package]
 name = "lsp_capabilities"
+<<<<<<< HEAD
 version = "0.1.0"
 edition = "2021"
+=======
+version.workspace = true
+edition.workspace = true
+>>>>>>> worktree-agent-a6e18639
 
 [package.metadata.polylith]
 interface = "lsp_capabilities"
 
 [dependencies]
+<<<<<<< HEAD
+=======
+schema = { path = "../../components/schema" }
+content = { path = "../../components/content" }
+>>>>>>> worktree-agent-a6e18639

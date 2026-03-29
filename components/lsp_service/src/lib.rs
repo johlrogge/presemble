@@ -1,1 +1,3 @@
-// lsp_service component — implementation in worktree, pending merge
+mod lsp_service;
+
+pub use lsp_service::PresembleLsp;

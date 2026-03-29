@@ -3,6 +3,307 @@ use crate::error::ContentError;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use schema::HeadingLevel;
 
+/// Convert a byte offset in `src` to a zero-indexed LSP (line, character) Position.
+/// `character` is a UTF-16 code unit offset as required by the LSP specification.
+pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
+    let byte_offset = byte_offset.min(src.len());
+    let prefix = &src[..byte_offset];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() as u32;
+    let last_newline = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let line_prefix = &prefix[last_newline..];
+    // UTF-16 code unit count as required by LSP spec
+    let character = line_prefix.encode_utf16().count() as u32;
+    (line, character)
+}
+
+/// A content element annotated with its byte range in the source.
+#[derive(Debug, Clone)]
+pub struct ContentElementWithOffset {
+    pub element: ContentElement,
+    /// Byte range of the element's opening event in the source string.
+    pub byte_range: std::ops::Range<usize>,
+}
+
+/// Parse a markdown content document and return elements with source byte ranges.
+pub fn parse_document_with_offsets(
+    input: &str,
+) -> Result<Vec<ContentElementWithOffset>, ContentError> {
+    let parser = Parser::new_ext(input, Options::ENABLE_TABLES).into_offset_iter();
+    let mut elements: Vec<ContentElementWithOffset> = Vec::new();
+
+    enum State {
+        Idle,
+        Heading {
+            level: HeadingLevel,
+            text: String,
+            byte_range: std::ops::Range<usize>,
+        },
+        Paragraph {
+            text: String,
+            images: Vec<ContentElementWithOffset>,
+            byte_range: std::ops::Range<usize>,
+        },
+        Image {
+            alt: String,
+            path: String,
+            inside_paragraph: bool,
+            paragraph_prefix: String,
+            prior_images: Vec<ContentElementWithOffset>,
+            paragraph_range: std::ops::Range<usize>,
+            image_range: std::ops::Range<usize>,
+        },
+        Link {
+            text: String,
+            href: String,
+            byte_range: std::ops::Range<usize>,
+        },
+        CodeBlock {
+            language: Option<String>,
+            code: String,
+            byte_range: std::ops::Range<usize>,
+        },
+        Table {
+            headers: Vec<String>,
+            rows: Vec<Vec<String>>,
+            current_row: Vec<String>,
+            current_cell: String,
+            byte_range: std::ops::Range<usize>,
+        },
+    }
+
+    let mut state = State::Idle;
+
+    for (event, range) in parser {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                let heading_level = convert_heading_level(level)?;
+                state = State::Heading {
+                    level: heading_level,
+                    text: String::new(),
+                    byte_range: range,
+                };
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let State::Heading { level, text, byte_range } = state {
+                    elements.push(ContentElementWithOffset {
+                        element: ContentElement::Heading { level, text },
+                        byte_range,
+                    });
+                    state = State::Idle;
+                }
+            }
+
+            Event::Start(Tag::Paragraph) => {
+                state = State::Paragraph {
+                    text: String::new(),
+                    images: Vec::new(),
+                    byte_range: range,
+                };
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if let State::Paragraph { text, images, byte_range } = state {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        elements.push(ContentElementWithOffset {
+                            element: ContentElement::Paragraph { text: trimmed },
+                            byte_range,
+                        });
+                    }
+                    elements.extend(images);
+                    state = State::Idle;
+                }
+            }
+
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                let path = dest_url.to_string();
+                match state {
+                    State::Paragraph { ref text, ref images, ref byte_range } => {
+                        let prefix = text.clone();
+                        let existing_images = images.clone();
+                        let para_range = byte_range.clone();
+                        state = State::Image {
+                            alt: String::new(),
+                            path,
+                            inside_paragraph: true,
+                            paragraph_prefix: prefix,
+                            prior_images: existing_images,
+                            paragraph_range: para_range,
+                            image_range: range,
+                        };
+                    }
+                    _ => {
+                        state = State::Image {
+                            alt: String::new(),
+                            path,
+                            inside_paragraph: false,
+                            paragraph_prefix: String::new(),
+                            prior_images: Vec::new(),
+                            paragraph_range: 0..0,
+                            image_range: range,
+                        };
+                    }
+                }
+            }
+            Event::End(TagEnd::Image) => {
+                if let State::Image {
+                    alt,
+                    path,
+                    inside_paragraph,
+                    paragraph_prefix,
+                    mut prior_images,
+                    paragraph_range,
+                    image_range,
+                } = state
+                {
+                    let alt_opt = if alt.is_empty() { None } else { Some(alt) };
+                    let image_element = ContentElementWithOffset {
+                        element: ContentElement::Image { alt: alt_opt, path },
+                        byte_range: image_range,
+                    };
+                    if inside_paragraph {
+                        prior_images.push(image_element);
+                        state = State::Paragraph {
+                            text: paragraph_prefix,
+                            images: prior_images,
+                            byte_range: paragraph_range,
+                        };
+                    } else {
+                        elements.push(image_element);
+                        state = State::Idle;
+                    }
+                }
+            }
+
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                let href = dest_url.to_string();
+                state = State::Link {
+                    text: String::new(),
+                    href,
+                    byte_range: range,
+                };
+            }
+            Event::End(TagEnd::Link) => {
+                if let State::Link { text, href, byte_range } = state {
+                    elements.push(ContentElementWithOffset {
+                        element: ContentElement::Link { text, href },
+                        byte_range,
+                    });
+                    state = State::Idle;
+                }
+            }
+
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let language = match &kind {
+                    CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
+                    _ => None,
+                };
+                state = State::CodeBlock { language, code: String::new(), byte_range: range };
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let State::CodeBlock { language, code, byte_range } = state {
+                    elements.push(ContentElementWithOffset {
+                        element: ContentElement::CodeBlock { language, code },
+                        byte_range,
+                    });
+                    state = State::Idle;
+                }
+            }
+
+            Event::Start(Tag::Table(_)) => {
+                state = State::Table {
+                    headers: Vec::new(),
+                    rows: Vec::new(),
+                    current_row: Vec::new(),
+                    current_cell: String::new(),
+                    byte_range: range,
+                };
+            }
+            Event::Start(Tag::TableHead) => {}
+            Event::End(TagEnd::TableHead) => {
+                if let State::Table { ref mut headers, ref mut current_row, .. } = state {
+                    *headers = std::mem::take(current_row);
+                }
+            }
+            Event::Start(Tag::TableRow) | Event::Start(Tag::TableCell) => {}
+            Event::End(TagEnd::TableCell) => {
+                if let State::Table { ref mut current_row, ref mut current_cell, .. } = state {
+                    let cell = std::mem::take(current_cell).trim().to_string();
+                    current_row.push(cell);
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let State::Table { ref mut rows, ref mut current_row, .. } = state {
+                    let row = std::mem::take(current_row);
+                    rows.push(row);
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let State::Table { headers, rows, byte_range, .. } = state {
+                    elements.push(ContentElementWithOffset {
+                        element: ContentElement::Table { headers, rows },
+                        byte_range,
+                    });
+                    state = State::Idle;
+                }
+            }
+
+            Event::Rule => {
+                elements.push(ContentElementWithOffset {
+                    element: ContentElement::Separator,
+                    byte_range: range,
+                });
+                state = State::Idle;
+            }
+
+            Event::Text(text) => {
+                let s = text.as_ref();
+                match &mut state {
+                    State::Heading { text: buf, .. } => buf.push_str(s),
+                    State::Paragraph { text: buf, .. } => buf.push_str(s),
+                    State::Image { alt, .. } => alt.push_str(s),
+                    State::Link { text: buf, .. } => buf.push_str(s),
+                    State::CodeBlock { code, .. } => code.push_str(s),
+                    State::Table { current_cell, .. } => current_cell.push_str(s),
+                    State::Idle => {}
+                }
+            }
+            Event::Code(text) => {
+                let s = text.as_ref();
+                let escaped = s
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;");
+                match &mut state {
+                    State::Heading { text: buf, .. } => buf.push_str(s),
+                    State::Paragraph { text: buf, .. } => buf.push_str(s),
+                    State::Image { alt, .. } => alt.push_str(s),
+                    State::Link { text: buf, .. } => buf.push_str(s),
+                    State::CodeBlock { code, .. } => code.push_str(s),
+                    State::Table { current_cell, .. } => {
+                        current_cell.push_str("<code>");
+                        current_cell.push_str(&escaped);
+                        current_cell.push_str("</code>");
+                    }
+                    State::Idle => {}
+                }
+            }
+
+            Event::SoftBreak | Event::HardBreak => {
+                match &mut state {
+                    State::Paragraph { text, .. } => text.push(' '),
+                    State::Heading { text, .. } => text.push(' '),
+                    _ => {}
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    Ok(elements)
+}
+
 /// Convert a pulldown-cmark HeadingLevel to schema's HeadingLevel.
 ///
 /// pulldown-cmark uses H1..H6 variants; schema uses a numeric u8 (1..=6).
@@ -658,5 +959,47 @@ Body paragraph."#;
             }
             _ => unreachable!(),
         }
+    }
+
+    // ── byte_to_position ─────────────────────────────────────────────────────
+
+    #[test]
+    fn byte_to_position_first_line() {
+        let src = "Hello, world!";
+        assert_eq!(byte_to_position(src, 0), (0, 0));
+        assert_eq!(byte_to_position(src, 5), (0, 5));
+        assert_eq!(byte_to_position(src, 13), (0, 13));
+    }
+
+    #[test]
+    fn byte_to_position_second_line() {
+        let src = "line one\nline two";
+        // "line two" starts at byte 9
+        assert_eq!(byte_to_position(src, 9), (1, 0));
+        assert_eq!(byte_to_position(src, 13), (1, 4));
+    }
+
+    #[test]
+    fn byte_to_position_utf16() {
+        // U+1F600 (emoji) is 4 bytes in UTF-8 but 2 UTF-16 code units.
+        let src = "\u{1F600}A";
+        // byte offset 0 → line 0, char 0
+        assert_eq!(byte_to_position(src, 0), (0, 0));
+        // byte offset 4 → after the emoji → char 2 in UTF-16
+        assert_eq!(byte_to_position(src, 4), (0, 2));
+        // byte offset 5 → after 'A' → char 3 in UTF-16
+        assert_eq!(byte_to_position(src, 5), (0, 3));
+    }
+
+    // ── parse_document_with_offsets ──────────────────────────────────────────
+
+    #[test]
+    fn parse_document_with_offsets_heading_has_range() {
+        let src = "# Hello\n\nSome text.\n";
+        let elems = parse_document_with_offsets(src).expect("should parse");
+        let heading = elems.iter().find(|e| matches!(e.element, ContentElement::Heading { .. }));
+        assert!(heading.is_some(), "expected a heading element with offset");
+        let h = heading.unwrap();
+        assert_eq!(h.byte_range.start, 0, "heading should start at byte 0");
     }
 }
