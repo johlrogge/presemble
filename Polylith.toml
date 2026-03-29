@@ -1,0 +1,22 @@
+[workspace]
+schema_version = 1
+
+[workspace.package]
+version = "0.2.2"
+edition = "2024"
+
+[libraries]
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive"] }
+notify = "7"
+pulldown-cmark = "0.12"
+quick-xml = { version = "0.36", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std"] }
+tower-lsp = "0.20"
+
+[profiles]
+dev = "profiles/dev.profile"
+development = "profiles/development.profile"
+live = "profiles/live.profile"

@@ -1,7 +1,7 @@
 [package]
 name = "lsp_service"
-version.workspace = true
-edition.workspace = true
+version = "0.2.2"
+edition = "2024"
 
 [package.metadata.polylith]
 interface = "lsp_service"
@@ -10,5 +10,5 @@ interface = "lsp_service"
 lsp_capabilities = { path = "../../components/lsp_capabilities" }
 content = { path = "../../components/content" }
 schema = { path = "../../components/schema" }
-tower-lsp = { workspace = true }
-tokio = { workspace = true }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }

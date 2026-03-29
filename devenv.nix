@@ -12,10 +12,10 @@ in
 
   enterShell = ''
     if [ -z "''${CI:-}" ]; then
-      cargo polylith cargo --profile dev build -q --bin publisher 2>/dev/null \
+      cargo polylith cargo --profile dev build -q --bin presemble 2>/dev/null \
         && export PATH="$PWD/target/debug:$PATH" \
-        && echo "presemble publisher ready (target/debug/presemble)" \
-        || echo "presemble publisher not built — run: cargo build -p publisher"
+        && echo "presemble ready (target/debug/presemble)" \
+        || echo "presemble not built — run: cargo polylith cargo build --bin presemble"
     fi
   '';
 }

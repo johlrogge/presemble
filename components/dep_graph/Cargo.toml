@@ -1,7 +1,7 @@
 [package]
 name = "dep_graph"
-version.workspace = true
-edition.workspace = true
+version = "0.2.2"
+edition = "2024"
 
 [package.metadata.polylith]
 interface = "dep_graph"

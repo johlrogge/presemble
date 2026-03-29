@@ -1,31 +1,5 @@
-[workspace]
-resolver = "2"
-members = [
-  "bases/*",
-  "components/*",
-  "projects/publisher",
-  "projects/content_management", "components/lsp_capabilities", "components/lsp_service",
-]
-
-[workspace.package]
-version = "0.2.2"
-edition = "2024"
-
-[workspace.dependencies]
-schema = { path = "components/schema" }
-content = { path = "components/content" }
-template = { path = "components/template" }
-dep_graph = { path = "components/dep_graph" }
-lsp_capabilities = { path = "components/lsp_capabilities" }
-lsp_service = { path = "components/lsp_service" }
-publisher_cli = { path = "bases/publisher_cli" }
-editor_server = { path = "bases/editor_server" }
-pulldown-cmark = "0.12"
-quick-xml = { version = "0.36", features = ["serialize"] }
-clap = { version = "4", features = ["derive"] }
-axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std"] }
-notify = "7"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tower-lsp = "0.20"
+[package]
+name = "workspace-root"
+version = "0.0.0"
+edition = "2021"
+publish = false
