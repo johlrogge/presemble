@@ -465,11 +465,22 @@ fn watch_and_rebuild(
             .flat_map(|p| current.affected_outputs(p))
             .count();
 
-        if affected_count == 0 {
+        // Also check if any dirty file belongs to a page that previously failed —
+        // failed pages are not in the dep_graph, so affected_count would be 0 for them,
+        // but we still need to rebuild to clear (or re-record) the error.
+        let has_errored_content = {
+            let errors = build_errors.lock().unwrap();
+            !errors.is_empty() && dirty.iter().any(|p| {
+                p.extension().and_then(|e| e.to_str()) == Some("md")
+                    && p.starts_with(site_dir.join("content"))
+            })
+        };
+
+        if affected_count == 0 && !has_errored_content {
             continue;
         }
 
-        println!("Rebuilding {} page(s)...", affected_count);
+        println!("Rebuilding {} page(s)...", affected_count.max(1));
         match rebuild_affected(site_dir, &dirty, &current, url_config) {
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
