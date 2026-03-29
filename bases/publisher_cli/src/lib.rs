@@ -128,6 +128,11 @@ pub struct BuildOutcome {
     /// Collected page data, keyed by schema stem
     pub built_pages: std::collections::HashMap<String, Vec<BuiltPage>>,
     pub dep_graph: DependencyGraph,
+    /// Per-page build errors, keyed by URL path (e.g. "/article/foo").
+    /// Populated when a content page fails validation or parsing.
+    /// In build mode these are already printed to stdout; in serve mode
+    /// the server uses this map to return styled error pages instead of 404s.
+    pub build_errors: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl BuildOutcome {
@@ -272,6 +277,7 @@ fn load_url_config(
 ///
 /// Returns `Ok(Some(result))` when the page is valid and was successfully built.
 /// Returns `Ok(None)` when the content fails validation (PASS/FAIL output is printed inside).
+///   On validation failure, `page_errors` is populated with human-readable error messages.
 /// Returns `Err(CliError)` for IO or render errors.
 pub fn build_content_page(
     site_dir: &std::path::Path,
@@ -279,6 +285,7 @@ pub fn build_content_page(
     schema_path: &std::path::Path,
     content_path: &std::path::Path,
     grammar: &schema::Grammar,
+    page_errors: &mut Vec<String>,
 ) -> Result<Option<PageBuildResult>, CliError> {
     let file_name = content_path
         .file_name()
@@ -291,7 +298,9 @@ pub fn build_content_page(
         Ok(d) => d,
         Err(e) => {
             println!("{file_name}: FAIL");
-            println!("  parse error: {e}");
+            let msg = format!("parse error: {e}");
+            println!("  {msg}");
+            page_errors.push(msg);
             return Ok(None);
         }
     };
@@ -301,11 +310,13 @@ pub fn build_content_page(
     if !result.is_valid() {
         println!("{file_name}: FAIL");
         for diagnostic in &result.diagnostics {
-            println!(
-                "  [{}] {}",
+            let msg = format!(
+                "[{}] {}",
                 format_severity(&diagnostic.severity),
                 diagnostic.message
             );
+            println!("  {msg}");
+            page_errors.push(msg);
         }
         return Ok(None);
     }
@@ -537,6 +548,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     let mut all_content_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut all_schema_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut collected_pages: Vec<CollectedPage> = Vec::new();
+    let mut build_errors: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
     // Discover all .md schema files
     let mut schema_entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&schemas_dir)
@@ -679,12 +691,14 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
             // Track content path for index deps
             all_content_paths.push(content_path.clone());
 
+            let mut page_errors_buf: Vec<String> = Vec::new();
             match build_content_page(
                 site_dir,
                 schema_stem,
                 &schema_path,
                 &content_path,
                 &grammar,
+                &mut page_errors_buf,
             )? {
                 Some(page_result) => {
                     dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
@@ -709,6 +723,10 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                     files_built += 1;
                 }
                 None => {
+                    if !page_errors_buf.is_empty() {
+                        let url_path = page_address(site_dir, schema_stem, &content_path).url_path;
+                        build_errors.insert(url_path, page_errors_buf);
+                    }
                     files_failed += 1;
                 }
             }
@@ -841,6 +859,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
         files_failed,
         built_pages,
         dep_graph,
+        build_errors,
     })
 }
 
@@ -871,6 +890,7 @@ pub fn rebuild_affected(
             files_failed: 0,
             built_pages: std::collections::HashMap::new(),
             dep_graph: DependencyGraph::new(),
+            build_errors: std::collections::HashMap::new(),
         });
     }
 
@@ -889,6 +909,7 @@ pub fn rebuild_affected(
         files_failed: 0,
         built_pages: std::collections::HashMap::new(),
         dep_graph: DependencyGraph::new(),
+        build_errors: std::collections::HashMap::new(),
     };
     let mut rebuild_collected: Vec<CollectedPage> = Vec::new();
 
@@ -950,7 +971,8 @@ pub fn rebuild_affected(
         };
 
         // Build the page (collect only — rendering deferred until after reference resolution)
-        match build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar)? {
+        let mut page_errors_buf: Vec<String> = Vec::new();
+        match build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar, &mut page_errors_buf)? {
             Some(result) => {
                 outcome
                     .dep_graph
@@ -976,6 +998,10 @@ pub fn rebuild_affected(
                 outcome.files_built += 1;
             }
             None => {
+                if !page_errors_buf.is_empty() {
+                    let url_path = page_address(site_dir, &schema_stem, &content_path).url_path;
+                    outcome.build_errors.insert(url_path, page_errors_buf);
+                }
                 outcome.files_failed += 1;
             }
         }
