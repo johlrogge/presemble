@@ -36,3 +36,26 @@ The publisher tracks a dependency graph: each output page records which schema, 
 file, and template it was built from. When a file changes, only the pages that depend
 on it rebuild. A site with 500 articles rebuilds 1 article (plus the index) when you
 fix a typo — not all 500.
+
+### Editor feedback without saving
+
+`presemble lsp` starts an LSP server that provides completions, diagnostics, hover,
+and go-to-definition in any LSP-capable editor. Errors surface as you type, not only
+on save or build. The same server handles content files, template files, and schema
+files in a single process.
+
+```
+presemble lsp site/
+```
+
+Point your editor at that binary. In Helix, add it to `languages.toml`:
+
+```toml
+[[language]]
+name = "markdown"
+language-servers = ["presemble-lsp"]
+
+[language-server.presemble-lsp]
+command = "presemble"
+args = ["lsp", "site/"]
+```

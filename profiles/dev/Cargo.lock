@@ -228,7 +228,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "content"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "pulldown-cmark",
  "schema",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "content_management"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "editor_server",
 ]
@@ -281,7 +281,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "dep_graph"
-version = "0.2.2"
+version = "0.6.0"
 
 [[package]]
 name = "digest"
@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "editor_server"
-version = "0.2.2"
+version = "0.6.0"
 
 [[package]]
 name = "equivalent"
@@ -840,15 +840,16 @@ dependencies = [
 
 [[package]]
 name = "lsp_capabilities"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "content",
  "schema",
+ "template",
 ]
 
 [[package]]
 name = "lsp_service"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "content",
  "lsp_capabilities",
@@ -1023,14 +1024,14 @@ dependencies = [
 
 [[package]]
 name = "publisher"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "publisher_cli",
 ]
 
 [[package]]
 name = "publisher_cli"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "axum",
  "clap",
@@ -1174,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "schema"
-version = "0.2.2"
+version = "0.6.0"
 
 [[package]]
 name = "scopeguard"
@@ -1353,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "template"
-version = "0.2.2"
+version = "0.6.0"
 dependencies = [
  "content",
  "quick-xml",

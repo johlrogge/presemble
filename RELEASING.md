@@ -89,6 +89,84 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.6.0
+
+M3 Phase 4: Template and schema LSP support.
+
+**Template file LSP**
+`presemble lsp` now handles template files. Data-path completions are derived from the schema matching the template's file stem. Data paths referencing fields that do not exist in the schema are flagged as errors. Hover on a `data="…"` attribute shows the field hint text. Go-to-definition on `presemble:include src="…"` jumps to the referenced template file; go-to-definition on an in-file `presemble:apply` reference jumps to the `presemble:define` block.
+
+**Schema file LSP**
+`presemble lsp` now handles schema files. Element keyword completions offer correct syntax for headings, paragraphs, links, and images at the right cursor context. Constraint completions are contextual to the slot type above the cursor. Parse errors in the schema surface as diagnostics at the exact failing line.
+
+**Single-server file-type dispatch**
+A single `presemble lsp` process classifies open documents by path prefix (`content/`, `templates/`, `schemas/`) and dispatches to the appropriate capability handlers. No separate server instances per file type.
+
+---
+
+### v0.5.3
+
+M3 Phase 3: Content LSP.
+
+**Content-aware completions**
+`presemble lsp` provides completions for content files: slot names from the schema, and for link slots, actual content files formatted as `[Title](/type/slug)` insert text.
+
+**Content diagnostics**
+Schema violations surface inline as the author types: missing required slots, wrong occurrence counts, capitalization violations, broken link references.
+
+**Hover and go-to-definition**
+Hover on a content element shows the schema hint text for that slot. Go-to-definition on a link value navigates to the linked content file.
+
+**Quickfix code actions**
+Capitalization violations include a one-step quickfix. Missing slots include a generated snippet quickfix that inserts the slot template at the body separator.
+
+---
+
+### v0.5.0
+
+M3 Phase 2: Source map annotations and focus on changed element.
+
+**Source map annotations**
+Rendered DOM elements are annotated with source-file provenance. The browser uses these annotations to scroll to and highlight the element that changed after a live rebuild.
+
+**In-memory rebuild fast path**
+DOM diffs can be served directly to the browser without a disk write for the preview step.
+
+---
+
+### v0.4.1
+
+M3 Phase 1.1: Smart navigation.
+
+**Smart navigation on live reload**
+The server sends changed page URL(s) in WebSocket messages (`{type, pages, primary}`). If the current page changed the browser reloads in place; otherwise it navigates to the first changed page.
+
+---
+
+### v0.4.0
+
+M3 Phase 1: WebSocket live reload.
+
+**WebSocket live reload**
+`presemble serve` injects a small script into served pages that connects over WebSocket and reloads when the dep_graph detects changed outputs. Only affected pages trigger a reload signal.
+
+---
+
+### v0.3.0
+
+M2: Cross-content references and template composition.
+
+**Cross-content reference resolution (ADR-012)**
+Templates can traverse content links to render data from linked documents (`post.author.name`, `post.author.bio`). Resolution is verified before any output is written.
+
+**Template composition**
+`presemble:define` declares named callable fragments; `presemble:apply` invokes them with an explicit data context (ADR-013). File-qualified references use `::` notation.
+
+**Collection queries at root level**
+Collections are accessed at the root of the data graph (`data-each="posts"`, not `data-each="site.posts"`).
+
+---
+
 ### v0.2.0 (upcoming)
 
 Covers milestones M0.5 and M1.

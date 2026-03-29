@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -75,16 +75,34 @@ The server advertises the following capabilities during initialization:
 
 - `textDocumentSync: FULL` — the client sends the full document text on each change; no
   incremental sync.
-- `completionProvider` with trigger characters `#`, `[`, and `!` — matching the Presemble content
-  syntax for slot references, links, and directives.
-- `hoverProvider` — hover on a slot name returns its schema declaration.
-- `codeActionProvider` — quick fixes for schema validation errors.
+- `completionProvider` with trigger characters `#`, `[`, `!`, `.`, and `"` — `#`, `[`, `!` match
+  content syntax; `.` triggers after a data-path stem in templates (e.g. `article.`); `"` triggers
+  inside attribute values in templates and schemas.
+- `hoverProvider` — hover on a slot name returns its schema declaration; hover on a template
+  data-path shows the resolved schema field's hint text.
+- `codeActionProvider` — quick fixes for schema validation errors (capitalization, template paths).
+- `definitionProvider` — go-to-definition for content references (`[link]`), template references
+  (`presemble:apply template="..."`), and `presemble:include` sources.
 
 ### Schema-to-content path convention
 
 Content files under `content/{stem}/` are validated against the schema at `schemas/{stem}.md`.
 For example, `content/posts/hello.md` is validated against `schemas/posts.md`. The `lsp_service`
 component derives the schema path from the content file path using this convention.
+
+### File-type dispatch
+
+The LSP server handles three file types, classified by path:
+
+- `content/**/*.md` — content files: validated against their schema, completions for slot names
+  and link targets.
+- `templates/**/*.html` / `*.hiccup` — template files: completions for data-path expressions,
+  diagnostics for nonexistent schema fields, go-to-definition for template references.
+- `schemas/**/*.md` — schema files: completions for element templates and constraint values,
+  parse-error diagnostics.
+
+Template files are mapped to schemas by naming convention: `templates/article.html` resolves to
+`schemas/article.md`. Callable templates (no matching schema) receive limited support.
 
 ## Alternatives considered
 

@@ -365,6 +365,68 @@ Default (no config file): relative URLs, works everywhere.
 
 See [deployment URL rewriting](/feature/deployment-url-rewriting) for full details.
 
+## Editor support (LSP)
+
+```
+presemble lsp <site-dir>
+```
+
+Starts an LSP server over stdio. A single server process handles content, template, and schema files, dispatching by path. Point any LSP-capable editor at the `presemble lsp` binary.
+
+### Helix setup
+
+Add to `~/.config/helix/languages.toml`:
+
+```toml
+[[language]]
+name = "markdown"
+language-servers = ["presemble-lsp"]
+
+[language-server.presemble-lsp]
+command = "presemble"
+args = ["lsp", "site/"]
+```
+
+Replace `site/` with the path to your site directory.
+
+### Content file capabilities
+
+| Capability | Description |
+|---|---|
+| Completions | Slot names from the schema; for link slots, actual content files formatted as `[Title](/type/slug)` |
+| Diagnostics | Schema violations — missing slots, occurrence counts, capitalization, broken link references |
+| Hover | Schema hint text for the slot at the cursor |
+| Go-to-definition | Navigates to the linked content file |
+| Code actions | Quickfix: capitalize first letter; insert missing slot snippet |
+
+### Template file capabilities
+
+| Capability | Description |
+|---|---|
+| Completions | Data-path completions for `data="…"` attributes, derived from the matching schema |
+| Diagnostics | Data paths referencing fields not declared in the schema |
+| Hover | Schema hint text for the field at the cursor |
+| Go-to-definition | Jumps to `presemble:include` target or `presemble:define` block |
+
+### Schema file capabilities
+
+| Capability | Description |
+|---|---|
+| Completions | Element keyword syntax (heading, paragraph, link, image); constraint key/value pairs |
+| Diagnostics | Parse errors at the failing line |
+
+### File-type dispatch
+
+The server classifies each file by its path within the site directory:
+
+| Prefix | Kind | Capabilities |
+|---|---|---|
+| `content/` | Content | All |
+| `templates/` | Template | Completions, diagnostics, hover, go-to-definition |
+| `schemas/` | Schema | Completions, diagnostics |
+
+Files outside these prefixes receive no diagnostics.
+
 ## Validated at every level
 
 Presemble validates at every stage:

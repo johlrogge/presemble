@@ -1,5 +1,6 @@
 use content::{byte_to_position, parse_document_with_offsets, validate, ContentElement};
 use schema::{Element, Grammar};
+use template::Expr;
 
 /// A completion suggestion for a schema slot.
 #[derive(Debug, Clone)]
@@ -201,6 +202,195 @@ fn template_for_slot(slot: &schema::Slot) -> String {
     }
 }
 
+/// Completions for a schema file at the given cursor line.
+///
+/// Three modes based on context:
+/// 1. **Constraint value lines** — line starts with `: `, look at preceding non-empty
+///    line to determine which constraint key we're under and offer its known values.
+/// 2. **Empty/blank lines** — offer element templates (heading, paragraph, link, image, separator).
+/// 3. **Constraint key lines** — offer constraint keys like `occurs`, `content`, etc.
+pub fn schema_completions(src: &str, cursor_line: u32) -> Vec<SlotCompletion> {
+    let lines: Vec<&str> = src.lines().collect();
+    let cursor_idx = cursor_line as usize;
+    let current_line = match lines.get(cursor_idx) {
+        Some(l) => *l,
+        None => "",
+    };
+
+    // Mode 1: constraint value line (starts with ": " or is just ":")
+    if current_line.starts_with(": ") || current_line == ":" {
+        // Find the preceding non-empty line to determine the constraint key
+        let preceding_key = lines[..cursor_idx]
+            .iter()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .copied()
+            .unwrap_or("")
+            .trim();
+
+        return match preceding_key {
+            "occurs" => vec![
+                SlotCompletion {
+                    label: "exactly once".to_string(),
+                    detail: "occurs value".to_string(),
+                    documentation: None,
+                    insert_text: "exactly once".to_string(),
+                },
+                SlotCompletion {
+                    label: "at least once".to_string(),
+                    detail: "occurs value".to_string(),
+                    documentation: None,
+                    insert_text: "at least once".to_string(),
+                },
+                SlotCompletion {
+                    label: "at most once".to_string(),
+                    detail: "occurs value".to_string(),
+                    documentation: None,
+                    insert_text: "at most once".to_string(),
+                },
+                SlotCompletion {
+                    label: "1..3".to_string(),
+                    detail: "occurs value".to_string(),
+                    documentation: None,
+                    insert_text: "1..3".to_string(),
+                },
+                SlotCompletion {
+                    label: "0..5".to_string(),
+                    detail: "occurs value".to_string(),
+                    documentation: None,
+                    insert_text: "0..5".to_string(),
+                },
+            ],
+            "content" => vec![SlotCompletion {
+                label: "capitalized".to_string(),
+                detail: "content value".to_string(),
+                documentation: None,
+                insert_text: "capitalized".to_string(),
+            }],
+            "orientation" => vec![
+                SlotCompletion {
+                    label: "landscape".to_string(),
+                    detail: "orientation value".to_string(),
+                    documentation: None,
+                    insert_text: "landscape".to_string(),
+                },
+                SlotCompletion {
+                    label: "portrait".to_string(),
+                    detail: "orientation value".to_string(),
+                    documentation: None,
+                    insert_text: "portrait".to_string(),
+                },
+            ],
+            "alt" => vec![
+                SlotCompletion {
+                    label: "required".to_string(),
+                    detail: "alt value".to_string(),
+                    documentation: None,
+                    insert_text: "required".to_string(),
+                },
+                SlotCompletion {
+                    label: "optional".to_string(),
+                    detail: "alt value".to_string(),
+                    documentation: None,
+                    insert_text: "optional".to_string(),
+                },
+            ],
+            "headings" => vec![
+                SlotCompletion {
+                    label: "h3..h6".to_string(),
+                    detail: "headings value".to_string(),
+                    documentation: None,
+                    insert_text: "h3..h6".to_string(),
+                },
+                SlotCompletion {
+                    label: "h2..h6".to_string(),
+                    detail: "headings value".to_string(),
+                    documentation: None,
+                    insert_text: "h2..h6".to_string(),
+                },
+                SlotCompletion {
+                    label: "h4..h6".to_string(),
+                    detail: "headings value".to_string(),
+                    documentation: None,
+                    insert_text: "h4..h6".to_string(),
+                },
+            ],
+            _ => vec![],
+        };
+    }
+
+    // Mode 2: empty line → offer element templates
+    if current_line.trim().is_empty() {
+        return vec![
+            SlotCompletion {
+                label: "Heading slot".to_string(),
+                detail: "heading element".to_string(),
+                documentation: Some("A heading element with name anchor".to_string()),
+                insert_text: "# Heading text {#name}\noccurs\n: exactly once\n".to_string(),
+            },
+            SlotCompletion {
+                label: "Paragraph slot".to_string(),
+                detail: "paragraph element".to_string(),
+                documentation: Some("A paragraph element".to_string()),
+                insert_text: "Paragraph text. {#name}\noccurs\n: exactly once\n".to_string(),
+            },
+            SlotCompletion {
+                label: "Link slot".to_string(),
+                detail: "link element".to_string(),
+                documentation: Some("A link reference to other content".to_string()),
+                insert_text: "[link text](/pattern) {#name}\noccurs\n: exactly once\n".to_string(),
+            },
+            SlotCompletion {
+                label: "Image slot".to_string(),
+                detail: "image element".to_string(),
+                documentation: Some("An image element".to_string()),
+                insert_text: "![alt text](images/*.(jpg|png)) {#name}\noccurs\n: exactly once\n"
+                    .to_string(),
+            },
+            SlotCompletion {
+                label: "Body separator".to_string(),
+                detail: "body section".to_string(),
+                documentation: Some("Separator between preamble and body".to_string()),
+                insert_text: "----\n\nBody content.\nheadings\n: h3..h6\n".to_string(),
+            },
+        ];
+    }
+
+    // Mode 3: constraint key line → offer constraint keys
+    vec![
+        SlotCompletion {
+            label: "occurs".to_string(),
+            detail: "constraint key".to_string(),
+            documentation: None,
+            insert_text: "occurs".to_string(),
+        },
+        SlotCompletion {
+            label: "content".to_string(),
+            detail: "constraint key".to_string(),
+            documentation: None,
+            insert_text: "content".to_string(),
+        },
+        SlotCompletion {
+            label: "orientation".to_string(),
+            detail: "constraint key".to_string(),
+            documentation: None,
+            insert_text: "orientation".to_string(),
+        },
+        SlotCompletion {
+            label: "alt".to_string(),
+            detail: "constraint key".to_string(),
+            documentation: None,
+            insert_text: "alt".to_string(),
+        },
+        SlotCompletion {
+            label: "headings".to_string(),
+            detail: "constraint key".to_string(),
+            documentation: None,
+            insert_text: "headings".to_string(),
+        },
+    ]
+}
+
 /// Validate a content source against its grammar and return positioned diagnostics.
 pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDiagnostic> {
     let elements_with_offsets = match parse_document_with_offsets(src) {
@@ -393,6 +583,312 @@ fn element_text(element: &ContentElement) -> Option<&str> {
     }
 }
 
+/// A data-path reference found in a template, with its source location.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TemplateDataRef {
+    pub expr_src: String,
+    pub path: Vec<String>,
+    pub attr_value_start: usize,
+    pub attr_value_end: usize,
+    pub line: u32,
+    pub character: u32,
+}
+
+/// Find all occurrences of `attr_name="..."` in `src`.
+/// Returns `(start_byte, end_byte, value_str)` for each match, where start/end
+/// are the byte offsets of the content inside the quotes (excluding the quotes).
+fn find_attr_values<'a>(src: &'a str, attr_name: &str) -> Vec<(usize, usize, &'a str)> {
+    let needle = format!("{attr_name}=\"");
+    let mut results = Vec::new();
+    let mut search_start = 0;
+
+    while let Some(rel) = src[search_start..].find(needle.as_str()) {
+        let abs = search_start + rel;
+        let value_start = abs + needle.len();
+        // Find the closing quote, scanning from value_start
+        if let Some(close_rel) = src[value_start..].find('"') {
+            let value_end = value_start + close_rel;
+            results.push((value_start, value_end, &src[value_start..value_end]));
+            search_start = value_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    results
+}
+
+/// Extract the root lookup path from an `Expr`.
+/// Returns the path parts for `Lookup` and `Pipe(Lookup, _)`.
+fn lookup_path(expr: &Expr) -> Option<Vec<String>> {
+    match expr {
+        Expr::Lookup(parts) => Some(parts.clone()),
+        Expr::Pipe(inner, _) => match inner.as_ref() {
+            Expr::Lookup(parts) => Some(parts.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Scan a raw template source for data-path references in known attribute positions.
+///
+/// Scans for:
+/// - `data="..."` (presemble:insert / presemble:apply)
+/// - `data-slot="..."` (template elements)
+/// - `data-each="..."` (template elements)
+/// - `presemble:class="..."` (any element)
+pub fn extract_template_data_refs(src: &str) -> Vec<TemplateDataRef> {
+    let attr_names = ["data", "data-slot", "data-each", "presemble:class"];
+    let mut refs = Vec::new();
+
+    for attr_name in attr_names {
+        for (start, end, value) in find_attr_values(src, attr_name) {
+            let expr_src = value.to_string();
+            let parsed = template::parse_expr(value);
+            if let Ok(expr) = parsed {
+                if let Some(path) = lookup_path(&expr) {
+                    let (line, character) = byte_to_position(src, start);
+                    refs.push(TemplateDataRef {
+                        expr_src,
+                        path,
+                        attr_value_start: start,
+                        attr_value_end: end,
+                        line,
+                        character,
+                    });
+                }
+            }
+        }
+    }
+
+    refs
+}
+
+/// Given a template source, cursor position (line, char), a grammar, and content stem,
+/// return completions for data-path attributes.
+///
+/// - If cursor is inside `data="`, `data-slot="`, `data-each="`, or `presemble:class="` value:
+///   - If no dot typed yet → offer the stem as a completion
+///   - If text starts with `{stem}.` → offer all preamble slot names
+/// - Otherwise returns empty vec.
+pub fn template_completions(
+    src: &str,
+    cursor_line: u32,
+    cursor_char: u32,
+    grammar: &Grammar,
+    stem: &str,
+) -> Vec<SlotCompletion> {
+    let line_str = match src.lines().nth(cursor_line as usize) {
+        Some(l) => l,
+        None => return vec![],
+    };
+
+    let attr_names = ["data", "data-slot", "data-each", "presemble:class"];
+
+    for attr_name in attr_names {
+        let needle = format!("{attr_name}=\"");
+        let mut search = 0usize;
+        while let Some(rel) = line_str[search..].find(needle.as_str()) {
+            let abs_in_line = search + rel;
+            let value_start_in_line = abs_in_line + needle.len();
+
+            // Find closing quote from value_start
+            let close_rel = match line_str[value_start_in_line..].find('"') {
+                Some(r) => r,
+                None => break,
+            };
+            let value_end_in_line = value_start_in_line + close_rel;
+
+            // Check if cursor falls inside the attribute value (inclusive of start, exclusive of close quote)
+            let cursor = cursor_char as usize;
+            if cursor >= value_start_in_line && cursor <= value_end_in_line {
+                // Extract the prefix typed so far before the cursor
+                let prefix = &line_str[value_start_in_line..cursor];
+
+                let stem_dot = format!("{stem}.");
+                if !prefix.contains('.') {
+                    // No dot yet — offer the stem name
+                    return vec![SlotCompletion {
+                        label: stem.to_string(),
+                        detail: "content type".to_string(),
+                        documentation: None,
+                        insert_text: stem.to_string(),
+                    }];
+                } else if prefix.starts_with(&stem_dot) {
+                    // Typed "{stem}." — offer all preamble slots
+                    return grammar
+                        .preamble
+                        .iter()
+                        .map(|slot| {
+                            let detail = match &slot.element {
+                                Element::Heading { .. } => "heading".to_string(),
+                                Element::Paragraph => "paragraph".to_string(),
+                                Element::Link { .. } => "link".to_string(),
+                                Element::Image { .. } => "image".to_string(),
+                            };
+                            SlotCompletion {
+                                label: slot.name.to_string(),
+                                detail,
+                                documentation: slot.hint_text.clone(),
+                                insert_text: slot.name.to_string(),
+                            }
+                        })
+                        .collect();
+                } else {
+                    // Inside an attribute value but prefix doesn't match stem
+                    return vec![];
+                }
+            }
+
+            search = value_end_in_line + 1;
+        }
+    }
+
+    vec![]
+}
+
+/// Validate data-path references in a template source against a grammar.
+///
+/// Only validates paths where the root segment matches `stem`. Other roots
+/// (e.g. `site.*`, `item.*`) are silently skipped.
+pub fn validate_template_paths(
+    src: &str,
+    grammar: &schema::Grammar,
+    stem: &str,
+) -> Vec<PositionedDiagnostic> {
+    let refs = extract_template_data_refs(src);
+    let mut diagnostics = Vec::new();
+
+    for data_ref in &refs {
+        if data_ref.path.is_empty() {
+            continue;
+        }
+        if data_ref.path[0] != stem {
+            continue;
+        }
+        if data_ref.path.len() < 2 {
+            continue;
+        }
+
+        let field = &data_ref.path[1];
+        let valid_slot = grammar.preamble.iter().any(|s| s.name.as_str() == field.as_str());
+        let valid_body = field == "body" && grammar.body.is_some();
+
+        if !valid_slot && !valid_body {
+            let start = (data_ref.line, data_ref.character);
+            let end = (
+                data_ref.line,
+                data_ref.character + data_ref.expr_src.len() as u32,
+            );
+            diagnostics.push(PositionedDiagnostic {
+                message: format!("unknown field '{}' in {} schema", field, stem),
+                severity: DiagnosticSeverity::Error,
+                start,
+                end,
+                capitalization_fix: None,
+                template_fix: None,
+            });
+        }
+    }
+
+    diagnostics
+}
+
+/// The target of a go-to-definition on a template reference.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplateDefinitionTarget {
+    /// Jump to a file — e.g. `templates/header.html`
+    File(std::path::PathBuf),
+    /// Jump to a position within the current file
+    InFile { line: u32, character: u32 },
+}
+
+/// Given the template source, a cursor line, and the site directory,
+/// return where the template referenced on that line is defined.
+///
+/// Looks for `template="..."` or `src="..."` on `cursor_line`.
+/// Resolution order:
+/// 1. File-qualified (`components::card`) → `templates/components.html`
+/// 2. In-file definition (`<template presemble:define="name">` or `<template name="name">`)
+/// 3. External file (`templates/{name}.html`)
+pub fn template_definition(
+    src: &str,
+    cursor_line: u32,
+    site_dir: &std::path::Path,
+) -> Option<TemplateDefinitionTarget> {
+    let line = src.lines().nth(cursor_line as usize)?;
+
+    // Extract template name from `template="..."` or `src="..."`
+    let name = extract_attr_value_on_line(line, "template")
+        .or_else(|| extract_attr_value_on_line(line, "src"))?
+        .to_string();
+
+    // 1. File-qualified names containing `::`
+    if name.contains("::") {
+        let file_part = name.split("::").next()?;
+        let path = site_dir.join("templates").join(format!("{file_part}.html"));
+        return Some(TemplateDefinitionTarget::File(path));
+    }
+
+    // 2. In-file definition scan
+    for (i, l) in src.lines().enumerate() {
+        if l.contains("<template") {
+            if let Some(val) = extract_attr_value_on_line(l, "presemble:define") {
+                if val == name {
+                    return Some(TemplateDefinitionTarget::InFile {
+                        line: i as u32,
+                        character: 0,
+                    });
+                }
+            }
+            if let Some(val) = extract_attr_value_on_line(l, "name") {
+                if val == name {
+                    return Some(TemplateDefinitionTarget::InFile {
+                        line: i as u32,
+                        character: 0,
+                    });
+                }
+            }
+        }
+    }
+
+    // 3. External template file
+    let path = site_dir.join("templates").join(format!("{name}.html"));
+    if path.exists() {
+        return Some(TemplateDefinitionTarget::File(path));
+    }
+
+    None
+}
+
+/// Extract the value of `attr_name="..."` from a single line, returning the value string.
+fn extract_attr_value_on_line<'a>(line: &'a str, attr_name: &str) -> Option<&'a str> {
+    let needle = format!("{attr_name}=\"");
+    let start = line.find(needle.as_str())? + needle.len();
+    let end = line[start..].find('"')? + start;
+    Some(&line[start..end])
+}
+
+/// Validate a schema source file and return positioned diagnostics.
+///
+/// Returns an empty vec if the schema is valid, or a single error diagnostic
+/// at position (0, 0) if parsing fails.
+pub fn validate_schema_with_positions(src: &str) -> Vec<PositionedDiagnostic> {
+    match schema::parse_schema(src) {
+        Ok(_) => vec![],
+        Err(err) => vec![PositionedDiagnostic {
+            message: err.to_string(),
+            severity: DiagnosticSeverity::Error,
+            start: (0, 0),
+            end: (0, 0),
+            capitalization_fix: None,
+            template_fix: None,
+        }],
+    }
+}
+
 fn find_text_start_in_src(src: &str, element_start: usize) -> Option<usize> {
     let after = &src[element_start..];
     let mut offset = element_start;
@@ -512,6 +1008,400 @@ mod tests {
         assert!(
             path.to_str().unwrap_or("").contains("johlrogge"),
             "path should contain johlrogge: {path:?}"
+        );
+    }
+
+    #[test]
+    fn extract_data_refs_simple_lookup() {
+        let src = r#"<presemble:insert data="article.title" />"#;
+        let refs = extract_template_data_refs(src);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].expr_src, "article.title");
+        assert_eq!(refs[0].path, vec!["article", "title"]);
+    }
+
+    #[test]
+    fn extract_data_refs_data_each() {
+        let src = r#"<div data-each="articles"><span data="item.title" /></div>"#;
+        let refs = extract_template_data_refs(src);
+        // Should find both data-each="articles" and data="item.title"
+        let each_ref = refs.iter().find(|r| r.expr_src == "articles");
+        let title_ref = refs.iter().find(|r| r.expr_src == "item.title");
+        assert!(each_ref.is_some(), "should find data-each ref: {refs:#?}");
+        assert_eq!(each_ref.unwrap().path, vec!["articles"]);
+        assert!(title_ref.is_some(), "should find data ref: {refs:#?}");
+        assert_eq!(title_ref.unwrap().path, vec!["item", "title"]);
+    }
+
+    #[test]
+    fn extract_data_refs_pipe_expression() {
+        let src = r#"<img presemble:class="article.cover.orientation | match(landscape => &quot;cover--landscape&quot;, portrait => &quot;cover--portrait&quot;)" />"#;
+        // The value is stored literally in the attribute; we test with a simpler pipe
+        let src2 = r#"<img presemble:class="article.cover.orientation | first" />"#;
+        let refs = extract_template_data_refs(src2);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].path, vec!["article", "cover", "orientation"]);
+    }
+
+    #[test]
+    fn extract_data_refs_positions_are_correct() {
+        // Line 0: "<presemble:insert data="article.title" />"
+        // The value "article.title" starts after `data="`
+        let src = "<presemble:insert data=\"article.title\" />";
+        let refs = extract_template_data_refs(src);
+        assert_eq!(refs.len(), 1);
+        // Line 0, character is the byte offset of the opening quote's next char
+        assert_eq!(refs[0].line, 0);
+        let expected_char = src.find("article.title").unwrap() as u32;
+        assert_eq!(refs[0].character, expected_char);
+    }
+
+    #[test]
+    fn extract_data_refs_data_slot() {
+        let src = r#"<template data-slot="article.subtitle"></template>"#;
+        let refs = extract_template_data_refs(src);
+        let slot_ref = refs.iter().find(|r| r.expr_src == "article.subtitle");
+        assert!(slot_ref.is_some(), "should find data-slot ref: {refs:#?}");
+        assert_eq!(slot_ref.unwrap().path, vec!["article", "subtitle"]);
+    }
+
+    #[test]
+    fn validate_template_paths_valid_path_no_diagnostics() {
+        let src = r#"<presemble:insert data="article.title" />"#;
+        let grammar = article_grammar();
+        let diags = validate_template_paths(src, &grammar, "article");
+        assert!(
+            diags.is_empty(),
+            "valid path article.title should produce no diagnostics: {diags:#?}"
+        );
+    }
+
+    #[test]
+    fn validate_template_paths_invalid_field_emits_diagnostic() {
+        let src = r#"<presemble:insert data="article.titel" />"#;
+        let grammar = article_grammar();
+        let diags = validate_template_paths(src, &grammar, "article");
+        assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:#?}");
+        assert!(
+            diags[0].message.contains("titel"),
+            "message should mention 'titel': {}",
+            diags[0].message
+        );
+        assert!(
+            diags[0].message.contains("article"),
+            "message should mention 'article': {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn validate_template_paths_unknown_root_skipped() {
+        let src = r#"<presemble:insert data="site.nav" />"#;
+        let grammar = article_grammar();
+        let diags = validate_template_paths(src, &grammar, "article");
+        assert!(
+            diags.is_empty(),
+            "unknown root 'site' should be silently skipped: {diags:#?}"
+        );
+    }
+
+    #[test]
+    fn validate_template_paths_body_is_valid() {
+        let src = r#"<presemble:insert data="article.body" />"#;
+        let grammar = article_grammar();
+        let diags = validate_template_paths(src, &grammar, "article");
+        assert!(
+            diags.is_empty(),
+            "article.body should be valid: {diags:#?}"
+        );
+    }
+
+    #[test]
+    fn validate_template_paths_multiple_refs_multiple_diagnostics() {
+        let src = r#"<presemble:insert data="article.titel" /><presemble:insert data="article.authr" />"#;
+        let grammar = article_grammar();
+        let diags = validate_template_paths(src, &grammar, "article");
+        assert_eq!(diags.len(), 2, "expected two diagnostics: {diags:#?}");
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("titel")),
+            "expected diagnostic for 'titel': {diags:#?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("authr")),
+            "expected diagnostic for 'authr': {diags:#?}"
+        );
+    }
+
+    // template_definition tests
+
+    fn blog_site_dir() -> std::path::PathBuf {
+        // Resolve relative to the workspace root (tests run from the component dir)
+        std::path::PathBuf::from("../../fixtures/blog-site")
+    }
+
+    #[test]
+    fn template_definition_apply_resolves_to_file() {
+        // `header` template exists as fixtures/blog-site/templates/header.html
+        let src = r#"<presemble:apply template="header" />"#;
+        let site_dir = blog_site_dir();
+        let result = template_definition(src, 0, &site_dir);
+        match result {
+            Some(TemplateDefinitionTarget::File(path)) => {
+                assert!(
+                    path.to_str().unwrap_or("").contains("header.html"),
+                    "expected path to contain header.html: {path:?}"
+                );
+            }
+            other => panic!("expected File target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_definition_apply_inline_definition_resolves_infile() {
+        // Template defined inline in the same source
+        let src = concat!(
+            "<presemble:apply template=\"feature-card\" />\n",
+            "<template presemble:define=\"feature-card\">\n",
+            "  <div>card</div>\n",
+            "</template>\n",
+        );
+        let site_dir = blog_site_dir();
+        let result = template_definition(src, 0, &site_dir);
+        match result {
+            Some(TemplateDefinitionTarget::InFile { line, character }) => {
+                assert_eq!(line, 1, "expected in-file line 1 (0-indexed)");
+                assert_eq!(character, 0);
+            }
+            other => panic!("expected InFile target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_definition_include_src_resolves_to_file() {
+        // `footer` template exists as fixtures/blog-site/templates/footer.html
+        let src = r#"<presemble:include src="footer" />"#;
+        let site_dir = blog_site_dir();
+        let result = template_definition(src, 0, &site_dir);
+        match result {
+            Some(TemplateDefinitionTarget::File(path)) => {
+                assert!(
+                    path.to_str().unwrap_or("").contains("footer.html"),
+                    "expected path to contain footer.html: {path:?}"
+                );
+            }
+            other => panic!("expected File target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_definition_no_match_returns_none() {
+        // No template with this name exists
+        let src = r#"<presemble:apply template="nonexistent-template-xyz" />"#;
+        let site_dir = blog_site_dir();
+        let result = template_definition(src, 0, &site_dir);
+        assert!(result.is_none(), "nonexistent template should return None");
+    }
+
+    // --- template_completions tests ---
+
+    #[test]
+    fn template_completions_stem_when_no_dot() {
+        let grammar = article_grammar();
+        // cursor is after the value so far "article" inside data="article"
+        let src = r#"<presemble:insert data="article" />"#;
+        let cursor_char = src.find("article").unwrap() as u32 + "article".len() as u32;
+        let completions = template_completions(src, 0, cursor_char, &grammar, "article");
+        assert_eq!(completions.len(), 1, "should return single stem completion: {completions:#?}");
+        assert_eq!(completions[0].label, "article");
+        assert_eq!(completions[0].detail, "content type");
+        assert_eq!(completions[0].insert_text, "article");
+    }
+
+    #[test]
+    fn template_completions_empty_value_returns_stem() {
+        let grammar = article_grammar();
+        // cursor right after opening quote: data="<cursor>
+        let src = r#"<presemble:insert data="" />"#;
+        let cursor_char = src.find("data=\"").unwrap() as u32 + "data=\"".len() as u32;
+        let completions = template_completions(src, 0, cursor_char, &grammar, "article");
+        assert_eq!(completions.len(), 1, "empty prefix should offer stem: {completions:#?}");
+        assert_eq!(completions[0].label, "article");
+    }
+
+    #[test]
+    fn template_completions_after_dot_returns_all_slots() {
+        let grammar = article_grammar();
+        // cursor is after "article." inside data="article."
+        let src = r#"<presemble:insert data="article." />"#;
+        let cursor_char = src.find("article.").unwrap() as u32 + "article.".len() as u32;
+        let completions = template_completions(src, 0, cursor_char, &grammar, "article");
+        assert!(
+            !completions.is_empty(),
+            "should return slot completions after dot: {completions:#?}"
+        );
+        // article schema has: title, summary, author, cover
+        assert!(
+            completions.iter().any(|c| c.label == "title"),
+            "should include title slot: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "summary"),
+            "should include summary slot: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "author"),
+            "should include author slot: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "cover"),
+            "should include cover slot: {completions:#?}"
+        );
+        // Details should be element-type labels
+        let title_c = completions.iter().find(|c| c.label == "title").unwrap();
+        assert_eq!(title_c.detail, "heading");
+        let author_c = completions.iter().find(|c| c.label == "author").unwrap();
+        assert_eq!(author_c.detail, "link");
+        let cover_c = completions.iter().find(|c| c.label == "cover").unwrap();
+        assert_eq!(cover_c.detail, "image");
+    }
+
+    #[test]
+    fn template_completions_outside_attribute_returns_empty() {
+        let grammar = article_grammar();
+        let src = r#"<presemble:insert data="article.title" />"#;
+        // cursor is at position 0 (on the '<'), not inside any attribute value
+        let completions = template_completions(src, 0, 0, &grammar, "article");
+        assert!(
+            completions.is_empty(),
+            "cursor outside attribute value should return empty: {completions:#?}"
+        );
+    }
+
+    #[test]
+    fn template_completions_works_with_data_each_attribute() {
+        let grammar = article_grammar();
+        let src = r#"<div data-each="article."></div>"#;
+        let cursor_char = src.find("article.").unwrap() as u32 + "article.".len() as u32;
+        let completions = template_completions(src, 0, cursor_char, &grammar, "article");
+        assert!(
+            !completions.is_empty(),
+            "data-each attribute should also produce slot completions: {completions:#?}"
+        );
+    }
+
+    // --- schema_completions tests ---
+
+    #[test]
+    fn schema_completions_occurs_value_line_offers_occurrence_values() {
+        // Schema excerpt: "occurs" on line 1, ": " on line 2
+        let src = "# Title {#title}\noccurs\n: \n";
+        // cursor on line 2 (": ")
+        let completions = schema_completions(src, 2);
+        assert!(
+            !completions.is_empty(),
+            "cursor on ': ' after 'occurs' should offer occurrence values: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "exactly once"),
+            "should include 'exactly once': {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "at least once"),
+            "should include 'at least once': {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "1..3"),
+            "should include '1..3': {completions:#?}"
+        );
+    }
+
+    #[test]
+    fn schema_completions_empty_line_offers_element_templates() {
+        // Empty schema — cursor on an empty line
+        let src = "\n";
+        let completions = schema_completions(src, 0);
+        assert!(
+            !completions.is_empty(),
+            "cursor on empty line should offer element templates: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "Heading slot"),
+            "should include 'Heading slot': {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "Paragraph slot"),
+            "should include 'Paragraph slot': {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "Link slot"),
+            "should include 'Link slot': {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "Image slot"),
+            "should include 'Image slot': {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "Body separator"),
+            "should include 'Body separator': {completions:#?}"
+        );
+    }
+
+    #[test]
+    fn schema_completions_content_value_line_offers_capitalized() {
+        // Schema: "content" on line 1, ": " on line 2
+        let src = "# Title {#title}\ncontent\n: \n";
+        let completions = schema_completions(src, 2);
+        assert_eq!(
+            completions.len(),
+            1,
+            "cursor on ': ' after 'content' should offer exactly one value: {completions:#?}"
+        );
+        assert_eq!(completions[0].label, "capitalized");
+        assert_eq!(completions[0].insert_text, "capitalized");
+    }
+
+    // --- validate_schema_with_positions tests ---
+
+    #[test]
+    fn validate_schema_with_positions_valid_schema_returns_empty() {
+        let src = include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let diags = validate_schema_with_positions(src);
+        assert!(
+            diags.is_empty(),
+            "valid schema should produce no diagnostics: {diags:#?}"
+        );
+    }
+
+    #[test]
+    fn validate_schema_with_positions_invalid_schema_returns_error() {
+        // A heading line without the required {#name} anchor triggers a parse error
+        let src = "# Title without anchor\n";
+        let diags = validate_schema_with_positions(src);
+        assert_eq!(diags.len(), 1, "invalid schema should produce exactly one diagnostic: {diags:#?}");
+        let diag = &diags[0];
+        assert!(
+            matches!(diag.severity, DiagnosticSeverity::Error),
+            "diagnostic should be an error: {diag:#?}"
+        );
+        assert!(!diag.message.is_empty(), "error message should not be empty");
+        assert_eq!(diag.start, (0, 0), "error should be positioned at line 0 char 0");
+        assert_eq!(diag.end, (0, 0), "error end should be at line 0 char 0");
+        assert!(diag.capitalization_fix.is_none(), "should have no capitalization fix");
+        assert!(diag.template_fix.is_none(), "should have no template fix");
+    }
+
+    #[test]
+    fn validate_schema_with_positions_error_message_contains_schema_info() {
+        // A heading line without the required {#name} anchor triggers a parse error
+        let src = "# Title without anchor\n";
+        let diags = validate_schema_with_positions(src);
+        assert_eq!(diags.len(), 1);
+        // The error message comes from SchemaError::Display which includes "schema parse error:"
+        assert!(
+            diags[0].message.contains("schema"),
+            "error message should mention 'schema': {}",
+            diags[0].message
         );
     }
 }
