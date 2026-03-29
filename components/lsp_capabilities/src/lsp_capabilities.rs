@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-// Implementation goes here
-=======
 use content::{byte_to_position, parse_document_with_offsets, validate, ContentElement};
 use schema::{Element, Grammar};
 
@@ -88,13 +85,9 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
             content::Severity::Warning => DiagnosticSeverity::Warning,
         };
 
-        // Find the element in elements_with_offsets that corresponds to this diagnostic.
-        // Match by slot name: find the element matching the expected type for the slot.
         let byte_range = if let Some(slot_name) = &diag.slot {
-            // Find the slot in grammar to know what element type to look for.
             let slot = grammar.preamble.iter().find(|s| &s.name == slot_name);
             if let Some(slot) = slot {
-                // Find the first element matching the slot's element type.
                 elements_with_offsets
                     .iter()
                     .find(|e| element_matches_slot_type(&e.element, &slot.element))
@@ -103,7 +96,6 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
                 None
             }
         } else {
-            // Body diagnostic — no specific slot. Use position 0.
             None
         };
 
@@ -115,9 +107,7 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
             ((0, 0), (0, 0))
         };
 
-        // Check for capitalization fix opportunity.
         let capitalization_fix = if diag.message.contains("uppercase") {
-            // Find the element text to get the first char.
             if let Some(slot_name) = &diag.slot {
                 let slot = grammar.preamble.iter().find(|s| &s.name == slot_name);
                 if let Some(slot) = slot {
@@ -128,11 +118,7 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
                         let text = element_text(&ewo.element);
                         if let Some(first_char) = text.and_then(|t| t.chars().next()) {
                             if !first_char.is_uppercase() {
-                                let uppercased: String = first_char
-                                    .to_uppercase()
-                                    .collect();
-                                // Find the byte offset of the text within the element.
-                                // Search for the first non-whitespace char after the element start.
+                                let uppercased: String = first_char.to_uppercase().collect();
                                 let text_start = find_text_start_in_src(src, ewo.byte_range.start);
                                 if let Some(ts) = text_start {
                                     let char_end = ts + first_char.len_utf8();
@@ -181,14 +167,12 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
 pub fn hover_for_line(src: &str, grammar: &Grammar, line: u32) -> Option<String> {
     let elements_with_offsets = parse_document_with_offsets(src).ok()?;
 
-    // Find the element whose byte_range contains the given line.
     let target = elements_with_offsets.iter().find(|ewo| {
         let start_line = byte_to_position(src, ewo.byte_range.start).0;
         let end_line = byte_to_position(src, ewo.byte_range.end).0;
         line >= start_line && line <= end_line
     })?;
 
-    // Match its element type to a schema slot.
     let slot = grammar
         .preamble
         .iter()
@@ -196,10 +180,6 @@ pub fn hover_for_line(src: &str, grammar: &Grammar, line: u32) -> Option<String>
 
     slot.hint_text.clone()
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn element_matches_slot_type(element: &ContentElement, slot_type: &Element) -> bool {
     matches!(
@@ -220,20 +200,13 @@ fn element_text(element: &ContentElement) -> Option<&str> {
     }
 }
 
-/// Find the byte offset of the first non-markup text character in the element
-/// starting at `element_start` in `src`.
-/// For headings like `# hello`, skip the `# ` prefix to find `h`.
 fn find_text_start_in_src(src: &str, element_start: usize) -> Option<usize> {
     let after = &src[element_start..];
-    // Skip leading markdown markup (# chars, spaces) to find the actual text.
     let mut offset = element_start;
     for ch in after.chars() {
         if ch == '#' || ch == ' ' || ch == '\t' {
             offset += ch.len_utf8();
-        } else if ch.is_alphanumeric() || ch.is_alphabetic() {
-            return Some(offset);
         } else {
-            // Something else — return as-is
             return Some(offset);
         }
     }
@@ -246,8 +219,7 @@ mod tests {
     use schema::parse_schema;
 
     fn article_grammar() -> Grammar {
-        let schema_input =
-            include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let schema_input = include_str!("../../../fixtures/blog-site/schemas/article.md");
         parse_schema(schema_input).expect("article schema should parse")
     }
 
@@ -255,15 +227,8 @@ mod tests {
     fn completions_for_schema_returns_all_slots() {
         let grammar = article_grammar();
         let completions = completions_for_schema(&grammar, "article");
-        assert!(
-            !completions.is_empty(),
-            "should return completions for article schema"
-        );
-        // The first slot should be 'title' for the article schema.
-        assert!(
-            completions.iter().any(|c| c.label == "title"),
-            "should include a 'title' completion"
-        );
+        assert!(!completions.is_empty(), "should return completions for article schema");
+        assert!(completions.iter().any(|c| c.label == "title"), "should include a 'title' completion");
     }
 
     #[test]
@@ -271,11 +236,7 @@ mod tests {
         let grammar = article_grammar();
         let completions = completions_for_schema(&grammar, "article");
         for c in &completions {
-            assert!(
-                c.insert_text.starts_with("article."),
-                "insert_text should start with stem: {:?}",
-                c.insert_text
-            );
+            assert!(c.insert_text.starts_with("article."), "insert_text should start with stem: {:?}", c.insert_text);
         }
     }
 
@@ -284,10 +245,7 @@ mod tests {
         let src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let grammar = article_grammar();
         let diags = validate_with_positions(src, &grammar);
-        assert!(
-            diags.is_empty(),
-            "valid document should produce no diagnostics: {diags:#?}"
-        );
+        assert!(diags.is_empty(), "valid document should produce no diagnostics: {diags:#?}");
     }
 
     #[test]
@@ -295,22 +253,13 @@ mod tests {
         let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
         let diags = validate_with_positions(src, &grammar);
-        assert!(
-            !diags.is_empty(),
-            "document missing title should produce diagnostics"
-        );
+        assert!(!diags.is_empty(), "document missing title should produce diagnostics");
     }
 
     #[test]
     fn hover_for_line_returns_hint_for_title_line() {
         let src = "# Hello World\n\nSome text.\n\n[Author](/authors/test)\n\n![Cover](cover.jpg)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
-        // Line 0 should be the title heading.
-        let hover = hover_for_line(src, &grammar, 0);
-        // If the article schema has a hint_text for the title slot, it should be returned.
-        // Whether it returns Some or None depends on the fixture.
-        // This test just ensures it doesn't panic.
-        let _ = hover;
+        let _ = hover_for_line(src, &grammar, 0);
     }
 }
->>>>>>> worktree-agent-a6e18639
