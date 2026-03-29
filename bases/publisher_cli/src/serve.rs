@@ -7,6 +7,8 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use lsp_service::PresembleLsp;
+use tower_lsp::{LspService, Server};
 use content::{parse_document, ContentElement};
 use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -61,6 +63,7 @@ struct AppState {
     output_dir: std::path::PathBuf,
     reload_tx: broadcast::Sender<ReloadMessage>,
     build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    site_dir: std::path::PathBuf,
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
@@ -122,10 +125,12 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         output_dir: out_dir.clone(),
         reload_tx,
         build_errors,
+        site_dir: site_dir.to_path_buf(),
     };
 
     let app = Router::new()
         .route("/_presemble/ws", get(ws_handler))
+        .route("/_presemble/lsp", get(lsp_ws_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -167,6 +172,72 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<ReloadMess
                 if msg.is_none() { break; }
             }
         }
+    }
+}
+
+async fn lsp_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_lsp_ws(socket, state.site_dir))
+}
+
+async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Create a duplex pair:
+    // - lsp_side: the LSP Server's I/O (AsyncRead for requests, AsyncWrite for responses)
+    // - adapter_side: our bridge (write requests in, read responses out)
+    let (lsp_side, adapter_side) = tokio::io::duplex(1024 * 64);
+
+    let (service, lsp_socket) = LspService::new(|client| {
+        PresembleLsp::new(client, site_dir)
+    });
+
+    // Split lsp_side for the Server (needs separate AsyncRead and AsyncWrite).
+    let (lsp_read, lsp_write) = tokio::io::split(lsp_side);
+
+    // Split the adapter side for reading responses and writing requests.
+    let (mut adapter_read, mut adapter_write) = tokio::io::split(adapter_side);
+
+    // Task A: WS frames → Content-Length framed bytes → LSP server (via adapter_write)
+    let ws_to_lsp = async move {
+        loop {
+            match ws_socket.recv().await {
+                Some(Ok(Message::Text(text))) => {
+                    let bytes = text.as_bytes();
+                    let header = format!("Content-Length: {}\r\n\r\n", bytes.len());
+                    if adapter_write.write_all(header.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if adapter_write.write_all(bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => continue,
+                Some(Err(_)) => break,
+            }
+        }
+    };
+
+    // Task B: LSP server responses (from adapter_read) → drain (responses go via notification)
+    // Since tower_lsp sends notifications (like publishDiagnostics) via the Client,
+    // we drain the response stream to avoid blocking the server.
+    let drain_responses = async move {
+        let mut buf = [0u8; 4096];
+        loop {
+            match adapter_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = Server::new(lsp_read, lsp_write, lsp_socket).serve(service) => {}
+        _ = ws_to_lsp => {}
+        _ = drain_responses => {}
     }
 }
 

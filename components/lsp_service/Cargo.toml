@@ -1,0 +1,14 @@
+[package]
+name = "lsp_service"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.polylith]
+interface = "lsp_service"
+
+[dependencies]
+lsp_capabilities = { path = "../../components/lsp_capabilities" }
+content = { path = "../../components/content" }
+schema = { path = "../../components/schema" }
+tower-lsp = { workspace = true }
+tokio = { workspace = true }
