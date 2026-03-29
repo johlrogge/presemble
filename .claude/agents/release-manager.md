@@ -1,1 +1,1 @@
-/nix/store/skyspdj3qk502sky1zavgak6dzjznp4r-claude-agents-release-manager.md
+/nix/store/k94jimsjg2r2m8455dydqfff87f9vl4g-claude-agents-release-manager.md
