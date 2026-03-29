@@ -3,6 +3,11 @@
 name = "markdown"
 language-servers = ["presemble-lsp", "marksman"]
 
+# Presemble LSP for template files
+[[language]]
+name = "html"
+language-servers = ["presemble-lsp"]
+
 [language-server.presemble-lsp]
 command = "presemble"
 args = ["lsp", "site/"]

@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
+#[derive(Clone, Copy)]
 enum FileKind {
     Content,
     Template,
@@ -164,6 +165,58 @@ impl PresembleLsp {
             .collect();
         self.client.publish_diagnostics(uri, diags, None).await;
     }
+
+    fn schema_stem(&self, uri: &Url) -> Option<String> {
+        let path = uri.to_file_path().ok()?;
+        let schemas_dir = self.site_dir.join("schemas");
+        let rel = path.strip_prefix(&schemas_dir).ok()?;
+        rel.file_stem()?.to_str().map(|s| s.to_string())
+    }
+
+    async fn revalidate_dependents(&self, schema_stem: &str) {
+        let sources = self.doc_sources.lock().await;
+        let dependents: Vec<(Url, String, FileKind)> = sources
+            .iter()
+            .filter_map(|(uri_str, src)| {
+                let uri = Url::parse(uri_str).ok()?;
+                let kind = classify_file(&uri, &self.site_dir);
+                match kind {
+                    FileKind::Template => {
+                        let path = uri.to_file_path().ok()?;
+                        let templates_dir = self.site_dir.join("templates");
+                        let rel = path.strip_prefix(&templates_dir).ok()?;
+                        let stem = rel.file_stem()?.to_str()?;
+                        if stem == schema_stem {
+                            Some((uri, src.clone(), kind))
+                        } else {
+                            None
+                        }
+                    }
+                    FileKind::Content => {
+                        let path = uri.to_file_path().ok()?;
+                        let content_dir = self.site_dir.join("content");
+                        let rel = path.strip_prefix(&content_dir).ok()?;
+                        let first = rel.components().next()?.as_os_str().to_str()?;
+                        if first == schema_stem {
+                            Some((uri, src.clone(), kind))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        drop(sources);
+
+        for (uri, src, kind) in dependents {
+            match kind {
+                FileKind::Template => self.validate_template_and_publish(uri, src).await,
+                FileKind::Content => self.validate_and_publish(uri, src).await,
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Extract slot name from a diagnostic message (e.g. "slot 'author': missing required link" → "author")
@@ -210,7 +263,12 @@ impl LanguageServer for PresembleLsp {
         let src = p.text_document.text;
         match classify_file(&uri, &self.site_dir) {
             FileKind::Template => self.validate_template_and_publish(uri, src).await,
-            FileKind::Schema => self.validate_schema_and_publish(uri, src).await,
+            FileKind::Schema => {
+                self.validate_schema_and_publish(uri.clone(), src).await;
+                if let Some(stem) = self.schema_stem(&uri) {
+                    self.revalidate_dependents(&stem).await;
+                }
+            }
             _ => self.validate_and_publish(uri, src).await,
         }
     }
@@ -220,7 +278,12 @@ impl LanguageServer for PresembleLsp {
             let uri = p.text_document.uri;
             match classify_file(&uri, &self.site_dir) {
                 FileKind::Template => self.validate_template_and_publish(uri, c.text).await,
-                FileKind::Schema => self.validate_schema_and_publish(uri, c.text).await,
+                FileKind::Schema => {
+                    self.validate_schema_and_publish(uri.clone(), c.text).await;
+                    if let Some(stem) = self.schema_stem(&uri) {
+                        self.revalidate_dependents(&stem).await;
+                    }
+                }
                 _ => self.validate_and_publish(uri, c.text).await,
             }
         }
@@ -231,7 +294,12 @@ impl LanguageServer for PresembleLsp {
             let uri = p.text_document.uri;
             match classify_file(&uri, &self.site_dir) {
                 FileKind::Template => self.validate_template_and_publish(uri, src).await,
-                FileKind::Schema => self.validate_schema_and_publish(uri, src).await,
+                FileKind::Schema => {
+                    self.validate_schema_and_publish(uri.clone(), src).await;
+                    if let Some(stem) = self.schema_stem(&uri) {
+                        self.revalidate_dependents(&stem).await;
+                    }
+                }
                 _ => self.validate_and_publish(uri, src).await,
             }
         }
