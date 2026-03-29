@@ -36,12 +36,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target/
+            profiles/dev/target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build site
-        run: devenv shell -- cargo run -p publisher -- build site --config site/.presemble/github-pages.json
+        run: devenv shell -- cargo polylith cargo --profile dev run -p publisher -- build site --config site/.presemble/github-pages.json
 
       - uses: actions/upload-pages-artifact@v3
         with:
