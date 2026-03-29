@@ -1,0 +1,8 @@
+# Presemble LSP for content files
+[[language]]
+name = "markdown"
+language-servers = ["presemble-lsp", "marksman"]
+
+[language-server.presemble-lsp]
+command = "presemble"
+args = ["lsp", "site/"]

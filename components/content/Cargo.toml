@@ -1,11 +1,11 @@
 [package]
 name = "content"
-version.workspace = true
-edition.workspace = true
+version = "0.2.2"
+edition = "2024"
 
 [package.metadata.polylith]
 interface = "content"
 
 [dependencies]
 schema = { workspace = true }
-pulldown-cmark = { workspace = true }
+pulldown-cmark = "0.12"

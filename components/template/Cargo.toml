@@ -1,7 +1,7 @@
 [package]
 name = "template"
-version.workspace = true
-edition.workspace = true
+version = "0.2.2"
+edition = "2024"
 
 [package.metadata.polylith]
 interface = "template"
@@ -9,4 +9,4 @@ interface = "template"
 [dependencies]
 schema = { workspace = true }
 content = { workspace = true }
-quick-xml = { workspace = true }
+quick-xml = { version = "0.36", features = ["serialize"] }
