@@ -23,7 +23,7 @@ New features go through a design-implement-review loop before release.
 1. **product-owner** — prioritize and scope the feature on the roadmap
    > "Should we add X? Where does it fit in the roadmap?"
 
-2. **devops** — start the feature branch
+2. **release-manager** — start the feature branch
    > "Start feature <name>"
 
 3. **architect** — design the feature; produce a task breakdown for minions
@@ -56,12 +56,12 @@ Run these agents in order before cutting a release:
 2. **product-owner** — confirm the release delivers intended value
    > "Review the planned 0.x.0 release"
 
-3. **documenter** — update README files to reflect the release
+3. **documenter** — update README files to reflect the release. Document all missing features as features in the site and as sections in the user-guide. Review the site (/site/). You are looking for outdated information and missing features.
    > "Update docs for release 0.x.0"
 
 4. **Update `ROADMAP.md`** — mark any newly completed deliverables as `[x]` and move semantic-types or other explicitly deferred items out of the current milestone so M2/M3/etc. have a clean definition of done.
 
-5. **devops** — start and finish the release branch
+5. **release-manager** — start and finish the release branch
    > "Start release 0.x.0" → confirm → "Finish release 0.x.0"
 
 6. **Human** — push to remote
@@ -71,9 +71,9 @@ Run these agents in order before cutting a release:
 
 ## Hotfix Checklist
 
-1. **devops** — start hotfix
+1. **release-manager** — start hotfix
 2. **commit** — commit the fix
-3. **devops** — finish hotfix (confirm before calling)
+3. **release-manager** — finish hotfix (confirm before calling)
 4. **Human** — push
 
 ## Notes
@@ -81,7 +81,7 @@ Run these agents in order before cutting a release:
 - Agents never push — that always stays with the human
 - Always confirm with devops before finishing a release or hotfix
 - Multiple code-minions can run in parallel on different tasks within the same feature
-- The commit agent reads `.claude/skills/conventional-commits/SKILL.md` for format
+- The commit agent uses the conventional-commits skill for format
 - The architect never writes code — it designs and reviews only
 - Version is declared in `[workspace.package]` in `Cargo.toml` — bump it on the release branch before finishing
 
