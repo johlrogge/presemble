@@ -60,6 +60,7 @@ pub fn serve_site(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<
 struct AppState {
     output_dir: std::path::PathBuf,
     reload_tx: broadcast::Sender<ReloadMessage>,
+    build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
@@ -72,9 +73,12 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
     // Initial build — capture the dependency graph
     println!("Building site...");
     let current_graph = Arc::new(Mutex::new(DependencyGraph::new()));
+    let build_errors: Arc<Mutex<HashMap<String, Vec<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     match build_site(site_dir, url_config) {
         Ok(outcome) => {
             *current_graph.lock().unwrap() = outcome.dep_graph;
+            *build_errors.lock().unwrap() = outcome.build_errors;
             if outcome.files_failed > 0 {
                 eprintln!("Build completed with {} error(s)", outcome.files_failed);
             } else {
@@ -109,13 +113,15 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
     let url_config_owned = url_config.clone();
     let reload_tx_clone = reload_tx.clone();
     let snapshot_clone = Arc::clone(&snapshot);
+    let build_errors_clone = Arc::clone(&build_errors);
     std::thread::spawn(move || {
-        watch_and_rebuild(&site_dir_owned, graph_clone, &url_config_owned, reload_tx_clone, snapshot_clone);
+        watch_and_rebuild(&site_dir_owned, graph_clone, &url_config_owned, reload_tx_clone, snapshot_clone, build_errors_clone);
     });
 
     let state = AppState {
         output_dir: out_dir.clone(),
         reload_tx,
+        build_errors,
     };
 
     let app = Router::new()
@@ -171,6 +177,24 @@ async fn file_handler(
     use axum::http::{StatusCode, header};
 
     let path = uri.path();
+
+    // Check for build errors before attempting to serve from disk.
+    // Normalise: look up with and without trailing slash.
+    {
+        let errors = state.build_errors.lock().unwrap();
+        let bare = path.trim_end_matches('/');
+        let key = if bare.is_empty() { "/" } else { bare };
+        if let Some(messages) = errors.get(key).or_else(|| errors.get(&format!("{key}/"))) {
+            let html = render_error_page(path, messages);
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                html.into_bytes(),
+            )
+                .into_response();
+        }
+    }
+
     let relative = path.trim_start_matches('/');
     let relative = if relative.is_empty() { "index.html" } else { relative };
 
@@ -364,6 +388,7 @@ fn watch_and_rebuild(
     url_config: &UrlConfig,
     reload_tx: broadcast::Sender<ReloadMessage>,
     snapshot: ContentSnapshot,
+    build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
@@ -449,8 +474,28 @@ fn watch_and_rebuild(
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
                 g.merge(outcome.dep_graph);
+
+                // Update the shared error map: clear errors for successfully rebuilt pages,
+                // then record errors for newly failed pages.
+                {
+                    let mut errors = build_errors.lock().unwrap();
+                    for pages in outcome.built_pages.values() {
+                        for page in pages {
+                            let bare = page.url_path.trim_end_matches('/').to_string();
+                            errors.remove(&bare);
+                            errors.remove(&format!("{bare}/"));
+                        }
+                    }
+                    for (url, msgs) in &outcome.build_errors {
+                        errors.insert(url.clone(), msgs.clone());
+                    }
+                }
+
                 if outcome.files_failed > 0 {
                     eprintln!("Rebuild completed with {} error(s)", outcome.files_failed);
+                    // Send a reload so the browser navigates to the error page.
+                    let error_pages: Vec<String> = outcome.build_errors.keys().cloned().collect();
+                    let _ = reload_tx.send(ReloadMessage { pages: error_pages, anchor: None });
                 } else if outcome.files_built > 0 {
                     println!("Rebuild complete ({} file(s))", outcome.files_built);
                     let mut pages: Vec<String> = outcome.built_pages
@@ -498,6 +543,8 @@ fn watch_and_rebuild(
                     Ok(outcome) => {
                         let mut g = graph.lock().unwrap();
                         *g = outcome.dep_graph;
+                        // Update error map from full rebuild
+                        *build_errors.lock().unwrap() = outcome.build_errors;
                         println!("Full rebuild complete");
                         let _ = reload_tx.send(ReloadMessage { pages: Vec::new(), anchor: None });
                     }
@@ -506,6 +553,49 @@ fn watch_and_rebuild(
             }
         }
     }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn render_error_page(url_path: &str, messages: &[String]) -> String {
+    let items = messages
+        .iter()
+        .map(|m| format!("<li>{}</li>", html_escape(m)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Build error — {url}</title>
+<style>
+body{{font-family:sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#222}}
+h1{{color:#c00;border-bottom:2px solid #c00;padding-bottom:.5rem}}
+.path{{font-family:monospace;background:#f5f5f5;padding:.25rem .5rem;border-radius:3px;font-size:.9em}}
+ul{{line-height:1.7;padding-left:1.2rem}}
+li{{color:#c00}}
+p.hint{{color:#666;font-size:.9em;margin-top:2rem}}
+</style>
+</head>
+<body>
+<h1>Build error</h1>
+<p>The page at <span class="path">{url}</span> could not be built:</p>
+<ul>{items}</ul>
+<p class="hint">Fix the content file and save — the page will reload automatically.</p>
+{inject}
+</body>
+</html>"#,
+        url = html_escape(url_path),
+        items = items,
+        inject = INJECT,
+    )
 }
 
 fn guess_content_type(path: &Path) -> String {
@@ -586,5 +676,36 @@ mod tests {
     fn first_changed_idx_identical_returns_none() {
         let elems = vec![ContentElement::Paragraph { text: "x".to_string() }];
         assert_eq!(first_changed_body_idx(&elems, &elems.clone()), None);
+    }
+
+    #[test]
+    fn html_escape_replaces_special_chars() {
+        assert_eq!(html_escape("<script>alert(\"xss\")&amp;</script>"), "&lt;script&gt;alert(&quot;xss&quot;)&amp;amp;&lt;/script&gt;");
+    }
+
+    #[test]
+    fn html_escape_passthrough_plain_text() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn render_error_page_contains_url_and_messages() {
+        let html = render_error_page("/article/foo", &["[ERROR] title must be capitalized".to_string()]);
+        assert!(html.contains("/article/foo"), "should contain url path");
+        assert!(html.contains("[ERROR] title must be capitalized"), "should contain error message");
+        assert!(html.contains("Build error"), "should contain heading");
+    }
+
+    #[test]
+    fn render_error_page_escapes_url_and_messages() {
+        let html = render_error_page("/bad<path>", &["message with <b>html</b>".to_string()]);
+        assert!(html.contains("/bad&lt;path&gt;"), "url should be escaped");
+        assert!(html.contains("message with &lt;b&gt;html&lt;/b&gt;"), "message should be escaped");
+    }
+
+    #[test]
+    fn render_error_page_includes_reload_script() {
+        let html = render_error_page("/article/foo", &["some error".to_string()]);
+        assert!(html.contains("_presemble/ws"), "should include live reload script");
     }
 }
