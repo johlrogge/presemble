@@ -98,7 +98,7 @@ as the subscription/notification system. No separate pub/sub needed.
 - Go-to-definition for content references and template paths
 - Shared between browser clients and editor clients (Helix, VSCode)
 
-*Phase 4: Template and schema LSP*
+*Phase 4: Template and schema LSP* -- shipped v0.6.0
 - Extend LSP support to template files: completions for data-paths, `presemble:apply` references, callable template names
 - Schema-driven diagnostics in templates: flag references to fields that do not exist in the schema
 - Schema file LSP: completions for field types, occurrence markers, reference targets
