@@ -9,3 +9,4 @@ interface = "lsp_capabilities"
 [dependencies]
 schema = { path = "../../components/schema" }
 content = { path = "../../components/content" }
+template = { path = "../../components/template" }
