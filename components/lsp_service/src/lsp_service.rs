@@ -23,6 +23,8 @@ pub struct PresembleLsp {
 
 impl PresembleLsp {
     pub fn new(client: Client, site_dir: PathBuf) -> Self {
+        // Canonicalize to absolute path so it can be matched against absolute file URIs from editors.
+        let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         Self {
             client,
             site_dir,

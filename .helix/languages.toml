@@ -6,3 +6,9 @@ language-servers = ["presemble-lsp", "marksman"]
 [language-server.presemble-lsp]
 command = "presemble"
 args = ["lsp", "site/"]
+
+# Point rust-analyzer at the polylith dev profile workspace
+# (root Cargo.toml no longer has [workspace] after polylith migration)
+[language-server.rust-analyzer]
+config.cargo.buildScripts.enable = true
+config.linkedProjects = ["profiles/dev/Cargo.toml"]
