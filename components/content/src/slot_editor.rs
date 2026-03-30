@@ -126,6 +126,90 @@ fn find_separator_insert_position(elements: &[ContentElement], _after: usize) ->
     elements.len()
 }
 
+/// Capitalize the first character of the text in a named slot.
+/// Returns Ok(true) if a change was made, Ok(false) if already capitalized or no text.
+pub fn capitalize_slot(
+    doc: &mut Document,
+    slot_name: &str,
+    grammar: &Grammar,
+) -> Result<bool, String> {
+    // Find the target slot index in the grammar preamble.
+    let target_slot_idx = grammar
+        .preamble
+        .iter()
+        .position(|s| s.name.as_str() == slot_name)
+        .ok_or_else(|| format!("slot '{slot_name}' not found in grammar"))?;
+
+    // Walk the preamble with a cursor to find the element index for the target slot.
+    let mut cursor = 0usize;
+
+    for (slot_idx, slot) in grammar.preamble.iter().enumerate() {
+        // Skip annotation-only paragraphs (parser artifacts).
+        while cursor < doc.elements.len() {
+            if let ContentElement::Paragraph { text } = &doc.elements[cursor] {
+                if is_annotation_paragraph(text) {
+                    cursor += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        // Stop at separator — no more preamble slots after it.
+        if cursor < doc.elements.len() && matches!(doc.elements[cursor], ContentElement::Separator) {
+            break;
+        }
+
+        let max = max_count_for_slot(slot);
+        let start = cursor;
+        let mut count = 0usize;
+
+        // Consume matching elements for this slot.
+        loop {
+            if count >= max {
+                break;
+            }
+            if cursor >= doc.elements.len() {
+                break;
+            }
+            if matches!(doc.elements[cursor], ContentElement::Separator) {
+                break;
+            }
+            if element_matches_slot(&doc.elements[cursor], &slot.element) {
+                cursor += 1;
+                count += 1;
+            } else {
+                break;
+            }
+        }
+
+        if slot_idx == target_slot_idx {
+            // The first element of this slot is at `start`.
+            if start >= cursor {
+                // No elements found for this slot.
+                return Ok(false);
+            }
+            let element = &mut doc.elements[start];
+            if let Some(text) = element_text_mut(element) {
+                let first_char = match text.chars().next() {
+                    Some(c) => c,
+                    None => return Ok(false),
+                };
+                if first_char.is_uppercase() {
+                    return Ok(false);
+                }
+                let upper: String = first_char.to_uppercase().collect();
+                text.replace_range(..first_char.len_utf8(), &upper);
+                return Ok(true);
+            } else {
+                return Ok(false);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 // ---------------------------------------------------------------------------
 // Build element from new_value
 // ---------------------------------------------------------------------------
@@ -193,6 +277,16 @@ fn max_count_for_slot(slot: &Slot) -> usize {
 fn is_annotation_paragraph(text: &str) -> bool {
     let t = text.trim();
     t.starts_with("{#") && t.ends_with('}') && !t[2..t.len() - 1].contains('}')
+}
+
+fn element_text_mut(element: &mut ContentElement) -> Option<&mut String> {
+    match element {
+        ContentElement::Heading { text, .. } => Some(text),
+        ContentElement::Paragraph { text } => Some(text),
+        ContentElement::Link { text, .. } => Some(text),
+        ContentElement::Image { alt: Some(alt), .. } => Some(alt),
+        _ => None,
+    }
 }
 
 fn element_matches_slot(element: &ContentElement, slot_element: &Element) -> bool {
@@ -338,5 +432,59 @@ headings
         let result = serialize_document(&doc);
         assert!(result.contains("# First Title"), "expected '# First Title' in: {result:?}");
         assert!(result.contains("----"), "expected '----' in: {result:?}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // capitalize_slot tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn capitalize_lowercase_heading_slot() {
+        let src = "# hello\n\n----\n";
+        let grammar = post_grammar();
+        let mut doc = parse_document(src).unwrap();
+        let changed = capitalize_slot(&mut doc, "title", &grammar).unwrap();
+        assert!(changed, "expected capitalize to return true");
+        let result = serialize_document(&doc);
+        assert!(
+            result.starts_with("# Hello"),
+            "expected result to start with '# Hello', got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn capitalize_already_capitalized_is_noop() {
+        let src = "# Hello\n\n----\n";
+        let grammar = post_grammar();
+        let mut doc = parse_document(src).unwrap();
+        let changed = capitalize_slot(&mut doc, "title", &grammar).unwrap();
+        assert!(!changed, "expected capitalize to return false when already capitalized");
+    }
+
+    #[test]
+    fn capitalize_paragraph_slot() {
+        let src = "# Title\n\nsummary text here.\n\n----\n";
+        let grammar = post_grammar();
+        let mut doc = parse_document(src).unwrap();
+        let changed = capitalize_slot(&mut doc, "summary", &grammar).unwrap();
+        assert!(changed, "expected capitalize to return true");
+        let result = serialize_document(&doc);
+        assert!(
+            result.contains("Summary text here."),
+            "expected 'Summary text here.' in: {result:?}"
+        );
+    }
+
+    #[test]
+    fn capitalize_unknown_slot_returns_error() {
+        let src = "# Title\n\n----\n";
+        let grammar = post_grammar();
+        let mut doc = parse_document(src).unwrap();
+        let err = capitalize_slot(&mut doc, "nonexistent", &grammar);
+        assert!(err.is_err(), "expected an error for unknown slot name");
+        assert!(
+            err.unwrap_err().contains("nonexistent"),
+            "error message should contain the slot name"
+        );
     }
 }
