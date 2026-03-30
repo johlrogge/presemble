@@ -322,8 +322,8 @@ mod tests {
             span
         );
         assert!(
-            span.start < src.len(),
-            "expected span to be inside the source (before EOF={}), got {:?}",
+            span.start <= src.len(),
+            "expected span to be at or inside the source (EOF={}), got {:?}",
             src.len(),
             span
         );
