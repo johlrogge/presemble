@@ -762,17 +762,16 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     // Load index content if schema and content exist
     let index_schema_path = site_dir.join("schemas/index.md");
     let index_content_dir = site_dir.join("content/index");
-    if index_schema_path.exists() {
-        if let Ok(schema_src) = std::fs::read_to_string(&index_schema_path) {
-            if let Ok(grammar) = schema::parse_schema(&schema_src) {
-                let index_md = index_content_dir.join("index.md");
-                if let Ok(content_src) = std::fs::read_to_string(&index_md) {
-                    if let Ok(doc) = content::parse_document(&content_src) {
-                        let index_graph = template::build_article_graph(&doc, &grammar);
-                        site_context.insert("index", template::Value::Record(index_graph));
-                    }
-                }
-            }
+    if index_schema_path.exists()
+        && let Ok(schema_src) = std::fs::read_to_string(&index_schema_path)
+        && let Ok(grammar) = schema::parse_schema(&schema_src)
+    {
+        let index_md = index_content_dir.join("index.md");
+        if let Ok(content_src) = std::fs::read_to_string(&index_md)
+            && let Ok(doc) = content::parse_document(&content_src)
+        {
+            let index_graph = template::build_article_graph(&doc, &grammar);
+            site_context.insert("index", template::Value::Record(index_graph));
         }
     }
 
