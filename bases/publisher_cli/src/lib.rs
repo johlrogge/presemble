@@ -355,6 +355,12 @@ pub fn build_content_page(
         _ => addr.slug.clone(),
     };
 
+    // Add metadata for browser editing: schema stem identifies the content type
+    slot_graph.insert("_presemble_stem", template::Value::Text(schema_stem.to_string()));
+    slot_graph.insert("_presemble_file", template::Value::Text(
+        format!("content/{schema_stem}/{}.md", addr.slug),
+    ));
+
     // Add url and link to the article graph
     slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
     let mut link_graph = template::DataGraph::new();

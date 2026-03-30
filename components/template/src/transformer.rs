@@ -268,6 +268,12 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
     let class = semantic_class(data_path);
     let as_tag = el.attr("as");
 
+    // Resolve the content file path for browser editing.
+    // Each page's graph carries _presemble_file (e.g., "content/post/building-presemble.md").
+    let presemble_file = graph.resolve(&["_presemble_file"])
+        .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
+        .unwrap_or_default();
+
     let value = graph.resolve(&path_segments);
 
     match value {
@@ -280,7 +286,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                 attrs: vec![
                     ("class".to_string(), class),
                     ("data-presemble-slot".to_string(), slot_name_from_path(data_path)),
-                    ("data-presemble-path".to_string(), data_path.to_string()),
+                    ("data-presemble-file".to_string(), presemble_file.clone()),
                 ],
                 children: vec![Node::Text(text.clone())],
             };
@@ -295,7 +301,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
         Some(Value::Record(sub_graph)) => {
             let slot = slot_name_from_path(data_path);
-            render_record(sub_graph, as_tag, &class, &slot, data_path)
+            render_record(sub_graph, as_tag, &class, &slot, &presemble_file)
         }
 
         Some(Value::List(items)) => {
@@ -303,7 +309,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             let slot = slot_name_from_path(data_path);
             let mut result = Vec::new();
             for item in items {
-                let mut rendered = render_list_item(item, tag, &class, &slot, data_path, graph)?;
+                let mut rendered = render_list_item(item, tag, &class, &slot, &presemble_file, graph)?;
                 result.append(&mut rendered);
             }
             Ok(result)
@@ -340,7 +346,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                     attrs: vec![
                         ("class".to_string(), combined_class),
                         ("data-presemble-slot".to_string(), slot_name.clone()),
-                        ("data-presemble-path".to_string(), data_path.to_string()),
+                        ("data-presemble-file".to_string(), presemble_file.clone()),
                         ("alt".to_string(), hint.clone()),
                         ("src".to_string(), String::new()),
                     ],
@@ -351,7 +357,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                     attrs: vec![
                         ("class".to_string(), combined_class),
                         ("data-presemble-slot".to_string(), slot_name.clone()),
-                        ("data-presemble-path".to_string(), data_path.to_string()),
+                        ("data-presemble-file".to_string(), presemble_file.clone()),
                         ("href".to_string(), "#".to_string()),
                     ],
                     children: vec![Node::Text(hint.clone())],
@@ -361,7 +367,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                     attrs: vec![
                         ("class".to_string(), combined_class),
                         ("data-presemble-slot".to_string(), slot_name.clone()),
-                        ("data-presemble-path".to_string(), data_path.to_string()),
+                        ("data-presemble-file".to_string(), presemble_file.clone()),
                     ],
                     children: vec![Node::Text(hint.clone())],
                 },
@@ -426,7 +432,7 @@ fn render_record(
     as_tag: Option<&str>,
     class: &str,
     slot: &str,
-    path: &str,
+    file: &str,
 ) -> Result<Vec<Node>, RenderError> {
     let has_href = sub_graph.resolve(&["href"]).is_some();
     let has_path = sub_graph.resolve(&["path"]).is_some();
@@ -456,7 +462,7 @@ fn render_record(
                     ("href".to_string(), href),
                     ("class".to_string(), class.to_string()),
                     ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-path".to_string(), path.to_string()),
+                    ("data-presemble-file".to_string(), file.to_string()),
                 ],
                 children: vec![Node::Text(text)],
             };
@@ -473,7 +479,7 @@ fn render_record(
                     ("alt".to_string(), alt),
                     ("class".to_string(), class.to_string()),
                     ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-path".to_string(), path.to_string()),
+                    ("data-presemble-file".to_string(), file.to_string()),
                 ],
                 children: vec![],
             };
@@ -491,7 +497,7 @@ fn render_record(
                         ("href".to_string(), href),
                         ("class".to_string(), class.to_string()),
                         ("data-presemble-slot".to_string(), slot.to_string()),
-                        ("data-presemble-path".to_string(), path.to_string()),
+                        ("data-presemble-file".to_string(), file.to_string()),
                     ],
                     children: vec![Node::Text(text)],
                 };
@@ -506,7 +512,7 @@ fn render_record(
                         ("alt".to_string(), alt),
                         ("class".to_string(), class.to_string()),
                         ("data-presemble-slot".to_string(), slot.to_string()),
-                        ("data-presemble-path".to_string(), path.to_string()),
+                        ("data-presemble-file".to_string(), file.to_string()),
                     ],
                     children: vec![],
                 };
@@ -524,7 +530,7 @@ fn render_list_item(
     tag: &str,
     class: &str,
     slot: &str,
-    path: &str,
+    file: &str,
     _graph: &DataGraph,
 ) -> Result<Vec<Node>, RenderError> {
     match item {
@@ -534,7 +540,7 @@ fn render_list_item(
                 attrs: vec![
                     ("class".to_string(), class.to_string()),
                     ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-path".to_string(), path.to_string()),
+                    ("data-presemble-file".to_string(), file.to_string()),
                 ],
                 children: vec![Node::Text(text.clone())],
             };
@@ -547,7 +553,7 @@ fn render_list_item(
             Ok(nodes)
         }
 
-        Value::Record(sub_graph) => render_record(sub_graph, Some(tag), class, slot, path),
+        Value::Record(sub_graph) => render_record(sub_graph, Some(tag), class, slot, file),
 
         Value::Absent => Ok(Vec::new()),
 
@@ -593,7 +599,7 @@ mod tests {
         let ctx = RenderContext::new(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert_eq!(html, r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-path="article.title">Hello World</h1>"#);
+        assert_eq!(html, r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello World</h1>"#);
     }
 
     #[test]
@@ -646,7 +652,7 @@ mod tests {
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
-            r#"<a href="/authors/jo" class="article-author" data-presemble-slot="author" data-presemble-path="article.author">Jo</a>"#
+            r#"<a href="/authors/jo" class="article-author" data-presemble-slot="author" data-presemble-file="">Jo</a>"#
         );
     }
 
@@ -668,7 +674,7 @@ mod tests {
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
-            r#"<img src="img.jpg" alt="A photo" class="article-cover" data-presemble-slot="cover" data-presemble-path="article.cover" />"#
+            r#"<img src="img.jpg" alt="A photo" class="article-cover" data-presemble-slot="cover" data-presemble-file="" />"#
         );
     }
 
@@ -694,7 +700,7 @@ mod tests {
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
-            r#"<div><h1 class="article-title" data-presemble-slot="title" data-presemble-path="article.title">Hello World</h1></div>"#
+            r#"<div><h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello World</h1></div>"#
         );
     }
 
@@ -808,7 +814,7 @@ mod tests {
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
-            r#"<p class="article-summary" data-presemble-slot="summary" data-presemble-path="article.summary">Para 1</p><p class="article-summary" data-presemble-slot="summary" data-presemble-path="article.summary">Para 2</p>"#
+            r#"<p class="article-summary" data-presemble-slot="summary" data-presemble-file="">Para 1</p><p class="article-summary" data-presemble-slot="summary" data-presemble-file="">Para 2</p>"#
         );
     }
 
@@ -859,7 +865,7 @@ mod tests {
         let ctx = RenderContext::new(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert_eq!(html, r#"<img src="img.jpg" alt="Photo" class="article-cover" data-presemble-slot="cover" data-presemble-path="article.cover" />"#);
+        assert_eq!(html, r#"<img src="img.jpg" alt="Photo" class="article-cover" data-presemble-slot="cover" data-presemble-file="" />"#);
     }
 
     // ---------------------------------------------------------------------------
@@ -886,7 +892,7 @@ mod tests {
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
-            r#"<h3 class="title" data-presemble-slot="title" data-presemble-path="title">Article 1</h3><h3 class="title" data-presemble-slot="title" data-presemble-path="title">Article 2</h3>"#
+            r#"<h3 class="title" data-presemble-slot="title" data-presemble-file="">Article 1</h3><h3 class="title" data-presemble-slot="title" data-presemble-file="">Article 2</h3>"#
         );
     }
 
@@ -929,7 +935,7 @@ mod tests {
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(!html.contains("<template"), "output should not contain <template>: {html}");
-        assert_eq!(html, r#"<h3 class="title" data-presemble-slot="title" data-presemble-path="title">Only Article</h3>"#);
+        assert_eq!(html, r#"<h3 class="title" data-presemble-slot="title" data-presemble-file="">Only Article</h3>"#);
     }
 
     // ---------------------------------------------------------------------------
