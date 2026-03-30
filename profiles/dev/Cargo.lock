@@ -1039,6 +1039,7 @@ dependencies = [
  "clap",
  "content",
  "dep_graph",
+ "lsp_capabilities",
  "lsp_service",
  "notify",
  "schema",
