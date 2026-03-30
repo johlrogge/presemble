@@ -65,7 +65,7 @@ article to its author page automatically, without any workarounds in the content
 
 ---
 
-## Current milestone — M3: "Live editorial feedback loop"
+## Done — M3: "Live editorial feedback loop"
 
 **Goal:** Close the feedback loop between editing and seeing results. The author should never
 wonder "did my change work?" — the system tells them immediately, whether they are in a browser
@@ -115,6 +115,55 @@ as the subscription/notification system. No separate pub/sub needed.
 **Success gate:** An author using Helix gets completions and diagnostics for content, templates,
 and schemas. An author viewing a served page sees inline suggestion nodes instead of error pages
 for missing content.
+
+---
+
+## Current milestone — M5: "Browser editing"
+
+**Goal:** The served page IS the editor. Content authors who never touch a terminal can create
+and edit content directly in the browser.
+
+**Why now:** Suggestion nodes shipped in M3 Phase 5 are the direct foundation. `presemble serve` already has WebSocket and content in memory — no conductor needed to start.
+
+**The Presemble mascot:**
+- Floating overlay in the corner of every served page
+- View mode: hugging face / peace sign — shows validation count badge
+- Edit mode: pen icon — content nodes become inline-editable
+- Suggest mode: speech bubble — annotations and suggestions for other editors
+- All clear: thumbs up — page is ready to publish
+
+**Three interaction modes:**
+
+*View mode* — just browsing, no editing possible. Default.
+
+*Edit mode* — content nodes are inline-editable:
+- Click suggestion nodes (from M3 Phase 5) to fill in missing content
+- Simple fields: contenteditable, what you type is what gets stored
+- Link fields with bounded options: select/dropdown
+- Basic inline markdown (`*bold*`, `_italic_`) in text content
+- Submit writes through conductor to disk, live reload rebuilds, page updates
+
+*Suggest mode* — for editorial review:
+- Mark for correction: click a node to flag it (optional comment). Flag becomes a diagnostic in Helix.
+- Suggest changes: propose alternative text. Arrives in Helix as a quickfix action.
+- Browser is just another author in the conductor pipeline.
+
+**Suggestion persistence:**
+- Suggestions live in `.presemble/suggestions/` as files
+- Survive conductor restarts — conductor reads on startup, re-emits as LSP diagnostics
+- Committed to git if the site uses git (part of the editorial record)
+- Not git-dependent — works with plain folders too
+
+**Deliverables:**
+- [ ] Presemble mascot overlay with mode toggle
+- [ ] Edit mode: inline editing of simple content fields
+- [ ] Suggest mode: mark-for-correction and suggest-changes
+- [ ] Suggestion persistence in `.presemble/suggestions/`
+- [ ] Conductor integration: browser edits flow through the standard edit pipeline
+
+**Success gate:** A content author can open a served page, click the mascot to enter edit mode,
+fill in missing content via suggestion nodes, and see the page update live. An editor in Helix
+sees browser suggestions as diagnostics with quickfixes.
 
 ---
 
@@ -168,54 +217,26 @@ Editing a file in Helix updates the browser preview before save.
 
 ---
 
-## M5 — "Browser editing"
+## M7 — "Asset discovery"
 
-**Goal:** The served page IS the editor. Content authors who never touch a terminal can create
-and edit content directly in the browser.
+**Goal:** Authors discover and insert images from the browser without leaving the page. Unsplash
+integration surfaces relevant images directly from image content slots.
 
-**The Presemble mascot:**
-- Floating overlay in the corner of every served page
-- View mode: hugging face / peace sign — shows validation count badge
-- Edit mode: pen icon — content nodes become inline-editable
-- Suggest mode: speech bubble — annotations and suggestions for other editors
-- All clear: thumbs up — page is ready to publish
-
-**Three interaction modes:**
-
-*View mode* — just browsing, no editing possible. Default.
-
-*Edit mode* — content nodes are inline-editable:
-- Click suggestion nodes (from M3 Phase 5) to fill in missing content
-- Simple fields: contenteditable, what you type is what gets stored
-- Link fields with bounded options: select/dropdown
-- Basic inline markdown (`*bold*`, `_italic_`) in text content
-- Submit writes through conductor to disk, live reload rebuilds, page updates
-
-*Suggest mode* — for editorial review:
-- Mark for correction: click a node to flag it (optional comment). Flag becomes a diagnostic in Helix.
-- Suggest changes: propose alternative text. Arrives in Helix as a quickfix action.
-- Browser is just another author in the conductor pipeline.
-
-**Suggestion persistence:**
-- Suggestions live in `.presemble/suggestions/` as files
-- Survive conductor restarts — conductor reads on startup, re-emits as LSP diagnostics
-- Committed to git if the site uses git (part of the editorial record)
-- Not git-dependent — works with plain folders too
+**Why now:** Must be ready before demo videos. Browser editing (M5) is the natural insertion
+surface — asset discovery extends it without requiring new infrastructure.
 
 **Deliverables:**
-- [ ] Presemble mascot overlay with mode toggle
-- [ ] Edit mode: inline editing of simple content fields
-- [ ] Suggest mode: mark-for-correction and suggest-changes
-- [ ] Suggestion persistence in `.presemble/suggestions/`
-- [ ] Conductor integration: browser edits flow through the standard edit pipeline
+- [ ] Unsplash API integration — search by keyword, browse results in browser
+- [ ] Schema-aware insertion — respects orientation, alt text requirements, and other schema constraints on image slots
+- [ ] Browser editing integration — clicking an image slot opens the asset search UI
+- [ ] Downloaded images stored under site assets with schema-correct metadata
 
-**Success gate:** A content author can open a served page, click the mascot to enter edit mode,
-fill in missing content via suggestion nodes, and see the page update live. An editor in Helix
-sees browser suggestions as diagnostics with quickfixes.
+**Success gate:** Author clicks an image slot in edit mode, searches Unsplash, selects an image,
+and it is inserted with correct metadata — without leaving the browser.
 
 ---
 
-## M6 — "Time enters the picture"
+## M8 — "Time enters the picture"
 
 **Goal:** Time becomes a first-class dimension of the site. Authors can schedule content and
 preview the future state of the site.
@@ -229,6 +250,42 @@ preview the future state of the site.
 
 **Success gate:** An author can set a publish date on a blog post, use the timeline scrubber to
 preview the site at that date, and the publisher automatically publishes when the time arrives.
+
+---
+
+## M9 — "CSS assistance"
+
+**Goal:** CSS is a first-class concern. Authors and designers get validation, theming tools, and
+live feedback — not a blank stylesheet and guesswork.
+
+**Why now:** CSS is a consistent pain point and must be addressed before distribution. Shipping
+Presemble to new users with no CSS story creates a bad first impression.
+
+**Deliverables:**
+- [ ] CSS validation against templates — flag missing styles for semantic slots, unused classes
+- [ ] Theme generation from design tokens or colour palettes
+- [ ] Live CSS hot reload in `presemble serve` — style changes apply without a full page rebuild
+
+**Success gate:** A new site gets diagnostics for missing styles on schema-defined slots. A
+designer can generate a starter theme from a colour palette and see changes live in the browser.
+
+---
+
+## M10 — "Distribution"
+
+**Goal:** Anyone can install and run Presemble with a single command. No Rust toolchain required.
+
+**Why now:** Must ship before promotion. A tool that requires `cargo install` from source is not
+ready for general use.
+
+**Deliverables:**
+- [ ] Cross-platform binaries (Linux, macOS, Windows) via CI
+- [ ] Nix flake for declarative installation
+- [ ] GitHub Releases with binary downloads
+- [ ] Install guide in README: one-liner for each platform
+
+**Success gate:** A user with no Rust installed can install Presemble and build a site in under
+five minutes following the install guide.
 
 ---
 
