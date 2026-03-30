@@ -423,6 +423,7 @@ const INJECT: &str = concat!(
     "var el=e.target.closest('[data-presemble-slot]');",
     "if(!el||el.classList.contains('presemble-editing')){return;}",
     "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
+    "if(el.tagName==='A'||el.tagName==='IMG'){return;}",
     "e.preventDefault();",
     "var pfile=el.getAttribute('data-presemble-file');",
     "var slot=el.getAttribute('data-presemble-slot');",
