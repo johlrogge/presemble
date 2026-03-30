@@ -707,6 +707,20 @@ fn element_matches_slot_type(element: &ContentElement, slot_type: &Element) -> b
     )
 }
 
+fn max_count_for_slot(slot: &schema::Slot) -> usize {
+    for constraint in &slot.constraints {
+        if let schema::Constraint::Occurs(count_range) = constraint {
+            return match count_range {
+                schema::CountRange::Exactly(n) => *n,
+                schema::CountRange::AtLeast(_) => usize::MAX,
+                schema::CountRange::AtMost(n) => *n,
+                schema::CountRange::Between { max, .. } => *max,
+            };
+        }
+    }
+    1
+}
+
 fn element_text(element: &ContentElement) -> Option<&str> {
     match element {
         ContentElement::Heading { text, .. } => Some(text.as_str()),
@@ -1149,7 +1163,8 @@ pub fn write_slot_to_string(
         .filter(|e| !matches!(e.element, content::ContentElement::Separator))
         .collect();
 
-    let mut found_ewo: Option<&content::ContentElementWithOffset> = None;
+    let mut found_range: Option<std::ops::Range<usize>> = None;
+    let mut first_element: Option<&content::ContentElement> = None;
 
     'slots: for (i, slot_iter) in grammar.preamble.iter().enumerate() {
         // Consume any annotation paragraphs
@@ -1168,29 +1183,41 @@ pub fn write_slot_to_string(
             break 'slots;
         }
 
-        let ewo = non_separator_elements[cursor];
-        if element_matches_slot_type(&ewo.element, &slot_iter.element) {
-            if i == slot_idx {
-                found_ewo = Some(ewo);
-                break 'slots;
-            }
-            cursor += 1;
-        } else {
-            // Element at cursor does not match this slot — slot is missing from document
-            if i == slot_idx {
-                // found_ewo remains None → insert case
-                break 'slots;
+        let max = max_count_for_slot(slot_iter);
+        let mut consumed = 0usize;
+        let start_cursor = cursor;
+
+        while consumed < max && cursor < non_separator_elements.len() {
+            let ewo = non_separator_elements[cursor];
+            if element_matches_slot_type(&ewo.element, &slot_iter.element) {
+                consumed += 1;
+                cursor += 1;
+            } else {
+                break;
             }
         }
+
+        if i == slot_idx {
+            if consumed > 0 {
+                // Replace case: range spans from first to last consumed element
+                let first = non_separator_elements[start_cursor];
+                let last = non_separator_elements[cursor - 1];
+                found_range = Some(first.byte_range.start..last.byte_range.end);
+                first_element = Some(&first.element);
+            }
+            // else: insert case, found_range stays None
+            break 'slots;
+        }
+        // If consumed == 0, slot is missing — don't advance cursor, continue to next slot
     }
 
-    if let Some(ewo) = found_ewo {
-        // Replace case: splice new markdown over the existing element's byte range
-        let formatted = format_slot_value(slot, new_value, Some(&ewo.element));
+    if let Some(range) = found_range {
+        // Replace case: splice new markdown over the byte range of all consumed elements
+        let formatted = format_slot_value(slot, new_value, first_element);
         let mut new_src = String::with_capacity(src.len());
-        new_src.push_str(&src[..ewo.byte_range.start]);
+        new_src.push_str(&src[..range.start]);
         new_src.push_str(&formatted);
-        new_src.push_str(&src[ewo.byte_range.end..]);
+        new_src.push_str(&src[range.end..]);
         Ok(new_src)
     } else {
         // Insert case: find the correct insertion position in schema order
@@ -2038,6 +2065,63 @@ mod tests {
             result.contains("### Body section"),
             "body content should be preserved: {result}"
         );
+    }
+
+    #[test]
+    fn write_slot_to_string_replaces_multi_paragraph_summary() {
+        // Document with 2 summary paragraphs — replacing summary should remove both old
+        // paragraphs and insert the new value; author and cover should be preserved.
+        let grammar = article_grammar();
+        let src = "# My Title\n\nFirst summary paragraph.\n\nSecond summary paragraph.\n\n[Author Name](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let result = write_slot_to_string(src, "summary", &grammar, "Brand new summary.")
+            .expect("write_slot_to_string should succeed for multi-paragraph summary");
+        assert!(
+            result.contains("Brand new summary."),
+            "result should contain new summary: {result}"
+        );
+        assert!(
+            !result.contains("First summary paragraph."),
+            "first old summary paragraph should be replaced: {result}"
+        );
+        assert!(
+            !result.contains("Second summary paragraph."),
+            "second old summary paragraph should be replaced: {result}"
+        );
+        assert!(result.contains("# My Title"), "title should be preserved: {result}");
+        assert!(result.contains("[Author Name]"), "author should be preserved: {result}");
+        assert!(result.contains("![cover]"), "cover should be preserved: {result}");
+    }
+
+    #[test]
+    fn write_slot_to_string_replaces_author_with_multi_paragraph_summary() {
+        // Document with 3 summary paragraphs — replacing author should preserve all 3
+        // summary paragraphs and only change the author link.
+        let grammar = article_grammar();
+        let src = "# My Title\n\nFirst summary.\n\nSecond summary.\n\nThird summary.\n\n[Old Author](/author/old)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let result = write_slot_to_string(src, "author", &grammar, "[New Author](/author/new)")
+            .expect("write_slot_to_string should succeed");
+        assert!(
+            result.contains("First summary."),
+            "first summary paragraph should be preserved: {result}"
+        );
+        assert!(
+            result.contains("Second summary."),
+            "second summary paragraph should be preserved: {result}"
+        );
+        assert!(
+            result.contains("Third summary."),
+            "third summary paragraph should be preserved: {result}"
+        );
+        assert!(
+            !result.contains("[Old Author]"),
+            "old author should be replaced: {result}"
+        );
+        assert!(
+            result.contains("[New Author]"),
+            "new author should be present: {result}"
+        );
+        assert!(result.contains("# My Title"), "title should be preserved: {result}");
+        assert!(result.contains("![cover]"), "cover should be preserved: {result}");
     }
 
     #[test]
