@@ -44,7 +44,7 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
 
     let result = content::validate(&doc, grammar);
 
-    result
+    let mut diagnostics: Vec<Diagnostic> = result
         .diagnostics
         .iter()
         .map(|vd| {
@@ -59,7 +59,42 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
                 span,
             }
         })
-        .collect()
+        .collect();
+
+    // Check for missing body separator or empty body when the grammar expects a body section.
+    if grammar.body.is_some() {
+        let separator_pos = doc.elements.iter().position(|e| matches!(e, ContentElement::Separator));
+        match separator_pos {
+            None => {
+                let end_byte = src.len();
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    message: "missing body separator (----); add a line with ---- to separate preamble from body".to_string(),
+                    slot: None,
+                    span: Some(end_byte..end_byte),
+                });
+            }
+            Some(sep_idx) => {
+                // Check if there's any content after the separator
+                let body_elements = &doc.elements[sep_idx + 1..];
+                if body_elements.is_empty() {
+                    // Find byte position of separator for the span
+                    let sep_span = elements_with_offsets.iter()
+                        .find(|e| matches!(e.element, ContentElement::Separator))
+                        .map(|e| e.byte_range.clone());
+                    let span = sep_span.unwrap_or(src.len()..src.len());
+                    diagnostics.push(Diagnostic {
+                        severity: Severity::Warning,
+                        message: "body section is empty; add content after the ---- separator".to_string(),
+                        slot: None,
+                        span: Some(span),
+                    });
+                }
+            }
+        }
+    }
+
+    diagnostics
 }
 
 /// Find the byte range of the element corresponding to a slot name diagnostic.

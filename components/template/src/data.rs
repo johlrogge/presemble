@@ -231,10 +231,17 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
         graph.insert("body", Value::Html(body_html));
     }
 
-    // Insert suggestion placeholders for any preamble slots not yet in the graph.
+    // Insert suggestion placeholders for any preamble slots not yet in the graph,
+    // or present but empty (e.g., a multi-occurrence paragraph slot with zero items).
     for slot in &grammar.preamble {
         let slot_key = slot.name.as_str().to_string();
-        if graph.entries.contains_key(&slot_key) {
+        let needs_suggestion = match graph.entries.get(&slot_key) {
+            None => true,
+            Some(Value::Absent) => true,
+            Some(Value::List(items)) if items.is_empty() => true,
+            _ => false,
+        };
+        if !needs_suggestion {
             continue;
         }
         let element_kind = match &slot.element {

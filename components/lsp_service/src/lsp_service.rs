@@ -1,8 +1,8 @@
 use lsp_capabilities::{
-    completions_for_schema, definition_for_position, hover_for_line, schema_completions,
-    template_completions, template_definition, validate_schema_with_positions,
-    validate_template_paths, validate_with_positions, CapitalizationFix, DiagnosticSeverity,
-    TemplateFix, TemplateDefinitionTarget,
+    content_completions, definition_for_position, hover_for_line,
+    schema_completions, template_completions, template_definition,
+    validate_schema_with_positions, validate_template_paths, validate_with_positions,
+    CapitalizationFix, DiagnosticSeverity, TemplateFix, TemplateDefinitionTarget,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -290,6 +290,13 @@ impl LanguageServer for PresembleLsp {
                             value: d,
                         })),
                         insert_text: Some(c.insert_text),
+                        insert_text_format: if c.is_snippet {
+                            Some(InsertTextFormat::SNIPPET)
+                        } else {
+                            None
+                        },
+                        sort_text: c.sort_text,
+                        preselect: if c.preselect { Some(true) } else { None },
                         ..Default::default()
                     })
                     .collect();
@@ -317,16 +324,24 @@ impl LanguageServer for PresembleLsp {
                         value: d,
                     })),
                     insert_text: Some(c.insert_text),
+                    insert_text_format: if c.is_snippet {
+                        Some(InsertTextFormat::SNIPPET)
+                    } else {
+                        None
+                    },
+                    sort_text: c.sort_text,
+                    preselect: if c.preselect { Some(true) } else { None },
                     ..Default::default()
                 })
                 .collect();
                 Ok(Some(CompletionResponse::Array(items)))
             }
             _ => {
-                let Some((grammar, stem)) = self.grammar_for_uri(uri) else {
+                let Some((grammar, _stem)) = self.grammar_for_uri(uri) else {
                     return Ok(None);
                 };
-                let items: Vec<CompletionItem> = completions_for_schema(&grammar, &stem, Some(self.site_index.site_dir()))
+                let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                let items: Vec<CompletionItem> = content_completions(&src, &grammar, Some(self.site_index.site_dir()))
                     .into_iter()
                     .map(|c| CompletionItem {
                         label: c.label,
@@ -337,6 +352,13 @@ impl LanguageServer for PresembleLsp {
                             value: d,
                         })),
                         insert_text: Some(c.insert_text),
+                        insert_text_format: if c.is_snippet {
+                            Some(InsertTextFormat::SNIPPET)
+                        } else {
+                            None
+                        },
+                        sort_text: c.sort_text,
+                        preselect: if c.preselect { Some(true) } else { None },
                         ..Default::default()
                     })
                     .collect();

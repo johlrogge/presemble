@@ -9,6 +9,33 @@ pub struct SlotCompletion {
     pub detail: String,
     pub documentation: Option<String>,
     pub insert_text: String,
+    /// If true, `insert_text` uses LSP snippet syntax (e.g. `${1:placeholder}`).
+    pub is_snippet: bool,
+    pub sort_text: Option<String>,
+    pub preselect: bool,
+}
+
+#[allow(dead_code)]
+impl SlotCompletion {
+    /// Create a plain (non-snippet) completion.
+    fn plain(label: impl Into<String>, detail: impl Into<String>, documentation: Option<String>, insert_text: impl Into<String>) -> Self {
+        Self { label: label.into(), detail: detail.into(), documentation, insert_text: insert_text.into(), is_snippet: false, sort_text: None, preselect: false }
+    }
+
+    /// Create a snippet completion.
+    fn snippet(label: impl Into<String>, detail: impl Into<String>, documentation: Option<String>, insert_text: impl Into<String>) -> Self {
+        Self { label: label.into(), detail: detail.into(), documentation, insert_text: insert_text.into(), is_snippet: true, sort_text: None, preselect: false }
+    }
+
+    fn with_sort_text(mut self, s: impl Into<String>) -> Self {
+        self.sort_text = Some(s.into());
+        self
+    }
+
+    fn with_preselect(mut self) -> Self {
+        self.preselect = true;
+        self
+    }
 }
 
 /// Severity level for a positioned diagnostic.
@@ -119,12 +146,7 @@ pub fn completions_for_schema(
                                         let title = read_title_from_md(&path)
                                             .unwrap_or_else(|| file_slug.clone());
                                         let url = url_from_pattern(pattern, &file_slug);
-                                        SlotCompletion {
-                                            label: title.clone(),
-                                            detail: url.clone(),
-                                            documentation: slot.hint_text.clone(),
-                                            insert_text: format!("[{title}]({url})"),
-                                        }
+                                        SlotCompletion::plain(title.clone(), url.clone(), slot.hint_text.clone(), format!("[{title}]({url})"))
                                     })
                                     .collect();
                                 if !items.is_empty() {
@@ -134,12 +156,7 @@ pub fn completions_for_schema(
                         }
                     }
                     // Fallback: generic slot name item
-                    vec![SlotCompletion {
-                        label: slot.name.to_string(),
-                        detail: "Link".to_string(),
-                        documentation: slot.hint_text.clone(),
-                        insert_text: format!("{stem}.{}", slot.name),
-                    }]
+                    vec![SlotCompletion::plain(slot.name.to_string(), "Link", slot.hint_text.clone(), format!("{stem}.{}", slot.name))]
                 }
                 _ => {
                     let detail = match &slot.element {
@@ -154,12 +171,7 @@ pub fn completions_for_schema(
                         Element::Link { .. } => "Link".to_string(),
                         Element::Image { .. } => "Image".to_string(),
                     };
-                    vec![SlotCompletion {
-                        label: slot.name.to_string(),
-                        detail,
-                        documentation: slot.hint_text.clone(),
-                        insert_text: format!("{stem}.{}", slot.name),
-                    }]
+                    vec![SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), format!("{stem}.{}", slot.name))]
                 }
             }
         })
@@ -168,16 +180,201 @@ pub fn completions_for_schema(
 
 /// Find the insertion position (line, character=0) for the separator line "----".
 /// Returns the line number of the separator, or the line after the last line if not found.
-fn find_separator_insert_position(src: &str) -> (u32, u32) {
+/// Find the position of the body separator `----` in the source.
+/// Returns `(line, col, found)` where `found` indicates whether a separator exists.
+fn find_separator_insert_position(src: &str) -> ((u32, u32), bool) {
     for (i, line) in src.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed == "----" || trimmed == "- - - -" {
-            return (i as u32, 0);
+            return ((i as u32, 0), true);
         }
     }
-    // Insert at end of file
+    // No separator found — insert at end of file
+    let line_count = src.lines().count();
+    ((line_count as u32, 0), false)
+}
+
+/// Find the correct insertion position for a missing slot based on schema order.
+///
+/// For a slot at `slot_idx` in the grammar preamble, finds the first document element
+/// that belongs to a later slot and returns the position just before it.
+/// If no later slot is present, inserts before the separator or at end of file.
+fn find_schema_ordered_insert_position(
+    src: &str,
+    slot_idx: usize,
+    grammar: &schema::Grammar,
+    elements_with_offsets: &[content::ContentElementWithOffset],
+) -> (u32, u32) {
+    // Look for the first document element belonging to a slot AFTER slot_idx
+    for later_slot in &grammar.preamble[slot_idx + 1..] {
+        if let Some(ewo) = elements_with_offsets
+            .iter()
+            .find(|e| element_matches_slot_type(&e.element, &later_slot.element))
+        {
+            // Insert before this element
+            return byte_to_position(src, ewo.byte_range.start);
+        }
+    }
+    // No later slot found — insert before the separator
+    let (sep_pos, found) = find_separator_insert_position(src);
+    if found {
+        return sep_pos;
+    }
+    // No separator — insert at end of file
     let line_count = src.lines().count();
     (line_count as u32, 0)
+}
+
+/// Escape special characters in LSP snippet syntax.
+fn escape_snippet(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('$', "\\$").replace('}', "\\}")
+}
+
+/// Generate LSP snippet text for a slot, with placeholder selections.
+fn snippet_for_slot(slot: &schema::Slot) -> String {
+    let hint = slot.hint_text.as_deref().unwrap_or(slot.name.as_str());
+    let escaped = escape_snippet(hint);
+    match &slot.element {
+        Element::Heading { level } => {
+            let hashes = "#".repeat(level.min.value() as usize);
+            format!("{hashes} ${{1:{escaped}}}")
+        }
+        Element::Paragraph => {
+            format!("${{1:{escaped}}}")
+        }
+        Element::Link { pattern } => {
+            let url = url_from_pattern(pattern, "name");
+            let escaped_url = escape_snippet(&url);
+            format!("[${{1:{escaped}}}](${{2:{escaped_url}}})")
+        }
+        Element::Image { pattern } => {
+            let url = pattern.replace('*', "filename.ext");
+            let escaped_url = escape_snippet(&url);
+            format!("![${{1:{escaped}}}](${{2:{escaped_url}}})")
+        }
+    }
+}
+
+/// Content-file completions: offers snippet templates for missing schema slots.
+///
+/// Parses the current document source to determine which slots are already filled,
+/// then offers snippet completions for the remaining slots in schema order.
+pub fn content_completions(
+    src: &str,
+    grammar: &Grammar,
+    site_dir: Option<&std::path::Path>,
+) -> Vec<SlotCompletion> {
+    // Parse current document to find which slots are filled
+    let doc = match content::parse_document(src) {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+
+    let mut completions = Vec::new();
+    let mut first_missing = true;
+
+    // Walk grammar preamble in order, offer completions for missing slots
+    for (idx, slot) in grammar.preamble.iter().enumerate() {
+        // Check if this slot type is present in the document
+        let is_filled = doc
+            .elements
+            .iter()
+            .any(|e| element_matches_slot_type(e, &slot.element));
+        if is_filled {
+            continue;
+        }
+
+        let sort_text = format!("{idx:02}");
+
+        // For link slots with site_dir, enumerate actual content files
+        if let Element::Link { pattern } = &slot.element {
+            if let Some(dir) = site_dir {
+                if let Some(content_stem) = stem_from_link_pattern(pattern) {
+                    let content_dir = dir.join("content").join(&content_stem);
+                    if let Ok(entries) = std::fs::read_dir(&content_dir) {
+                        let items: Vec<SlotCompletion> = entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.path().extension().and_then(|ex| ex.to_str()) == Some("md")
+                            })
+                            .map(|e| {
+                                let path = e.path();
+                                let file_slug = path
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let title = read_title_from_md(&path)
+                                    .unwrap_or_else(|| file_slug.clone());
+                                let url = format!("/{content_stem}/{file_slug}");
+                                let escaped_title = escape_snippet(&title);
+                                let escaped_url = escape_snippet(&url);
+                                let mut c = SlotCompletion::snippet(
+                                    format!("{}: {}", slot.name, title),
+                                    format!("Link to {content_stem}/{file_slug}"),
+                                    slot.hint_text.clone(),
+                                    format!(
+                                        "[${{1:{escaped_title}}}](${{2:{escaped_url}}})"
+                                    ),
+                                )
+                                .with_sort_text(sort_text.clone());
+                                if first_missing {
+                                    c = c.with_preselect();
+                                }
+                                c
+                            })
+                            .collect();
+                        if !items.is_empty() {
+                            first_missing = false;
+                            completions.extend(items);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Generic snippet completion for this slot
+        let snippet = snippet_for_slot(slot);
+        let mut c = SlotCompletion::snippet(
+            slot.name.to_string(),
+            match &slot.element {
+                Element::Heading { level } => format!("H{} heading", level.min.value()),
+                Element::Paragraph => "Paragraph".to_string(),
+                Element::Link { .. } => "Link".to_string(),
+                Element::Image { .. } => "Image".to_string(),
+            },
+            slot.hint_text.clone(),
+            snippet,
+        )
+        .with_sort_text(sort_text);
+        if first_missing {
+            c = c.with_preselect();
+            first_missing = false;
+        }
+        completions.push(c);
+    }
+
+    // Offer separator if missing and grammar has body rules
+    if grammar.body.is_some() {
+        let has_separator = doc
+            .elements
+            .iter()
+            .any(|e| matches!(e, content::ContentElement::Separator));
+        if !has_separator {
+            completions.push(
+                SlotCompletion::plain(
+                    "----",
+                    "Body separator",
+                    Some("Separates preamble slots from body content".to_string()),
+                    "----\n",
+                )
+                .with_sort_text("99"),
+            );
+        }
+    }
+
+    completions
 }
 
 /// Generate a template string for a slot element type.
@@ -230,90 +427,25 @@ pub fn schema_completions(src: &str, cursor_line: u32) -> Vec<SlotCompletion> {
 
         return match preceding_key {
             "occurs" => vec![
-                SlotCompletion {
-                    label: "exactly once".to_string(),
-                    detail: "occurs value".to_string(),
-                    documentation: None,
-                    insert_text: "exactly once".to_string(),
-                },
-                SlotCompletion {
-                    label: "at least once".to_string(),
-                    detail: "occurs value".to_string(),
-                    documentation: None,
-                    insert_text: "at least once".to_string(),
-                },
-                SlotCompletion {
-                    label: "at most once".to_string(),
-                    detail: "occurs value".to_string(),
-                    documentation: None,
-                    insert_text: "at most once".to_string(),
-                },
-                SlotCompletion {
-                    label: "1..3".to_string(),
-                    detail: "occurs value".to_string(),
-                    documentation: None,
-                    insert_text: "1..3".to_string(),
-                },
-                SlotCompletion {
-                    label: "0..5".to_string(),
-                    detail: "occurs value".to_string(),
-                    documentation: None,
-                    insert_text: "0..5".to_string(),
-                },
+                SlotCompletion::plain("exactly once", "occurs value", None, "exactly once"),
+                SlotCompletion::plain("at least once", "occurs value", None, "at least once"),
+                SlotCompletion::plain("at most once", "occurs value", None, "at most once"),
+                SlotCompletion::plain("1..3", "occurs value", None, "1..3"),
+                SlotCompletion::plain("0..5", "occurs value", None, "0..5"),
             ],
-            "content" => vec![SlotCompletion {
-                label: "capitalized".to_string(),
-                detail: "content value".to_string(),
-                documentation: None,
-                insert_text: "capitalized".to_string(),
-            }],
+            "content" => vec![SlotCompletion::plain("capitalized", "content value", None, "capitalized")],
             "orientation" => vec![
-                SlotCompletion {
-                    label: "landscape".to_string(),
-                    detail: "orientation value".to_string(),
-                    documentation: None,
-                    insert_text: "landscape".to_string(),
-                },
-                SlotCompletion {
-                    label: "portrait".to_string(),
-                    detail: "orientation value".to_string(),
-                    documentation: None,
-                    insert_text: "portrait".to_string(),
-                },
+                SlotCompletion::plain("landscape", "orientation value", None, "landscape"),
+                SlotCompletion::plain("portrait", "orientation value", None, "portrait"),
             ],
             "alt" => vec![
-                SlotCompletion {
-                    label: "required".to_string(),
-                    detail: "alt value".to_string(),
-                    documentation: None,
-                    insert_text: "required".to_string(),
-                },
-                SlotCompletion {
-                    label: "optional".to_string(),
-                    detail: "alt value".to_string(),
-                    documentation: None,
-                    insert_text: "optional".to_string(),
-                },
+                SlotCompletion::plain("required", "alt value", None, "required"),
+                SlotCompletion::plain("optional", "alt value", None, "optional"),
             ],
             "headings" => vec![
-                SlotCompletion {
-                    label: "h3..h6".to_string(),
-                    detail: "headings value".to_string(),
-                    documentation: None,
-                    insert_text: "h3..h6".to_string(),
-                },
-                SlotCompletion {
-                    label: "h2..h6".to_string(),
-                    detail: "headings value".to_string(),
-                    documentation: None,
-                    insert_text: "h2..h6".to_string(),
-                },
-                SlotCompletion {
-                    label: "h4..h6".to_string(),
-                    detail: "headings value".to_string(),
-                    documentation: None,
-                    insert_text: "h4..h6".to_string(),
-                },
+                SlotCompletion::plain("h3..h6", "headings value", None, "h3..h6"),
+                SlotCompletion::plain("h2..h6", "headings value", None, "h2..h6"),
+                SlotCompletion::plain("h4..h6", "headings value", None, "h4..h6"),
             ],
             _ => vec![],
         };
@@ -322,72 +454,21 @@ pub fn schema_completions(src: &str, cursor_line: u32) -> Vec<SlotCompletion> {
     // Mode 2: empty line → offer element templates
     if current_line.trim().is_empty() {
         return vec![
-            SlotCompletion {
-                label: "Heading slot".to_string(),
-                detail: "heading element".to_string(),
-                documentation: Some("A heading element with name anchor".to_string()),
-                insert_text: "# Heading text {#name}\noccurs\n: exactly once\n".to_string(),
-            },
-            SlotCompletion {
-                label: "Paragraph slot".to_string(),
-                detail: "paragraph element".to_string(),
-                documentation: Some("A paragraph element".to_string()),
-                insert_text: "Paragraph text. {#name}\noccurs\n: exactly once\n".to_string(),
-            },
-            SlotCompletion {
-                label: "Link slot".to_string(),
-                detail: "link element".to_string(),
-                documentation: Some("A link reference to other content".to_string()),
-                insert_text: "[link text](/pattern) {#name}\noccurs\n: exactly once\n".to_string(),
-            },
-            SlotCompletion {
-                label: "Image slot".to_string(),
-                detail: "image element".to_string(),
-                documentation: Some("An image element".to_string()),
-                insert_text: "![alt text](images/*.(jpg|png)) {#name}\noccurs\n: exactly once\n"
-                    .to_string(),
-            },
-            SlotCompletion {
-                label: "Body separator".to_string(),
-                detail: "body section".to_string(),
-                documentation: Some("Separator between preamble and body".to_string()),
-                insert_text: "----\n\nBody content.\nheadings\n: h3..h6\n".to_string(),
-            },
+            SlotCompletion::plain("Heading slot", "heading element", Some("A heading element with name anchor".to_string()), "# Heading text {#name}\noccurs\n: exactly once\n"),
+            SlotCompletion::plain("Paragraph slot", "paragraph element", Some("A paragraph element".to_string()), "Paragraph text. {#name}\noccurs\n: exactly once\n"),
+            SlotCompletion::plain("Link slot", "link element", Some("A link reference to other content".to_string()), "[link text](/pattern) {#name}\noccurs\n: exactly once\n"),
+            SlotCompletion::plain("Image slot", "image element", Some("An image element".to_string()), "![alt text](images/*.(jpg|png)) {#name}\noccurs\n: exactly once\n"),
+            SlotCompletion::plain("Body separator", "body section", Some("Separator between preamble and body".to_string()), "----\n\nBody content.\nheadings\n: h3..h6\n"),
         ];
     }
 
     // Mode 3: constraint key line → offer constraint keys
     vec![
-        SlotCompletion {
-            label: "occurs".to_string(),
-            detail: "constraint key".to_string(),
-            documentation: None,
-            insert_text: "occurs".to_string(),
-        },
-        SlotCompletion {
-            label: "content".to_string(),
-            detail: "constraint key".to_string(),
-            documentation: None,
-            insert_text: "content".to_string(),
-        },
-        SlotCompletion {
-            label: "orientation".to_string(),
-            detail: "constraint key".to_string(),
-            documentation: None,
-            insert_text: "orientation".to_string(),
-        },
-        SlotCompletion {
-            label: "alt".to_string(),
-            detail: "constraint key".to_string(),
-            documentation: None,
-            insert_text: "alt".to_string(),
-        },
-        SlotCompletion {
-            label: "headings".to_string(),
-            detail: "constraint key".to_string(),
-            documentation: None,
-            insert_text: "headings".to_string(),
-        },
+        SlotCompletion::plain("occurs", "constraint key", None, "occurs"),
+        SlotCompletion::plain("content", "constraint key", None, "content"),
+        SlotCompletion::plain("orientation", "constraint key", None, "orientation"),
+        SlotCompletion::plain("alt", "constraint key", None, "alt"),
+        SlotCompletion::plain("headings", "constraint key", None, "headings"),
     ]
 }
 
@@ -474,14 +555,32 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
         };
 
         // Compute template_fix for "missing" diagnostics
-        let template_fix = if diag.message.contains("missing") {
+        let template_fix = if diag.message.contains("missing body separator") {
+            // Quickfix: insert ---- at end of file
+            let line_count = src.lines().count() as u32;
+            Some(TemplateFix {
+                insert_text: "\n----\n".to_string(),
+                insert_position: (line_count, 0),
+            })
+        } else if diag.message.contains("missing") {
             if let Some(slot_name_str) = &diag.slot {
-                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name_str);
-                if let Some(slot) = slot {
+                let slot_idx = grammar.preamble.iter().position(|s| s.name.as_str() == slot_name_str);
+                let slot = slot_idx.map(|i| &grammar.preamble[i]);
+                if let (Some(slot), Some(slot_idx)) = (slot, slot_idx) {
                     let template = template_for_slot(slot);
-                    let insert_position = find_separator_insert_position(src);
+                    // Find the correct insertion position based on schema order:
+                    // insert before the first document element belonging to a later slot.
+                    let insert_position = find_schema_ordered_insert_position(
+                        src, slot_idx, grammar, &elements_with_offsets,
+                    );
+                    let (_, has_separator) = find_separator_insert_position(src);
+                    let insert_text = if has_separator || insert_position.0 > 0 {
+                        format!("{template}\n\n")
+                    } else {
+                        format!("{template}\n\n----\n")
+                    };
                     Some(TemplateFix {
-                        insert_text: format!("\n{template}\n"),
+                        insert_text,
                         insert_position,
                     })
                 } else {
@@ -707,12 +806,7 @@ pub fn template_completions(
                 let stem_dot = format!("{stem}.");
                 if !prefix.contains('.') {
                     // No dot yet — offer the stem name
-                    return vec![SlotCompletion {
-                        label: stem.to_string(),
-                        detail: "content type".to_string(),
-                        documentation: None,
-                        insert_text: stem.to_string(),
-                    }];
+                    return vec![SlotCompletion::plain(stem, "content type", None, stem)];
                 } else if prefix.starts_with(&stem_dot) {
                     // Typed "{stem}." — offer all preamble slots
                     return grammar
@@ -725,12 +819,7 @@ pub fn template_completions(
                                 Element::Link { .. } => "link".to_string(),
                                 Element::Image { .. } => "image".to_string(),
                             };
-                            SlotCompletion {
-                                label: slot.name.to_string(),
-                                detail,
-                                documentation: slot.hint_text.clone(),
-                                insert_text: slot.name.to_string(),
-                            }
+                            SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), slot.name.to_string())
                         })
                         .collect();
                 } else {
@@ -1383,5 +1472,138 @@ mod tests {
             "error message should mention 'schema': {}",
             diags[0].message
         );
+    }
+
+    // --- content_completions tests ---
+
+    #[test]
+    fn content_completions_empty_doc_returns_all_slots_and_separator() {
+        let grammar = article_grammar();
+        let completions = content_completions("", &grammar, None);
+        // title, summary, author, cover = 4 slots + separator = 5
+        assert!(
+            completions.len() >= 5,
+            "empty doc should return completions for all slots + separator: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "title"),
+            "should include title: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "summary"),
+            "should include summary: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "author"),
+            "should include author: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "cover"),
+            "should include cover: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "----"),
+            "should include separator: {completions:#?}"
+        );
+    }
+
+    #[test]
+    fn content_completions_all_slots_are_snippets() {
+        let grammar = article_grammar();
+        let completions = content_completions("", &grammar, None);
+        let slot_completions: Vec<_> = completions.iter().filter(|c| c.label != "----").collect();
+        assert!(
+            !slot_completions.is_empty(),
+            "should have slot completions: {completions:#?}"
+        );
+        for c in &slot_completions {
+            assert!(
+                c.is_snippet,
+                "slot completion '{}' should be a snippet: {c:#?}",
+                c.label
+            );
+        }
+    }
+
+    #[test]
+    fn content_completions_first_slot_is_preselected() {
+        let grammar = article_grammar();
+        let completions = content_completions("", &grammar, None);
+        let first = completions
+            .iter()
+            .filter(|c| c.label != "----")
+            .next()
+            .expect("should have at least one non-separator completion");
+        assert!(first.preselect, "first missing slot should be preselected: {first:#?}");
+        // Only one should be preselected
+        let preselected_count = completions.iter().filter(|c| c.preselect).count();
+        assert_eq!(preselected_count, 1, "exactly one completion should be preselected");
+    }
+
+    #[test]
+    fn content_completions_with_title_skips_title() {
+        let grammar = article_grammar();
+        let src = "# Hello World\n\n";
+        let completions = content_completions(src, &grammar, None);
+        assert!(
+            !completions.iter().any(|c| c.label == "title"),
+            "title is filled, should not be offered: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label == "summary"),
+            "summary should still be offered: {completions:#?}"
+        );
+        // summary should be preselected (first missing)
+        let summary_c = completions.iter().find(|c| c.label == "summary").unwrap();
+        assert!(summary_c.preselect, "summary should be preselected when title is filled: {summary_c:#?}");
+    }
+
+    #[test]
+    fn snippet_for_slot_heading_contains_placeholder() {
+        let grammar = article_grammar();
+        let title_slot = grammar
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == "title")
+            .expect("article grammar should have title slot");
+        let snippet = snippet_for_slot(title_slot);
+        assert!(
+            snippet.contains("${1:"),
+            "heading snippet should contain placeholder: {snippet}"
+        );
+        assert!(
+            snippet.starts_with("# "),
+            "heading snippet should start with '# ': {snippet}"
+        );
+    }
+
+    #[test]
+    fn snippet_for_slot_link_contains_two_placeholders() {
+        let grammar = article_grammar();
+        let author_slot = grammar
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == "author")
+            .expect("article grammar should have author slot");
+        let snippet = snippet_for_slot(author_slot);
+        assert!(
+            snippet.contains("${1:"),
+            "link snippet should contain first placeholder: {snippet}"
+        );
+        assert!(
+            snippet.contains("${2:"),
+            "link snippet should contain second placeholder: {snippet}"
+        );
+    }
+
+    #[test]
+    fn escape_snippet_escapes_dollar_sign() {
+        let input = "cost $5 for {item}";
+        let escaped = escape_snippet(input);
+        assert!(
+            !escaped.contains('$') || escaped.contains("\\$"),
+            "dollar sign should be escaped: {escaped}"
+        );
+        assert_eq!(escaped, "cost \\$5 for {item\\}");
     }
 }
