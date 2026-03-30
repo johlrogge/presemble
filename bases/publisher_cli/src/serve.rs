@@ -582,8 +582,8 @@ fn watch_and_rebuild(
                     // Send a reload so the browser navigates to the error page.
                     let error_pages: Vec<String> = outcome.build_errors.keys().cloned().collect();
                     let _ = reload_tx.send(ReloadMessage { pages: error_pages, anchor: None });
-                } else if outcome.files_built > 0 {
-                    println!("Rebuild complete ({} file(s))", outcome.files_built);
+                } else if outcome.files_built > 0 || outcome.files_with_suggestions > 0 {
+                    println!("Rebuild complete ({} file(s), {} with suggestions)", outcome.files_built, outcome.files_with_suggestions);
                     let mut pages: Vec<String> = outcome.built_pages
                         .values()
                         .flat_map(|pages| pages.iter().map(|p| p.url_path.clone()))
