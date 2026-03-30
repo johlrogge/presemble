@@ -296,49 +296,38 @@ pub fn content_completions(
         let sort_text = format!("{idx:02}");
 
         // For link slots with site_dir, enumerate actual content files
-        if let Element::Link { pattern } = &slot.element {
-            if let Some(dir) = site_dir {
-                if let Some(content_stem) = stem_from_link_pattern(pattern) {
-                    let content_dir = dir.join("content").join(&content_stem);
-                    if let Ok(entries) = std::fs::read_dir(&content_dir) {
-                        let items: Vec<SlotCompletion> = entries
-                            .filter_map(|e| e.ok())
-                            .filter(|e| {
-                                e.path().extension().and_then(|ex| ex.to_str()) == Some("md")
-                            })
-                            .map(|e| {
-                                let path = e.path();
-                                let file_slug = path
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let title = read_title_from_md(&path)
-                                    .unwrap_or_else(|| file_slug.clone());
-                                let url = format!("/{content_stem}/{file_slug}");
-                                let escaped_title = escape_snippet(&title);
-                                let escaped_url = escape_snippet(&url);
-                                let mut c = SlotCompletion::snippet(
-                                    format!("{}: {}", slot.name, title),
-                                    format!("Link to {content_stem}/{file_slug}"),
-                                    slot.hint_text.clone(),
-                                    format!(
-                                        "[${{1:{escaped_title}}}](${{2:{escaped_url}}})"
-                                    ),
-                                )
-                                .with_sort_text(sort_text.clone());
-                                if first_missing {
-                                    c = c.with_preselect();
-                                }
-                                c
-                            })
-                            .collect();
-                        if !items.is_empty() {
-                            first_missing = false;
-                            completions.extend(items);
-                            continue;
+        if let Element::Link { pattern } = &slot.element
+            && let Some(dir) = site_dir
+            && let Some(content_stem) = stem_from_link_pattern(pattern)
+        {
+            let content_dir = dir.join("content").join(&content_stem);
+            if let Ok(entries) = std::fs::read_dir(&content_dir) {
+                let items: Vec<SlotCompletion> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().and_then(|ex| ex.to_str()) == Some("md"))
+                    .map(|e| {
+                        let path = e.path();
+                        let file_slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                        let title = read_title_from_md(&path).unwrap_or_else(|| file_slug.clone());
+                        let url = format!("/{content_stem}/{file_slug}");
+                        let escaped_title = escape_snippet(&title);
+                        let escaped_url = escape_snippet(&url);
+                        let mut c = SlotCompletion::snippet(
+                            format!("{}: {}", slot.name, title),
+                            format!("Link to {content_stem}/{file_slug}"),
+                            slot.hint_text.clone(),
+                            format!("[${{1:{escaped_title}}}](${{2:{escaped_url}}})"),
+                        ).with_sort_text(sort_text.clone());
+                        if first_missing {
+                            c = c.with_preselect();
                         }
-                    }
+                        c
+                    })
+                    .collect();
+                if !items.is_empty() {
+                    first_missing = false;
+                    completions.extend(items);
+                    continue;
                 }
             }
         }
