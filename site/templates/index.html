@@ -13,10 +13,13 @@
   <section class="hero">
     <h1>Data Not Text</h1>
     <presemble:insert data="index.tagline" as="p" />
-    <template data-slot="index.pitch">
-      <presemble:insert data="index.pitch" as="p" />
-    </template>
   </section>
+
+  <template data-slot="index.pitch">
+    <section class="pitch">
+      <presemble:insert data="index.pitch" as="p" />
+    </section>
+  </template>
 
   <template data-slot="index.body">
     <section class="why-presemble">

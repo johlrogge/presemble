@@ -158,12 +158,40 @@ main {
   letter-spacing: -0.02em;
 }
 
-.hero p {
+.hero .index-tagline {
   font-size: 1.2rem;
   color: var(--text-soft);
   max-width: 40ch;
   margin: 0 auto var(--space-sm);
   font-style: italic;
+}
+
+.pitch {
+  max-width: 55ch;
+  margin: var(--space-lg) auto 0;
+  padding: 0 var(--space);
+}
+.pitch .index-pitch {
+  font-size: 1.05rem;
+  color: var(--text);
+  font-style: normal;
+  margin: 0 0 var(--space);
+}
+
+.why-presemble { margin-top: var(--space-xl); }
+.why-presemble h2 {
+  color: var(--green);
+  font-size: 1.7rem;
+  text-align: center;
+  margin-bottom: var(--space);
+}
+.why-presemble h3 {
+  color: var(--amber);
+  margin-top: var(--space-lg);
+}
+.why-presemble p {
+  color: var(--text-soft);
+  max-width: 65ch;
 }
 
 .feature-grid { margin-top: var(--space-xl); }
