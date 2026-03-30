@@ -1,6 +1,16 @@
 use content::{ContentElement, Document};
 use schema::{Element, Grammar};
 
+/// The kind of schema element a suggestion represents.
+#[derive(Debug, Clone)]
+pub enum SuggestionKind {
+    Heading { level: u8 },
+    Paragraph,
+    Link,
+    Image,
+    Body,
+}
+
 /// A value in the data graph.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -14,6 +24,13 @@ pub enum Value {
     List(Vec<Value>),
     /// Absent — slot not present or optional field not filled
     Absent,
+    /// A suggestion placeholder for missing content, driven by schema hint_text.
+    /// Rendered as a visually distinct placeholder in the output.
+    Suggestion {
+        hint: String,
+        slot_name: String,
+        element_kind: SuggestionKind,
+    },
 }
 
 /// A data graph node: a map from string keys to values.
@@ -212,6 +229,48 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     let body_html = render_body_html(&elements[cursor..]);
     if !body_html.is_empty() {
         graph.insert("body", Value::Html(body_html));
+    }
+
+    // Insert suggestion placeholders for any preamble slots not yet in the graph,
+    // or present but empty (e.g., a multi-occurrence paragraph slot with zero items).
+    for slot in &grammar.preamble {
+        let slot_key = slot.name.as_str().to_string();
+        let needs_suggestion = match graph.entries.get(&slot_key) {
+            None => true,
+            Some(Value::Absent) => true,
+            Some(Value::List(items)) if items.is_empty() => true,
+            _ => false,
+        };
+        if !needs_suggestion {
+            continue;
+        }
+        let element_kind = match &slot.element {
+            Element::Heading { level } => SuggestionKind::Heading { level: level.min.value() },
+            Element::Paragraph => SuggestionKind::Paragraph,
+            Element::Link { .. } => SuggestionKind::Link,
+            Element::Image { .. } => SuggestionKind::Image,
+        };
+        let hint = slot.hint_text.clone().unwrap_or_else(|| slot.name.to_string());
+        graph.insert(
+            slot_key,
+            Value::Suggestion {
+                hint,
+                slot_name: slot.name.as_str().to_string(),
+                element_kind,
+            },
+        );
+    }
+
+    // Insert a suggestion for the body if the grammar expects one but it's missing.
+    if grammar.body.is_some() && !graph.entries.contains_key("body") {
+        graph.insert(
+            "body",
+            Value::Suggestion {
+                hint: "Body content goes here.".to_string(),
+                slot_name: "body".to_string(),
+                element_kind: SuggestionKind::Body,
+            },
+        );
     }
 
     graph
@@ -564,8 +623,113 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Suggestion tests
+    // ---------------------------------------------------------------------------
+
     #[test]
-    fn build_graph_tagline_absent_when_no_paragraphs() {
+    fn empty_doc_gets_suggestions_for_all_article_slots() {
+        // A document with only the separator — all preamble slots should become suggestions.
+        let doc_input = "----\n";
+        let doc = parse_document(doc_input).expect("empty doc should parse");
+        let grammar = article_grammar();
+        let graph = build_article_graph(&doc, &grammar);
+
+        // title — Heading suggestion
+        match graph.resolve(&["title"]) {
+            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Heading { .. }, .. }) => {
+                assert_eq!(slot_name, "title");
+            }
+            other => panic!("expected Suggestion for title, got {other:?}"),
+        }
+
+        // summary — Paragraph suggestion; hint comes from schema hint_text
+        match graph.resolve(&["summary"]) {
+            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Paragraph, hint }) => {
+                assert_eq!(slot_name, "summary");
+                // hint should come from schema hint_text ("Your article summary. Tell the reader what they will learn.")
+                assert!(!hint.is_empty(), "hint should not be empty");
+            }
+            other => panic!("expected Suggestion for summary, got {other:?}"),
+        }
+
+        // author — Link suggestion
+        match graph.resolve(&["author"]) {
+            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Link, .. }) => {
+                assert_eq!(slot_name, "author");
+            }
+            other => panic!("expected Suggestion for author, got {other:?}"),
+        }
+
+        // cover — Image suggestion
+        match graph.resolve(&["cover"]) {
+            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Image, .. }) => {
+                assert_eq!(slot_name, "cover");
+            }
+            other => panic!("expected Suggestion for cover, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_hello_world_doc_has_no_suggestions() {
+        let doc = hello_world_doc();
+        let grammar = article_grammar();
+        let graph = build_article_graph(&doc, &grammar);
+
+        fn has_suggestion(value: &Value) -> bool {
+            match value {
+                Value::Suggestion { .. } => true,
+                Value::Record(sub) => sub.iter().any(|(_, v)| has_suggestion(v)),
+                Value::List(items) => items.iter().any(has_suggestion),
+                _ => false,
+            }
+        }
+
+        for (key, value) in graph.iter() {
+            assert!(
+                !has_suggestion(value),
+                "expected no suggestions in hello-world graph, but slot '{key}' has a suggestion: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn doc_missing_only_cover_gets_only_cover_suggestion() {
+        // Document has title, summary, author, but no cover.
+        let doc_input = "# My Title\n\nMy summary.\n\n[Jo Hlrogge](/author/jo)\n\n----\n\n### Body\n";
+        let doc = parse_document(doc_input).expect("partial doc should parse");
+        let grammar = article_grammar();
+        let graph = build_article_graph(&doc, &grammar);
+
+        // title should be real
+        match graph.resolve(&["title"]) {
+            Some(Value::Text(_)) => {}
+            other => panic!("expected real Text for title, got {other:?}"),
+        }
+
+        // summary should be real (single paragraph, stored as List)
+        match graph.resolve(&["summary"]) {
+            Some(Value::List(_)) => {}
+            other => panic!("expected real List for summary, got {other:?}"),
+        }
+
+        // author should be real
+        match graph.resolve(&["author"]) {
+            Some(Value::Record(_)) => {}
+            other => panic!("expected real Record for author, got {other:?}"),
+        }
+
+        // cover should be a suggestion
+        match graph.resolve(&["cover"]) {
+            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Image, .. }) => {
+                assert_eq!(slot_name, "cover");
+            }
+            other => panic!("expected Suggestion for cover, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_graph_tagline_becomes_suggestion_when_no_paragraphs() {
         let schema_src = "# Title {#title}\noccurs\n: exactly once\n\nTagline. {#tagline}\noccurs\n: exactly once\n\n----\n";
         let content_src = "# My Title\n\n----\n\n### Body\n";
 
@@ -573,7 +737,12 @@ mod tests {
         let doc = parse_document(content_src).expect("content parses");
         let graph = build_article_graph(&doc, &grammar);
 
-        // tagline absent when no paragraph in content
-        assert!(matches!(graph.resolve(&["tagline"]), Some(Value::Absent) | None));
+        // Missing tagline now becomes a Suggestion placeholder rather than Absent.
+        match graph.resolve(&["tagline"]) {
+            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Paragraph, .. }) => {
+                assert_eq!(slot_name, "tagline");
+            }
+            other => panic!("expected Suggestion for missing tagline, got {other:?}"),
+        }
     }
 }

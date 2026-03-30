@@ -334,3 +334,67 @@ fn cross_content_reference_resolves_author_data() {
         other => panic!("expected author.name Text after resolution, got: {other:?}"),
     }
 }
+
+#[test]
+fn invalid_post_is_rendered_with_suggestions_not_skipped() {
+    let (_tmp, site_dir) = copy_fixture_site();
+
+    let outcome = publisher_cli::build_site(&site_dir, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
+
+    // The invalid-post should appear in built_pages (rendered with suggestion nodes)
+    let articles = outcome
+        .built_pages
+        .get("article")
+        .expect("article pages should exist");
+    let invalid_page = articles
+        .iter()
+        .find(|p| p.url_path.contains("invalid-post"));
+    assert!(
+        invalid_page.is_some(),
+        "invalid-post should be in built_pages (rendered with suggestions), got url_paths: {:?}",
+        articles.iter().map(|p| &p.url_path).collect::<Vec<_>>()
+    );
+
+    // It should NOT be in build_errors (those are parse failures only)
+    let in_errors = outcome
+        .build_errors
+        .keys()
+        .any(|k| k.contains("invalid-post"));
+    assert!(
+        !in_errors,
+        "invalid-post should not be in build_errors (it renders with suggestions, not fail)"
+    );
+
+    // It SHOULD be in page_suggestions (validation diagnostics were recorded)
+    let in_suggestions = outcome
+        .page_suggestions
+        .keys()
+        .any(|k| k.contains("invalid-post"));
+    assert!(
+        in_suggestions,
+        "invalid-post should be in page_suggestions; keys: {:?}",
+        outcome.page_suggestions.keys().collect::<Vec<_>>()
+    );
+
+    // files_failed should not count the invalid post
+    assert_eq!(
+        outcome.files_failed, 0,
+        "no pages should be counted as failed (invalid-post renders with suggestions)"
+    );
+
+    // files_with_suggestions should be at least 1
+    assert!(
+        outcome.files_with_suggestions >= 1,
+        "at least one page should be counted as having suggestions"
+    );
+
+    // The HTML output file should exist (the page was rendered)
+    let invalid_post_output = publisher_cli::output_dir(&site_dir)
+        .join("article/invalid-post/index.html");
+    assert!(
+        invalid_post_output.exists(),
+        "invalid-post output HTML should exist at {}",
+        invalid_post_output.display()
+    );
+}
