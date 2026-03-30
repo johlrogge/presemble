@@ -50,21 +50,23 @@ New features go through a design-implement-review loop before release.
 
 Run these agents in order before cutting a release:
 
-1. **architect** — review all changes since last release
+1. **Hygiene gate** — run `mcp__rust-codebase__hygiene_report` (tests + clippy + coverage). All must pass before proceeding. This catches lint violations that CI enforces with `-D warnings`.
+
+2. **architect** — review all changes since last release
    > "Review changes since last release"
 
-2. **product-owner** — confirm the release delivers intended value
+3. **product-owner** — confirm the release delivers intended value
    > "Review the planned 0.x.0 release"
 
-3. **documenter** — update README files to reflect the release. Document all missing features as features in the site and as sections in the user-guide. Review the site (/site/). You are looking for outdated information and missing features.
+4. **documenter** — update README files to reflect the release. Document all missing features as features in the site and as sections in the user-guide. Review the site (/site/). You are looking for outdated information and missing features. Review the homepage elevator pitch and "Why Presemble" section to ensure they reflect current capabilities — present tense only.
    > "Update docs for release 0.x.0"
 
-4. **Update `ROADMAP.md`** — mark any newly completed deliverables as `[x]` and move semantic-types or other explicitly deferred items out of the current milestone so M2/M3/etc. have a clean definition of done.
+5. **Update `ROADMAP.md`** — mark any newly completed deliverables as `[x]` and move semantic-types or other explicitly deferred items out of the current milestone so M2/M3/etc. have a clean definition of done.
 
-5. **release-manager** — start and finish the release branch
+6. **release-manager** — start and finish the release branch
    > "Start release 0.x.0" → confirm → "Finish release 0.x.0"
 
-6. **Human** — push to remote
+7. **Human** — push to remote
    ```
    git push origin master develop --tags
    ```
