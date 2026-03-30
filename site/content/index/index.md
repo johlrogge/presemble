@@ -1,10 +1,10 @@
 # Content is data. Templates are data. Schemas are the contracts between them.
 
-Presemble is a schema-driven site publisher. You define the structure of your content in plain markdown schemas. The publisher enforces those schemas at build time — every slot, every link, every asset — before a single output file is written. No partial publishes. No 404s waiting in production.
+Presemble is a site publisher that knows what your content should look like — and helps you get there. You describe each page type once, and Presemble guides you through filling it in: completions in your editor, friendly nudges when something is missing, and warm placeholders where content still needs to go. When everything is ready, it publishes. Not before.
 
-Templates are structured DOM trees, not text with holes. The publisher transforms them node-by-node, inserting typed content from the data graph. String manipulation only happens at serialisation. Mismatched tags and broken nesting are caught at parse time, not in production.
+You never wonder "did I forget something?" Presemble tells you — in the editor while you type, in the browser while you preview, and at build time before anything goes live. Missing fields, broken links, incomplete pages — they all surface as helpful suggestions, not cryptic errors.
 
-Your editor speaks Presemble. `presemble lsp` starts a single Language Server Protocol server that provides completions, diagnostics, hover, and go-to-definition for content files, template files, and schema files — all at once. Errors surface as you type. A schema violation shows up before you save, not after you deploy.
+Start a new page and Presemble shows you exactly what it needs. Fill in the blanks, save, and watch the site update in your browser. That is the workflow. No surprises, no guesswork, no broken deploys.
 
 ----
 
