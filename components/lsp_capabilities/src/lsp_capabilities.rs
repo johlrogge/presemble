@@ -1011,6 +1011,218 @@ fn find_text_start_in_src(src: &str, element_start: usize) -> Option<usize> {
     None
 }
 
+/// Convert a zero-indexed LSP (line, character) position to a byte offset in `src`.
+///
+/// `character` is interpreted as a UTF-16 code unit offset (matching `byte_to_position`).
+/// If `line` is past the end of the file, returns `src.len()`.
+/// If `col` is past the end of a line, clamps to the end of that line.
+fn position_to_byte(src: &str, line: u32, col: u32) -> usize {
+    let mut current_line = 0u32;
+    let mut byte_offset = 0usize;
+
+    for (i, ch) in src.char_indices() {
+        if current_line == line {
+            // Walk forward inside the target line counting UTF-16 code units
+            let line_start = byte_offset;
+            let remaining = &src[line_start..];
+            let mut utf16_count = 0u32;
+            for (j, c) in remaining.char_indices() {
+                if c == '\n' {
+                    // col is past end of line — clamp to newline position
+                    return line_start + j;
+                }
+                if utf16_count == col {
+                    return line_start + j;
+                }
+                let units = c.len_utf16() as u32;
+                utf16_count += units;
+            }
+            // col is at or past end of file content
+            return src.len();
+        }
+        if ch == '\n' {
+            current_line += 1;
+            byte_offset = i + 1;
+        }
+        let _ = i;
+    }
+    // line is at or past end of file
+    src.len()
+}
+
+/// Format new markdown text for a given slot element type and user-supplied value.
+///
+/// For headings, uses the minimum heading level from the schema.
+/// For links, `new_value` may be plain text (display only) or `text|href` (pipe-separated).
+/// For images, `new_value` may be plain text (alt only) or `alt|path` (pipe-separated).
+fn format_slot_value(slot: &schema::Slot, new_value: &str, existing_element: Option<&content::ContentElement>) -> String {
+    match &slot.element {
+        schema::Element::Heading { level } => {
+            let hashes = "#".repeat(level.min.value() as usize);
+            format!("{hashes} {new_value}")
+        }
+        schema::Element::Paragraph => new_value.to_string(),
+        schema::Element::Link { pattern } => {
+            // If new_value contains '|' treat it as "text|href"
+            if let Some((text, href)) = new_value.split_once('|') {
+                format!("[{text}]({href})")
+            } else {
+                // Preserve existing href if available; fall back to schema pattern
+                let href = match existing_element {
+                    Some(content::ContentElement::Link { href, .. }) => href.clone(),
+                    _ => url_from_pattern(pattern, "name"),
+                };
+                format!("[{new_value}]({href})")
+            }
+        }
+        schema::Element::Image { pattern } => {
+            // If new_value contains '|' treat it as "alt|path"
+            if let Some((alt, path)) = new_value.split_once('|') {
+                format!("![{alt}]({path})")
+            } else {
+                // Preserve existing path if available; fall back to schema pattern
+                let path = match existing_element {
+                    Some(content::ContentElement::Image { path, .. }) => path.clone(),
+                    _ => pattern.replace('*', "filename.ext"),
+                };
+                format!("![{new_value}]({path})")
+            }
+        }
+    }
+}
+
+/// Edit a content file by writing a new value to a named schema slot.
+///
+/// If the slot already exists in the document, the existing element is replaced
+/// in-place. If the slot is missing, the new element is inserted at the
+/// schema-order-correct position (reusing `find_schema_ordered_insert_position`).
+///
+/// The function reads and writes `file_path` directly.
+///
+/// # Errors
+/// Returns `Err(String)` if:
+/// - The file cannot be read or written
+/// - `slot_name` does not exist in `grammar.preamble`
+/// - The document source cannot be parsed
+pub fn write_slot_to_file(
+    file_path: &std::path::Path,
+    slot_name: &str,
+    grammar: &Grammar,
+    new_value: &str,
+) -> Result<(), String> {
+    let src = std::fs::read_to_string(file_path)
+        .map_err(|e| format!("failed to read {}: {e}", file_path.display()))?;
+
+    let new_src = write_slot_to_string(&src, slot_name, grammar, new_value)?;
+
+    std::fs::write(file_path, &new_src)
+        .map_err(|e| format!("failed to write {}: {e}", file_path.display()))?;
+
+    Ok(())
+}
+
+/// Core logic for `write_slot_to_file` operating on a string.
+///
+/// Exposed for testing without filesystem access.
+pub fn write_slot_to_string(
+    src: &str,
+    slot_name: &str,
+    grammar: &Grammar,
+    new_value: &str,
+) -> Result<String, String> {
+    // Find the slot in the grammar
+    let (slot_idx, slot) = grammar
+        .preamble
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.name.as_str() == slot_name)
+        .ok_or_else(|| format!("slot '{slot_name}' not found in grammar"))?;
+
+    let elements_with_offsets = content::parse_document_with_offsets(src)
+        .map_err(|e| format!("failed to parse document: {e:?}"))?;
+
+    // Walk grammar preamble in order (cursor approach) to find the element
+    // that corresponds to the target slot — same logic as the validator.
+    let mut cursor = 0usize;
+    let non_separator_elements: Vec<&content::ContentElementWithOffset> = elements_with_offsets
+        .iter()
+        .filter(|e| !matches!(e.element, content::ContentElement::Separator))
+        .collect();
+
+    let mut found_ewo: Option<&content::ContentElementWithOffset> = None;
+
+    'slots: for (i, slot_iter) in grammar.preamble.iter().enumerate() {
+        // Consume any annotation paragraphs
+        while cursor < non_separator_elements.len() {
+            if let content::ContentElement::Paragraph { text } = &non_separator_elements[cursor].element {
+                let t = text.trim();
+                if t.starts_with("{#") && t.ends_with('}') && !t[2..t.len() - 1].contains('}') {
+                    cursor += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        if cursor >= non_separator_elements.len() {
+            break 'slots;
+        }
+
+        let ewo = non_separator_elements[cursor];
+        if element_matches_slot_type(&ewo.element, &slot_iter.element) {
+            if i == slot_idx {
+                found_ewo = Some(ewo);
+                break 'slots;
+            }
+            cursor += 1;
+        } else {
+            // Element at cursor does not match this slot — slot is missing from document
+            if i == slot_idx {
+                // found_ewo remains None → insert case
+                break 'slots;
+            }
+        }
+    }
+
+    if let Some(ewo) = found_ewo {
+        // Replace case: splice new markdown over the existing element's byte range
+        let formatted = format_slot_value(slot, new_value, Some(&ewo.element));
+        let mut new_src = String::with_capacity(src.len());
+        new_src.push_str(&src[..ewo.byte_range.start]);
+        new_src.push_str(&formatted);
+        new_src.push_str(&src[ewo.byte_range.end..]);
+        Ok(new_src)
+    } else {
+        // Insert case: find the correct insertion position in schema order
+        let insert_pos = find_schema_ordered_insert_position(
+            src, slot_idx, grammar, &elements_with_offsets,
+        );
+        let insert_byte = position_to_byte(src, insert_pos.0, insert_pos.1);
+
+        let formatted = format_slot_value(slot, new_value, None);
+
+        let (_, has_separator) = find_separator_insert_position(src);
+        let line_at_pos = src.lines().nth(insert_pos.0 as usize).unwrap_or("");
+        let needs_extra_newline = !line_at_pos.trim().is_empty() && insert_pos.0 > 0;
+
+        let insert_text = if has_separator || insert_pos.0 > 0 {
+            if needs_extra_newline {
+                format!("{formatted}\n\n")
+            } else {
+                format!("{formatted}\n")
+            }
+        } else {
+            format!("{formatted}\n\n----\n")
+        };
+
+        let mut new_src = String::with_capacity(src.len() + insert_text.len());
+        new_src.push_str(&src[..insert_byte]);
+        new_src.push_str(&insert_text);
+        new_src.push_str(&src[insert_byte..]);
+        Ok(new_src)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1688,6 +1900,144 @@ mod tests {
             "dollar sign should be escaped: {escaped}"
         );
         assert_eq!(escaped, "cost \\$5 for {item\\}");
+    }
+
+    // --- position_to_byte tests ---
+
+    #[test]
+    fn position_to_byte_line_zero_col_zero() {
+        let src = "# Hello\n\nParagraph.\n";
+        assert_eq!(position_to_byte(src, 0, 0), 0);
+    }
+
+    #[test]
+    fn position_to_byte_line_zero_mid_line() {
+        let src = "# Hello\n\nParagraph.\n";
+        // "# Hello" starts at 0; col 2 → byte 2 (the 'H')
+        assert_eq!(position_to_byte(src, 0, 2), 2);
+    }
+
+    #[test]
+    fn position_to_byte_line_two() {
+        let src = "# Hello\n\nParagraph.\n";
+        // line 0: "# Hello\n" (8 bytes), line 1: "\n" (1 byte), line 2 starts at byte 9
+        assert_eq!(position_to_byte(src, 2, 0), 9);
+    }
+
+    #[test]
+    fn position_to_byte_past_end_clamps_to_len() {
+        let src = "abc\n";
+        assert_eq!(position_to_byte(src, 99, 0), src.len());
+    }
+
+    #[test]
+    fn position_to_byte_roundtrips_with_byte_to_position() {
+        let src = "# Hello World\n\nSome paragraph text.\n\n[Author](/author/test)\n";
+        for byte in [0, 2, 14, 15, 36, 37] {
+            let (line, col) = byte_to_position(src, byte);
+            let back = position_to_byte(src, line, col);
+            assert_eq!(back, byte, "roundtrip failed for byte offset {byte}");
+        }
+    }
+
+    // --- write_slot_to_string tests ---
+
+    #[test]
+    fn write_slot_to_string_replaces_heading_slot() {
+        let grammar = article_grammar();
+        let src = "# Hello, World\n\nSummary text.\n\n[Author Name](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let result = write_slot_to_string(src, "title", &grammar, "New Title")
+            .expect("write_slot_to_string should succeed");
+        assert!(
+            result.contains("# New Title"),
+            "result should contain replaced heading: {result}"
+        );
+        assert!(
+            !result.contains("# Hello, World"),
+            "old heading should be replaced: {result}"
+        );
+        // Other slots should be preserved
+        assert!(result.contains("Summary text."), "summary should be preserved: {result}");
+        assert!(result.contains("[Author Name]"), "author should be preserved: {result}");
+    }
+
+    #[test]
+    fn write_slot_to_string_replaces_paragraph_slot() {
+        let grammar = article_grammar();
+        let src = "# Hello, World\n\nOld summary text.\n\n[Author Name](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let result = write_slot_to_string(src, "summary", &grammar, "Brand new summary.")
+            .expect("write_slot_to_string should succeed");
+        assert!(
+            result.contains("Brand new summary."),
+            "result should contain new summary: {result}"
+        );
+        assert!(
+            !result.contains("Old summary text."),
+            "old summary should be replaced: {result}"
+        );
+        // Title should be preserved
+        assert!(result.contains("# Hello, World"), "title should be preserved: {result}");
+    }
+
+    #[test]
+    fn write_slot_to_string_unknown_slot_returns_error() {
+        let grammar = article_grammar();
+        let src = "# Hello\n\nSummary.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
+        let result = write_slot_to_string(src, "nonexistent_slot", &grammar, "value");
+        assert!(result.is_err(), "unknown slot should return Err");
+        assert!(
+            result.unwrap_err().contains("nonexistent_slot"),
+            "error message should mention the missing slot"
+        );
+    }
+
+    #[test]
+    fn write_slot_to_string_inserts_missing_slot() {
+        let grammar = article_grammar();
+        // Document is missing the title (heading) — starts with a paragraph
+        let src = "Summary text.\n\n[Author Name](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let result = write_slot_to_string(src, "title", &grammar, "Inserted Title")
+            .expect("write_slot_to_string should succeed for missing slot");
+        assert!(
+            result.contains("# Inserted Title"),
+            "result should contain the inserted heading: {result}"
+        );
+        // Existing content should be preserved
+        assert!(result.contains("Summary text."), "summary should be preserved: {result}");
+    }
+
+    #[test]
+    fn write_slot_to_string_result_parses_cleanly_after_heading_replace() {
+        let grammar = article_grammar();
+        let src = "# Old Title\n\nSummary text.\n\n[Author Name](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let result = write_slot_to_string(src, "title", &grammar, "New Title")
+            .expect("write_slot_to_string should succeed");
+        let parsed = content::parse_document_with_offsets(&result);
+        assert!(
+            parsed.is_ok(),
+            "result document should parse without errors: {parsed:?}"
+        );
+        let elements = parsed.unwrap();
+        let has_new_title = elements.iter().any(|e| {
+            matches!(&e.element, content::ContentElement::Heading { text, .. } if text == "New Title")
+        });
+        assert!(has_new_title, "parsed document should contain the new heading: {elements:#?}");
+    }
+
+    #[test]
+    fn write_slot_to_string_preserves_separator() {
+        let grammar = article_grammar();
+        let src = "# Title\n\nSummary.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body section\n";
+        let result = write_slot_to_string(src, "title", &grammar, "Changed Title")
+            .expect("write_slot_to_string should succeed");
+        assert!(
+            result.contains("----"),
+            "body separator should be preserved: {result}"
+        );
+        assert!(
+            result.contains("### Body section"),
+            "body content should be preserved: {result}"
+        );
     }
 
     #[test]

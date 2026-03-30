@@ -289,22 +289,22 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
         let html = match element {
             ContentElement::Heading { level, text } => {
                 let l = level.value();
-                format!("<h{l} id=\"presemble-body-{idx}\">{}</h{l}>", escape_html(text))
+                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{}</h{l}>", escape_html(text))
             }
             ContentElement::Paragraph { text } => {
-                format!("<p id=\"presemble-body-{idx}\">{}</p>", escape_html(text))
+                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{}</p>", escape_html(text))
             }
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
                 format!(
-                    "<img id=\"presemble-body-{idx}\" src=\"{}\" alt=\"{}\">",
+                    "<img id=\"presemble-body-{idx}\" data-presemble-slot=\"body\" src=\"{}\" alt=\"{}\">",
                     escape_html(path),
                     escape_html(alt_text)
                 )
             }
             ContentElement::Link { text, href } => {
                 format!(
-                    "<a id=\"presemble-body-{idx}\" href=\"{}\">{}</a>",
+                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\" href=\"{}\">{}</a>",
                     escape_html(href),
                     escape_html(text)
                 )
@@ -313,11 +313,11 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
                 let escaped = escape_html(code);
                 match language {
                     Some(lang) => format!(
-                        "<pre id=\"presemble-body-{idx}\"><code class=\"language-{}\">{}</code></pre>",
+                        "<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"><code class=\"language-{}\">{}</code></pre>",
                         escape_html(lang),
                         escaped
                     ),
-                    None => format!("<pre id=\"presemble-body-{idx}\"><code>{}</code></pre>", escaped),
+                    None => format!("<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"><code>{}</code></pre>", escaped),
                 }
             }
             ContentElement::Separator => continue,
@@ -340,7 +340,7 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "<table id=\"presemble-body-{idx}\"><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
+                    "<table id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
                     header_cells, body_rows
                 )
             }
@@ -446,7 +446,7 @@ mod tests {
         };
         let html = super::render_body_html(&[code_block]);
         assert!(
-            html.contains("<pre id=\"presemble-body-0\"><code class=\"language-rust\">"),
+            html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
         );
         assert!(
@@ -463,13 +463,29 @@ mod tests {
         };
         let html = super::render_body_html(&[code_block]);
         assert!(
-            html.contains("<pre id=\"presemble-body-0\"><code>"),
+            html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code>"),
             "expected plain pre/code in output; got: {html}"
         );
         assert!(
             html.contains("some code"),
             "expected code content in output; got: {html}"
         );
+    }
+
+    #[test]
+    fn render_body_html_elements_have_data_presemble_slot_body() {
+        let elements = vec![
+            ContentElement::Paragraph { text: "para".to_string() },
+            ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() },
+        ];
+        let html = render_body_html(&elements);
+        assert!(
+            html.contains("data-presemble-slot=\"body\""),
+            "expected data-presemble-slot=\"body\" attribute on body elements; got: {html}"
+        );
+        // Both elements should have the attribute
+        let count = html.matches("data-presemble-slot=\"body\"").count();
+        assert_eq!(count, 2, "expected 2 elements with data-presemble-slot=\"body\"; got {count} in: {html}");
     }
 
     #[test]

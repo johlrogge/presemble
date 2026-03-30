@@ -5,7 +5,7 @@ use axum::{
     extract::{State, WebSocketUpgrade},
     extract::ws::{Message, WebSocket},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 use lsp_service::PresembleLsp;
 use tower_lsp::{LspService, Server};
@@ -131,6 +131,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
     let app = Router::new()
         .route("/_presemble/ws", get(ws_handler))
         .route("/_presemble/lsp", get(lsp_ws_handler))
+        .route("/_presemble/edit", post(edit_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -146,6 +147,69 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .map_err(|e| CliError::Render(format!("server error: {e}")))?;
 
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct EditRequest {
+    file: String,
+    slot: String,
+    value: String,
+}
+
+#[derive(serde::Serialize)]
+struct EditResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn edit_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<EditRequest>,
+) -> axum::Json<EditResponse> {
+    match apply_edit(&state.site_dir, &req.file, &req.slot, &req.value) {
+        Ok(()) => axum::Json(EditResponse { ok: true, error: None }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+    }
+}
+
+fn apply_edit(
+    site_dir: &std::path::Path,
+    file: &str,
+    slot: &str,
+    value: &str,
+) -> Result<(), String> {
+    // Validate path: must start with "content/", must not contain "..", must end with ".md"
+    if !file.starts_with("content/") {
+        return Err(format!("file must start with 'content/': {file}"));
+    }
+    if file.contains("..") {
+        return Err(format!("file must not contain '..': {file}"));
+    }
+    if !file.ends_with(".md") {
+        return Err(format!("file must end with '.md': {file}"));
+    }
+
+    // Resolve absolute path
+    let abs_path = site_dir.join(file);
+
+    // Derive schema stem: second path component (e.g. "content/article/hello.md" → "article")
+    let stem = std::path::Path::new(file)
+        .components()
+        .nth(1)
+        .and_then(|c| c.as_os_str().to_str())
+        .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+        .to_string();
+
+    // Load grammar
+    let schema_path = site_dir.join("schemas").join(format!("{stem}.md"));
+    let schema_src = std::fs::read_to_string(&schema_path)
+        .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
+    let grammar = schema::parse_schema(&schema_src)
+        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
+
+    // Write slot
+    lsp_capabilities::write_slot_to_file(&abs_path, slot, &grammar, value)
 }
 
 async fn ws_handler(
@@ -310,6 +374,17 @@ const INJECT: &str = concat!(
     ".presemble-suggestion::before{content:attr(data-presemble-slot);position:absolute;top:-0.7em;left:0.5rem;background:#fef9e7;padding:0 0.25rem;font-size:0.75em;font-style:normal;font-weight:600;color:#b8942b;}",
     ".presemble-suggestion-body{min-height:8rem;}",
     "img.presemble-suggestion{min-width:200px;min-height:120px;display:block;}",
+    ".presemble-edit-toggle{position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999;background:#5d8a6e;color:#fff;border:none;border-radius:50%;width:3rem;height:3rem;font-size:1.4rem;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.2);transition:background 0.2s;}",
+    ".presemble-edit-toggle:hover{background:#4a7159;}",
+    ".presemble-edit-toggle.active{background:#c4913a;}",
+    ".presemble-edit-mode [data-presemble-slot]{cursor:pointer;transition:outline 0.15s,background 0.15s;}",
+    ".presemble-edit-mode [data-presemble-slot]:hover{outline:2px dashed #5d8a6e;outline-offset:4px;}",
+    ".presemble-edit-mode [data-presemble-slot].presemble-editing{outline:2px solid #5d8a6e;outline-offset:4px;background:rgba(93,138,110,0.05);}",
+    ".presemble-edit-toolbar{display:inline-flex;gap:0.3rem;margin-top:0.3rem;}",
+    ".presemble-edit-toolbar button{font-size:0.8rem;padding:0.2rem 0.6rem;border-radius:0.3rem;border:1px solid #ccc;cursor:pointer;}",
+    ".presemble-edit-toolbar .presemble-save{background:#5d8a6e;color:#fff;border-color:#5d8a6e;}",
+    ".presemble-edit-toolbar .presemble-cancel{background:#fff;color:#666;}",
+    ".presemble-edit-error{color:#c00;font-size:0.85rem;margin-top:0.3rem;}",
     "</style>",
     "<script>(function(){",
     "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
@@ -335,6 +410,80 @@ const INJECT: &str = concat!(
       "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){tryScroll(10);});}",
       "else{tryScroll(10);}",
     "})();",
+    "(function(){",
+    "var btn=document.createElement('button');",
+    "btn.className='presemble-edit-toggle';",
+    "btn.textContent='\u{270f}';",
+    "btn.title='Toggle edit mode';",
+    "if(sessionStorage.getItem('presemble-edit-mode')==='1'){",
+      "document.body.classList.add('presemble-edit-mode');",
+      "btn.classList.add('active');",
+    "}",
+    "btn.onclick=function(){",
+      "var active=document.body.classList.toggle('presemble-edit-mode');",
+      "btn.classList.toggle('active');",
+      "sessionStorage.setItem('presemble-edit-mode',active?'1':'0');",
+    "};",
+    "document.body.appendChild(btn);",
+    "})();",
+    "function presembleFile(){",
+    "var p=location.pathname;",
+    "if(p==='/'){return 'content/index/index.md';}",
+    "if(p.endsWith('/')){return 'content'+p+'index.md';}",
+    "return 'content'+p+'.md';",
+    "}",
+    "document.addEventListener('click',function(e){",
+    "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
+    "var el=e.target.closest('[data-presemble-slot]');",
+    "if(!el||el.classList.contains('presemble-editing')){return;}",
+    "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
+    "e.preventDefault();",
+    "var slot=el.getAttribute('data-presemble-slot');",
+    "var original=el.innerText;",
+    "el.contentEditable='true';",
+    "el.classList.add('presemble-editing');",
+    "el.focus();",
+    "var toolbar=document.createElement('div');",
+    "toolbar.className='presemble-edit-toolbar';",
+    "toolbar.innerHTML='<button class=\"presemble-save\">Save</button><button class=\"presemble-cancel\">Cancel</button>';",
+    "el.after(toolbar);",
+    "function cleanup(){",
+      "el.contentEditable='false';",
+      "el.classList.remove('presemble-editing');",
+      "toolbar.remove();",
+      "var err=el.parentNode.querySelector('.presemble-edit-error');",
+      "if(err){err.remove();}",
+    "}",
+    "function save(){",
+      "var value=el.innerText.trim();",
+      "cleanup();",
+      "fetch('/_presemble/edit',{",
+        "method:'POST',",
+        "headers:{'Content-Type':'application/json'},",
+        "body:JSON.stringify({file:presembleFile(),slot:slot,value:value})",
+      "}).then(function(r){return r.json();}).then(function(data){",
+        "if(!data.ok){",
+          "var err=document.createElement('div');",
+          "err.className='presemble-edit-error';",
+          "err.textContent=data.error||'Edit failed';",
+          "el.after(err);",
+          "el.innerText=original;",
+        "}",
+      "}).catch(function(e){",
+        "var err=document.createElement('div');",
+        "err.className='presemble-edit-error';",
+        "err.textContent='Network error: '+e.message;",
+        "el.after(err);",
+        "el.innerText=original;",
+      "});",
+    "}",
+    "toolbar.querySelector('.presemble-save').onclick=function(e){e.stopPropagation();save();};",
+    "toolbar.querySelector('.presemble-cancel').onclick=function(e){e.stopPropagation();el.innerText=original;cleanup();};",
+    "el.addEventListener('keydown',function handler(e){",
+      "if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();el.removeEventListener('keydown',handler);}",
+      "if(e.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('keydown',handler);}",
+    "});",
+    "});",
     "})();</script>"
 );
 
@@ -793,5 +942,52 @@ mod tests {
     fn render_error_page_includes_reload_script() {
         let html = render_error_page("/article/foo", &["some error".to_string()]);
         assert!(html.contains("_presemble/ws"), "should include live reload script");
+    }
+
+    // --- edit endpoint path-validation tests ---
+
+    #[test]
+    fn apply_edit_rejects_non_content_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = apply_edit(dir.path(), "templates/article/hello.md", "title", "Hello").unwrap_err();
+        assert!(err.contains("must start with 'content/'"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_edit_rejects_dotdot() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = apply_edit(dir.path(), "content/../etc/passwd", "title", "x").unwrap_err();
+        assert!(err.contains("must not contain '..'"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_edit_rejects_non_md_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = apply_edit(dir.path(), "content/article/hello.html", "title", "x").unwrap_err();
+        assert!(err.contains("must end with '.md'"), "got: {err}");
+    }
+
+    #[test]
+    fn apply_edit_writes_slot_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let schemas_dir = dir.path().join("schemas");
+        std::fs::create_dir_all(&schemas_dir).unwrap();
+        std::fs::create_dir_all(dir.path().join("content").join("article")).unwrap();
+
+        // Write a minimal schema using the presemble schema format
+        std::fs::write(
+            schemas_dir.join("article.md"),
+            "# Article Title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n",
+        ).unwrap();
+
+        // Write a minimal content file matching the schema (H1 heading for title slot)
+        let content_path = dir.path().join("content").join("article").join("hello.md");
+        std::fs::write(&content_path, "# Old Title\n").unwrap();
+
+        apply_edit(dir.path(), "content/article/hello.md", "title", "New Title").unwrap();
+
+        let result = std::fs::read_to_string(&content_path).unwrap();
+        assert!(result.contains("New Title"), "slot value should be updated, got: {result}");
+        assert!(!result.contains("Old Title"), "old title should be gone, got: {result}");
     }
 }
