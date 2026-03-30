@@ -45,20 +45,20 @@ pub enum DiagnosticSeverity {
     Warning,
 }
 
-/// A code action fix for capitalization.
+/// A code action that operates at the Document level.
 #[derive(Debug, Clone)]
-pub struct CapitalizationFix {
-    pub range_start: (u32, u32),
-    pub range_end: (u32, u32),
-    pub replacement: String,
-}
-
-/// A "insert template" fix: text to insert and where (just before the body separator or at EOF)
-#[derive(Debug, Clone)]
-pub struct TemplateFix {
-    pub insert_text: String,
-    /// Insertion point in the source (line, character) — typically just before "----"
-    pub insert_position: (u32, u32),
+pub enum SlotAction {
+    /// Insert a missing slot with placeholder content.
+    InsertSlot {
+        slot_name: String,
+        placeholder_value: String,
+    },
+    /// Capitalize the first character of a slot's text.
+    Capitalize {
+        slot_name: String,
+    },
+    /// Insert a missing body separator.
+    InsertSeparator,
 }
 
 /// A diagnostic with source position for LSP.
@@ -68,8 +68,7 @@ pub struct PositionedDiagnostic {
     pub severity: DiagnosticSeverity,
     pub start: (u32, u32),
     pub end: (u32, u32),
-    pub capitalization_fix: Option<CapitalizationFix>,
-    pub template_fix: Option<TemplateFix>,
+    pub action: Option<SlotAction>,
 }
 
 /// Extract content schema stem from link pattern "/author/<name>" → "author"
@@ -178,61 +177,6 @@ pub fn completions_for_schema(
         .collect()
 }
 
-/// Find the insertion position (line, character=0) for the separator line "----".
-/// Returns the line number of the separator, or the line after the last line if not found.
-/// Find the position of the body separator `----` in the source.
-/// Returns `(line, col, found)` where `found` indicates whether a separator exists.
-fn find_separator_insert_position(src: &str) -> ((u32, u32), bool) {
-    for (i, line) in src.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed == "----" || trimmed == "- - - -" {
-            return ((i as u32, 0), true);
-        }
-    }
-    // No separator found — insert at end of file
-    let line_count = src.lines().count();
-    ((line_count as u32, 0), false)
-}
-
-/// Find the correct insertion position for a missing slot based on schema order.
-///
-/// For a slot at `slot_idx` in the grammar preamble, finds the first document element
-/// that belongs to a later slot and returns the position just before it.
-/// If no later slot is present, inserts before the separator or at end of file.
-fn find_schema_ordered_insert_position(
-    src: &str,
-    slot_idx: usize,
-    grammar: &schema::Grammar,
-    elements_with_offsets: &[content::ContentElementWithOffset],
-) -> (u32, u32) {
-    // Look for the first document element belonging to a slot AFTER slot_idx
-    for later_slot in &grammar.preamble[slot_idx + 1..] {
-        if let Some(ewo) = elements_with_offsets
-            .iter()
-            .find(|e| element_matches_slot_type(&e.element, &later_slot.element))
-        {
-            // If inserting before the first content element, go to line 0
-            // to avoid orphaned blank lines above the new element.
-            let is_first_content = elements_with_offsets
-                .iter()
-                .filter(|e| !matches!(e.element, content::ContentElement::Separator))
-                .min_by_key(|e| e.byte_range.start)
-                .is_some_and(|first| first.byte_range.start == ewo.byte_range.start);
-            if is_first_content {
-                return (0, 0);
-            }
-            return byte_to_position(src, ewo.byte_range.start);
-        }
-    }
-    // No later slot found — insert before the separator
-    let (sep_pos, found) = find_separator_insert_position(src);
-    if found {
-        return sep_pos;
-    }
-    // No separator — insert at end of file
-    let line_count = src.lines().count();
-    (line_count as u32, 0)
-}
 
 /// Escape special characters in LSP snippet syntax.
 fn escape_snippet(s: &str) -> String {
@@ -529,9 +473,6 @@ fn span_to_positions(src: &str, span: Option<&std::ops::Range<usize>>) -> ((u32,
 
 /// Validate a content source against its grammar and return positioned diagnostics.
 pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDiagnostic> {
-    // Still needed for quickfix computation (capitalization fix, template fix).
-    let elements_with_offsets = parse_document_with_offsets(src).unwrap_or_default();
-
     // Validation decisions come from the `validation` component.
     let raw_diagnostics = validation::validate_content(src, grammar);
 
@@ -541,91 +482,20 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
         let severity = map_severity(&diag.severity);
         let (start, end) = span_to_positions(src, diag.span.as_ref());
 
-        let capitalization_fix = if diag.message.contains("uppercase") {
-            if let Some(slot_name_str) = &diag.slot {
-                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name_str);
-                if let Some(slot) = slot {
-                    let elem_with_offset = elements_with_offsets
-                        .iter()
-                        .find(|e| element_matches_slot_type(&e.element, &slot.element));
-                    if let Some(ewo) = elem_with_offset {
-                        let text = element_text(&ewo.element);
-                        if let Some(first_char) = text.and_then(|t| t.chars().next()) {
-                            if !first_char.is_uppercase() {
-                                let uppercased: String = first_char.to_uppercase().collect();
-                                let text_start = find_text_start_in_src(src, ewo.byte_range.start);
-                                if let Some(ts) = text_start {
-                                    let char_end = ts + first_char.len_utf8();
-                                    let fix_start = byte_to_position(src, ts);
-                                    let fix_end = byte_to_position(src, char_end);
-                                    Some(CapitalizationFix {
-                                        range_start: fix_start,
-                                        range_end: fix_end,
-                                        replacement: uppercased,
-                                    })
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Compute template_fix for "missing" diagnostics
-        let template_fix = if diag.message.contains("missing body separator") {
-            // Quickfix: insert ---- at end of file
-            let line_count = src.lines().count() as u32;
-            Some(TemplateFix {
-                insert_text: "\n----\n".to_string(),
-                insert_position: (line_count, 0),
-            })
+        let action = if diag.message.contains("uppercase") {
+            diag.slot.as_ref().map(|s| SlotAction::Capitalize { slot_name: s.clone() })
+        } else if diag.message.contains("missing body separator") {
+            Some(SlotAction::InsertSeparator)
         } else if diag.message.contains("missing") {
-            if let Some(slot_name_str) = &diag.slot {
-                let slot_idx = grammar.preamble.iter().position(|s| s.name.as_str() == slot_name_str);
-                let slot = slot_idx.map(|i| &grammar.preamble[i]);
-                if let (Some(slot), Some(slot_idx)) = (slot, slot_idx) {
-                    let template = template_for_slot(slot);
-                    // Find the correct insertion position based on schema order:
-                    // insert before the first document element belonging to a later slot.
-                    let insert_position = find_schema_ordered_insert_position(
-                        src, slot_idx, grammar, &elements_with_offsets,
-                    );
-                    let (_, has_separator) = find_separator_insert_position(src);
-                    // Check if the line at insert_position is blank (already has whitespace
-                    // separation from the following element). If so, a single trailing newline
-                    // is enough; otherwise we need two newlines to create the blank separator.
-                    let line_at_pos = src.lines().nth(insert_position.0 as usize).unwrap_or("");
-                    let needs_extra_newline = !line_at_pos.trim().is_empty() && insert_position.0 > 0;
-                    let insert_text = if has_separator || insert_position.0 > 0 {
-                        if needs_extra_newline {
-                            format!("{template}\n\n")
-                        } else {
-                            format!("{template}\n")
-                        }
-                    } else {
-                        format!("{template}\n\n----\n")
-                    };
-                    Some(TemplateFix {
-                        insert_text,
-                        insert_position,
-                    })
-                } else {
-                    None
-                }
+            if let Some(slot_name) = &diag.slot {
+                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name);
+                slot.map(|s| {
+                    let placeholder = template_for_slot(s);
+                    SlotAction::InsertSlot {
+                        slot_name: slot_name.clone(),
+                        placeholder_value: placeholder,
+                    }
+                })
             } else {
                 None
             }
@@ -638,8 +508,7 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
             severity,
             start,
             end,
-            capitalization_fix,
-            template_fix,
+            action,
         });
     }
 
@@ -705,15 +574,6 @@ fn element_matches_slot_type(element: &ContentElement, slot_type: &Element) -> b
             | (ContentElement::Link { .. }, Element::Link { .. })
             | (ContentElement::Image { .. }, Element::Image { .. })
     )
-}
-
-fn element_text(element: &ContentElement) -> Option<&str> {
-    match element {
-        ContentElement::Heading { text, .. } => Some(text.as_str()),
-        ContentElement::Paragraph { text } => Some(text.as_str()),
-        ContentElement::Link { text, .. } => Some(text.as_str()),
-        _ => None,
-    }
 }
 
 /// A data-path reference found in a template, with its source location.
@@ -894,8 +754,7 @@ pub fn validate_template_paths(
                 severity,
                 start,
                 end,
-                capitalization_fix: None,
-                template_fix: None,
+                action: None,
             }
         })
         .collect()
@@ -991,25 +850,12 @@ pub fn validate_schema_with_positions(src: &str) -> Vec<PositionedDiagnostic> {
                 severity,
                 start,
                 end,
-                capitalization_fix: None,
-                template_fix: None,
+                action: None,
             }
         })
         .collect()
 }
 
-fn find_text_start_in_src(src: &str, element_start: usize) -> Option<usize> {
-    let after = &src[element_start..];
-    let mut offset = element_start;
-    for ch in after.chars() {
-        if ch == '#' || ch == ' ' || ch == '\t' {
-            offset += ch.len_utf8();
-        } else {
-            return Some(offset);
-        }
-    }
-    None
-}
 
 /// Edit a content file by writing a new value to a named schema slot.
 ///
@@ -1053,6 +899,31 @@ pub fn write_slot_to_string(
     let mut doc = content::parse_document(src)
         .map_err(|e| format!("failed to parse document: {e}"))?;
     content::modify_slot(&mut doc, slot_name, grammar, new_value)?;
+    Ok(content::serialize_document(&doc))
+}
+
+/// Apply a SlotAction to a source string, returning the new file content.
+/// Uses the Document-level pipeline: parse -> modify -> serialize.
+pub fn apply_action(
+    src: &str,
+    grammar: &Grammar,
+    action: &SlotAction,
+) -> Result<String, String> {
+    let mut doc = content::parse_document(src)
+        .map_err(|e| format!("failed to parse document: {e}"))?;
+    match action {
+        SlotAction::InsertSlot { slot_name, placeholder_value } => {
+            content::modify_slot(&mut doc, slot_name, grammar, placeholder_value)?;
+        }
+        SlotAction::Capitalize { slot_name } => {
+            content::capitalize_slot(&mut doc, slot_name, grammar)?;
+        }
+        SlotAction::InsertSeparator => {
+            if !doc.elements.iter().any(|e| matches!(e, content::ContentElement::Separator)) {
+                doc.elements.push(content::ContentElement::Separator);
+            }
+        }
+    }
     Ok(content::serialize_document(&doc))
 }
 
@@ -1120,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_with_positions_missing_field_has_template_fix() {
+    fn validate_with_positions_missing_field_has_insert_slot_action() {
         let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
         let diags = validate_with_positions(src, &grammar);
@@ -1129,51 +1000,45 @@ mod tests {
             missing_diag.is_some(),
             "expected a 'missing' diagnostic: {diags:#?}"
         );
-        let fix = missing_diag.unwrap().template_fix.as_ref();
-        assert!(fix.is_some(), "missing field diagnostic should have a template_fix");
-    }
-
-    #[test]
-    fn template_fix_insert_position_is_zero_when_content_starts_at_top() {
-        // When the first later-slot element is at line 0, insert_position should be (0, 0)
-        // so the quickfix inserts the missing title at the top of the file.
-        let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
-        let grammar = article_grammar();
-        let diags = validate_with_positions(src, &grammar);
-        // The missing-title diagnostic is the one with a template_fix whose insert_position is (0,0)
-        let title_fixes: Vec<_> = diags.iter()
-            .filter(|d| d.message.contains("missing"))
-            .filter_map(|d| d.template_fix.as_ref())
-            .collect();
-        assert!(!title_fixes.is_empty(), "expected at least one template_fix for missing slot: {diags:#?}");
-        let first_fix = &title_fixes[0];
-        assert_eq!(
-            first_fix.insert_position,
-            (0, 0),
-            "insert_position should be (0,0) so the fix inserts at the top of the file"
-        );
-    }
-
-    #[test]
-    fn template_fix_insert_text_no_extra_blank_line_when_at_line_zero() {
-        // When inserting at (0, 0) before existing content, insert_text should end with
-        // a single newline so no extra blank line appears above the inserted title.
-        // Regression: the old code used "\n\n" which pushed the title to line 2.
-        let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
-        let grammar = article_grammar();
-        let diags = validate_with_positions(src, &grammar);
-        let fixes: Vec<_> = diags.iter()
-            .filter(|d| d.message.contains("missing"))
-            .filter_map(|d| d.template_fix.as_ref())
-            .filter(|f| f.insert_position == (0, 0))
-            .collect();
-        assert!(!fixes.is_empty(), "expected a template_fix at (0,0): {diags:#?}");
-        let fix = &fixes[0];
+        let action = missing_diag.unwrap().action.as_ref();
+        assert!(action.is_some(), "missing field diagnostic should have an action");
         assert!(
-            fix.insert_text.ends_with('\n') && !fix.insert_text.ends_with("\n\n"),
-            "insert_text at position (0,0) should end with a single newline to avoid double blank lines, got: {:?}",
-            fix.insert_text
+            matches!(action.unwrap(), SlotAction::InsertSlot { .. }),
+            "action should be InsertSlot: {action:?}"
         );
+    }
+
+    #[test]
+    fn validate_with_positions_missing_field_insert_slot_has_slot_name() {
+        // InsertSlot action should carry the slot_name so the caller can insert the right content.
+        let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let grammar = article_grammar();
+        let diags = validate_with_positions(src, &grammar);
+        let insert_actions: Vec<_> = diags.iter()
+            .filter(|d| d.message.contains("missing"))
+            .filter_map(|d| d.action.as_ref())
+            .collect();
+        assert!(!insert_actions.is_empty(), "expected at least one InsertSlot action for missing slot: {diags:#?}");
+        let first_action = &insert_actions[0];
+        match first_action {
+            SlotAction::InsertSlot { slot_name, placeholder_value } => {
+                assert!(!slot_name.is_empty(), "slot_name should not be empty");
+                assert!(!placeholder_value.is_empty(), "placeholder_value should not be empty");
+            }
+            other => panic!("expected InsertSlot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_with_positions_missing_body_separator_has_insert_separator_action() {
+        // A doc with preamble but no separator should get InsertSeparator.
+        let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n";
+        let grammar = article_grammar();
+        let diags = validate_with_positions(src, &grammar);
+        let sep_action = diags.iter()
+            .filter_map(|d| d.action.as_ref())
+            .find(|a| matches!(a, SlotAction::InsertSeparator));
+        assert!(sep_action.is_some(), "expected InsertSeparator action for missing separator: {diags:#?}");
     }
 
     #[test]
@@ -1584,8 +1449,7 @@ mod tests {
         assert!(!diag.message.is_empty(), "error message should not be empty");
         assert_eq!(diag.start, (0, 0), "error should be positioned at line 0 char 0");
         assert_eq!(diag.end, (0, 0), "error end should be at line 0 char 0");
-        assert!(diag.capitalization_fix.is_none(), "should have no capitalization fix");
-        assert!(diag.template_fix.is_none(), "should have no template fix");
+        assert!(diag.action.is_none(), "should have no action");
     }
 
     #[test]
@@ -1890,6 +1754,37 @@ mod tests {
         );
         assert!(result.contains("# My Title"), "title should be preserved: {result}");
         assert!(result.contains("![cover]"), "cover should be preserved: {result}");
+    }
+
+    // --- apply_action tests ---
+
+    #[test]
+    fn apply_action_insert_slot() {
+        let grammar = article_grammar();
+        let src = "Summary text.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
+        let result = apply_action(src, &grammar, &SlotAction::InsertSlot {
+            slot_name: "title".to_string(),
+            placeholder_value: "# New Title".to_string(),
+        }).unwrap();
+        assert!(result.contains("# New Title"), "should contain inserted title: {result}");
+    }
+
+    #[test]
+    fn apply_action_capitalize() {
+        let grammar = article_grammar();
+        let src = "# lowercase title\n\nSummary.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
+        let result = apply_action(src, &grammar, &SlotAction::Capitalize {
+            slot_name: "title".to_string(),
+        }).unwrap();
+        assert!(result.contains("# Lowercase title"), "should capitalize: {result}");
+    }
+
+    #[test]
+    fn apply_action_insert_separator() {
+        let grammar = article_grammar();
+        let src = "# Title\n\nSummary.\n";
+        let result = apply_action(src, &grammar, &SlotAction::InsertSeparator).unwrap();
+        assert!(result.contains("----"), "should have separator: {result}");
     }
 
     #[test]

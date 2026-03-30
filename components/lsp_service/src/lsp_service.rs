@@ -1,8 +1,8 @@
 use lsp_capabilities::{
-    content_completions, definition_for_position, hover_for_line,
+    apply_action, content_completions, definition_for_position, hover_for_line,
     schema_completions, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
-    CapitalizationFix, DiagnosticSeverity, TemplateFix, TemplateDefinitionTarget,
+    DiagnosticSeverity, SlotAction, TemplateDefinitionTarget,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,8 +12,7 @@ use tower_lsp::{async_trait, Client, LanguageServer};
 
 struct StoredDiagnostic {
     lsp_diag: Diagnostic,
-    cap_fix: Option<CapitalizationFix>,
-    template_fix: Option<TemplateFix>,
+    action: Option<SlotAction>,
 }
 
 pub struct PresembleLsp {
@@ -92,8 +91,7 @@ impl PresembleLsp {
                 };
                 StoredDiagnostic {
                     lsp_diag,
-                    cap_fix: p.capitalization_fix.clone(),
-                    template_fix: p.template_fix.clone(),
+                    action: p.action.clone(),
                 }
             })
             .collect();
@@ -179,17 +177,6 @@ impl PresembleLsp {
     }
 }
 
-/// Extract slot name from a diagnostic message (e.g. "slot 'author': missing required link" → "author")
-fn slot_name_from_message(msg: &str) -> &str {
-    // Messages follow the pattern: "slot 'NAME': ..."
-    if let Some(start) = msg.find("slot '") {
-        let after = &msg[start + 6..];
-        if let Some(end) = after.find('\'') {
-            return &after[..end];
-        }
-    }
-    msg
-}
 
 #[async_trait]
 impl LanguageServer for PresembleLsp {
@@ -254,11 +241,41 @@ impl LanguageServer for PresembleLsp {
     }
 
     async fn did_save(&self, p: DidSaveTextDocumentParams) {
-        if let Ok(src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
+        if let Ok(mut src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
             let kind = self.site_index.classify(&path);
             match kind {
+                site_index::FileKind::Content { .. } => {
+                    // Auto-format: parse and serialize to canonical form
+                    if let Ok(doc) = content::parse_document(&src) {
+                        let canonical = content::serialize_document(&doc);
+                        if canonical != src {
+                            // Write canonical form to disk
+                            let _ = std::fs::write(
+                                uri.to_file_path().unwrap_or_default(),
+                                &canonical,
+                            );
+                            // Send the canonical form to the editor
+                            let mut changes = std::collections::HashMap::new();
+                            changes.insert(uri.clone(), vec![TextEdit {
+                                range: Range {
+                                    start: Position { line: 0, character: 0 },
+                                    end: Position { line: u32::MAX, character: 0 },
+                                },
+                                new_text: canonical.clone(),
+                            }]);
+                            let edit = WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            };
+                            let _ = self.client.apply_edit(edit).await;
+                            // Re-validate with the canonical source
+                            src = canonical;
+                        }
+                    }
+                    self.validate_and_publish(uri, src).await;
+                }
                 site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, src).await,
                 site_index::FileKind::Schema { .. } => {
                     self.validate_schema_and_publish(uri.clone(), src).await;
@@ -428,51 +445,53 @@ impl LanguageServer for PresembleLsp {
     async fn code_action(&self, p: CodeActionParams) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
         let uri = &p.text_document.uri;
         let diags = self.doc_diagnostics.lock().await;
-        let stored: Vec<(Diagnostic, Option<CapitalizationFix>, Option<TemplateFix>)> = diags
+        let stored: Vec<(Diagnostic, Option<SlotAction>)> = diags
             .get(&uri.to_string())
             .map(|v| {
                 v.iter()
-                    .map(|sd| (sd.lsp_diag.clone(), sd.cap_fix.clone(), sd.template_fix.clone()))
+                    .map(|sd| (sd.lsp_diag.clone(), sd.action.clone()))
                     .collect()
             })
             .unwrap_or_default();
         drop(diags);
+
+        let Some((grammar, _)) = self.grammar_for_uri(uri) else {
+            return Ok(Some(Vec::new()));
+        };
+        let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
-        for (lsp_diag, cap_fix, template_fix) in &stored {
-            if let Some(fix) = cap_fix {
-                let mut changes = HashMap::new();
-                changes.insert(uri.clone(), vec![TextEdit {
-                    range: Range {
-                        start: Position { line: fix.range_start.0, character: fix.range_start.1 },
-                        end: Position { line: fix.range_end.0, character: fix.range_end.1 },
-                    },
-                    new_text: fix.replacement.clone(),
-                }]);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Capitalize first letter".into(),
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    diagnostics: Some(vec![lsp_diag.clone()]),
-                    edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
-                    ..Default::default()
-                }));
-            }
-            if let Some(fix) = template_fix {
-                let mut changes = HashMap::new();
-                changes.insert(uri.clone(), vec![TextEdit {
-                    range: Range {
-                        start: Position { line: fix.insert_position.0, character: fix.insert_position.1 },
-                        end: Position { line: fix.insert_position.0, character: fix.insert_position.1 },
-                    },
-                    new_text: fix.insert_text.clone(),
-                }]);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: format!("Insert {} template", slot_name_from_message(&lsp_diag.message)),
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    diagnostics: Some(vec![lsp_diag.clone()]),
-                    edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
-                    ..Default::default()
-                }));
-            }
+        for (_diag, maybe_action) in stored {
+            let Some(slot_action) = maybe_action else { continue };
+            let new_content = match apply_action(&src, &grammar, &slot_action) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let title = match &slot_action {
+                SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
+                SlotAction::InsertSlot { slot_name, .. } => format!("Insert {slot_name}"),
+                SlotAction::InsertSeparator => "Insert body separator".to_string(),
+            };
+            let edit = TextEdit {
+                range: Range {
+                    start: Position { line: 0, character: 0 },
+                    end: Position { line: u32::MAX, character: 0 },
+                },
+                new_text: new_content,
+            };
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), vec![edit]);
+            let workspace_edit = WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            };
+            let code_action = CodeAction {
+                title,
+                kind: Some(CodeActionKind::QUICKFIX),
+                edit: Some(workspace_edit),
+                ..Default::default()
+            };
+            actions.push(CodeActionOrCommand::CodeAction(code_action));
         }
         Ok(Some(actions))
     }
