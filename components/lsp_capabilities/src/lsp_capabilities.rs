@@ -211,7 +211,16 @@ fn find_schema_ordered_insert_position(
             .iter()
             .find(|e| element_matches_slot_type(&e.element, &later_slot.element))
         {
-            // Insert before this element
+            // If inserting before the first content element, go to line 0
+            // to avoid orphaned blank lines above the new element.
+            let is_first_content = elements_with_offsets
+                .iter()
+                .filter(|e| !matches!(e.element, content::ContentElement::Separator))
+                .min_by_key(|e| e.byte_range.start)
+                .is_some_and(|first| first.byte_range.start == ewo.byte_range.start);
+            if is_first_content {
+                return (0, 0);
+            }
             return byte_to_position(src, ewo.byte_range.start);
         }
     }
