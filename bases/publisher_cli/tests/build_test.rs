@@ -398,3 +398,153 @@ fn invalid_post_is_rendered_with_suggestions_not_skipped() {
         invalid_post_output.display()
     );
 }
+
+#[test]
+fn index_content_is_rendered_into_index_page() {
+    // Build a site that has schemas/index.md and content/index/index.md
+    // and verify that index.* data paths are available in the rendered index.html.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("index-content-site");
+
+    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("content/index")).unwrap();
+    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    // Article schema and content (required for a valid site)
+    fs::write(
+        site.join("schemas/article.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/article/sample.md"),
+        "# Sample Article\n",
+    )
+    .unwrap();
+
+    // Index schema: a page with a site title and tagline
+    fs::write(
+        site.join("schemas/index.md"),
+        "# Site title {#site_title}\noccurs\n: exactly once\n\nTagline for the site. {#tagline}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+
+    // Index content
+    fs::write(
+        site.join("content/index/index.md"),
+        "# My Awesome Site\n\nBuilt with Presemble.\n",
+    )
+    .unwrap();
+
+    // Article template
+    fs::write(
+        site.join("templates/article.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+
+    // Index template that uses index.* data paths
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html>
+<html>
+<head><title><presemble:insert data="index.site_title" /></title></head>
+<body>
+<h1><presemble:insert data="index.site_title" /></h1>
+<p><presemble:insert data="index.tagline" /></p>
+</body>
+</html>"#,
+    )
+    .unwrap();
+
+    // Minimal CSS so asset copy doesn't complain
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let outcome =
+        publisher_cli::build_site(&site, &publisher_cli::UrlConfig::default())
+            .expect("build should succeed");
+    assert_eq!(outcome.files_failed, 0, "no pages should fail");
+
+    let index_html =
+        fs::read_to_string(publisher_cli::output_dir(&site).join("index.html")).unwrap();
+
+    assert!(
+        index_html.contains("My Awesome Site"),
+        "index.html should contain index.site_title from content: {index_html}"
+    );
+    assert!(
+        index_html.contains("Built with Presemble"),
+        "index.html should contain index.tagline from content: {index_html}"
+    );
+}
+
+#[test]
+fn index_content_schema_and_content_tracked_as_deps() {
+    // When schemas/index.md and content/index/index.md exist, changes to either
+    // should trigger a rebuild of index.html.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("index-dep-site");
+
+    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("content/index")).unwrap();
+    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/article/sample.md"),
+        "# Sample Article\n",
+    )
+    .unwrap();
+
+    fs::write(
+        site.join("schemas/index.md"),
+        "# Site title {#site_title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/index/index.md"),
+        "# My Site\n",
+    )
+    .unwrap();
+
+    fs::write(
+        site.join("templates/article.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="index.site_title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let site = fs::canonicalize(&site).unwrap();
+    let outcome =
+        publisher_cli::build_site(&site, &publisher_cli::UrlConfig::default())
+            .expect("build should succeed");
+
+    let index_output = publisher_cli::output_dir(&site).join("index.html");
+    let index_schema = site.join("schemas/index.md");
+    let index_content = site.join("content/index/index.md");
+
+    let affected_by_schema = outcome.dep_graph.affected_outputs(&index_schema);
+    assert!(
+        affected_by_schema.contains(&index_output),
+        "schemas/index.md change should affect index.html; affected: {affected_by_schema:?}"
+    );
+
+    let affected_by_content = outcome.dep_graph.affected_outputs(&index_content);
+    assert!(
+        affected_by_content.contains(&index_output),
+        "content/index/index.md change should affect index.html; affected: {affected_by_content:?}"
+    );
+}

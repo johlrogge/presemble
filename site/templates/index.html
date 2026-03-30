@@ -12,8 +12,18 @@
 <main class="home">
   <section class="hero">
     <h1>Data Not Text</h1>
-    <p class="hero__lead">Content is data. Templates are data. Schemas are the contracts between them.</p>
+    <presemble:insert data="index.tagline" as="p" />
+    <template data-slot="index.pitch">
+      <presemble:insert data="index.pitch" as="p" />
+    </template>
   </section>
+
+  <template data-slot="index.body">
+    <section class="why-presemble">
+      <h2>Why Presemble</h2>
+      <presemble:insert data="index.body" />
+    </section>
+  </template>
 
   <section class="feature-grid">
     <h2>Core Principles</h2>
