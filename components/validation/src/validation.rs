@@ -66,12 +66,18 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
         let separator_pos = doc.elements.iter().position(|e| matches!(e, ContentElement::Separator));
         match separator_pos {
             None => {
-                let end_byte = src.len();
+                // Position at the last preamble element (where ---- should follow)
+                let last_preamble_span = elements_with_offsets
+                    .iter()
+                    .rev()
+                    .find(|e| !matches!(e.element, ContentElement::Separator))
+                    .map(|e| e.byte_range.clone());
+                let span = last_preamble_span.unwrap_or(src.len()..src.len());
                 diagnostics.push(Diagnostic {
                     severity: Severity::Warning,
                     message: "missing body separator (----); add a line with ---- to separate preamble from body".to_string(),
                     slot: None,
-                    span: Some(end_byte..end_byte),
+                    span: Some(span),
                 });
             }
             Some(sep_idx) => {
@@ -82,7 +88,9 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
                     let sep_span = elements_with_offsets.iter()
                         .find(|e| matches!(e.element, ContentElement::Separator))
                         .map(|e| e.byte_range.clone());
-                    let span = sep_span.unwrap_or(src.len()..src.len());
+                    let span = sep_span
+                        .map(|r| r.end..r.end)  // Point to just after the separator
+                        .unwrap_or(src.len()..src.len());
                     diagnostics.push(Diagnostic {
                         severity: Severity::Warning,
                         message: "body section is empty; add content after the ---- separator".to_string(),
@@ -259,6 +267,65 @@ mod tests {
             title_error.is_some(),
             "expected a 'title' slot error, got: {:#?}",
             diagnostics
+        );
+    }
+
+    #[test]
+    fn missing_separator_span_points_to_last_preamble_element() {
+        // Document with no separator — the span should NOT be at end-of-file;
+        // it should be within the content (pointing at the last preamble element).
+        let src = "# My Title\n\nA paragraph here.\n\n[Author](/author/test)\n\n![Cover](images/cover.jpg)\n";
+        let grammar = article_grammar();
+        let diagnostics = validate_content(src, &grammar);
+
+        let missing_sep = diagnostics
+            .iter()
+            .find(|d| d.message.contains("missing body separator"));
+        assert!(
+            missing_sep.is_some(),
+            "expected a missing-separator diagnostic, got: {:#?}",
+            diagnostics
+        );
+        let diag = missing_sep.unwrap();
+        let span = diag.span.clone().expect("expected a span on the diagnostic");
+        // The span must be strictly before end-of-file (src.len()) since there are preamble elements.
+        assert!(
+            span.start < src.len(),
+            "expected span to point at a preamble element (before EOF={}), got {:?}",
+            src.len(),
+            span
+        );
+    }
+
+    #[test]
+    fn empty_body_span_points_after_separator() {
+        // Document with separator but no body content — span should point just after the separator.
+        let src = "# My Title\n\nA paragraph here.\n\n[Author](/author/test)\n\n![Cover](images/cover.jpg)\n\n----\n";
+        let grammar = article_grammar();
+        let diagnostics = validate_content(src, &grammar);
+
+        let empty_body = diagnostics
+            .iter()
+            .find(|d| d.message.contains("body section is empty"));
+        assert!(
+            empty_body.is_some(),
+            "expected an empty-body diagnostic, got: {:#?}",
+            diagnostics
+        );
+        let diag = empty_body.unwrap();
+        let span = diag.span.clone().expect("expected a span on the diagnostic");
+        // The span should be a zero-width range (start == end) just after the separator.
+        // The separator "----\n" ends before src.len(), so span.start must be < src.len().
+        assert_eq!(
+            span.start, span.end,
+            "expected a zero-width span pointing just after the separator, got {:?}",
+            span
+        );
+        assert!(
+            span.start <= src.len(),
+            "expected span to be at or inside the source (EOF={}), got {:?}",
+            src.len(),
+            span
         );
     }
 

@@ -374,6 +374,42 @@ pub fn content_completions(
         }
     }
 
+    // Offer body content completions when separator exists and grammar has body rules
+    if let Some(body_rules) = &grammar.body {
+        let has_separator = doc
+            .elements
+            .iter()
+            .any(|e| matches!(e, content::ContentElement::Separator));
+        if has_separator {
+            if let Some(heading_range) = &body_rules.heading_range {
+                let min_level = heading_range.min.value();
+                let hashes = "#".repeat(min_level as usize);
+                completions.push(
+                    SlotCompletion::snippet(
+                        format!("Body heading (H{})", min_level),
+                        format!("H{}-H{} heading", heading_range.min.value(), heading_range.max.value()),
+                        Some(format!(
+                            "Body section allows headings H{} through H{}",
+                            heading_range.min.value(),
+                            heading_range.max.value()
+                        )),
+                        format!("{hashes} ${{1:Heading}}"),
+                    )
+                    .with_sort_text("98"),
+                );
+            }
+            completions.push(
+                SlotCompletion::snippet(
+                    "Body paragraph",
+                    "Body text",
+                    Some("A paragraph in the body section".to_string()),
+                    "${1:Body text.}",
+                )
+                .with_sort_text("97"),
+            );
+        }
+    }
+
     completions
 }
 
@@ -496,10 +532,7 @@ fn span_to_positions(src: &str, span: Option<&std::ops::Range<usize>>) -> ((u32,
 /// Validate a content source against its grammar and return positioned diagnostics.
 pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDiagnostic> {
     // Still needed for quickfix computation (capitalization fix, template fix).
-    let elements_with_offsets = match parse_document_with_offsets(src) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
+    let elements_with_offsets = parse_document_with_offsets(src).unwrap_or_default();
 
     // Validation decisions come from the `validation` component.
     let raw_diagnostics = validation::validate_content(src, grammar);
@@ -574,8 +607,17 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
                         src, slot_idx, grammar, &elements_with_offsets,
                     );
                     let (_, has_separator) = find_separator_insert_position(src);
+                    // Check if the line at insert_position is blank (already has whitespace
+                    // separation from the following element). If so, a single trailing newline
+                    // is enough; otherwise we need two newlines to create the blank separator.
+                    let line_at_pos = src.lines().nth(insert_position.0 as usize).unwrap_or("");
+                    let needs_extra_newline = !line_at_pos.trim().is_empty() && insert_position.0 > 0;
                     let insert_text = if has_separator || insert_position.0 > 0 {
-                        format!("{template}\n\n")
+                        if needs_extra_newline {
+                            format!("{template}\n\n")
+                        } else {
+                            format!("{template}\n")
+                        }
                     } else {
                         format!("{template}\n\n----\n")
                     };
@@ -1046,6 +1088,49 @@ mod tests {
         );
         let fix = missing_diag.unwrap().template_fix.as_ref();
         assert!(fix.is_some(), "missing field diagnostic should have a template_fix");
+    }
+
+    #[test]
+    fn template_fix_insert_position_is_zero_when_content_starts_at_top() {
+        // When the first later-slot element is at line 0, insert_position should be (0, 0)
+        // so the quickfix inserts the missing title at the top of the file.
+        let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let grammar = article_grammar();
+        let diags = validate_with_positions(src, &grammar);
+        // The missing-title diagnostic is the one with a template_fix whose insert_position is (0,0)
+        let title_fixes: Vec<_> = diags.iter()
+            .filter(|d| d.message.contains("missing"))
+            .filter_map(|d| d.template_fix.as_ref())
+            .collect();
+        assert!(!title_fixes.is_empty(), "expected at least one template_fix for missing slot: {diags:#?}");
+        let first_fix = &title_fixes[0];
+        assert_eq!(
+            first_fix.insert_position,
+            (0, 0),
+            "insert_position should be (0,0) so the fix inserts at the top of the file"
+        );
+    }
+
+    #[test]
+    fn template_fix_insert_text_no_extra_blank_line_when_at_line_zero() {
+        // When inserting at (0, 0) before existing content, insert_text should end with
+        // a single newline so no extra blank line appears above the inserted title.
+        // Regression: the old code used "\n\n" which pushed the title to line 2.
+        let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let grammar = article_grammar();
+        let diags = validate_with_positions(src, &grammar);
+        let fixes: Vec<_> = diags.iter()
+            .filter(|d| d.message.contains("missing"))
+            .filter_map(|d| d.template_fix.as_ref())
+            .filter(|f| f.insert_position == (0, 0))
+            .collect();
+        assert!(!fixes.is_empty(), "expected a template_fix at (0,0): {diags:#?}");
+        let fix = &fixes[0];
+        assert!(
+            fix.insert_text.ends_with('\n') && !fix.insert_text.ends_with("\n\n"),
+            "insert_text at position (0,0) should end with a single newline to avoid double blank lines, got: {:?}",
+            fix.insert_text
+        );
     }
 
     #[test]
@@ -1605,5 +1690,26 @@ mod tests {
             "dollar sign should be escaped: {escaped}"
         );
         assert_eq!(escaped, "cost \\$5 for {item\\}");
+    }
+
+    #[test]
+    fn content_completions_with_separator_offers_body_completions() {
+        // Document has all preamble slots filled and a separator but no body content
+        let grammar = article_grammar();
+        let src = "# Hello World\n\nSummary text.\n\n[Author Name](/author/author-name)\n\n![cover](images/cover.jpg)\n\n----\n\n";
+        let completions = content_completions(src, &grammar, None);
+        assert!(
+            completions.iter().any(|c| c.label == "Body paragraph"),
+            "should offer body paragraph completion after separator: {completions:#?}"
+        );
+        assert!(
+            completions.iter().any(|c| c.label.starts_with("Body heading")),
+            "should offer body heading completion after separator: {completions:#?}"
+        );
+        // Separator should NOT be offered since it's already present
+        assert!(
+            !completions.iter().any(|c| c.label == "----"),
+            "separator should not be offered when already present: {completions:#?}"
+        );
     }
 }
