@@ -62,11 +62,11 @@
     "devenv": {
       "locked": {
         "dir": "src/modules",
-        "lastModified": 1774763318,
-        "narHash": "sha256-fLlQQ1BGiJ8oDhTDrPW/X3jAGqKiL6CbJSvEtdDxHDk=",
+        "lastModified": 1774816935,
+        "narHash": "sha256-MJ1kZGA/BZ9Xy+lsppMcw19jCf9zB9lmfwmCDhiC7Dg=",
         "owner": "cachix",
         "repo": "devenv",
-        "rev": "177d0848dc5f1de11796e0ae3183af6d456c5246",
+        "rev": "a4cf85b989fff0bafe5858c879e5343493a86019",
         "type": "github"
       },
       "original": {
@@ -115,11 +115,11 @@
     "metadev": {
       "flake": false,
       "locked": {
-        "lastModified": 1774725931,
-        "narHash": "sha256-w4ME92EPW7+Jclyhh3Mg/IChQpU+byt2HRhe/2LCK14=",
+        "lastModified": 1774852296,
+        "narHash": "sha256-Q3ZPrDRywD3TSZLh15mAdyeQTeWHuQpfsF3YnTw/rbw=",
         "owner": "johlrogge",
         "repo": "metadev",
-        "rev": "9bd098e799f4694823a434596a14e193d920d352",
+        "rev": "a0d1bf85985a8ca89c0f0cc27647fb5725c5ab77",
         "type": "github"
       },
       "original": {
@@ -181,11 +181,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1774753967,
-        "narHash": "sha256-HpT5fE8JQSbAxolUnw3VgGAo3urVjcrgtB2rtoxURVw=",
+        "lastModified": 1774840424,
+        "narHash": "sha256-3Oi4mBKzOCFQYLUyEjyc0s5cnlNj1MzmhpVKoLptpe8=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "405b9b4c2c6c5a2b1d390524ce8a240729f34a96",
+        "rev": "d9f52b51548e76ab8b6e7d647763047ebdec835c",
         "type": "github"
       },
       "original": {

@@ -355,6 +355,12 @@ pub fn build_content_page(
         _ => addr.slug.clone(),
     };
 
+    // Add metadata for browser editing: schema stem identifies the content type
+    slot_graph.insert("_presemble_stem", template::Value::Text(schema_stem.to_string()));
+    slot_graph.insert("_presemble_file", template::Value::Text(
+        format!("content/{schema_stem}/{}.md", addr.slug),
+    ));
+
     // Add url and link to the article graph
     slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
     let mut link_graph = template::DataGraph::new();
@@ -770,7 +776,9 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
         if let Ok(content_src) = std::fs::read_to_string(&index_md)
             && let Ok(doc) = content::parse_document(&content_src)
         {
-            let index_graph = template::build_article_graph(&doc, &grammar);
+            let mut index_graph = template::build_article_graph(&doc, &grammar);
+            index_graph.insert("_presemble_file", template::Value::Text("content/index/index.md".to_string()));
+            index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
             site_context.insert("index", template::Value::Record(index_graph));
         }
     }
