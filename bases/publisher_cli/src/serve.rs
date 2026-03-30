@@ -151,9 +151,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
 
 #[derive(serde::Deserialize)]
 struct EditRequest {
-    file: String,
-    slot: String,
-    value: String,
+    path: String,   // graph path, e.g. "post.title"
+    value: String,  // new plain text value
 }
 
 #[derive(serde::Serialize)]
@@ -167,7 +166,7 @@ async fn edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
-    match apply_edit(&state.site_dir, &req.file, &req.slot, &req.value) {
+    match apply_edit(&state.site_dir, &req.path, &req.value) {
         Ok(()) => axum::Json(EditResponse { ok: true, error: None }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
     }
@@ -175,41 +174,77 @@ async fn edit_handler(
 
 fn apply_edit(
     site_dir: &std::path::Path,
-    file: &str,
-    slot: &str,
+    graph_path: &str,
     value: &str,
 ) -> Result<(), String> {
-    // Validate path: must start with "content/", must not contain "..", must end with ".md"
-    if !file.starts_with("content/") {
-        return Err(format!("file must start with 'content/': {file}"));
-    }
-    if file.contains("..") {
-        return Err(format!("file must not contain '..': {file}"));
-    }
-    if !file.ends_with(".md") {
-        return Err(format!("file must end with '.md': {file}"));
+    // Parse graph path: "post.title" → schema_stem="post", slot="title"
+    let parts: Vec<&str> = graph_path.splitn(2, '.').collect();
+    let (schema_stem, slot) = match parts.as_slice() {
+        [stem, slot] => (*stem, *slot),
+        _ => return Err(format!("invalid graph path (expected 'type.slot'): {graph_path}")),
+    };
+
+    // Find the content file for this schema stem
+    // For schemas with a single file per slug, we need to find which file contains this slot.
+    // For now: scan the content directory for the schema stem and find files.
+    let content_dir = site_dir.join("content").join(schema_stem);
+    if !content_dir.exists() {
+        return Err(format!("content directory not found: {}", content_dir.display()));
     }
 
-    // Resolve absolute path
-    let abs_path = site_dir.join(file);
+    // Find content files in this directory
+    let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&content_dir)
+        .map_err(|e| format!("cannot read content dir: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
 
-    // Derive schema stem: second path component (e.g. "content/article/hello.md" → "article")
-    let stem = std::path::Path::new(file)
-        .components()
-        .nth(1)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
-        .to_string();
+    if entries.is_empty() {
+        return Err(format!("no content files in {}", content_dir.display()));
+    }
+
+    // If there's exactly one file, use it. If multiple, we need more context
+    // (future: the graph path could include the slug, e.g. "post.building-presemble.title")
+    let content_path = if entries.len() == 1 {
+        entries[0].clone()
+    } else {
+        // For now, try each file to find one where the slot exists or needs inserting
+        // This handles the case where multiple content files share a schema
+        let mut found = None;
+        for path in &entries {
+            if let Ok(src) = std::fs::read_to_string(path) {
+                // Check if this file has content for the slot (or is a candidate for insertion)
+                if let Ok(doc) = content::parse_document(&src) {
+                    // Simple heuristic: if file has any content, it's a candidate
+                    if !doc.elements.is_empty() || entries.len() == 1 {
+                        found = Some(path.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        found.unwrap_or_else(|| entries[0].clone())
+    };
+
+    // Validate path is under content/ (no traversal)
+    let canonical = content_path.canonicalize()
+        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    let canonical_content = site_dir.join("content").canonicalize()
+        .map_err(|e| format!("cannot resolve content dir: {e}"))?;
+    if !canonical.starts_with(&canonical_content) {
+        return Err("path traversal detected".to_string());
+    }
 
     // Load grammar
-    let schema_path = site_dir.join("schemas").join(format!("{stem}.md"));
+    let schema_path = site_dir.join("schemas").join(format!("{schema_stem}.md"));
     let schema_src = std::fs::read_to_string(&schema_path)
         .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
     let grammar = schema::parse_schema(&schema_src)
         .map_err(|e| format!("failed to parse schema: {e:?}"))?;
 
     // Write slot
-    lsp_capabilities::write_slot_to_file(&abs_path, slot, &grammar, value)
+    lsp_capabilities::write_slot_to_file(&canonical, slot, &grammar, value)
 }
 
 async fn ws_handler(
@@ -379,11 +414,11 @@ const INJECT: &str = concat!(
     ".presemble-edit-toggle.active{background:#c4913a;}",
     ".presemble-edit-mode [data-presemble-slot]{cursor:pointer;transition:outline 0.15s,background 0.15s;}",
     ".presemble-edit-mode [data-presemble-slot]:hover{outline:2px dashed #5d8a6e;outline-offset:4px;}",
-    ".presemble-edit-mode [data-presemble-slot].presemble-editing{outline:2px solid #5d8a6e;outline-offset:4px;background:rgba(93,138,110,0.05);}",
-    ".presemble-edit-toolbar{display:inline-flex;gap:0.3rem;margin-top:0.3rem;}",
-    ".presemble-edit-toolbar button{font-size:0.8rem;padding:0.2rem 0.6rem;border-radius:0.3rem;border:1px solid #ccc;cursor:pointer;}",
-    ".presemble-edit-toolbar .presemble-save{background:#5d8a6e;color:#fff;border-color:#5d8a6e;}",
-    ".presemble-edit-toolbar .presemble-cancel{background:#fff;color:#666;}",
+    ".presemble-edit-mode [data-presemble-slot].presemble-editing{outline:2px solid #5d8a6e;outline-offset:4px;background:rgba(93,138,110,0.05);position:relative;}",
+    ".presemble-edit-toolbar{position:absolute;right:-3rem;top:0;display:flex;flex-direction:column;gap:0.2rem;}",
+    ".presemble-edit-toolbar button{font-size:1rem;width:2rem;height:2rem;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,0.15);}",
+    ".presemble-edit-toolbar .presemble-save{background:#5d8a6e;color:#fff;}",
+    ".presemble-edit-toolbar .presemble-undo{background:#fff;color:#c44;}",
     ".presemble-edit-error{color:#c00;font-size:0.85rem;margin-top:0.3rem;}",
     "</style>",
     "<script>(function(){",
@@ -426,27 +461,22 @@ const INJECT: &str = concat!(
     "};",
     "document.body.appendChild(btn);",
     "})();",
-    "function presembleFile(){",
-    "var p=location.pathname;",
-    "if(p==='/'){return 'content/index/index.md';}",
-    "if(p.endsWith('/')){return 'content'+p+'index.md';}",
-    "return 'content'+p+'.md';",
-    "}",
     "document.addEventListener('click',function(e){",
     "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
     "var el=e.target.closest('[data-presemble-slot]');",
     "if(!el||el.classList.contains('presemble-editing')){return;}",
     "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
     "e.preventDefault();",
-    "var slot=el.getAttribute('data-presemble-slot');",
+    "var gpath=el.getAttribute('data-presemble-path');",
+    "if(!gpath){return;}",
     "var original=el.innerText;",
     "el.contentEditable='true';",
     "el.classList.add('presemble-editing');",
     "el.focus();",
     "var toolbar=document.createElement('div');",
     "toolbar.className='presemble-edit-toolbar';",
-    "toolbar.innerHTML='<button class=\"presemble-save\">Save</button><button class=\"presemble-cancel\">Cancel</button>';",
-    "el.after(toolbar);",
+    "toolbar.innerHTML='<button class=\"presemble-save\" title=\"Save\">&#10003;</button><button class=\"presemble-undo\" title=\"Undo\">&#8630;</button>';",
+    "el.appendChild(toolbar);",
     "function cleanup(){",
       "el.contentEditable='false';",
       "el.classList.remove('presemble-editing');",
@@ -455,12 +485,13 @@ const INJECT: &str = concat!(
       "if(err){err.remove();}",
     "}",
     "function save(){",
+      "toolbar.remove();",
       "var value=el.innerText.trim();",
       "cleanup();",
       "fetch('/_presemble/edit',{",
         "method:'POST',",
         "headers:{'Content-Type':'application/json'},",
-        "body:JSON.stringify({file:presembleFile(),slot:slot,value:value})",
+        "body:JSON.stringify({path:gpath,value:value})",
       "}).then(function(r){return r.json();}).then(function(data){",
         "if(!data.ok){",
           "var err=document.createElement('div');",
@@ -478,7 +509,7 @@ const INJECT: &str = concat!(
       "});",
     "}",
     "toolbar.querySelector('.presemble-save').onclick=function(e){e.stopPropagation();save();};",
-    "toolbar.querySelector('.presemble-cancel').onclick=function(e){e.stopPropagation();el.innerText=original;cleanup();};",
+    "toolbar.querySelector('.presemble-undo').onclick=function(e){e.stopPropagation();el.innerText=original;cleanup();};",
     "el.addEventListener('keydown',function handler(e){",
       "if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();el.removeEventListener('keydown',handler);}",
       "if(e.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('keydown',handler);}",
@@ -944,50 +975,42 @@ mod tests {
         assert!(html.contains("_presemble/ws"), "should include live reload script");
     }
 
-    // --- edit endpoint path-validation tests ---
+    // --- edit endpoint tests ---
 
     #[test]
-    fn apply_edit_rejects_non_content_prefix() {
+    fn apply_edit_rejects_invalid_path() {
         let dir = tempfile::tempdir().unwrap();
-        let err = apply_edit(dir.path(), "templates/article/hello.md", "title", "Hello").unwrap_err();
-        assert!(err.contains("must start with 'content/'"), "got: {err}");
+        let err = apply_edit(dir.path(), "title", "Hello").unwrap_err();
+        assert!(err.contains("invalid graph path"), "got: {err}");
     }
 
     #[test]
-    fn apply_edit_rejects_dotdot() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = apply_edit(dir.path(), "content/../etc/passwd", "title", "x").unwrap_err();
-        assert!(err.contains("must not contain '..'"), "got: {err}");
-    }
-
-    #[test]
-    fn apply_edit_rejects_non_md_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = apply_edit(dir.path(), "content/article/hello.html", "title", "x").unwrap_err();
-        assert!(err.contains("must end with '.md'"), "got: {err}");
-    }
-
-    #[test]
-    fn apply_edit_writes_slot_to_file() {
+    fn apply_edit_resolves_graph_path_to_content_file() {
         let dir = tempfile::tempdir().unwrap();
         let schemas_dir = dir.path().join("schemas");
         std::fs::create_dir_all(&schemas_dir).unwrap();
         std::fs::create_dir_all(dir.path().join("content").join("article")).unwrap();
 
-        // Write a minimal schema using the presemble schema format
         std::fs::write(
             schemas_dir.join("article.md"),
             "# Article Title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n",
         ).unwrap();
 
-        // Write a minimal content file matching the schema (H1 heading for title slot)
         let content_path = dir.path().join("content").join("article").join("hello.md");
         std::fs::write(&content_path, "# Old Title\n").unwrap();
 
-        apply_edit(dir.path(), "content/article/hello.md", "title", "New Title").unwrap();
+        // Graph path: "article.title"
+        apply_edit(dir.path(), "article.title", "New Title").unwrap();
 
         let result = std::fs::read_to_string(&content_path).unwrap();
         assert!(result.contains("New Title"), "slot value should be updated, got: {result}");
         assert!(!result.contains("Old Title"), "old title should be gone, got: {result}");
+    }
+
+    #[test]
+    fn apply_edit_missing_content_dir_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = apply_edit(dir.path(), "article.title", "x").unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
     }
 }
