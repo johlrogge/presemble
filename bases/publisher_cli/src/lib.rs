@@ -641,6 +641,13 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
 
     for schema_stem in &schema_stems_list {
         let schema_stem: &str = schema_stem;
+
+        // The "index" schema is reserved for feeding data into the index template.
+        // It does not generate standalone content pages and is handled separately below.
+        if schema_stem == "index" {
+            continue;
+        }
+
         let schema_path = site_index.schema_path(schema_stem);
 
         // Track schema stem for unused-source warnings
@@ -752,6 +759,23 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
         site_context.insert(collection_key, template::Value::List(collection));
     }
 
+    // Load index content if schema and content exist
+    let index_schema_path = site_dir.join("schemas/index.md");
+    let index_content_dir = site_dir.join("content/index");
+    if index_schema_path.exists() {
+        if let Ok(schema_src) = std::fs::read_to_string(&index_schema_path) {
+            if let Ok(grammar) = schema::parse_schema(&schema_src) {
+                let index_md = index_content_dir.join("index.md");
+                if let Ok(content_src) = std::fs::read_to_string(&index_md) {
+                    if let Ok(doc) = content::parse_document(&content_src) {
+                        let index_graph = template::build_article_graph(&doc, &grammar);
+                        site_context.insert("index", template::Value::Record(index_graph));
+                    }
+                }
+            }
+        }
+    }
+
     // Render templates/index.html if it exists
     let index_template_path = site_dir.join("templates").join("index.html");
 
@@ -782,6 +806,9 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                         index_deps.insert(index_template_path.clone());
                         index_deps.extend(all_content_paths.iter().cloned());
                         index_deps.extend(all_schema_paths.iter().cloned());
+                        // Track index-specific content and schema as dependencies
+                        index_deps.insert(index_schema_path.clone());
+                        index_deps.insert(index_content_dir.join("index.md"));
                         dep_graph.register(index_output.clone(), index_deps);
                     }
                     Err(e) => {
@@ -1250,6 +1277,10 @@ fn warn_unused_sources(
         for dir_entry in dirs {
             let dir_name = dir_entry.file_name();
             let name = dir_name.to_string_lossy();
+            // "index" is a reserved content dir for the index page — not a schema-driven collection
+            if name == "index" {
+                continue;
+            }
             if !schema_stems.iter().any(|s| s == name.as_ref()) {
                 eprintln!("warning: content/{name}/ has no matching schema, consider deleting it");
             }
