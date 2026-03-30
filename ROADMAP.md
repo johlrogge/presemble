@@ -255,6 +255,18 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - Query the data graph, test template fragments, inspect schema validation — without leaving the editor
 - Requires the conductor's nng IPC backbone
 
+**CSS and design assistance (brainstorm):**
+- How does Presemble help with CSS? Schema-driven semantic classes already exist — can we go further?
+- Theme generation from design tokens or colour palettes
+- CSS validation against template structure (flag unused classes, missing styles for semantic slots)
+- Live CSS editing in serve mode with hot reload
+
+**Asset discovery in browser editing (brainstorm):**
+- Image slot editing in browser mode surfaces Unsplash (or similar) search
+- Author searches for an image, selects it, Presemble downloads and inserts the reference
+- Respects schema constraints (orientation, alt text requirement)
+- Could extend to other asset sources (icon libraries, stock photo services)
+
 **Other deferred items:**
 - Real-time multiplayer editing
 - Comments, suggestions, track changes (beyond M5 suggest mode)
