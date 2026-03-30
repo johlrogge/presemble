@@ -75,8 +75,10 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
                         None | Some(Value::Absent) => {
                             // Slot absent — drop the entire block.
                         }
-                        Some(_) => {
-                            // Slot present — unwrap template wrapper, recursively transform children.
+                        Some(Value::Suggestion { .. }) | Some(_) => {
+                            // Slot present (including suggestion placeholders) — unwrap template
+                            // wrapper and recursively transform children so inner
+                            // presemble:insert calls can produce suggestion nodes.
                             let mut rendered = transform(el.children, graph, ctx)?;
                             output.append(&mut rendered);
                         }
@@ -160,6 +162,7 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &DataGraph) -> String {
                     .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
                     .unwrap_or_default(),
                 Some(Value::Record(_)) => String::new(),
+                Some(Value::Suggestion { hint, .. }) => hint.clone(),
             }
         }
         Expr::Pipe(inner, transform) => {
@@ -292,6 +295,64 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                 result.append(&mut rendered);
             }
             Ok(result)
+        }
+
+        Some(Value::Suggestion { hint, slot_name, element_kind }) => {
+            use crate::data::SuggestionKind;
+            let sem_class = semantic_class(data_path);
+            let body_class = if matches!(element_kind, SuggestionKind::Body) {
+                " presemble-suggestion-body"
+            } else {
+                ""
+            };
+            let combined_class = format!("{sem_class} presemble-suggestion{body_class}");
+
+            // Determine the tag: `as` attribute takes priority, else derive from element_kind.
+            let tag: String = if let Some(t) = as_tag {
+                t.to_string()
+            } else {
+                match element_kind {
+                    SuggestionKind::Heading { level } => format!("h{level}"),
+                    SuggestionKind::Paragraph => "p".to_string(),
+                    SuggestionKind::Link => "a".to_string(),
+                    SuggestionKind::Image => "img".to_string(),
+                    SuggestionKind::Body => "div".to_string(),
+                }
+            };
+
+            let effective_tag = tag.as_str();
+
+            let element = match effective_tag {
+                "img" => Element {
+                    name: "img".to_string(),
+                    attrs: vec![
+                        ("class".to_string(), combined_class),
+                        ("data-presemble-slot".to_string(), slot_name.clone()),
+                        ("alt".to_string(), hint.clone()),
+                        ("src".to_string(), String::new()),
+                    ],
+                    children: vec![],
+                },
+                "a" => Element {
+                    name: "a".to_string(),
+                    attrs: vec![
+                        ("class".to_string(), combined_class),
+                        ("data-presemble-slot".to_string(), slot_name.clone()),
+                        ("href".to_string(), "#".to_string()),
+                    ],
+                    children: vec![Node::Text(hint.clone())],
+                },
+                _ => Element {
+                    name: effective_tag.to_string(),
+                    attrs: vec![
+                        ("class".to_string(), combined_class),
+                        ("data-presemble-slot".to_string(), slot_name.clone()),
+                    ],
+                    children: vec![Node::Text(hint.clone())],
+                },
+            };
+
+            Ok(vec![Node::Element(element)])
         }
     }
 }
@@ -460,6 +521,8 @@ fn render_list_item(
         Value::Absent => Ok(Vec::new()),
 
         Value::List(_) => Ok(Vec::new()),
+
+        Value::Suggestion { .. } => Ok(Vec::new()),
     }
 }
 
@@ -1021,5 +1084,169 @@ mod tests {
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(html.contains("<p>Hello</p>"), "included fragment should appear: {html}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Value::Suggestion rendering tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn suggestion_heading_renders_as_styled_placeholder() {
+        use crate::data::SuggestionKind;
+        let mut graph = DataGraph::new();
+        let mut article = DataGraph::new();
+        article.insert(
+            "title",
+            Value::Suggestion {
+                hint: "Your blog post title".to_string(),
+                slot_name: "title".to_string(),
+                element_kind: SuggestionKind::Heading { level: 1 },
+            },
+        );
+        graph.insert("article", Value::Record(article));
+
+        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h1"), "output should contain h1 tag: {html}");
+        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
+        assert!(html.contains("Your blog post title"), "output should contain hint text: {html}");
+        assert!(html.contains(r#"data-presemble-slot="title""#), "output should have data-presemble-slot: {html}");
+    }
+
+    #[test]
+    fn suggestion_heading_without_as_uses_element_kind_level() {
+        use crate::data::SuggestionKind;
+        let mut graph = DataGraph::new();
+        let mut article = DataGraph::new();
+        article.insert(
+            "title",
+            Value::Suggestion {
+                hint: "Your title".to_string(),
+                slot_name: "title".to_string(),
+                element_kind: SuggestionKind::Heading { level: 2 },
+            },
+        );
+        graph.insert("article", Value::Record(article));
+
+        let src = r#"<presemble:insert data="article.title" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h2"), "heading suggestion without 'as' should use element_kind level: {html}");
+        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
+    }
+
+    #[test]
+    fn suggestion_image_renders_with_alt_and_empty_src() {
+        use crate::data::SuggestionKind;
+        let mut graph = DataGraph::new();
+        let mut article = DataGraph::new();
+        article.insert(
+            "cover",
+            Value::Suggestion {
+                hint: "cover image description".to_string(),
+                slot_name: "cover".to_string(),
+                element_kind: SuggestionKind::Image,
+            },
+        );
+        graph.insert("article", Value::Record(article));
+
+        let src = r#"<presemble:insert data="article.cover" as="img" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<img"), "output should contain img tag: {html}");
+        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
+        assert!(html.contains(r#"alt="cover image description""#), "output should have alt attribute with hint: {html}");
+        assert!(html.contains(r#"src="""#) || html.contains(r#"src= "#), "output should have empty src: {html}");
+        assert!(html.contains(r#"data-presemble-slot="cover""#), "output should have data-presemble-slot: {html}");
+    }
+
+    #[test]
+    fn suggestion_link_renders_with_href_hash() {
+        use crate::data::SuggestionKind;
+        let mut graph = DataGraph::new();
+        let mut article = DataGraph::new();
+        article.insert(
+            "author",
+            Value::Suggestion {
+                hint: "Author name".to_string(),
+                slot_name: "author".to_string(),
+                element_kind: SuggestionKind::Link,
+            },
+        );
+        graph.insert("article", Value::Record(article));
+
+        let src = r#"<presemble:insert data="article.author" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<a"), "output should contain a tag: {html}");
+        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
+        assert!(html.contains("href=\"#\""), "output should have href=#: {html}");
+        assert!(html.contains("Author name"), "output should have hint text: {html}");
+        assert!(html.contains(r#"data-presemble-slot="author""#), "output should have data-presemble-slot: {html}");
+    }
+
+    #[test]
+    fn data_slot_with_suggestion_renders_children() {
+        use crate::data::SuggestionKind;
+        let mut graph = DataGraph::new();
+        let mut article = DataGraph::new();
+        article.insert(
+            "title",
+            Value::Suggestion {
+                hint: "Your title".to_string(),
+                slot_name: "title".to_string(),
+                element_kind: SuggestionKind::Heading { level: 1 },
+            },
+        );
+        graph.insert("article", Value::Record(article));
+
+        // data-slot block should NOT be dropped when slot is a Suggestion
+        let src = r#"<template data-slot="article.title"><presemble:insert data="article.title" as="h1" /></template>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(!result.is_empty(), "suggestion slot block should NOT be dropped");
+        assert!(html.contains("<h1"), "inner insert should produce a suggestion node: {html}");
+        assert!(html.contains("presemble-suggestion"), "inner insert should have suggestion class: {html}");
+    }
+
+    #[test]
+    fn eval_expr_to_string_returns_hint_for_suggestion() {
+        use crate::ast::Expr;
+        use crate::data::SuggestionKind;
+
+        let mut graph = DataGraph::new();
+        graph.insert(
+            "tagline",
+            Value::Suggestion {
+                hint: "Write your tagline here".to_string(),
+                slot_name: "tagline".to_string(),
+                element_kind: SuggestionKind::Paragraph,
+            },
+        );
+
+        let expr = Expr::Lookup(vec!["tagline".to_string()]);
+        let result = eval_expr_to_string(&expr, &graph);
+        assert_eq!(result, "Write your tagline here");
     }
 }

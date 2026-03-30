@@ -128,14 +128,20 @@ pub struct PageBuildResult {
 pub struct BuildOutcome {
     pub files_built: usize,
     pub files_failed: usize,
+    /// Pages that were rendered with suggestion nodes due to validation issues.
+    pub files_with_suggestions: usize,
     /// Collected page data, keyed by schema stem
     pub built_pages: std::collections::HashMap<String, Vec<BuiltPage>>,
     pub dep_graph: DependencyGraph,
     /// Per-page build errors, keyed by URL path (e.g. "/article/foo").
-    /// Populated when a content page fails validation or parsing.
+    /// Populated only when a content page fails to parse (hard failure).
     /// In build mode these are already printed to stdout; in serve mode
     /// the server uses this map to return styled error pages instead of 404s.
     pub build_errors: std::collections::HashMap<String, Vec<String>>,
+    /// Per-page suggestion diagnostics, keyed by URL path (e.g. "/article/foo").
+    /// Populated when a content page fails validation but is still rendered with
+    /// suggestion nodes. These pages are reachable — they just have placeholder content.
+    pub page_suggestions: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl BuildOutcome {
@@ -284,9 +290,11 @@ fn load_url_config(
 
 /// Build a single content page: parse, validate, render, and write output.
 ///
-/// Returns `Ok(Some(result))` when the page is valid and was successfully built.
-/// Returns `Ok(None)` when the content fails validation (PASS/FAIL output is printed inside).
-///   On validation failure, `page_errors` is populated with human-readable error messages.
+/// Returns `Ok(Some(result))` when the page was successfully built (possibly with suggestion nodes).
+///   When validation finds issues, `page_errors` is populated with human-readable messages,
+///   but the page is still built — missing slots are filled with `Value::Suggestion` nodes.
+/// Returns `Ok(None)` only when the content fails to **parse** (hard failure).
+///   On parse failure, `page_errors` is populated with the parse error message.
 /// Returns `Err(CliError)` for IO or render errors.
 pub fn build_content_page(
     site_dir: &std::path::Path,
@@ -317,20 +325,19 @@ pub fn build_content_page(
     let result = content::validate(&doc, grammar);
 
     if !result.is_valid() {
-        println!("{file_name}: FAIL");
+        println!("{file_name}: SUGGESTIONS");
         for diagnostic in &result.diagnostics {
             let msg = format!(
-                "[{}] {}",
-                format_severity(&diagnostic.severity),
+                "[SUGGESTION] {}",
                 diagnostic.message
             );
             println!("  {msg}");
             page_errors.push(msg);
         }
-        return Ok(None);
+        // Fall through: continue building with suggestion nodes for missing slots
+    } else {
+        println!("{file_name}: PASS");
     }
-
-    println!("{file_name}: PASS");
 
     // Compute canonical address once, before branching on template existence
     let addr = page_address(site_dir, schema_stem, content_path);
@@ -552,12 +559,14 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
 
     let mut files_built: usize = 0;
     let mut files_failed: usize = 0;
+    let mut files_with_suggestions: usize = 0;
     let mut built_pages: std::collections::HashMap<String, Vec<BuiltPage>> = std::collections::HashMap::new();
     let mut dep_graph = DependencyGraph::new();
     let mut all_content_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut all_schema_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut collected_pages: Vec<CollectedPage> = Vec::new();
     let mut build_errors: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut page_suggestions: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
     // Discover all schema stems via site_index
     let schema_stems_list = site_index.schema_stems();
@@ -693,11 +702,17 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                         page_index,
                         output_path: page_result.output_path,
                         template_path: page_result.template_path,
-                        url_path: page_url_path,
+                        url_path: page_url_path.clone(),
                     });
-                    files_built += 1;
+                    if !page_errors_buf.is_empty() {
+                        page_suggestions.insert(page_url_path, page_errors_buf);
+                        files_with_suggestions += 1;
+                    } else {
+                        files_built += 1;
+                    }
                 }
                 None => {
+                    // Only parse failures reach here
                     if !page_errors_buf.is_empty() {
                         let url_path = page_address(site_dir, schema_stem, &content_path).url_path;
                         build_errors.insert(url_path, page_errors_buf);
@@ -832,9 +847,11 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
     Ok(BuildOutcome {
         files_built,
         files_failed,
+        files_with_suggestions,
         built_pages,
         dep_graph,
         build_errors,
+        page_suggestions,
     })
 }
 
@@ -863,9 +880,11 @@ pub fn rebuild_affected(
         return Ok(BuildOutcome {
             files_built: 0,
             files_failed: 0,
+            files_with_suggestions: 0,
             built_pages: std::collections::HashMap::new(),
             dep_graph: DependencyGraph::new(),
             build_errors: std::collections::HashMap::new(),
+            page_suggestions: std::collections::HashMap::new(),
         });
     }
 
@@ -882,9 +901,11 @@ pub fn rebuild_affected(
     let mut outcome = BuildOutcome {
         files_built: 0,
         files_failed: 0,
+        files_with_suggestions: 0,
         built_pages: std::collections::HashMap::new(),
         dep_graph: DependencyGraph::new(),
         build_errors: std::collections::HashMap::new(),
+        page_suggestions: std::collections::HashMap::new(),
     };
     let mut rebuild_collected: Vec<CollectedPage> = Vec::new();
 
@@ -968,11 +989,17 @@ pub fn rebuild_affected(
                     page_index,
                     output_path: result.output_path,
                     template_path: result.template_path,
-                    url_path: page_url_path,
+                    url_path: page_url_path.clone(),
                 });
-                outcome.files_built += 1;
+                if !page_errors_buf.is_empty() {
+                    outcome.page_suggestions.insert(page_url_path, page_errors_buf);
+                    outcome.files_with_suggestions += 1;
+                } else {
+                    outcome.files_built += 1;
+                }
             }
             None => {
+                // Only parse failures reach here
                 if !page_errors_buf.is_empty() {
                     let url_path = page_address(site_dir, &schema_stem, &content_path).url_path;
                     outcome.build_errors.insert(url_path, page_errors_buf);
@@ -1227,13 +1254,6 @@ fn warn_unused_sources(
                 eprintln!("warning: content/{name}/ has no matching schema, consider deleting it");
             }
         }
-    }
-}
-
-fn format_severity(severity: &content::Severity) -> &'static str {
-    match severity {
-        content::Severity::Error => "ERROR",
-        content::Severity::Warning => "WARN",
     }
 }
 
