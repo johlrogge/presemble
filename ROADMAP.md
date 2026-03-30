@@ -104,7 +104,7 @@ as the subscription/notification system. No separate pub/sub needed.
 - Schema file LSP: completions for field types, occurrence markers, reference targets
 - Structural field existence checking (Layer 1 of template type system): the access path IS the constraint
 
-*Phase 5: Suggestion nodes (error UX)*
+*Phase 5: Suggestion nodes (error UX)* -- shipped v0.7.0
 - No error pages. Errors become inline suggestion nodes in the rendered page
 - Missing content renders as schema-driven placeholders (hint_text, examples from schema)
 - Visually distinct — soft, inviting, clearly not real content
