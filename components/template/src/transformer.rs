@@ -269,10 +269,20 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
     let as_tag = el.attr("as");
 
     // Resolve the content file path for browser editing.
-    // Each page's graph carries _presemble_file (e.g., "content/post/building-presemble.md").
-    let presemble_file = graph.resolve(&["_presemble_file"])
-        .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
-        .unwrap_or_default();
+    // Each page's graph carries _presemble_file. For "index.tagline", look in graph["index"]["_presemble_file"].
+    // For relative paths like "title" (inside data-each), look in graph["_presemble_file"].
+    let presemble_file = {
+        let mut file_path_segments: Vec<&str> = path_segments.iter().copied().collect();
+        if let Some(last) = file_path_segments.last_mut() {
+            *last = "_presemble_file";
+        }
+        graph.resolve(&file_path_segments)
+            .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
+            // Fallback: try direct lookup (for relative paths inside data-each)
+            .or_else(|| graph.resolve(&["_presemble_file"])
+                .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None }))
+            .unwrap_or_default()
+    };
 
     let value = graph.resolve(&path_segments);
 
@@ -340,37 +350,24 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
             let effective_tag = tag.as_str();
 
-            let element = match effective_tag {
-                "img" => Element {
-                    name: "img".to_string(),
-                    attrs: vec![
-                        ("class".to_string(), combined_class),
-                        ("data-presemble-slot".to_string(), slot_name.clone()),
-                        ("data-presemble-file".to_string(), presemble_file.clone()),
-                        ("alt".to_string(), hint.clone()),
-                        ("src".to_string(), String::new()),
-                    ],
-                    children: vec![],
-                },
-                "a" => Element {
-                    name: "a".to_string(),
-                    attrs: vec![
-                        ("class".to_string(), combined_class),
-                        ("data-presemble-slot".to_string(), slot_name.clone()),
-                        ("data-presemble-file".to_string(), presemble_file.clone()),
-                        ("href".to_string(), "#".to_string()),
-                    ],
-                    children: vec![Node::Text(hint.clone())],
-                },
-                _ => Element {
-                    name: effective_tag.to_string(),
-                    attrs: vec![
-                        ("class".to_string(), combined_class),
-                        ("data-presemble-slot".to_string(), slot_name.clone()),
-                        ("data-presemble-file".to_string(), presemble_file.clone()),
-                    ],
-                    children: vec![Node::Text(hint.clone())],
-                },
+            // Hint text goes into data-presemble-hint for CSS placeholder display.
+            // The element content is empty — the user starts with a clean slate.
+            let mut attrs = vec![
+                ("class".to_string(), combined_class),
+                ("data-presemble-slot".to_string(), slot_name.clone()),
+                ("data-presemble-file".to_string(), presemble_file.clone()),
+                ("data-presemble-hint".to_string(), hint.clone()),
+            ];
+            if effective_tag == "img" {
+                attrs.push(("alt".to_string(), String::new()));
+                attrs.push(("src".to_string(), String::new()));
+            } else if effective_tag == "a" {
+                attrs.push(("href".to_string(), "#".to_string()));
+            }
+            let element = Element {
+                name: effective_tag.to_string(),
+                attrs,
+                children: vec![],
             };
 
             Ok(vec![Node::Element(element)])

@@ -776,7 +776,9 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
         if let Ok(content_src) = std::fs::read_to_string(&index_md)
             && let Ok(doc) = content::parse_document(&content_src)
         {
-            let index_graph = template::build_article_graph(&doc, &grammar);
+            let mut index_graph = template::build_article_graph(&doc, &grammar);
+            index_graph.insert("_presemble_file", template::Value::Text("content/index/index.md".to_string()));
+            index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
             site_context.insert("index", template::Value::Record(index_graph));
         }
     }
