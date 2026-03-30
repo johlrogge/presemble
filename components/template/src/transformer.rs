@@ -1218,7 +1218,8 @@ mod tests {
 
         assert!(html.contains("<img"), "output should contain img tag: {html}");
         assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
-        assert!(html.contains(r#"alt="cover image description""#), "output should have alt attribute with hint: {html}");
+        assert!(html.contains(r#"data-presemble-hint="cover image description""#), "output should have hint attribute: {html}");
+        assert!(html.contains(r#"alt="""#), "output should have empty alt attribute: {html}");
         assert!(html.contains(r#"src="""#) || html.contains(r#"src= "#), "output should have empty src: {html}");
         assert!(html.contains(r#"data-presemble-slot="cover""#), "output should have data-presemble-slot: {html}");
     }

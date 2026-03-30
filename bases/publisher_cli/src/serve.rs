@@ -456,6 +456,8 @@ const INJECT: &str = concat!(
           "err.textContent=data.error||'Edit failed';",
           "el.after(err);",
           "el.innerText=original;",
+        "}else{",
+          "setTimeout(function(){location.reload();},500);",
         "}",
       "}).catch(function(e){",
         "var err=document.createElement('div');",
