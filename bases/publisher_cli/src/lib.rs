@@ -897,6 +897,7 @@ pub fn rebuild_affected(
     dirty_sources: &std::collections::HashSet<std::path::PathBuf>,
     current_graph: &DependencyGraph,
     url_config: &UrlConfig,
+    new_content_files: &[std::path::PathBuf],
 ) -> Result<BuildOutcome, CliError> {
     use std::collections::HashSet;
 
@@ -910,7 +911,7 @@ pub fn rebuild_affected(
         affected.extend(current_graph.affected_outputs(source));
     }
 
-    if affected.is_empty() {
+    if affected.is_empty() && new_content_files.is_empty() {
         return Ok(BuildOutcome {
             files_built: 0,
             files_failed: 0,
@@ -1043,6 +1044,90 @@ pub fn rebuild_affected(
         }
     }
 
+    // Build new content files that aren't yet in the dep_graph.
+    for content_path in new_content_files {
+        // Derive schema_stem from the parent directory name under content/
+        let schema_stem = match content_path.parent()
+            .and_then(|p| p.strip_prefix(&content_base).ok())
+            .and_then(|rel| rel.components().next())
+            .and_then(|c| {
+                if let std::path::Component::Normal(s) = c {
+                    s.to_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        {
+            Some(s) => s,
+            None => {
+                eprintln!("Warning: could not derive schema stem for {}", content_path.display());
+                continue;
+            }
+        };
+
+        // Skip index files — they are handled by the index rebuild logic
+        let file_stem = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if file_stem == "index" {
+            continue;
+        }
+
+        let schema_path = schemas_dir.join(format!("{schema_stem}.md"));
+        if !schema_path.exists() {
+            eprintln!("Warning: no schema found for new content file {}", content_path.display());
+            continue;
+        }
+
+        let schema_src = std::fs::read_to_string(&schema_path)?;
+        let grammar = match schema::parse_schema(&schema_src) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("schema error in {}: {e}", schema_path.display());
+                outcome.files_failed += 1;
+                continue;
+            }
+        };
+
+        let mut page_errors_buf: Vec<String> = Vec::new();
+        match build_content_page(site_dir, &schema_stem, &schema_path, content_path, &grammar, &mut page_errors_buf)? {
+            Some(result) => {
+                outcome
+                    .dep_graph
+                    .register(result.output_path.clone(), result.deps.clone());
+                let page_index = outcome
+                    .built_pages
+                    .entry(schema_stem.clone())
+                    .or_default()
+                    .len();
+                let page_url_path = result.built.url_path.clone();
+                outcome
+                    .built_pages
+                    .entry(schema_stem.clone())
+                    .or_default()
+                    .push(result.built);
+                rebuild_collected.push(CollectedPage {
+                    schema_stem: schema_stem.clone(),
+                    page_index,
+                    output_path: result.output_path,
+                    template_path: result.template_path,
+                    url_path: page_url_path.clone(),
+                });
+                if !page_errors_buf.is_empty() {
+                    outcome.page_suggestions.insert(page_url_path, page_errors_buf);
+                    outcome.files_with_suggestions += 1;
+                } else {
+                    outcome.files_built += 1;
+                }
+            }
+            None => {
+                if !page_errors_buf.is_empty() {
+                    let url_path = page_address(site_dir, &schema_stem, content_path).url_path;
+                    outcome.build_errors.insert(url_path, page_errors_buf);
+                }
+                outcome.files_failed += 1;
+            }
+        }
+    }
+
     // Phase 2: Re-resolve references within rebuilt pages.
     // Note: this only resolves within the partial set — if a *referenced* page changed,
     // a full rebuild is needed for complete resolution.
@@ -1068,7 +1153,7 @@ pub fn rebuild_affected(
     // The index depends on all content pages, so the simplest correct implementation
     // is to delegate to build_site() which re-reads everything and re-renders the index.
     // This is a full rebuild but only happens when the index is explicitly affected.
-    if rebuild_index {
+    if rebuild_index || !new_content_files.is_empty() {
         let full = build_site(site_dir, url_config)?;
         // Copy the index dep registration from the full build into our partial outcome
         let index_deps = full.dep_graph.sources_for(&index_output);

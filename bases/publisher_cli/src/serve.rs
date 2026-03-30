@@ -423,6 +423,7 @@ const INJECT: &str = concat!(
     "var el=e.target.closest('[data-presemble-slot]');",
     "if(!el||el.classList.contains('presemble-editing')){return;}",
     "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
+    "if(el.tagName==='A'||el.tagName==='IMG'){return;}",
     "e.preventDefault();",
     "var pfile=el.getAttribute('data-presemble-file');",
     "var slot=el.getAttribute('data-presemble-slot');",
@@ -456,6 +457,8 @@ const INJECT: &str = concat!(
           "err.textContent=data.error||'Edit failed';",
           "el.after(err);",
           "el.innerText=original;",
+        "}else{",
+          "setTimeout(function(){location.reload();},500);",
         "}",
       "}).catch(function(e){",
         "var err=document.createElement('div');",
@@ -688,12 +691,27 @@ fn watch_and_rebuild(
             })
         };
 
-        if affected_count == 0 && !has_errored_content {
+        let content_base = site_dir.join("content");
+        let new_content_files: Vec<std::path::PathBuf> = dirty.iter()
+            .filter(|p| {
+                p.starts_with(&content_base)
+                    && p.extension().and_then(|e| e.to_str()) == Some("md")
+                    && p.exists()
+            })
+            .filter(|p| {
+                let canonical = std::fs::canonicalize(p).unwrap_or_else(|_| (*p).clone());
+                !current.is_known_source(&canonical)
+            })
+            .cloned()
+            .collect();
+        let has_new_content = !new_content_files.is_empty();
+
+        if affected_count == 0 && !has_errored_content && !has_new_content {
             continue;
         }
 
         println!("Rebuilding {} page(s)...", affected_count.max(1));
-        match rebuild_affected(site_dir, &dirty, &current, url_config) {
+        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files) {
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
                 g.merge(outcome.dep_graph);

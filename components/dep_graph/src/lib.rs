@@ -47,6 +47,11 @@ impl DependencyGraph {
         self.forward.get(output).cloned().unwrap_or_default()
     }
 
+    /// Returns true if `source` is tracked as a dependency of any output.
+    pub fn is_known_source(&self, source: &Path) -> bool {
+        self.reverse.contains_key(source)
+    }
+
     /// Merge another graph into this one (used after partial rebuild).
     /// For each output in `other`, replaces existing entries.
     pub fn merge(&mut self, other: DependencyGraph) {
@@ -104,6 +109,31 @@ mod tests {
     fn affected_outputs_returns_empty_for_unknown_source() {
         let g = DependencyGraph::new();
         assert!(g.affected_outputs(Path::new("unknown.md")).is_empty());
+    }
+
+    #[test]
+    fn is_known_source_returns_true_for_registered_source() {
+        let mut g = DependencyGraph::new();
+        let source = PathBuf::from("content/article/hello.md");
+        let output = PathBuf::from("output/article/hello/index.html");
+        g.register(output, HashSet::from([source.clone()]));
+        assert!(g.is_known_source(&source));
+    }
+
+    #[test]
+    fn is_known_source_returns_false_for_unknown_source() {
+        let g = DependencyGraph::new();
+        assert!(!g.is_known_source(Path::new("content/article/unknown.md")));
+    }
+
+    #[test]
+    fn is_known_source_returns_false_after_output_removed() {
+        let mut g = DependencyGraph::new();
+        let source = PathBuf::from("content/article/hello.md");
+        let output = PathBuf::from("output/article/hello/index.html");
+        g.register(output.clone(), HashSet::from([source.clone()]));
+        g.remove_output(&output);
+        assert!(!g.is_known_source(&source));
     }
 
     #[test]

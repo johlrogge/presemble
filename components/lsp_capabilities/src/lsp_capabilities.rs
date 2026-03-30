@@ -707,20 +707,6 @@ fn element_matches_slot_type(element: &ContentElement, slot_type: &Element) -> b
     )
 }
 
-fn max_count_for_slot(slot: &schema::Slot) -> usize {
-    for constraint in &slot.constraints {
-        if let schema::Constraint::Occurs(count_range) = constraint {
-            return match count_range {
-                schema::CountRange::Exactly(n) => *n,
-                schema::CountRange::AtLeast(_) => usize::MAX,
-                schema::CountRange::AtMost(n) => *n,
-                schema::CountRange::Between { max, .. } => *max,
-            };
-        }
-    }
-    1
-}
-
 fn element_text(element: &ContentElement) -> Option<&str> {
     match element {
         ContentElement::Heading { text, .. } => Some(text.as_str()),
@@ -1025,86 +1011,6 @@ fn find_text_start_in_src(src: &str, element_start: usize) -> Option<usize> {
     None
 }
 
-/// Convert a zero-indexed LSP (line, character) position to a byte offset in `src`.
-///
-/// `character` is interpreted as a UTF-16 code unit offset (matching `byte_to_position`).
-/// If `line` is past the end of the file, returns `src.len()`.
-/// If `col` is past the end of a line, clamps to the end of that line.
-fn position_to_byte(src: &str, line: u32, col: u32) -> usize {
-    let mut current_line = 0u32;
-    let mut byte_offset = 0usize;
-
-    for (i, ch) in src.char_indices() {
-        if current_line == line {
-            // Walk forward inside the target line counting UTF-16 code units
-            let line_start = byte_offset;
-            let remaining = &src[line_start..];
-            let mut utf16_count = 0u32;
-            for (j, c) in remaining.char_indices() {
-                if c == '\n' {
-                    // col is past end of line — clamp to newline position
-                    return line_start + j;
-                }
-                if utf16_count == col {
-                    return line_start + j;
-                }
-                let units = c.len_utf16() as u32;
-                utf16_count += units;
-            }
-            // col is at or past end of file content
-            return src.len();
-        }
-        if ch == '\n' {
-            current_line += 1;
-            byte_offset = i + 1;
-        }
-        let _ = i;
-    }
-    // line is at or past end of file
-    src.len()
-}
-
-/// Format new markdown text for a given slot element type and user-supplied value.
-///
-/// For headings, uses the minimum heading level from the schema.
-/// For links, `new_value` may be plain text (display only) or `text|href` (pipe-separated).
-/// For images, `new_value` may be plain text (alt only) or `alt|path` (pipe-separated).
-fn format_slot_value(slot: &schema::Slot, new_value: &str, existing_element: Option<&content::ContentElement>) -> String {
-    match &slot.element {
-        schema::Element::Heading { level } => {
-            let hashes = "#".repeat(level.min.value() as usize);
-            format!("{hashes} {new_value}")
-        }
-        schema::Element::Paragraph => new_value.to_string(),
-        schema::Element::Link { pattern } => {
-            // If new_value contains '|' treat it as "text|href"
-            if let Some((text, href)) = new_value.split_once('|') {
-                format!("[{text}]({href})")
-            } else {
-                // Preserve existing href if available; fall back to schema pattern
-                let href = match existing_element {
-                    Some(content::ContentElement::Link { href, .. }) => href.clone(),
-                    _ => url_from_pattern(pattern, "name"),
-                };
-                format!("[{new_value}]({href})")
-            }
-        }
-        schema::Element::Image { pattern } => {
-            // If new_value contains '|' treat it as "alt|path"
-            if let Some((alt, path)) = new_value.split_once('|') {
-                format!("![{alt}]({path})")
-            } else {
-                // Preserve existing path if available; fall back to schema pattern
-                let path = match existing_element {
-                    Some(content::ContentElement::Image { path, .. }) => path.clone(),
-                    _ => pattern.replace('*', "filename.ext"),
-                };
-                format!("![{new_value}]({path})")
-            }
-        }
-    }
-}
-
 /// Edit a content file by writing a new value to a named schema slot.
 ///
 /// If the slot already exists in the document, the existing element is replaced
@@ -1144,110 +1050,10 @@ pub fn write_slot_to_string(
     grammar: &Grammar,
     new_value: &str,
 ) -> Result<String, String> {
-    // Find the slot in the grammar
-    let (slot_idx, slot) = grammar
-        .preamble
-        .iter()
-        .enumerate()
-        .find(|(_, s)| s.name.as_str() == slot_name)
-        .ok_or_else(|| format!("slot '{slot_name}' not found in grammar"))?;
-
-    let elements_with_offsets = content::parse_document_with_offsets(src)
-        .map_err(|e| format!("failed to parse document: {e:?}"))?;
-
-    // Walk grammar preamble in order (cursor approach) to find the element
-    // that corresponds to the target slot — same logic as the validator.
-    let mut cursor = 0usize;
-    let non_separator_elements: Vec<&content::ContentElementWithOffset> = elements_with_offsets
-        .iter()
-        .filter(|e| !matches!(e.element, content::ContentElement::Separator))
-        .collect();
-
-    let mut found_range: Option<std::ops::Range<usize>> = None;
-    let mut first_element: Option<&content::ContentElement> = None;
-
-    'slots: for (i, slot_iter) in grammar.preamble.iter().enumerate() {
-        // Consume any annotation paragraphs
-        while cursor < non_separator_elements.len() {
-            if let content::ContentElement::Paragraph { text } = &non_separator_elements[cursor].element {
-                let t = text.trim();
-                if t.starts_with("{#") && t.ends_with('}') && !t[2..t.len() - 1].contains('}') {
-                    cursor += 1;
-                    continue;
-                }
-            }
-            break;
-        }
-
-        if cursor >= non_separator_elements.len() {
-            break 'slots;
-        }
-
-        let max = max_count_for_slot(slot_iter);
-        let mut consumed = 0usize;
-        let start_cursor = cursor;
-
-        while consumed < max && cursor < non_separator_elements.len() {
-            let ewo = non_separator_elements[cursor];
-            if element_matches_slot_type(&ewo.element, &slot_iter.element) {
-                consumed += 1;
-                cursor += 1;
-            } else {
-                break;
-            }
-        }
-
-        if i == slot_idx {
-            if consumed > 0 {
-                // Replace case: range spans from first to last consumed element
-                let first = non_separator_elements[start_cursor];
-                let last = non_separator_elements[cursor - 1];
-                found_range = Some(first.byte_range.start..last.byte_range.end);
-                first_element = Some(&first.element);
-            }
-            // else: insert case, found_range stays None
-            break 'slots;
-        }
-        // If consumed == 0, slot is missing — don't advance cursor, continue to next slot
-    }
-
-    if let Some(range) = found_range {
-        // Replace case: splice new markdown over the byte range of all consumed elements
-        let formatted = format_slot_value(slot, new_value, first_element);
-        let mut new_src = String::with_capacity(src.len());
-        new_src.push_str(&src[..range.start]);
-        new_src.push_str(&formatted);
-        new_src.push_str(&src[range.end..]);
-        Ok(new_src)
-    } else {
-        // Insert case: find the correct insertion position in schema order
-        let insert_pos = find_schema_ordered_insert_position(
-            src, slot_idx, grammar, &elements_with_offsets,
-        );
-        let insert_byte = position_to_byte(src, insert_pos.0, insert_pos.1);
-
-        let formatted = format_slot_value(slot, new_value, None);
-
-        let (_, has_separator) = find_separator_insert_position(src);
-        let line_at_pos = src.lines().nth(insert_pos.0 as usize).unwrap_or("");
-        let needs_extra_newline = !line_at_pos.trim().is_empty() && insert_pos.0 > 0;
-
-        let insert_text = if has_separator || insert_pos.0 > 0 {
-            if needs_extra_newline {
-                format!("{formatted}\n\n")
-            } else {
-                format!("{formatted}\n")
-            }
-        } else {
-            format!("{formatted}\n\n----\n")
-        };
-
-        let mut new_src = String::with_capacity(src.len() + insert_text.len());
-        new_src.push_str(&src[..insert_byte]);
-        new_src.push_str(&insert_text);
-        new_src.push_str(&src[insert_byte..]);
-        Ok(new_src)
-    }
+    let mut doc = content::parse_document(src)
+        .map_err(|e| format!("failed to parse document: {e}"))?;
+    content::modify_slot(&mut doc, slot_name, grammar, new_value)?;
+    Ok(content::serialize_document(&doc))
 }
 
 #[cfg(test)]
@@ -1929,44 +1735,6 @@ mod tests {
         assert_eq!(escaped, "cost \\$5 for {item\\}");
     }
 
-    // --- position_to_byte tests ---
-
-    #[test]
-    fn position_to_byte_line_zero_col_zero() {
-        let src = "# Hello\n\nParagraph.\n";
-        assert_eq!(position_to_byte(src, 0, 0), 0);
-    }
-
-    #[test]
-    fn position_to_byte_line_zero_mid_line() {
-        let src = "# Hello\n\nParagraph.\n";
-        // "# Hello" starts at 0; col 2 → byte 2 (the 'H')
-        assert_eq!(position_to_byte(src, 0, 2), 2);
-    }
-
-    #[test]
-    fn position_to_byte_line_two() {
-        let src = "# Hello\n\nParagraph.\n";
-        // line 0: "# Hello\n" (8 bytes), line 1: "\n" (1 byte), line 2 starts at byte 9
-        assert_eq!(position_to_byte(src, 2, 0), 9);
-    }
-
-    #[test]
-    fn position_to_byte_past_end_clamps_to_len() {
-        let src = "abc\n";
-        assert_eq!(position_to_byte(src, 99, 0), src.len());
-    }
-
-    #[test]
-    fn position_to_byte_roundtrips_with_byte_to_position() {
-        let src = "# Hello World\n\nSome paragraph text.\n\n[Author](/author/test)\n";
-        for byte in [0, 2, 14, 15, 36, 37] {
-            let (line, col) = byte_to_position(src, byte);
-            let back = position_to_byte(src, line, col);
-            assert_eq!(back, byte, "roundtrip failed for byte offset {byte}");
-        }
-    }
-
     // --- write_slot_to_string tests ---
 
     #[test]
@@ -2098,7 +1866,7 @@ mod tests {
         // summary paragraphs and only change the author link.
         let grammar = article_grammar();
         let src = "# My Title\n\nFirst summary.\n\nSecond summary.\n\nThird summary.\n\n[Old Author](/author/old)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
-        let result = write_slot_to_string(src, "author", &grammar, "[New Author](/author/new)")
+        let result = write_slot_to_string(src, "author", &grammar, "New Author|/author/new")
             .expect("write_slot_to_string should succeed");
         assert!(
             result.contains("First summary."),
