@@ -900,6 +900,7 @@ dependencies = [
 name = "lsp_service"
 version = "0.10.1"
 dependencies = [
+ "conductor",
  "content",
  "lsp_capabilities",
  "schema",
@@ -1105,6 +1106,7 @@ version = "0.10.1"
 dependencies = [
  "axum",
  "clap",
+ "conductor",
  "content",
  "dep_graph",
  "editor_server",
