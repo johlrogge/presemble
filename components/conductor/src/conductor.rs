@@ -103,13 +103,11 @@ impl Conductor {
             Command::Shutdown => CommandResult::ok(),
             Command::DocumentChanged { path, text } => {
                 let path_buf = PathBuf::from(&path);
-                self.doc_sources.write().unwrap().insert(path_buf.clone(), text.clone());
-
-                // Auto-save: write to disk so the file watcher picks it up and rebuilds
-                if let Err(e) = std::fs::write(&path_buf, &text) {
-                    return CommandResult::error(format!("failed to write {path}: {e}"));
-                }
-
+                // Store in memory only — do NOT write to disk.
+                // Disk writes happen on explicit save (DocumentSaved) or browser edit (EditSlot).
+                // The "browser updates before save" feature will need the rebuild pipeline
+                // to read from doc_sources. For now, changes are only visible after save.
+                self.doc_sources.write().unwrap().insert(path_buf, text);
                 CommandResult::ok()
             }
             Command::DocumentSaved { path } => {
