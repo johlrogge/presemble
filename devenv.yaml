@@ -1,11 +1,4 @@
 inputs:
-  nixpkgs:
-    url: github:cachix/devenv-nixpkgs/rolling
-  rust-overlay:
-    url: github:oxalica/rust-overlay
-    inputs:
-      nixpkgs:
-        follows: nixpkgs
   claude-code-nix:
     url: github:sadjow/claude-code-nix
     inputs:
@@ -16,9 +9,20 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
   metadev:
     url: github:johlrogge/metadev
     flake: false
-
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
 imports:
-  - metadev
+- metadev

@@ -312,6 +312,45 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - Query the data graph, test template fragments, inspect schema validation — without leaving the editor
 - Requires the conductor's nng IPC backbone
 
+**Named body sections (brainstorm):**
+- The `----` separator could be extended with named sections: `---- {#named-section}`
+- Multiple body sections with different constraints per section
+- Schema could specify: `## Introduction {#intro}` section allows h3..h4, `## Details {#details}` allows h2..h6
+- Enables structured body content without losing the free-form feel
+
+**Expressive link patterns in schemas (brainstorm):**
+- Current: `[<name>](/author/<name>) {#author}` — placeholder syntax, display text is literal
+- Proposed: `[author.name](/author/*) {#author}` — graph-aware link patterns
+  - Display text is a graph path reference (`author.name` resolves to the linked author's name field)
+  - URL uses wildcard `*` for the slug instead of repeated `<name>` placeholders
+  - The schema declares the relationship explicitly: this link displays a field FROM the referenced content
+  - Enables the template to know what to render without hardcoding: `post.author` link shows the author's actual name
+  - Validation can check: does the referenced content type have a `name` field?
+  - Completions can show: author names from the content, not just slugs
+
+**Link validation and quickfixes (brainstorm):**
+- Build and LSP should validate content references (e.g., `[Author](/author/johlrogge)` → does the author exist?)
+- Different diagnostic levels:
+  - Schema exists but content file missing → offer quickfix: "Create /author/johlrogge" (opens new buffer with suggestion placeholders)
+  - Schema exists, close match found → offer quickfix: "Did you mean /author/johlrogge?" (fuzzy match)
+  - Schema doesn't exist → hard error
+- LSP link completions already enumerate existing content — extend to validate references at build time
+- "Create" quickfix would scaffold a new content file from the schema and open it in the editor
+
+**Live nodes — backend-backed template regions (brainstorm):**
+- Some template nodes could be backed by a live data source in production (database, API, etc.)
+- Example: a product catalog region pulls from a database instead of static content files
+- The template declares the node as "live" — at build time it renders a placeholder or static snapshot, at serve/production time it fetches from the backend
+- Enables hybrid static/dynamic sites without leaving the Presemble model
+- Schema still validates the shape of the data — the source just changes from file to backend
+
+**Full-text search with FST indexes (brainstorm):**
+- Use finite state transducers (https://burntsushi.net/transducers/) to produce compact search indexes at build time
+- Each content type could have its own index (search posts, search authors, search features separately)
+- The index is a static artifact — no server-side search needed, works with any hosting
+- Could power an in-browser search UI or a `/_presemble/search` endpoint in serve mode
+- The `fst` crate (Rust) implements this — small dependency, battle-tested
+
 **Other deferred items:**
 - Real-time multiplayer editing
 - Comments, suggestions, track changes (beyond M5 suggest mode)

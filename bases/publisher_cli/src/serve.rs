@@ -1,8 +1,8 @@
 use crate::error::CliError;
-use crate::{build_site, rebuild_affected, BuildMode, DependencyGraph, UrlConfig};
+use crate::{build_for_serve, rebuild_affected, BuildPolicy, DependencyGraph, UrlConfig};
 use axum::{
     Router,
-    extract::{State, WebSocketUpgrade},
+    extract::{Query, State, WebSocketUpgrade},
     extract::ws::{Message, WebSocket},
     response::IntoResponse,
     routing::{get, post},
@@ -78,7 +78,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
     let current_graph = Arc::new(Mutex::new(DependencyGraph::new()));
     let build_errors: Arc<Mutex<HashMap<String, Vec<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    match build_site(site_dir, url_config, BuildMode::Serve) {
+    match build_for_serve(site_dir, url_config) {
         Ok(outcome) => {
             *current_graph.lock().unwrap() = outcome.dep_graph;
             *build_errors.lock().unwrap() = outcome.build_errors;
@@ -132,6 +132,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/ws", get(ws_handler))
         .route("/_presemble/lsp", get(lsp_ws_handler))
         .route("/_presemble/edit", post(edit_handler))
+        .route("/_presemble/links", get(links_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -219,6 +220,136 @@ fn apply_edit(
 
     // Write slot
     lsp_capabilities::write_slot_to_file(&canonical, slot, &grammar, value)
+}
+
+#[derive(serde::Deserialize)]
+struct LinksQuery {
+    schema: String,
+    slot: String,
+}
+
+#[derive(serde::Serialize)]
+struct LinkOption {
+    text: String,
+    href: String,
+}
+
+async fn links_handler(
+    State(state): State<AppState>,
+    Query(query): Query<LinksQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    match collect_link_options(&state.site_dir, &query.schema, &query.slot) {
+        Ok(options) => {
+            let json = serde_json::to_vec(&options).unwrap_or_default();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
+        }
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn collect_link_options(
+    site_dir: &std::path::Path,
+    schema_stem: &str,
+    slot_name: &str,
+) -> Result<Vec<LinkOption>, String> {
+    let schema_path = site_dir.join("schemas").join(format!("{schema_stem}.md"));
+    let schema_src = std::fs::read_to_string(&schema_path)
+        .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
+    let grammar = schema::parse_schema(&schema_src)
+        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
+
+    let slot = grammar
+        .preamble
+        .iter()
+        .find(|s| s.name.as_str() == slot_name)
+        .ok_or_else(|| format!("slot '{slot_name}' not found in schema '{schema_stem}'"))?;
+
+    let pattern = match &slot.element {
+        schema::Element::Link { pattern } => pattern.clone(),
+        _ => return Err(format!("slot '{slot_name}' is not a Link slot")),
+    };
+
+    let content_stem = stem_from_link_pattern(&pattern)
+        .ok_or_else(|| format!("cannot derive content stem from pattern '{pattern}'"))?;
+
+    let content_dir = site_dir.join("content").join(&content_stem);
+    let entries = std::fs::read_dir(&content_dir)
+        .map_err(|e| format!("failed to read content dir {}: {e}", content_dir.display()))?;
+
+    let mut options: Vec<LinkOption> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|ex| ex.to_str()) == Some("md"))
+        .map(|e| {
+            let path = e.path();
+            let file_slug = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let text = read_title_from_md(&path).unwrap_or_else(|| file_slug.clone());
+            let href = url_from_pattern(&pattern, &file_slug);
+            LinkOption { text, href }
+        })
+        .collect();
+
+    options.sort_by(|a, b| a.text.cmp(&b.text));
+    Ok(options)
+}
+
+/// Extract content schema stem from link pattern "/author/<name>" → "author"
+fn stem_from_link_pattern(pattern: &str) -> Option<String> {
+    let s = pattern.trim_start_matches('/');
+    let seg = s.split('/').next()?;
+    let clean = seg.split('<').next()?.trim_end_matches('-').trim();
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean.to_string())
+    }
+}
+
+/// Read the first H1 heading text from a markdown file.
+fn read_title_from_md(path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content
+        .lines()
+        .find(|l| l.starts_with("# "))
+        .map(|l| l.trim_start_matches("# ").trim().to_string())
+}
+
+/// Replace `<variable>` placeholders in a link pattern with the given slug.
+fn url_from_pattern(pattern: &str, slug: &str) -> String {
+    let mut result = String::new();
+    let mut in_angle = false;
+    for ch in pattern.chars() {
+        match ch {
+            '<' => {
+                in_angle = true;
+                result.push_str(slug);
+            }
+            '>' => {
+                in_angle = false;
+            }
+            _ if !in_angle => result.push(ch),
+            _ => {}
+        }
+    }
+    result
 }
 
 async fn ws_handler(
@@ -394,6 +525,7 @@ const INJECT: &str = concat!(
     ".presemble-edit-error{color:#c00;font-size:0.85rem;margin-top:0.3rem;}",
     ".presemble-edit-toggle{position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999;background:#5d8a6e;color:#fff;border:none;border-radius:50%;width:3rem;height:3rem;font-size:1.4rem;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.2);transition:background 0.2s;line-height:3rem;text-align:center;}",
     ".presemble-edit-toggle:hover{background:#4a7159;}",
+    ".presemble-link-picker{font-size:1rem;padding:0.4rem;border:2px solid #5d8a6e;border-radius:0.4rem;background:#fff;margin:0.3rem 0;display:block;min-width:15rem;}",
     "</style>",
     "<script>(function(){",
     "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
@@ -434,7 +566,49 @@ const INJECT: &str = concat!(
     "var el=e.target.closest('[data-presemble-slot]');",
     "if(!el||el.classList.contains('presemble-editing')){return;}",
     "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
-    "if(el.tagName==='A'||el.tagName==='IMG'){return;}",
+    "if(el.tagName==='IMG'){return;}",
+    "if(el.tagName==='A'){",
+      "e.preventDefault();",
+      "var afile=el.getAttribute('data-presemble-file');",
+      "var aslot=el.getAttribute('data-presemble-slot');",
+      "if(!afile||!aslot){return;}",
+      "var astem=afile.split('/')[1];",
+      "fetch('/_presemble/links?schema='+astem+'&slot='+aslot)",
+        ".then(function(r){return r.json();})",
+        ".then(function(options){",
+          "var sel=document.createElement('select');",
+          "sel.className='presemble-link-picker';",
+          "var ph=document.createElement('option');",
+          "ph.textContent='Select '+aslot+'...';",
+          "ph.value='';",
+          "sel.appendChild(ph);",
+          "options.forEach(function(opt){",
+            "var o=document.createElement('option');",
+            "o.textContent=opt.text;",
+            "o.value=opt.text+'|'+opt.href;",
+            "sel.appendChild(o);",
+          "});",
+          "el.after(sel);",
+          "sel.focus();",
+          "sel.onchange=function(){",
+            "if(sel.value){",
+              "fetch('/_presemble/edit',{",
+                "method:'POST',",
+                "headers:{'Content-Type':'application/json'},",
+                "body:JSON.stringify({file:afile,slot:aslot,value:sel.value})",
+              "}).then(function(r){return r.json();}).then(function(data){",
+                "sel.remove();",
+                "if(data.ok){setTimeout(function(){location.reload();},500);}",
+                "else{alert(data.error);}",
+              "});",
+            "}",
+          "};",
+          "sel.onblur=function(){setTimeout(function(){sel.remove();},200);};",
+          "function onKey(e){if(e.key==='Escape'){sel.remove();document.removeEventListener('keydown',onKey);}}",
+          "document.addEventListener('keydown',onKey);",
+        "});",
+      "return;",
+    "}",
     "e.preventDefault();",
     "var pfile=el.getAttribute('data-presemble-file');",
     "var slot=el.getAttribute('data-presemble-slot');",
@@ -722,7 +896,7 @@ fn watch_and_rebuild(
         }
 
         println!("Rebuilding {} page(s)...", affected_count.max(1));
-        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, BuildMode::Serve) {
+        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, &BuildPolicy::lenient()) {
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
                 g.merge(outcome.dep_graph);
@@ -791,7 +965,7 @@ fn watch_and_rebuild(
             }
             Err(e) => {
                 eprintln!("Rebuild failed: {e} — falling back to full rebuild");
-                match build_site(site_dir, url_config, BuildMode::Serve) {
+                match build_for_serve(site_dir, url_config) {
                     Ok(outcome) => {
                         let mut g = graph.lock().unwrap();
                         *g = outcome.dep_graph;

@@ -50,7 +50,7 @@ New features go through a design-implement-review loop before release.
 
 Run these agents in order before cutting a release:
 
-1. **Hygiene gate** — run `mcp__rust-codebase__hygiene_report` (tests + clippy + coverage). All must pass before proceeding. This catches lint violations that CI enforces with `-D warnings`.
+1. **MANDATORY hygiene gate** — run `mcp__rust-codebase__hygiene_report` (tests + clippy + coverage). **DO NOT PROCEED if this fails.** CI enforces `clippy -- -D warnings` and will reject the release. A git pre-commit hook also runs clippy on every commit (configured in `devenv.nix`).
 
 2. **architect** — review all changes since last release
    > "Review changes since last release"
