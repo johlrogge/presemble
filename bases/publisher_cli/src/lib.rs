@@ -766,6 +766,65 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, mode: BuildMode) -> R
     // Phase 2: Resolve cross-content references (e.g. post.author.name from the author page)
     resolve_references(&mut built_pages);
 
+    // Phase 2b: Validate link references — internal hrefs must point to existing pages
+    {
+        let url_set: std::collections::HashSet<String> = built_pages
+            .values()
+            .flatten()
+            .map(|p| p.url_path.clone())
+            .collect();
+
+        let mut link_errors: Vec<(String, String)> = Vec::new();
+
+        for pages in built_pages.values() {
+            for page in pages {
+                for (key, value) in page.data.iter() {
+                    if key.starts_with('_') {
+                        continue; // skip internal metadata
+                    }
+                    if let template::Value::Record(sub) = value
+                        && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                    {
+                        // Only validate internal links (starting with /)
+                        if href.starts_with('/') && !url_set.contains(href) {
+                            link_errors.push((
+                                page.url_path.clone(),
+                                format!(
+                                    "broken link: '{key}' references '{}' which does not exist",
+                                    href
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !link_errors.is_empty() {
+            for (page_url, msg) in &link_errors {
+                match mode {
+                    BuildMode::Build => {
+                        println!("  [ERROR] {msg}");
+                        build_errors
+                            .entry(page_url.clone())
+                            .or_default()
+                            .push(msg.clone());
+                    }
+                    BuildMode::Serve => {
+                        println!("  [WARNING] {msg}");
+                        page_suggestions
+                            .entry(page_url.clone())
+                            .or_default()
+                            .push(msg.clone());
+                    }
+                }
+            }
+            if mode == BuildMode::Build {
+                files_failed += link_errors.len();
+            }
+        }
+    }
+
     // Phase 3: Render all collected pages with resolved data
     for collected in &collected_pages {
         if let Some(tmpl_path) = &collected.template_path {

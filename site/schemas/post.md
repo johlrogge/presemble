@@ -6,7 +6,8 @@ content
 
 Your post summary. Tell the reader what they will learn. {#summary}
 occurs
-: 1..3
+: exactly once
+
 
 [<name>](/author/<name>) {#author}
 occurs

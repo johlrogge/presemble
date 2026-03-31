@@ -32,11 +32,10 @@ pub fn modify_slot(
     for (slot_idx, slot) in grammar.preamble.iter().enumerate() {
         // Skip annotation-only paragraphs (parser artifacts).
         while cursor < doc.elements.len() {
-            if let ContentElement::Paragraph { text } = &doc.elements[cursor] {
-                if is_annotation_paragraph(text) {
-                    cursor += 1;
-                    continue;
-                }
+            if let ContentElement::Paragraph { text } = &doc.elements[cursor]
+                && is_annotation_paragraph(text) {
+                cursor += 1;
+                continue;
             }
             break;
         }
@@ -146,11 +145,10 @@ pub fn capitalize_slot(
     for (slot_idx, slot) in grammar.preamble.iter().enumerate() {
         // Skip annotation-only paragraphs (parser artifacts).
         while cursor < doc.elements.len() {
-            if let ContentElement::Paragraph { text } = &doc.elements[cursor] {
-                if is_annotation_paragraph(text) {
-                    cursor += 1;
-                    continue;
-                }
+            if let ContentElement::Paragraph { text } = &doc.elements[cursor]
+                && is_annotation_paragraph(text) {
+                cursor += 1;
+                continue;
             }
             break;
         }

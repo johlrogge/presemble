@@ -243,7 +243,7 @@ fn apply_transform_to_string(value: &EvalValue<'_>, transform: &Transform) -> St
 /// Extract the slot name from a data path — the last segment.
 /// e.g. "article.title" -> "title", "title" -> "title"
 fn slot_name_from_path(data_path: &str) -> String {
-    data_path.split('.').last().unwrap_or(data_path).to_string()
+    data_path.split('.').next_back().unwrap_or(data_path).to_string()
 }
 
 /// Derive the semantic class from the `data` attribute path.
@@ -272,7 +272,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
     // Each page's graph carries _presemble_file. For "index.tagline", look in graph["index"]["_presemble_file"].
     // For relative paths like "title" (inside data-each), look in graph["_presemble_file"].
     let presemble_file = {
-        let mut file_path_segments: Vec<&str> = path_segments.iter().copied().collect();
+        let mut file_path_segments: Vec<&str> = path_segments.to_vec();
         if let Some(last) = file_path_segments.last_mut() {
             *last = "_presemble_file";
         }

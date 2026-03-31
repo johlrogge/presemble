@@ -548,3 +548,120 @@ fn index_content_schema_and_content_tracked_as_deps() {
         "content/index/index.md change should affect index.html; affected: {affected_by_content:?}"
     );
 }
+
+#[test]
+fn broken_link_reference_fails_build() {
+    // Create a minimal site where an article references a nonexistent author page.
+    // In BuildMode::Build the broken reference should count as a build failure.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("broken-ref-site");
+
+    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    // Note: no content/author directory — the author page does NOT exist
+    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    // Article schema: title + author link
+    fs::write(
+        site.join("schemas/article.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#author}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+
+    // Article content linking to a nonexistent author
+    fs::write(
+        site.join("content/article/my-post.md"),
+        "# My Post\n\n[Ghost Writer](/author/ghost-writer)\n",
+    )
+    .unwrap();
+
+    // Minimal templates
+    fs::write(
+        site.join("templates/article.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Index</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let outcome = publisher_cli::build_site(
+        &site,
+        &publisher_cli::UrlConfig::default(),
+        publisher_cli::BuildMode::Build,
+    )
+    .expect("build_site should not return Err");
+
+    assert!(
+        outcome.files_failed > 0,
+        "broken content reference should count as a build failure; outcome: files_failed={}, build_errors={:?}",
+        outcome.files_failed,
+        outcome.build_errors
+    );
+
+    // The broken link error should appear in build_errors
+    let all_errors: Vec<_> = outcome.build_errors.values().flatten().collect();
+    assert!(
+        all_errors.iter().any(|msg| msg.contains("ghost-writer") || msg.contains("broken link")),
+        "build_errors should mention the broken reference; errors: {all_errors:?}"
+    );
+}
+
+#[test]
+fn broken_link_reference_is_warning_in_serve_mode() {
+    // Same setup but BuildMode::Serve — broken references should be warnings
+    // (page_suggestions), not hard failures.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("broken-ref-serve-site");
+
+    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#author}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/article/my-post.md"),
+        "# My Post\n\n[Ghost Writer](/author/ghost-writer)\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/article.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Index</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let outcome = publisher_cli::build_site(
+        &site,
+        &publisher_cli::UrlConfig::default(),
+        publisher_cli::BuildMode::Serve,
+    )
+    .expect("build_site should not return Err");
+
+    // In Serve mode broken references are warnings — files_failed should be 0
+    assert_eq!(
+        outcome.files_failed, 0,
+        "broken reference in Serve mode should not count as hard failure"
+    );
+
+    // The broken link warning should appear in page_suggestions
+    let all_suggestions: Vec<_> = outcome.page_suggestions.values().flatten().collect();
+    assert!(
+        all_suggestions.iter().any(|msg| msg.contains("ghost-writer") || msg.contains("broken link")),
+        "page_suggestions should mention the broken reference in Serve mode; suggestions: {all_suggestions:?}"
+    );
+}
