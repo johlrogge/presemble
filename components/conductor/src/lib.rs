@@ -84,53 +84,52 @@ mod tests {
             other => panic!("expected DocumentText(Some(...)), got {other:?}"),
         }
 
-        // File should also be written to disk
-        let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(on_disk, text);
+        // DocumentChanged does NOT write to disk — only in-memory
     }
 
     #[test]
-    fn document_changed_fails_if_parent_dir_missing() {
+    fn document_changed_does_not_write_to_disk() {
         let dir = tempfile::tempdir().unwrap();
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        // Path whose parent doesn't exist
-        let path = dir.path().join("no_such_dir/test.md");
+        let path = dir.path().join("content/article/test.md");
         let result = conductor.handle_command(Command::DocumentChanged {
             path: path.to_string_lossy().to_string(),
             text: "# Hello\n".to_string(),
         });
-        assert!(matches!(result.response, Response::Error(_)));
+        assert!(matches!(result.response, Response::Ok));
+        // File should NOT exist on disk
+        assert!(!path.exists(), "DocumentChanged should not write to disk");
     }
 
     #[test]
     fn document_saved_clears_memory() {
         let dir = tempfile::tempdir().unwrap();
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let content_dir = dir.path().join("content/article");
-        std::fs::create_dir_all(&content_dir).unwrap();
-        let path = content_dir.join("test.md");
+        let path = dir.path().join("content/article/test.md");
         let text = "# My Title\n".to_string();
 
-        // First store in memory (also writes to disk)
+        // Store in memory
         conductor.handle_command(Command::DocumentChanged {
             path: path.to_string_lossy().to_string(),
-            text,
+            text: text.clone(),
         });
 
-        // Then saved — clears memory
-        let result = conductor.handle_command(Command::DocumentSaved {
+        // Verify in memory
+        let result = conductor.handle_command(Command::GetDocumentText {
             path: path.to_string_lossy().to_string(),
         });
-        assert!(matches!(result.response, Response::Ok));
+        assert!(matches!(result.response, Response::DocumentText(Some(_))));
 
-        // File still exists on disk (written by DocumentChanged), so we get it back
+        // Save clears memory
+        conductor.handle_command(Command::DocumentSaved {
+            path: path.to_string_lossy().to_string(),
+        });
+
+        // After save, no in-memory copy, no file on disk → None
         let result2 = conductor.handle_command(Command::GetDocumentText {
             path: path.to_string_lossy().to_string(),
         });
-        match result2.response {
-            Response::DocumentText(Some(_)) => {} // falls back to disk read
-            other => panic!("expected DocumentText(Some(...)) from disk, got {other:?}"),
-        }
+        assert!(matches!(result2.response, Response::DocumentText(None)));
     }
 
     #[test]
