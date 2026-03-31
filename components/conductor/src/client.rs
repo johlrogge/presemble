@@ -74,6 +74,58 @@ impl ConductorSubscriber {
     }
 }
 
+/// Ensure the conductor daemon is running for a site directory.
+/// If no conductor is listening, spawns one as a background process.
+pub fn ensure_conductor(site_dir: &std::path::Path) -> Result<ConductorClient, String> {
+    let url = socket_url(site_dir);
+
+    // Try to connect to existing conductor
+    if let Ok(client) = ConductorClient::connect(&url) {
+        if client.ping().is_ok() {
+            return Ok(client);
+        }
+        // Socket exists but conductor isn't responding — stale socket
+        cleanup_stale_socket(site_dir);
+    }
+
+    // Start conductor daemon as background process
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find presemble executable: {e}"))?;
+
+    let child = std::process::Command::new(&exe)
+        .arg("conductor")
+        .arg(site_dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("failed to start conductor: {e}"))?;
+
+    // Detach the child so it runs independently
+    std::mem::forget(child);
+
+    // Wait for conductor to be ready (poll with timeout)
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(client) = ConductorClient::connect(&url)
+            && client.ping().is_ok()
+        {
+            return Ok(client);
+        }
+    }
+
+    Err("conductor failed to start within 5 seconds".to_string())
+}
+
+fn cleanup_stale_socket(site_dir: &std::path::Path) {
+    let url = socket_url(site_dir);
+    // nng IPC URLs are "ipc:///path/to/socket" — extract the path
+    if let Some(path) = url.strip_prefix("ipc://") {
+        let _ = std::fs::remove_file(path);
+        // Also remove the pub socket
+        let _ = std::fs::remove_file(format!("{path}-pub"));
+    }
+}
+
 /// Compute the IPC socket URL for a site directory.
 pub fn socket_url(site_dir: &std::path::Path) -> String {
     use std::collections::hash_map::DefaultHasher;

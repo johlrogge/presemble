@@ -71,11 +71,86 @@ impl Conductor {
                 // Signal shutdown (handled by daemon loop)
                 Response::Ok
             }
-            // These will be implemented in Phase 3
-            Command::DocumentChanged { .. } => Response::Ok,
-            Command::DocumentSaved { .. } => Response::Ok,
-            Command::FileChanged { .. } => Response::Ok,
-            Command::EditSlot { .. } => Response::Ok,
+            Command::DocumentChanged { path, text } => {
+                let path = PathBuf::from(&path);
+                self.doc_sources.write().unwrap().insert(path, text);
+                Response::Ok
+            }
+            Command::DocumentSaved { path } => {
+                let path = PathBuf::from(&path);
+                // Clear in-memory version — disk is now authoritative
+                self.doc_sources.write().unwrap().remove(&path);
+                Response::Ok
+            }
+            Command::FileChanged { paths } => {
+                for p in &paths {
+                    let path = PathBuf::from(p);
+                    // Clear in-memory version
+                    self.doc_sources.write().unwrap().remove(&path);
+                }
+                // Refresh schema cache for changed schemas
+                for p in &paths {
+                    let path = std::path::Path::new(p);
+                    if let site_index::FileKind::Schema { stem } = self.site_index.classify(path)
+                        && let Ok(src) = std::fs::read_to_string(path)
+                    {
+                        self.schema_cache.write().unwrap().insert(stem, src);
+                    }
+                }
+                Response::Ok
+            }
+            Command::EditSlot { file, slot, value } => {
+                let abs_path = self.site_dir.join(&file);
+
+                // Derive schema stem from path component (content/{stem}/file.md)
+                let stem = match std::path::Path::new(&file).components().nth(1) {
+                    Some(c) => match c.as_os_str().to_str() {
+                        Some(s) => s.to_string(),
+                        None => {
+                            return Response::Error(format!(
+                                "cannot derive schema stem from: {file}"
+                            ))
+                        }
+                    },
+                    None => {
+                        return Response::Error(format!(
+                            "cannot derive schema stem from: {file}"
+                        ))
+                    }
+                };
+
+                // Load grammar from cache
+                let grammar = match self.schema_source(&stem) {
+                    Some(src) => match schema::parse_schema(&src) {
+                        Ok(g) => g,
+                        Err(e) => return Response::Error(format!("schema parse error: {e:?}")),
+                    },
+                    None => return Response::Error(format!("no schema for: {stem}")),
+                };
+
+                // Read the content file
+                let content_src = match std::fs::read_to_string(&abs_path) {
+                    Ok(s) => s,
+                    Err(e) => return Response::Error(format!("cannot read {file}: {e}")),
+                };
+
+                // Parse, modify, serialize, and write
+                let mut doc = match content::parse_document(&content_src) {
+                    Ok(d) => d,
+                    Err(e) => return Response::Error(format!("parse error: {e}")),
+                };
+
+                if let Err(e) = content::modify_slot(&mut doc, &slot, &grammar, &value) {
+                    return Response::Error(e);
+                }
+
+                let new_src = content::serialize_document(&doc);
+                if let Err(e) = std::fs::write(&abs_path, new_src) {
+                    return Response::Error(format!("write error: {e}"));
+                }
+
+                Response::Ok
+            }
         }
     }
 }
