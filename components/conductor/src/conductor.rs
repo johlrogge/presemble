@@ -37,9 +37,56 @@ fn derive_url_from_content_path(file: &str) -> String {
     format!("/{without_ext}")
 }
 
+/// A simple TemplateRegistry backed by the filesystem (no caching).
+/// Used by the conductor's rebuild_page method.
+struct SimpleTemplateRegistry {
+    templates_dir: PathBuf,
+}
+
+impl template::TemplateRegistry for SimpleTemplateRegistry {
+    fn resolve(&self, name: &str) -> Option<Vec<template::dom::Node>> {
+        if let Some((file_part, def_name)) = name.split_once("::") {
+            // File-qualified: load the file, extract definitions, return the named one.
+            // Strip leading "templates/" if present.
+            let file_stem = std::path::Path::new(file_part)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(file_part);
+            let nodes = self.load_nodes(file_stem)?;
+            let (_, defs) = template::extract_definitions(nodes);
+            defs.get(def_name).cloned()
+        } else {
+            // Bare name: return main nodes (non-definition content).
+            let nodes = self.load_nodes(name)?;
+            let (main, _) = template::extract_definitions(nodes);
+            if main.is_empty() { None } else { Some(main) }
+        }
+    }
+}
+
+impl SimpleTemplateRegistry {
+    /// Load and parse a template file by stem (tries .html then .hiccup).
+    fn load_nodes(&self, file_stem: &str) -> Option<Vec<template::dom::Node>> {
+        let html_path = self.templates_dir.join(format!("{file_stem}.html"));
+        let hiccup_path = self.templates_dir.join(format!("{file_stem}.hiccup"));
+
+        if html_path.exists() {
+            let src = std::fs::read_to_string(&html_path).ok()?;
+            template::parse_template_xml(&src).ok()
+        } else if hiccup_path.exists() {
+            let src = std::fs::read_to_string(&hiccup_path).ok()?;
+            template::parse_template_hiccup(&src).ok()
+        } else {
+            None
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub struct Conductor {
     site_dir: PathBuf,
+    output_dir: PathBuf,
+    templates_dir: PathBuf,
     dep_graph: RwLock<dep_graph::DependencyGraph>,
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
     doc_sources: RwLock<HashMap<PathBuf, String>>, // path -> in-memory text
@@ -50,6 +97,12 @@ impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
+
+        let output_dir = {
+            let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
+            site_dir.parent().unwrap_or(&site_dir).join("output").join(name)
+        };
+        let templates_dir = site_dir.join("templates");
 
         // Populate schema cache
         let mut schema_cache = HashMap::new();
@@ -62,6 +115,8 @@ impl Conductor {
 
         Ok(Self {
             site_dir,
+            output_dir,
+            templates_dir,
             dep_graph: RwLock::new(dep_graph::DependencyGraph::new()),
             schema_cache: RwLock::new(schema_cache),
             doc_sources: RwLock::new(HashMap::new()),
@@ -86,6 +141,108 @@ impl Conductor {
         std::fs::read_to_string(path).ok()
     }
 
+    /// Rebuild a single content page from in-memory text.
+    ///
+    /// Returns the list of URL paths that were rebuilt, or an error string.
+    /// Errors here are non-fatal: the caller logs and continues.
+    fn rebuild_page(&self, content_path: &Path, text: &str) -> Result<Vec<String>, String> {
+        // Classify file to get schema stem
+        let stem = match self.site_index.classify(content_path) {
+            site_index::FileKind::Content { schema_stem } => schema_stem,
+            _ => return Err(format!("not a content file: {}", content_path.display())),
+        };
+
+        // Load grammar from cache
+        let schema_src = self
+            .schema_source(&stem)
+            .ok_or_else(|| format!("no schema for {stem}"))?;
+        let grammar = schema::parse_schema(&schema_src)
+            .map_err(|e| format!("schema error: {e:?}"))?;
+
+        // Parse content from in-memory text
+        let doc = content::parse_document(text)
+            .map_err(|e| format!("parse error: {e}"))?;
+
+        // Build data graph (suggestion nodes fill missing slots)
+        let mut graph = template::build_article_graph(&doc, &grammar);
+
+        // Compute slug and URL path
+        let slug = content_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        let url_path = if slug == "index" {
+            format!("/{stem}/")
+        } else {
+            format!("/{stem}/{slug}")
+        };
+
+        // Add metadata
+        graph.insert("url", template::Value::Text(url_path.clone()));
+        graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
+        graph.insert(
+            "_presemble_file",
+            template::Value::Text(format!("content/{stem}/{slug}.md")),
+        );
+
+        // Add link record
+        let title = match graph.resolve(&["title"]) {
+            Some(template::Value::Text(t)) => t.clone(),
+            _ => slug.to_string(),
+        };
+        let mut link_graph = template::DataGraph::new();
+        link_graph.insert("href", template::Value::Text(url_path.clone()));
+        link_graph.insert("text", template::Value::Text(title));
+        graph.insert("link", template::Value::Record(link_graph));
+
+        // Load and parse template
+        let template_path = self
+            .site_index
+            .template_for(&stem)
+            .ok_or_else(|| format!("no template for {stem}"))?;
+        let tmpl_src = std::fs::read_to_string(&template_path)
+            .map_err(|e| format!("template read error: {e}"))?;
+        let raw_nodes =
+            if template_path.extension().and_then(|e| e.to_str()) == Some("hiccup") {
+                template::parse_template_hiccup(&tmpl_src)
+                    .map_err(|e| format!("{e}"))?
+            } else {
+                template::parse_template_xml(&tmpl_src)
+                    .map_err(|e| format!("{e}"))?
+            };
+        let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+
+        // Create render context
+        let registry = SimpleTemplateRegistry {
+            templates_dir: self.templates_dir.clone(),
+        };
+        let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
+
+        // Wrap graph under stem key (template expects stem.field paths)
+        let mut context = template::DataGraph::new();
+        context.insert(&stem, template::Value::Record(graph));
+
+        // Transform and serialize
+        let transformed = template::transform(nodes, &context, &ctx)
+            .map_err(|e| format!("render error: {e}"))?;
+        let html = template::serialize_nodes(&transformed);
+
+        // Write output
+        let output_path = if slug == "index" {
+            self.output_dir.join(&stem).join("index.html")
+        } else {
+            self.output_dir.join(&stem).join(slug).join("index.html")
+        };
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir error: {e}"))?;
+        }
+        std::fs::write(&output_path, &html)
+            .map_err(|e| format!("write error: {e}"))?;
+
+        Ok(vec![url_path])
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -103,12 +260,21 @@ impl Conductor {
             Command::Shutdown => CommandResult::ok(),
             Command::DocumentChanged { path, text } => {
                 let path_buf = PathBuf::from(&path);
-                // Store in memory only — do NOT write to disk.
+                // Store in memory — do NOT write to disk.
                 // Disk writes happen on explicit save (DocumentSaved) or browser edit (EditSlot).
-                // The "browser updates before save" feature will need the rebuild pipeline
-                // to read from doc_sources. For now, changes are only visible after save.
-                self.doc_sources.write().unwrap().insert(path_buf, text);
-                CommandResult::ok()
+                self.doc_sources.write().unwrap().insert(path_buf.clone(), text.clone());
+
+                // Rebuild the page from in-memory text and broadcast PagesRebuilt.
+                match self.rebuild_page(&path_buf, &text) {
+                    Ok(pages) if !pages.is_empty() => CommandResult::ok_with_events(vec![
+                        ConductorEvent::PagesRebuilt { pages, anchor: None },
+                    ]),
+                    Ok(_) => CommandResult::ok(),
+                    Err(e) => {
+                        eprintln!("conductor: rebuild failed for {path}: {e}");
+                        CommandResult::ok()
+                    }
+                }
             }
             Command::DocumentSaved { path } => {
                 let path = PathBuf::from(&path);

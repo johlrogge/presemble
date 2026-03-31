@@ -133,6 +133,89 @@ mod tests {
     }
 
     #[test]
+    fn document_changed_emits_pages_rebuilt_when_site_has_schema_and_template() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Set up a minimal site with schema, content, and template.
+        let schemas_dir = dir.path().join("schemas");
+        std::fs::create_dir_all(&schemas_dir).unwrap();
+        let schema_src = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+        std::fs::write(schemas_dir.join("post.md"), schema_src).unwrap();
+
+        let content_dir = dir.path().join("content/post");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let content_path = content_dir.join("hello.md");
+
+        let templates_dir = dir.path().join("templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+        std::fs::write(
+            templates_dir.join("post.html"),
+            r#"<html><body><presemble:insert data="post.title" as="h1"></presemble:insert></body></html>"#,
+        )
+        .unwrap();
+
+        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+
+        let text = "# My Post Title\n\n----\n\nSome body content.\n".to_string();
+        let result = conductor.handle_command(Command::DocumentChanged {
+            path: content_path.to_string_lossy().to_string(),
+            text,
+        });
+
+        assert!(matches!(result.response, Response::Ok), "expected Ok response");
+        assert_eq!(result.events.len(), 1, "expected one PagesRebuilt event");
+        match &result.events[0] {
+            ConductorEvent::PagesRebuilt { pages, anchor } => {
+                assert_eq!(pages, &vec!["/post/hello".to_string()]);
+                assert!(anchor.is_none());
+            }
+            other => panic!("expected PagesRebuilt, got {other:?}"),
+        }
+
+        // Output file should have been written.
+        // output_dir = <site_dir_parent>/output/<site_dir_name>/
+        let site_dir = dir.path().canonicalize().unwrap_or(dir.path().to_path_buf());
+        let site_name = site_dir.file_name().unwrap();
+        let output_file = site_dir
+            .parent()
+            .unwrap()
+            .join("output")
+            .join(site_name)
+            .join("post/hello/index.html");
+        assert!(output_file.exists(), "output file should have been written at {}", output_file.display());
+        let html = std::fs::read_to_string(&output_file).unwrap();
+        assert!(html.contains("My Post Title"), "output should contain title");
+    }
+
+    #[test]
+    fn document_changed_emits_no_event_when_no_template_exists() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Schema exists but no template
+        let schemas_dir = dir.path().join("schemas");
+        std::fs::create_dir_all(&schemas_dir).unwrap();
+        std::fs::write(
+            schemas_dir.join("post.md"),
+            "# Post title {#title}\noccurs\n: exactly once\n",
+        )
+        .unwrap();
+
+        let content_dir = dir.path().join("content/post");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let content_path = content_dir.join("hello.md");
+
+        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+
+        let result = conductor.handle_command(Command::DocumentChanged {
+            path: content_path.to_string_lossy().to_string(),
+            text: "# My Title\n".to_string(),
+        });
+
+        assert!(matches!(result.response, Response::Ok));
+        assert!(result.events.is_empty(), "no events when rebuild fails");
+    }
+
+    #[test]
     fn edit_slot_modifies_file_and_emits_pages_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
 
