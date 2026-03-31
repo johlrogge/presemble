@@ -1041,6 +1041,11 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         &all_asset_paths,
     );
 
+    // Clean up stale output files that are no longer in the dep_graph
+    if output_dir.exists() {
+        cleanup_stale_outputs(&output_dir, &dep_graph);
+    }
+
     Ok(BuildOutcome {
         files_built,
         files_failed,
@@ -1050,6 +1055,30 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         build_errors,
         page_suggestions,
     })
+}
+
+/// Remove output files that are not tracked in the dep_graph.
+fn cleanup_stale_outputs(out_dir: &Path, dep_graph: &dep_graph::DependencyGraph) {
+    fn walk(dir: &Path, dep_graph: &dep_graph::DependencyGraph) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, dep_graph);
+                // Remove empty directories
+                let _ = std::fs::remove_dir(&path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("html")
+                && dep_graph.sources_for(&path).is_empty()
+            {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("warning: failed to remove stale output {}: {e}", path.display());
+                } else {
+                    println!("  removed stale: {}", path.display());
+                }
+            }
+        }
+    }
+    walk(out_dir, dep_graph);
 }
 
 /// Rebuild only pages whose dependencies include any of `dirty_sources`.
