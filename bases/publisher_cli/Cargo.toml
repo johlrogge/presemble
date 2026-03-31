@@ -8,6 +8,7 @@ schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 dep_graph = { workspace = true }
+editor_server = { workspace = true }
 site_index = { workspace = true }
 lsp_capabilities = { workspace = true }
 lsp_service = { workspace = true }

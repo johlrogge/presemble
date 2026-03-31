@@ -1,4 +1,5 @@
 [implementations]
+conductor = "components/conductor"
 content = "components/content"
 dep_graph = "components/dep_graph"
 editor_server = "bases/editor_server"
