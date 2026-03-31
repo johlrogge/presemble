@@ -2,7 +2,40 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use crate::protocol::{Command, Response};
+use crate::protocol::{Command, ConductorEvent, Response};
+
+/// The result of handling a command: a response to send back, plus
+/// zero or more events to broadcast to all subscribers.
+pub struct CommandResult {
+    pub response: Response,
+    pub events: Vec<ConductorEvent>,
+}
+
+impl CommandResult {
+    fn ok() -> Self {
+        Self { response: Response::Ok, events: vec![] }
+    }
+
+    fn ok_with_events(events: Vec<ConductorEvent>) -> Self {
+        Self { response: Response::Ok, events }
+    }
+
+    fn error(msg: impl Into<String>) -> Self {
+        Self { response: Response::Error(msg.into()), events: vec![] }
+    }
+
+    fn with_response(response: Response) -> Self {
+        Self { response, events: vec![] }
+    }
+}
+
+/// Derive a URL path from a content-relative file path.
+/// e.g. "content/post/hello.md" → "/post/hello"
+fn derive_url_from_content_path(file: &str) -> String {
+    let stripped = file.strip_prefix("content/").unwrap_or(file);
+    let without_ext = stripped.strip_suffix(".md").unwrap_or(stripped);
+    format!("/{without_ext}")
+}
 
 #[allow(dead_code)]
 pub struct Conductor {
@@ -53,34 +86,37 @@ impl Conductor {
         std::fs::read_to_string(path).ok()
     }
 
-    /// Handle a command and return a response.
-    pub fn handle_command(&self, cmd: Command) -> Response {
+    /// Handle a command and return a response plus any events to broadcast.
+    pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
-            Command::Ping => Response::Pong,
+            Command::Ping => CommandResult::with_response(Response::Pong),
             Command::GetGrammar { stem } => {
-                Response::SchemaSource(self.schema_source(&stem))
+                CommandResult::with_response(Response::SchemaSource(self.schema_source(&stem)))
             }
-            Command::GetDocumentText { path } => {
-                Response::DocumentText(self.document_text(Path::new(&path)))
-            }
+            Command::GetDocumentText { path } => CommandResult::with_response(
+                Response::DocumentText(self.document_text(Path::new(&path))),
+            ),
             Command::GetBuildErrors => {
                 // TODO: implement build error tracking
-                Response::BuildErrors(HashMap::new())
+                CommandResult::with_response(Response::BuildErrors(HashMap::new()))
             }
-            Command::Shutdown => {
-                // Signal shutdown (handled by daemon loop)
-                Response::Ok
-            }
+            Command::Shutdown => CommandResult::ok(),
             Command::DocumentChanged { path, text } => {
-                let path = PathBuf::from(&path);
-                self.doc_sources.write().unwrap().insert(path, text);
-                Response::Ok
+                let path_buf = PathBuf::from(&path);
+                self.doc_sources.write().unwrap().insert(path_buf.clone(), text.clone());
+
+                // Auto-save: write to disk so the file watcher picks it up and rebuilds
+                if let Err(e) = std::fs::write(&path_buf, &text) {
+                    return CommandResult::error(format!("failed to write {path}: {e}"));
+                }
+
+                CommandResult::ok()
             }
             Command::DocumentSaved { path } => {
                 let path = PathBuf::from(&path);
                 // Clear in-memory version — disk is now authoritative
                 self.doc_sources.write().unwrap().remove(&path);
-                Response::Ok
+                CommandResult::ok()
             }
             Command::FileChanged { paths } => {
                 for p in &paths {
@@ -97,7 +133,7 @@ impl Conductor {
                         self.schema_cache.write().unwrap().insert(stem, src);
                     }
                 }
-                Response::Ok
+                CommandResult::ok()
             }
             Command::EditSlot { file, slot, value } => {
                 let abs_path = self.site_dir.join(&file);
@@ -107,13 +143,13 @@ impl Conductor {
                     Some(c) => match c.as_os_str().to_str() {
                         Some(s) => s.to_string(),
                         None => {
-                            return Response::Error(format!(
+                            return CommandResult::error(format!(
                                 "cannot derive schema stem from: {file}"
                             ))
                         }
                     },
                     None => {
-                        return Response::Error(format!(
+                        return CommandResult::error(format!(
                             "cannot derive schema stem from: {file}"
                         ))
                     }
@@ -123,33 +159,42 @@ impl Conductor {
                 let grammar = match self.schema_source(&stem) {
                     Some(src) => match schema::parse_schema(&src) {
                         Ok(g) => g,
-                        Err(e) => return Response::Error(format!("schema parse error: {e:?}")),
+                        Err(e) => {
+                            return CommandResult::error(format!("schema parse error: {e:?}"))
+                        }
                     },
-                    None => return Response::Error(format!("no schema for: {stem}")),
+                    None => return CommandResult::error(format!("no schema for: {stem}")),
                 };
 
                 // Read the content file
                 let content_src = match std::fs::read_to_string(&abs_path) {
                     Ok(s) => s,
-                    Err(e) => return Response::Error(format!("cannot read {file}: {e}")),
+                    Err(e) => {
+                        return CommandResult::error(format!("cannot read {file}: {e}"))
+                    }
                 };
 
                 // Parse, modify, serialize, and write
                 let mut doc = match content::parse_document(&content_src) {
                     Ok(d) => d,
-                    Err(e) => return Response::Error(format!("parse error: {e}")),
+                    Err(e) => return CommandResult::error(format!("parse error: {e}")),
                 };
 
                 if let Err(e) = content::modify_slot(&mut doc, &slot, &grammar, &value) {
-                    return Response::Error(e);
+                    return CommandResult::error(e);
                 }
 
                 let new_src = content::serialize_document(&doc);
                 if let Err(e) = std::fs::write(&abs_path, new_src) {
-                    return Response::Error(format!("write error: {e}"));
+                    return CommandResult::error(format!("write error: {e}"));
                 }
 
-                Response::Ok
+                // Broadcast a PagesRebuilt event so connected browsers reload
+                let url = derive_url_from_content_path(&file);
+                CommandResult::ok_with_events(vec![ConductorEvent::PagesRebuilt {
+                    pages: vec![url],
+                    anchor: None,
+                }])
             }
         }
     }
