@@ -146,8 +146,17 @@ pub struct BuildOutcome {
 
 impl BuildOutcome {
     pub fn has_errors(&self) -> bool {
-        self.files_failed > 0
+        self.files_failed > 0 || self.files_with_suggestions > 0
     }
+}
+
+/// Controls how validation failures are handled during a build.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BuildMode {
+    /// Production build: validation failures skip the page, exit non-zero.
+    Build,
+    /// Development serve: validation failures render as suggestion placeholders.
+    Serve,
 }
 
 #[derive(Parser)]
@@ -213,7 +222,7 @@ pub fn run() -> Result<(), CliError> {
                 base_path.as_deref(),
                 base_url.as_deref(),
             )?;
-            let outcome = build_site(site_path, &url_config)?;
+            let outcome = build_site(site_path, &url_config, BuildMode::Build)?;
             if outcome.has_errors() {
                 std::process::exit(1);
             }
@@ -239,7 +248,7 @@ pub fn run() -> Result<(), CliError> {
             // backward compat: presemble <site-dir>
             let site_dir = cli.site_dir
                 .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?;
-            let outcome = build_site(Path::new(&site_dir), &UrlConfig::default())?;
+            let outcome = build_site(Path::new(&site_dir), &UrlConfig::default(), BuildMode::Build)?;
             if outcome.has_errors() {
                 std::process::exit(1);
             }
@@ -303,6 +312,7 @@ pub fn build_content_page(
     content_path: &std::path::Path,
     grammar: &schema::Grammar,
     page_errors: &mut Vec<String>,
+    mode: BuildMode,
 ) -> Result<Option<PageBuildResult>, CliError> {
     let file_name = content_path
         .file_name()
@@ -325,16 +335,32 @@ pub fn build_content_page(
     let result = content::validate(&doc, grammar);
 
     if !result.is_valid() {
-        println!("{file_name}: SUGGESTIONS");
-        for diagnostic in &result.diagnostics {
-            let msg = format!(
-                "[SUGGESTION] {}",
-                diagnostic.message
-            );
-            println!("  {msg}");
-            page_errors.push(msg);
+        match mode {
+            BuildMode::Build => {
+                println!("{file_name}: FAIL");
+                for diagnostic in &result.diagnostics {
+                    let msg = format!(
+                        "[VALIDATION] {}",
+                        diagnostic.message
+                    );
+                    println!("  {msg}");
+                    page_errors.push(msg);
+                }
+                return Ok(None);
+            }
+            BuildMode::Serve => {
+                println!("{file_name}: SUGGESTIONS");
+                for diagnostic in &result.diagnostics {
+                    let msg = format!(
+                        "[SUGGESTION] {}",
+                        diagnostic.message
+                    );
+                    println!("  {msg}");
+                    page_errors.push(msg);
+                }
+                // Fall through: continue building with suggestion nodes for missing slots
+            }
         }
-        // Fall through: continue building with suggestion nodes for missing slots
     } else {
         println!("{file_name}: PASS");
     }
@@ -554,7 +580,7 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+pub fn build_site(site_dir: &Path, url_config: &UrlConfig, mode: BuildMode) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir)
         .unwrap_or_else(|_| site_dir.to_path_buf());
     let site_dir = site_dir.as_path();
@@ -696,6 +722,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcom
                 &content_path,
                 &grammar,
                 &mut page_errors_buf,
+                mode,
             )? {
                 Some(page_result) => {
                     dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
@@ -898,6 +925,7 @@ pub fn rebuild_affected(
     current_graph: &DependencyGraph,
     url_config: &UrlConfig,
     new_content_files: &[std::path::PathBuf],
+    mode: BuildMode,
 ) -> Result<BuildOutcome, CliError> {
     use std::collections::HashSet;
 
@@ -1003,7 +1031,7 @@ pub fn rebuild_affected(
 
         // Build the page (collect only — rendering deferred until after reference resolution)
         let mut page_errors_buf: Vec<String> = Vec::new();
-        match build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar, &mut page_errors_buf)? {
+        match build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar, &mut page_errors_buf, mode)? {
             Some(result) => {
                 outcome
                     .dep_graph
@@ -1088,7 +1116,7 @@ pub fn rebuild_affected(
         };
 
         let mut page_errors_buf: Vec<String> = Vec::new();
-        match build_content_page(site_dir, &schema_stem, &schema_path, content_path, &grammar, &mut page_errors_buf)? {
+        match build_content_page(site_dir, &schema_stem, &schema_path, content_path, &grammar, &mut page_errors_buf, mode)? {
             Some(result) => {
                 outcome
                     .dep_graph
@@ -1154,7 +1182,7 @@ pub fn rebuild_affected(
     // is to delegate to build_site() which re-reads everything and re-renders the index.
     // This is a full rebuild but only happens when the index is explicitly affected.
     if rebuild_index || !new_content_files.is_empty() {
-        let full = build_site(site_dir, url_config)?;
+        let full = build_site(site_dir, url_config, mode)?;
         // Copy the index dep registration from the full build into our partial outcome
         let index_deps = full.dep_graph.sources_for(&index_output);
         if !index_deps.is_empty() {
