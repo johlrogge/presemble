@@ -9,3 +9,4 @@ fixtures/*/output/
 site/output/
 site/.devenv/
 /output/
+.pre-commit-config.yaml
