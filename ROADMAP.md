@@ -327,6 +327,20 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - LSP link completions already enumerate existing content — extend to validate references at build time
 - "Create" quickfix would scaffold a new content file from the schema and open it in the editor
 
+**Live nodes — backend-backed template regions (brainstorm):**
+- Some template nodes could be backed by a live data source in production (database, API, etc.)
+- Example: a product catalog region pulls from a database instead of static content files
+- The template declares the node as "live" — at build time it renders a placeholder or static snapshot, at serve/production time it fetches from the backend
+- Enables hybrid static/dynamic sites without leaving the Presemble model
+- Schema still validates the shape of the data — the source just changes from file to backend
+
+**Full-text search with FST indexes (brainstorm):**
+- Use finite state transducers (https://burntsushi.net/transducers/) to produce compact search indexes at build time
+- Each content type could have its own index (search posts, search authors, search features separately)
+- The index is a static artifact — no server-side search needed, works with any hosting
+- Could power an in-browser search UI or a `/_presemble/search` endpoint in serve mode
+- The `fst` crate (Rust) implements this — small dependency, battle-tested
+
 **Other deferred items:**
 - Real-time multiplayer editing
 - Comments, suggestions, track changes (beyond M5 suggest mode)
