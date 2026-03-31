@@ -7,12 +7,13 @@ in
   claude.code.enable = true;
 
   git-hooks.enable = true;
-  git-hooks.hooks.clippy = {
+  git-hooks.hooks.polylith-clippy = {
     enable = true;
-    name = "clippy";
+    name = "Clippy (polylith)";
     entry = "cargo polylith cargo --profile dev clippy -- -D warnings";
+    files = "\\.(rs|toml)$";
+    language = "system";
     pass_filenames = false;
-    types = ["rust"];
   };
 
   packages = [
