@@ -150,13 +150,87 @@ impl BuildOutcome {
     }
 }
 
-/// Controls how validation failures are handled during a build.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum BuildMode {
-    /// Production build: validation failures skip the page, exit non-zero.
-    Build,
-    /// Development serve: validation failures render as suggestion placeholders.
-    Serve,
+/// Result of attempting to build a single content page, before any policy.
+pub struct PageBuildAttempt {
+    pub file_name: String,
+    pub validation: content::ValidationResult,
+    pub page: Option<PageBuildResult>,
+    pub parse_error: Option<String>,
+}
+
+/// Policy decision for a page build attempt.
+pub enum PageDisposition {
+    /// Page is valid, include it.
+    Include,
+    /// Page has issues but should still be included (serve mode suggestions).
+    IncludeWithSuggestions(Vec<String>),
+    /// Page failed validation, skip it.
+    Skip(Vec<String>),
+}
+
+/// How to handle broken link references.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LinkDisposition {
+    HardError,
+    Warning,
+}
+
+/// Policy for how the build pipeline handles validation failures and broken links.
+pub struct BuildPolicy {
+    pub page_policy: fn(&PageBuildAttempt) -> PageDisposition,
+    pub link_policy: LinkDisposition,
+}
+
+impl BuildPolicy {
+    /// Strict: validation failures skip pages, broken links are errors.
+    pub fn strict() -> Self {
+        BuildPolicy {
+            page_policy: |attempt| {
+                if attempt.parse_error.is_some() {
+                    let msg = attempt.parse_error.as_ref().unwrap().clone();
+                    return PageDisposition::Skip(vec![msg]);
+                }
+                if !attempt.validation.is_valid() {
+                    let msgs: Vec<String> = attempt.validation.diagnostics.iter()
+                        .map(|d| format!("[ERROR] {}", d.message))
+                        .collect();
+                    return PageDisposition::Skip(msgs);
+                }
+                PageDisposition::Include
+            },
+            link_policy: LinkDisposition::HardError,
+        }
+    }
+
+    /// Lenient: validation failures produce suggestions, broken links are warnings.
+    pub fn lenient() -> Self {
+        BuildPolicy {
+            page_policy: |attempt| {
+                if attempt.parse_error.is_some() {
+                    let msg = attempt.parse_error.as_ref().unwrap().clone();
+                    return PageDisposition::Skip(vec![msg]);
+                }
+                if !attempt.validation.is_valid() {
+                    let msgs: Vec<String> = attempt.validation.diagnostics.iter()
+                        .map(|d| format!("[SUGGESTION] {}", d.message))
+                        .collect();
+                    return PageDisposition::IncludeWithSuggestions(msgs);
+                }
+                PageDisposition::Include
+            },
+            link_policy: LinkDisposition::Warning,
+        }
+    }
+}
+
+/// Top-level entry point for production builds (strict policy).
+pub fn build_for_publish(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+    build_site(site_dir, url_config, &BuildPolicy::strict())
+}
+
+/// Top-level entry point for development serve (lenient policy).
+pub fn build_for_serve(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+    build_site(site_dir, url_config, &BuildPolicy::lenient())
 }
 
 #[derive(Parser)]
@@ -222,7 +296,7 @@ pub fn run() -> Result<(), CliError> {
                 base_path.as_deref(),
                 base_url.as_deref(),
             )?;
-            let outcome = build_site(site_path, &url_config, BuildMode::Build)?;
+            let outcome = build_for_publish(site_path, &url_config)?;
             if outcome.has_errors() {
                 std::process::exit(1);
             }
@@ -248,7 +322,7 @@ pub fn run() -> Result<(), CliError> {
             // backward compat: presemble <site-dir>
             let site_dir = cli.site_dir
                 .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?;
-            let outcome = build_site(Path::new(&site_dir), &UrlConfig::default(), BuildMode::Build)?;
+            let outcome = build_for_publish(Path::new(&site_dir), &UrlConfig::default())?;
             if outcome.has_errors() {
                 std::process::exit(1);
             }
@@ -297,73 +371,42 @@ fn load_url_config(
     Ok(config)
 }
 
-/// Build a single content page: parse, validate, render, and write output.
+/// Build a single content page: parse, validate, and collect data.
 ///
-/// Returns `Ok(Some(result))` when the page was successfully built (possibly with suggestion nodes).
-///   When validation finds issues, `page_errors` is populated with human-readable messages,
-///   but the page is still built — missing slots are filled with `Value::Suggestion` nodes.
-/// Returns `Ok(None)` only when the content fails to **parse** (hard failure).
-///   On parse failure, `page_errors` is populated with the parse error message.
-/// Returns `Err(CliError)` for IO or render errors.
+/// Returns `Ok(PageBuildAttempt)` in all cases — the attempt records whether parsing
+/// succeeded, what the validation result was, and (if parsing succeeded) the page data.
+/// Returns `Err(CliError)` only for IO errors.
+///
+/// Callers inspect the `PageBuildAttempt` and apply policy to decide what to do.
 pub fn build_content_page(
     site_dir: &std::path::Path,
     schema_stem: &str,
     schema_path: &std::path::Path,
     content_path: &std::path::Path,
     grammar: &schema::Grammar,
-    page_errors: &mut Vec<String>,
-    mode: BuildMode,
-) -> Result<Option<PageBuildResult>, CliError> {
+) -> Result<PageBuildAttempt, CliError> {
     let file_name = content_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("<unknown>");
+        .unwrap_or("<unknown>")
+        .to_string();
 
     let content_source = std::fs::read_to_string(content_path)?;
 
     let doc = match content::parse_document(&content_source) {
         Ok(d) => d,
         Err(e) => {
-            println!("{file_name}: FAIL");
             let msg = format!("parse error: {e}");
-            println!("  {msg}");
-            page_errors.push(msg);
-            return Ok(None);
+            return Ok(PageBuildAttempt {
+                file_name,
+                validation: content::ValidationResult::default(),
+                page: None,
+                parse_error: Some(msg),
+            });
         }
     };
 
-    let result = content::validate(&doc, grammar);
-
-    if !result.is_valid() {
-        match mode {
-            BuildMode::Build => {
-                println!("{file_name}: FAIL");
-                for diagnostic in &result.diagnostics {
-                    let msg = format!(
-                        "[VALIDATION] {}",
-                        diagnostic.message
-                    );
-                    println!("  {msg}");
-                    page_errors.push(msg);
-                }
-                return Ok(None);
-            }
-            BuildMode::Serve => {
-                println!("{file_name}: SUGGESTIONS");
-                for diagnostic in &result.diagnostics {
-                    let msg = format!(
-                        "[SUGGESTION] {}",
-                        diagnostic.message
-                    );
-                    println!("  {msg}");
-                    page_errors.push(msg);
-                }
-                // Fall through: continue building with suggestion nodes for missing slots
-            }
-        }
-    } else {
-        println!("{file_name}: PASS");
-    }
+    let validation = content::validate(&doc, grammar);
 
     // Compute canonical address once, before branching on template existence
     let addr = page_address(site_dir, schema_stem, content_path);
@@ -372,7 +415,7 @@ pub fn build_content_page(
     let templates_dir = site_dir.join("templates");
     let template_path = find_template(&templates_dir, schema_stem);
 
-    // Build data graph
+    // Build data graph (always — suggestion nodes fill missing slots)
     let mut slot_graph = template::build_article_graph(&doc, grammar);
 
     // Extract title text for the link record (fallback to slug if absent)
@@ -401,7 +444,7 @@ pub fn build_content_page(
         deps.insert(tp.to_path_buf());
     }
 
-    Ok(Some(PageBuildResult {
+    let page_result = PageBuildResult {
         built: BuiltPage {
             url_path: addr.url_path,
             data: slot_graph,
@@ -410,7 +453,14 @@ pub fn build_content_page(
         schema_stem: schema_stem.to_string(),
         deps,
         template_path,
-    }))
+    };
+
+    Ok(PageBuildAttempt {
+        file_name,
+        validation,
+        page: Some(page_result),
+        parse_error: None,
+    })
 }
 
 /// After all pages are built, walk each page's DataGraph and resolve
@@ -580,7 +630,7 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn build_site(site_dir: &Path, url_config: &UrlConfig, mode: BuildMode) -> Result<BuildOutcome, CliError> {
+pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir)
         .unwrap_or_else(|_| site_dir.to_path_buf());
     let site_dir = site_dir.as_path();
@@ -714,49 +764,70 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, mode: BuildMode) -> R
             // Track content path for index deps
             all_content_paths.push(content_path.clone());
 
-            let mut page_errors_buf: Vec<String> = Vec::new();
-            match build_content_page(
+            let attempt = build_content_page(
                 site_dir,
                 schema_stem,
                 &schema_path,
                 &content_path,
                 &grammar,
-                &mut page_errors_buf,
-                mode,
-            )? {
-                Some(page_result) => {
-                    dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
-                    let schema_stem_str = schema_stem.to_string();
-                    let page_index = built_pages
-                        .entry(schema_stem_str.clone())
-                        .or_default()
-                        .len();
-                    let page_url_path = page_result.built.url_path.clone();
-                    built_pages
-                        .entry(schema_stem_str.clone())
-                        .or_default()
-                        .push(page_result.built);
-
-                    collected_pages.push(CollectedPage {
-                        schema_stem: schema_stem_str,
-                        page_index,
-                        output_path: page_result.output_path,
-                        template_path: page_result.template_path,
-                        url_path: page_url_path.clone(),
-                    });
-                    if !page_errors_buf.is_empty() {
-                        page_suggestions.insert(page_url_path, page_errors_buf);
-                        files_with_suggestions += 1;
-                    } else {
+            )?;
+            let disposition = (policy.page_policy)(&attempt);
+            match disposition {
+                PageDisposition::Include => {
+                    println!("{}: PASS", attempt.file_name);
+                    if let Some(page_result) = attempt.page {
+                        dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
+                        let schema_stem_str = schema_stem.to_string();
+                        let page_index = built_pages
+                            .entry(schema_stem_str.clone())
+                            .or_default()
+                            .len();
+                        let page_url_path = page_result.built.url_path.clone();
+                        built_pages
+                            .entry(schema_stem_str.clone())
+                            .or_default()
+                            .push(page_result.built);
+                        collected_pages.push(CollectedPage {
+                            schema_stem: schema_stem_str,
+                            page_index,
+                            output_path: page_result.output_path,
+                            template_path: page_result.template_path,
+                            url_path: page_url_path,
+                        });
                         files_built += 1;
                     }
                 }
-                None => {
-                    // Only parse failures reach here
-                    if !page_errors_buf.is_empty() {
-                        let url_path = page_address(site_dir, schema_stem, &content_path).url_path;
-                        build_errors.insert(url_path, page_errors_buf);
+                PageDisposition::IncludeWithSuggestions(msgs) => {
+                    println!("{}: SUGGESTIONS", attempt.file_name);
+                    for msg in &msgs { println!("  {msg}"); }
+                    if let Some(page_result) = attempt.page {
+                        dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
+                        let schema_stem_str = schema_stem.to_string();
+                        let page_index = built_pages
+                            .entry(schema_stem_str.clone())
+                            .or_default()
+                            .len();
+                        let page_url_path = page_result.built.url_path.clone();
+                        built_pages
+                            .entry(schema_stem_str.clone())
+                            .or_default()
+                            .push(page_result.built);
+                        collected_pages.push(CollectedPage {
+                            schema_stem: schema_stem_str,
+                            page_index,
+                            output_path: page_result.output_path,
+                            template_path: page_result.template_path,
+                            url_path: page_url_path.clone(),
+                        });
+                        page_suggestions.insert(page_url_path, msgs);
+                        files_with_suggestions += 1;
                     }
+                }
+                PageDisposition::Skip(msgs) => {
+                    println!("{}: FAIL", attempt.file_name);
+                    for msg in &msgs { println!("  {msg}"); }
+                    let url_path = page_address(site_dir, schema_stem, &content_path).url_path;
+                    build_errors.insert(url_path, msgs);
                     files_failed += 1;
                 }
             }
@@ -802,15 +873,15 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, mode: BuildMode) -> R
 
         if !link_errors.is_empty() {
             for (page_url, msg) in &link_errors {
-                match mode {
-                    BuildMode::Build => {
+                match policy.link_policy {
+                    LinkDisposition::HardError => {
                         println!("  [ERROR] {msg}");
                         build_errors
                             .entry(page_url.clone())
                             .or_default()
                             .push(msg.clone());
                     }
-                    BuildMode::Serve => {
+                    LinkDisposition::Warning => {
                         println!("  [WARNING] {msg}");
                         page_suggestions
                             .entry(page_url.clone())
@@ -819,7 +890,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, mode: BuildMode) -> R
                     }
                 }
             }
-            if mode == BuildMode::Build {
+            if policy.link_policy == LinkDisposition::HardError {
                 files_failed += link_errors.len();
             }
         }
@@ -984,7 +1055,7 @@ pub fn rebuild_affected(
     current_graph: &DependencyGraph,
     url_config: &UrlConfig,
     new_content_files: &[std::path::PathBuf],
-    mode: BuildMode,
+    policy: &BuildPolicy,
 ) -> Result<BuildOutcome, CliError> {
     use std::collections::HashSet;
 
@@ -1089,43 +1160,50 @@ pub fn rebuild_affected(
         };
 
         // Build the page (collect only — rendering deferred until after reference resolution)
-        let mut page_errors_buf: Vec<String> = Vec::new();
-        match build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar, &mut page_errors_buf, mode)? {
-            Some(result) => {
-                outcome
-                    .dep_graph
-                    .register(result.output_path.clone(), result.deps.clone());
-                let page_index = outcome
-                    .built_pages
-                    .entry(schema_stem.clone())
-                    .or_default()
-                    .len();
-                let page_url_path = result.built.url_path.clone();
-                outcome
-                    .built_pages
-                    .entry(schema_stem.clone())
-                    .or_default()
-                    .push(result.built);
-                rebuild_collected.push(CollectedPage {
-                    schema_stem: schema_stem.clone(),
-                    page_index,
-                    output_path: result.output_path,
-                    template_path: result.template_path,
-                    url_path: page_url_path.clone(),
-                });
-                if !page_errors_buf.is_empty() {
-                    outcome.page_suggestions.insert(page_url_path, page_errors_buf);
-                    outcome.files_with_suggestions += 1;
-                } else {
+        let attempt = build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar)?;
+        let disposition = (policy.page_policy)(&attempt);
+        match disposition {
+            PageDisposition::Include => {
+                println!("{}: PASS", attempt.file_name);
+                if let Some(result) = attempt.page {
+                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
+                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
+                    let page_url_path = result.built.url_path.clone();
+                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
+                    rebuild_collected.push(CollectedPage {
+                        schema_stem: schema_stem.clone(),
+                        page_index,
+                        output_path: result.output_path,
+                        template_path: result.template_path,
+                        url_path: page_url_path,
+                    });
                     outcome.files_built += 1;
                 }
             }
-            None => {
-                // Only parse failures reach here
-                if !page_errors_buf.is_empty() {
-                    let url_path = page_address(site_dir, &schema_stem, &content_path).url_path;
-                    outcome.build_errors.insert(url_path, page_errors_buf);
+            PageDisposition::IncludeWithSuggestions(msgs) => {
+                println!("{}: SUGGESTIONS", attempt.file_name);
+                for msg in &msgs { println!("  {msg}"); }
+                if let Some(result) = attempt.page {
+                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
+                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
+                    let page_url_path = result.built.url_path.clone();
+                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
+                    rebuild_collected.push(CollectedPage {
+                        schema_stem: schema_stem.clone(),
+                        page_index,
+                        output_path: result.output_path,
+                        template_path: result.template_path,
+                        url_path: page_url_path.clone(),
+                    });
+                    outcome.page_suggestions.insert(page_url_path, msgs);
+                    outcome.files_with_suggestions += 1;
                 }
+            }
+            PageDisposition::Skip(msgs) => {
+                println!("{}: FAIL", attempt.file_name);
+                for msg in &msgs { println!("  {msg}"); }
+                let url_path = page_address(site_dir, &schema_stem, &content_path).url_path;
+                outcome.build_errors.insert(url_path, msgs);
                 outcome.files_failed += 1;
             }
         }
@@ -1174,42 +1252,50 @@ pub fn rebuild_affected(
             }
         };
 
-        let mut page_errors_buf: Vec<String> = Vec::new();
-        match build_content_page(site_dir, &schema_stem, &schema_path, content_path, &grammar, &mut page_errors_buf, mode)? {
-            Some(result) => {
-                outcome
-                    .dep_graph
-                    .register(result.output_path.clone(), result.deps.clone());
-                let page_index = outcome
-                    .built_pages
-                    .entry(schema_stem.clone())
-                    .or_default()
-                    .len();
-                let page_url_path = result.built.url_path.clone();
-                outcome
-                    .built_pages
-                    .entry(schema_stem.clone())
-                    .or_default()
-                    .push(result.built);
-                rebuild_collected.push(CollectedPage {
-                    schema_stem: schema_stem.clone(),
-                    page_index,
-                    output_path: result.output_path,
-                    template_path: result.template_path,
-                    url_path: page_url_path.clone(),
-                });
-                if !page_errors_buf.is_empty() {
-                    outcome.page_suggestions.insert(page_url_path, page_errors_buf);
-                    outcome.files_with_suggestions += 1;
-                } else {
+        let attempt = build_content_page(site_dir, &schema_stem, &schema_path, content_path, &grammar)?;
+        let disposition = (policy.page_policy)(&attempt);
+        match disposition {
+            PageDisposition::Include => {
+                println!("{}: PASS", attempt.file_name);
+                if let Some(result) = attempt.page {
+                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
+                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
+                    let page_url_path = result.built.url_path.clone();
+                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
+                    rebuild_collected.push(CollectedPage {
+                        schema_stem: schema_stem.clone(),
+                        page_index,
+                        output_path: result.output_path,
+                        template_path: result.template_path,
+                        url_path: page_url_path,
+                    });
                     outcome.files_built += 1;
                 }
             }
-            None => {
-                if !page_errors_buf.is_empty() {
-                    let url_path = page_address(site_dir, &schema_stem, content_path).url_path;
-                    outcome.build_errors.insert(url_path, page_errors_buf);
+            PageDisposition::IncludeWithSuggestions(msgs) => {
+                println!("{}: SUGGESTIONS", attempt.file_name);
+                for msg in &msgs { println!("  {msg}"); }
+                if let Some(result) = attempt.page {
+                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
+                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
+                    let page_url_path = result.built.url_path.clone();
+                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
+                    rebuild_collected.push(CollectedPage {
+                        schema_stem: schema_stem.clone(),
+                        page_index,
+                        output_path: result.output_path,
+                        template_path: result.template_path,
+                        url_path: page_url_path.clone(),
+                    });
+                    outcome.page_suggestions.insert(page_url_path, msgs);
+                    outcome.files_with_suggestions += 1;
                 }
+            }
+            PageDisposition::Skip(msgs) => {
+                println!("{}: FAIL", attempt.file_name);
+                for msg in &msgs { println!("  {msg}"); }
+                let url_path = page_address(site_dir, &schema_stem, content_path).url_path;
+                outcome.build_errors.insert(url_path, msgs);
                 outcome.files_failed += 1;
             }
         }
@@ -1241,7 +1327,7 @@ pub fn rebuild_affected(
     // is to delegate to build_site() which re-reads everything and re-renders the index.
     // This is a full rebuild but only happens when the index is explicitly affected.
     if rebuild_index || !new_content_files.is_empty() {
-        let full = build_site(site_dir, url_config, mode)?;
+        let full = build_site(site_dir, url_config, policy)?;
         // Copy the index dep registration from the full build into our partial outcome
         let index_deps = full.dep_graph.sources_for(&index_output);
         if !index_deps.is_empty() {

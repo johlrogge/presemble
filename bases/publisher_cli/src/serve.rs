@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use crate::{build_site, rebuild_affected, BuildMode, DependencyGraph, UrlConfig};
+use crate::{build_for_serve, rebuild_affected, BuildPolicy, DependencyGraph, UrlConfig};
 use axum::{
     Router,
     extract::{Query, State, WebSocketUpgrade},
@@ -78,7 +78,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
     let current_graph = Arc::new(Mutex::new(DependencyGraph::new()));
     let build_errors: Arc<Mutex<HashMap<String, Vec<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    match build_site(site_dir, url_config, BuildMode::Serve) {
+    match build_for_serve(site_dir, url_config) {
         Ok(outcome) => {
             *current_graph.lock().unwrap() = outcome.dep_graph;
             *build_errors.lock().unwrap() = outcome.build_errors;
@@ -896,7 +896,7 @@ fn watch_and_rebuild(
         }
 
         println!("Rebuilding {} page(s)...", affected_count.max(1));
-        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, BuildMode::Serve) {
+        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, &BuildPolicy::lenient()) {
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
                 g.merge(outcome.dep_graph);
@@ -965,7 +965,7 @@ fn watch_and_rebuild(
             }
             Err(e) => {
                 eprintln!("Rebuild failed: {e} — falling back to full rebuild");
-                match build_site(site_dir, url_config, BuildMode::Serve) {
+                match build_for_serve(site_dir, url_config) {
                     Ok(outcome) => {
                         let mut g = graph.lock().unwrap();
                         *g = outcome.dep_graph;

@@ -5,7 +5,7 @@ use schema::{
 };
 
 /// The result of validating a document against a grammar.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ValidationResult {
     pub diagnostics: Vec<ValidationDiagnostic>,
 }
