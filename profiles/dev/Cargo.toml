@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "components/conductor",
     "components/content",
     "components/dep_graph",
     "components/lsp_capabilities",
@@ -19,10 +20,11 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 
 [workspace.dependencies]
+conductor = { path = "components/conductor" }
 content = { path = "components/content" }
 dep_graph = { path = "components/dep_graph" }
 editor_server = { path = "bases/editor_server" }
@@ -35,6 +37,7 @@ template = { path = "components/template" }
 validation = { path = "components/validation" }
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
+nng = "1"
 notify = "7"
 pulldown-cmark = "0.12"
 quick-xml = { version = "0.36", features = ["serialize"] }

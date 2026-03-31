@@ -21,10 +21,11 @@ pub struct PresembleLsp {
     pub site_dir: std::path::PathBuf,
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
+    conductor: Option<conductor::ConductorClient>,
 }
 
 impl PresembleLsp {
-    pub fn new(client: Client, site_dir: std::path::PathBuf) -> Self {
+    pub fn new(client: Client, site_dir: std::path::PathBuf, conductor: Option<conductor::ConductorClient>) -> Self {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
         Self {
@@ -33,6 +34,7 @@ impl PresembleLsp {
             site_dir,
             doc_sources: Arc::new(Mutex::new(HashMap::new())),
             doc_diagnostics: Arc::new(Mutex::new(HashMap::new())),
+            conductor,
         }
     }
 
@@ -227,6 +229,14 @@ impl LanguageServer for PresembleLsp {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
             let kind = self.site_index.classify(&path);
+            // Notify conductor of the change (triggers rebuild + browser reload).
+            // Fire-and-forget: if it fails, the LSP still works locally.
+            if let Some(ref cond) = self.conductor {
+                let _ = cond.send(&conductor::Command::DocumentChanged {
+                    path: path.to_string_lossy().to_string(),
+                    text: c.text.clone(),
+                });
+            }
             match kind {
                 site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, c.text).await,
                 site_index::FileKind::Schema { .. } => {
@@ -241,6 +251,14 @@ impl LanguageServer for PresembleLsp {
     }
 
     async fn did_save(&self, p: DidSaveTextDocumentParams) {
+        // Notify conductor that this file was saved (clears in-memory buffer, triggers rebuild).
+        // Fire-and-forget: if it fails, the LSP still works locally.
+        if let Some(ref cond) = self.conductor {
+            let path = p.text_document.uri.to_file_path().unwrap_or_default();
+            let _ = cond.send(&conductor::Command::DocumentSaved {
+                path: path.to_string_lossy().to_string(),
+            });
+        }
         if let Ok(mut src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();

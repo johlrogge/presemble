@@ -1,6 +1,6 @@
 [package]
 name = "publisher_cli"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 
 [dependencies]
@@ -8,6 +8,8 @@ schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 dep_graph = { workspace = true }
+conductor = { workspace = true }
+editor_server = { workspace = true }
 site_index = { workspace = true }
 lsp_capabilities = { workspace = true }
 lsp_service = { workspace = true }
