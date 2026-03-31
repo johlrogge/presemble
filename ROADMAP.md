@@ -312,6 +312,21 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - Query the data graph, test template fragments, inspect schema validation — without leaving the editor
 - Requires the conductor's nng IPC backbone
 
+**Named body sections (brainstorm):**
+- The `----` separator could be extended with named sections: `---- {#named-section}`
+- Multiple body sections with different constraints per section
+- Schema could specify: `## Introduction {#intro}` section allows h3..h4, `## Details {#details}` allows h2..h6
+- Enables structured body content without losing the free-form feel
+
+**Link validation and quickfixes (brainstorm):**
+- Build and LSP should validate content references (e.g., `[Author](/author/johlrogge)` → does the author exist?)
+- Different diagnostic levels:
+  - Schema exists but content file missing → offer quickfix: "Create /author/johlrogge" (opens new buffer with suggestion placeholders)
+  - Schema exists, close match found → offer quickfix: "Did you mean /author/johlrogge?" (fuzzy match)
+  - Schema doesn't exist → hard error
+- LSP link completions already enumerate existing content — extend to validate references at build time
+- "Create" quickfix would scaffold a new content file from the schema and open it in the editor
+
 **Other deferred items:**
 - Real-time multiplayer editing
 - Comments, suggestions, track changes (beyond M5 suggest mode)
