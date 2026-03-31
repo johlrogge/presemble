@@ -279,6 +279,11 @@ enum Command {
         /// Path to the site directory
         site_dir: String,
     },
+    /// Start the conductor daemon for a site
+    Conductor {
+        /// Path to the site directory
+        site_dir: String,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -316,6 +321,9 @@ pub fn run() -> Result<(), CliError> {
             init_site(Path::new(&site_dir))
         }
         Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
+        Some(Command::Conductor { site_dir }) => {
+            editor_server::run_daemon(Path::new(&site_dir)).map_err(CliError::Render)
+        }
         None => {
             // backward compat: presemble <site-dir>
             let site_dir = cli.site_dir

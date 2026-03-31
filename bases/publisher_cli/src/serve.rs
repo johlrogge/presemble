@@ -64,6 +64,7 @@ struct AppState {
     reload_tx: broadcast::Sender<ReloadMessage>,
     build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
     site_dir: std::path::PathBuf,
+    conductor: Option<Arc<conductor::ConductorClient>>,
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
@@ -121,11 +122,49 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         watch_and_rebuild(&site_dir_owned, graph_clone, &url_config_owned, reload_tx_clone, snapshot_clone, build_errors_clone);
     });
 
+    // Connect to conductor (auto-starts if needed)
+    let conductor_client = match conductor::ensure_conductor(site_dir) {
+        Ok(c) => {
+            println!("Connected to conductor");
+            Some(Arc::new(c))
+        }
+        Err(e) => {
+            eprintln!("Warning: conductor not available: {e}");
+            eprintln!("Running without conductor — edits from Helix will not update browser live");
+            None
+        }
+    };
+
+    // Subscribe to conductor events and forward to the reload broadcast channel
+    if conductor_client.is_some() {
+        let pub_url = format!("{}-pub", conductor::socket_url(site_dir));
+        let reload_tx_clone = reload_tx.clone();
+        std::thread::spawn(move || {
+            if let Ok(sub) = conductor::ConductorSubscriber::connect(&pub_url) {
+                loop {
+                    match sub.recv() {
+                        Ok(conductor::ConductorEvent::PagesRebuilt { pages, anchor }) => {
+                            let _ = reload_tx_clone.send(ReloadMessage { pages, anchor });
+                        }
+                        Ok(conductor::ConductorEvent::BuildFailed { error_pages }) => {
+                            let _ = reload_tx_clone.send(ReloadMessage { pages: error_pages, anchor: None });
+                        }
+                        Err(e) => {
+                            eprintln!("Conductor subscription error: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let state = AppState {
         output_dir: out_dir.clone(),
         reload_tx,
         build_errors,
         site_dir: site_dir.to_path_buf(),
+        conductor: conductor_client,
     };
 
     let app = Router::new()
@@ -168,6 +207,26 @@ async fn edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
+    // Forward through conductor if available
+    if let Some(ref cond) = state.conductor {
+        match cond.send(&conductor::Command::EditSlot {
+            file: req.file.clone(),
+            slot: req.slot.clone(),
+            value: req.value.clone(),
+        }) {
+            Ok(conductor::Response::Ok) => {
+                return axum::Json(EditResponse { ok: true, error: None });
+            }
+            Ok(conductor::Response::Error(e)) => {
+                return axum::Json(EditResponse { ok: false, error: Some(e) });
+            }
+            Err(e) => {
+                return axum::Json(EditResponse { ok: false, error: Some(e) });
+            }
+            _ => {} // unexpected response, fall through to local handling
+        }
+    }
+    // Fall back to local apply_edit
     match apply_edit(&state.site_dir, &req.file, &req.slot, &req.value) {
         Ok(()) => axum::Json(EditResponse { ok: true, error: None }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
@@ -395,7 +454,7 @@ async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
     let (lsp_side, adapter_side) = tokio::io::duplex(1024 * 64);
 
     let (service, lsp_socket) = LspService::new(|client| {
-        PresembleLsp::new(client, site_dir)
+        PresembleLsp::new(client, site_dir, None)
     });
 
     // Split lsp_side for the Server (needs separate AsyncRead and AsyncWrite).
