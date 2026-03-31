@@ -2,7 +2,7 @@
 schema_version = 1
 
 [workspace.package]
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 
 [libraries]
