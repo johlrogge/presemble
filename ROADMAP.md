@@ -318,6 +318,16 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - Schema could specify: `## Introduction {#intro}` section allows h3..h4, `## Details {#details}` allows h2..h6
 - Enables structured body content without losing the free-form feel
 
+**Expressive link patterns in schemas (brainstorm):**
+- Current: `[<name>](/author/<name>) {#author}` — placeholder syntax, display text is literal
+- Proposed: `[author.name](/author/*) {#author}` — graph-aware link patterns
+  - Display text is a graph path reference (`author.name` resolves to the linked author's name field)
+  - URL uses wildcard `*` for the slug instead of repeated `<name>` placeholders
+  - The schema declares the relationship explicitly: this link displays a field FROM the referenced content
+  - Enables the template to know what to render without hardcoding: `post.author` link shows the author's actual name
+  - Validation can check: does the referenced content type have a `name` field?
+  - Completions can show: author names from the content, not just slugs
+
 **Link validation and quickfixes (brainstorm):**
 - Build and LSP should validate content references (e.g., `[Author](/author/johlrogge)` → does the author exist?)
 - Different diagnostic levels:
