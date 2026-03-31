@@ -186,9 +186,8 @@ impl BuildPolicy {
     pub fn strict() -> Self {
         BuildPolicy {
             page_policy: |attempt| {
-                if attempt.parse_error.is_some() {
-                    let msg = attempt.parse_error.as_ref().unwrap().clone();
-                    return PageDisposition::Skip(vec![msg]);
+                if let Some(msg) = &attempt.parse_error {
+                    return PageDisposition::Skip(vec![msg.clone()]);
                 }
                 if !attempt.validation.is_valid() {
                     let msgs: Vec<String> = attempt.validation.diagnostics.iter()
@@ -206,9 +205,8 @@ impl BuildPolicy {
     pub fn lenient() -> Self {
         BuildPolicy {
             page_policy: |attempt| {
-                if attempt.parse_error.is_some() {
-                    let msg = attempt.parse_error.as_ref().unwrap().clone();
-                    return PageDisposition::Skip(vec![msg]);
+                if let Some(msg) = &attempt.parse_error {
+                    return PageDisposition::Skip(vec![msg.clone()]);
                 }
                 if !attempt.validation.is_valid() {
                     let msgs: Vec<String> = attempt.validation.diagnostics.iter()
