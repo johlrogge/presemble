@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use crate::{build_site, rebuild_affected, DependencyGraph, UrlConfig};
+use crate::{build_site, rebuild_affected, BuildMode, DependencyGraph, UrlConfig};
 use axum::{
     Router,
     extract::{State, WebSocketUpgrade},
@@ -78,7 +78,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
     let current_graph = Arc::new(Mutex::new(DependencyGraph::new()));
     let build_errors: Arc<Mutex<HashMap<String, Vec<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    match build_site(site_dir, url_config) {
+    match build_site(site_dir, url_config, BuildMode::Serve) {
         Ok(outcome) => {
             *current_graph.lock().unwrap() = outcome.dep_graph;
             *build_errors.lock().unwrap() = outcome.build_errors;
@@ -392,6 +392,8 @@ const INJECT: &str = concat!(
     ".presemble-edit-toolbar .presemble-save{background:#5d8a6e;color:#fff;}",
     ".presemble-edit-toolbar .presemble-undo{background:#fff;color:#c44;}",
     ".presemble-edit-error{color:#c00;font-size:0.85rem;margin-top:0.3rem;}",
+    ".presemble-edit-toggle{position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999;background:#5d8a6e;color:#fff;border:none;border-radius:50%;width:3rem;height:3rem;font-size:1.4rem;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.2);transition:background 0.2s;line-height:3rem;text-align:center;}",
+    ".presemble-edit-toggle:hover{background:#4a7159;}",
     "</style>",
     "<script>(function(){",
     "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
@@ -417,9 +419,18 @@ const INJECT: &str = concat!(
       "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){tryScroll(10);});}",
       "else{tryScroll(10);}",
     "})();",
-    "if(document.body){document.body.classList.add('presemble-edit-mode');}",
-    "else{document.addEventListener('DOMContentLoaded',function(){document.body.classList.add('presemble-edit-mode');});}",
+    "(function(){",
+    "var btn=document.createElement('button');",
+    "btn.className='presemble-edit-toggle';",
+    "var editing=sessionStorage.getItem('presemble-edit-mode')==='1';",
+    "function updateBtn(){btn.textContent=editing?'\\u270F':'\\uD83D\\uDC41';btn.title=editing?'Switch to view mode':'Switch to edit mode';}",
+    "if(editing){document.body.classList.add('presemble-edit-mode');}",
+    "updateBtn();",
+    "btn.onclick=function(){editing=!editing;document.body.classList.toggle('presemble-edit-mode');sessionStorage.setItem('presemble-edit-mode',editing?'1':'0');updateBtn();};",
+    "document.body.appendChild(btn);",
+    "})();",
     "document.addEventListener('click',function(e){",
+    "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
     "var el=e.target.closest('[data-presemble-slot]');",
     "if(!el||el.classList.contains('presemble-editing')){return;}",
     "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
@@ -711,7 +722,7 @@ fn watch_and_rebuild(
         }
 
         println!("Rebuilding {} page(s)...", affected_count.max(1));
-        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files) {
+        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, BuildMode::Serve) {
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
                 g.merge(outcome.dep_graph);
@@ -780,7 +791,7 @@ fn watch_and_rebuild(
             }
             Err(e) => {
                 eprintln!("Rebuild failed: {e} — falling back to full rebuild");
-                match build_site(site_dir, url_config) {
+                match build_site(site_dir, url_config, BuildMode::Serve) {
                     Ok(outcome) => {
                         let mut g = graph.lock().unwrap();
                         *g = outcome.dep_graph;
