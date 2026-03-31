@@ -3,7 +3,7 @@ mod conductor;
 mod protocol;
 
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber};
-pub use conductor::Conductor;
+pub use conductor::{CommandResult, Conductor};
 pub use protocol::{Command, ConductorEvent, Response};
 
 #[cfg(test)]
@@ -21,24 +21,25 @@ mod tests {
     fn conductor_ping_returns_pong() {
         let dir = tempfile::tempdir().unwrap();
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let response = conductor.handle_command(Command::Ping);
-        assert!(matches!(response, Response::Pong));
+        let result = conductor.handle_command(Command::Ping);
+        assert!(matches!(result.response, Response::Pong));
+        assert!(result.events.is_empty());
     }
 
     #[test]
     fn conductor_shutdown_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let response = conductor.handle_command(Command::Shutdown);
-        assert!(matches!(response, Response::Ok));
+        let result = conductor.handle_command(Command::Shutdown);
+        assert!(matches!(result.response, Response::Ok));
     }
 
     #[test]
     fn conductor_get_build_errors_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let response = conductor.handle_command(Command::GetBuildErrors);
-        match response {
+        let result = conductor.handle_command(Command::GetBuildErrors);
+        match result.response {
             Response::BuildErrors(errors) => assert!(errors.is_empty()),
             other => panic!("expected BuildErrors, got {other:?}"),
         }
@@ -48,36 +49,56 @@ mod tests {
     fn conductor_get_document_text_missing_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let response = conductor.handle_command(Command::GetDocumentText {
+        let result = conductor.handle_command(Command::GetDocumentText {
             path: "/nonexistent/file.md".to_string(),
         });
-        match response {
+        match result.response {
             Response::DocumentText(None) => {}
             other => panic!("expected DocumentText(None), got {other:?}"),
         }
     }
 
     #[test]
-    fn document_changed_stores_in_memory() {
+    fn document_changed_stores_in_memory_and_writes_to_disk() {
         let dir = tempfile::tempdir().unwrap();
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let path = dir.path().join("content/article/test.md");
+        // Create parent dirs so the write can succeed
+        let content_dir = dir.path().join("content/article");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let path = content_dir.join("test.md");
         let text = "# My Title\n".to_string();
 
-        let response = conductor.handle_command(Command::DocumentChanged {
+        let result = conductor.handle_command(Command::DocumentChanged {
             path: path.to_string_lossy().to_string(),
             text: text.clone(),
         });
-        assert!(matches!(response, Response::Ok));
+        assert!(matches!(result.response, Response::Ok));
+        assert!(result.events.is_empty());
 
         // GetDocumentText should return the in-memory version
-        let response = conductor.handle_command(Command::GetDocumentText {
+        let result2 = conductor.handle_command(Command::GetDocumentText {
             path: path.to_string_lossy().to_string(),
         });
-        match response {
+        match result2.response {
             Response::DocumentText(Some(got)) => assert_eq!(got, text),
             other => panic!("expected DocumentText(Some(...)), got {other:?}"),
         }
+
+        // DocumentChanged does NOT write to disk — only in-memory
+    }
+
+    #[test]
+    fn document_changed_does_not_write_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        let path = dir.path().join("content/article/test.md");
+        let result = conductor.handle_command(Command::DocumentChanged {
+            path: path.to_string_lossy().to_string(),
+            text: "# Hello\n".to_string(),
+        });
+        assert!(matches!(result.response, Response::Ok));
+        // File should NOT exist on disk
+        assert!(!path.exists(), "DocumentChanged should not write to disk");
     }
 
     #[test]
@@ -87,30 +108,32 @@ mod tests {
         let path = dir.path().join("content/article/test.md");
         let text = "# My Title\n".to_string();
 
-        // First store in memory
+        // Store in memory
         conductor.handle_command(Command::DocumentChanged {
             path: path.to_string_lossy().to_string(),
-            text,
+            text: text.clone(),
         });
 
-        // Then saved — clears memory
-        let response = conductor.handle_command(Command::DocumentSaved {
+        // Verify in memory
+        let result = conductor.handle_command(Command::GetDocumentText {
             path: path.to_string_lossy().to_string(),
         });
-        assert!(matches!(response, Response::Ok));
+        assert!(matches!(result.response, Response::DocumentText(Some(_))));
 
-        // File doesn't exist on disk either, so should return None
-        let response = conductor.handle_command(Command::GetDocumentText {
+        // Save clears memory
+        conductor.handle_command(Command::DocumentSaved {
             path: path.to_string_lossy().to_string(),
         });
-        match response {
-            Response::DocumentText(None) => {}
-            other => panic!("expected DocumentText(None), got {other:?}"),
-        }
+
+        // After save, no in-memory copy, no file on disk → None
+        let result2 = conductor.handle_command(Command::GetDocumentText {
+            path: path.to_string_lossy().to_string(),
+        });
+        assert!(matches!(result2.response, Response::DocumentText(None)));
     }
 
     #[test]
-    fn edit_slot_modifies_file() {
+    fn edit_slot_modifies_file_and_emits_pages_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
 
         // Set up schemas directory with article schema
@@ -128,16 +151,26 @@ mod tests {
 
         let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
 
-        let response = conductor.handle_command(Command::EditSlot {
+        let result = conductor.handle_command(Command::EditSlot {
             file: "content/article/test.md".to_string(),
             slot: "title".to_string(),
             value: "New Title".to_string(),
         });
 
-        match &response {
+        match &result.response {
             Response::Ok => {}
             Response::Error(e) => panic!("expected Ok, got Error({e})"),
             other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Verify PagesRebuilt event was emitted with the correct URL
+        assert_eq!(result.events.len(), 1, "expected one event");
+        match &result.events[0] {
+            ConductorEvent::PagesRebuilt { pages, anchor } => {
+                assert_eq!(pages, &vec!["/article/test".to_string()]);
+                assert!(anchor.is_none());
+            }
+            other => panic!("expected PagesRebuilt, got {other:?}"),
         }
 
         // Verify file was modified

@@ -9,8 +9,9 @@ pub fn run_lsp_stdio(site_dir: &Path) -> Result<(), CliError> {
         .block_on(async {
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
+            let conductor_client = conductor::ensure_conductor(site_dir).ok();
             let (service, socket) = LspService::new(|client| {
-                PresembleLsp::new(client, site_dir.to_path_buf(), None)
+                PresembleLsp::new(client, site_dir.to_path_buf(), conductor_client)
             });
             Server::new(stdin, stdout, socket).serve(service).await;
             Ok(())

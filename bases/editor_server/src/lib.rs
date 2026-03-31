@@ -2,7 +2,7 @@ mod error;
 
 pub use error::ServerError;
 
-use conductor::{socket_url, Command, Conductor, Response};
+use conductor::{socket_url, Command, Conductor, Response}; // Response kept for parse-error path
 use std::path::Path;
 
 /// Run the conductor daemon for a site directory.
@@ -56,9 +56,18 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
         // Check for shutdown before handling
         let is_shutdown = matches!(cmd, Command::Shutdown);
 
-        let response = conductor.handle_command(cmd);
-        let data = serde_json::to_vec(&response).unwrap_or_default();
+        let result = conductor.handle_command(cmd);
+
+        // Send response to the caller
+        let data = serde_json::to_vec(&result.response).unwrap_or_default();
         let _ = rep_socket.send(nng::Message::from(data.as_slice()));
+
+        // Broadcast any events to all subscribers
+        for event in &result.events {
+            if let Ok(event_data) = serde_json::to_vec(event) {
+                let _ = pub_socket.send(nng::Message::from(event_data.as_slice()));
+            }
+        }
 
         if is_shutdown {
             println!("Conductor shutting down.");
