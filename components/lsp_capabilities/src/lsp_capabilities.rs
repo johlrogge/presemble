@@ -388,7 +388,7 @@ pub fn link_completions(site_dir: &std::path::Path) -> Vec<SlotCompletion> {
             let link_text = format!("[{title}]({url})");
 
             completions.push(SlotCompletion::plain(
-                format!("{type_stem}/{title}"),
+                format!("{type_stem}:{title}"),
                 url.clone(),
                 None,
                 link_text,
