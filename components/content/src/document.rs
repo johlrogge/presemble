@@ -68,6 +68,8 @@ pub enum ContentElement {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
     },
+    /// Pre-rendered HTML block from body content (inline markdown preserved).
+    RawHtml { html: String },
 }
 
 #[cfg(test)]

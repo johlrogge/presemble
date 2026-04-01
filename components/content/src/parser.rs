@@ -2,6 +2,7 @@ use crate::document::{ContentElement, Document, FlatDocument};
 use crate::error::ContentError;
 use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::html as pulldown_html;
 use schema::{Grammar, HeadingLevel, Span, Spanned};
 
 /// Convert a byte offset in `src` to a zero-indexed LSP (line, character) Position.
@@ -24,7 +25,7 @@ pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
 ///
 /// For the structured slotted form, use [`parse_and_assign`] instead.
 pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
-    let parser = Parser::new_ext(input, Options::ENABLE_TABLES).into_offset_iter();
+    let mut event_iter = Parser::new_ext(input, Options::ENABLE_TABLES).into_offset_iter();
     let mut elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
 
     enum State {
@@ -68,8 +69,67 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     }
 
     let mut state = State::Idle;
+    let mut post_separator = false;
 
-    for (event, range) in parser {
+    while let Some((event, range)) = event_iter.next() {
+        // After the separator, intercept paragraph and blockquote starts:
+        // collect all their events and render via pulldown-cmark's HTML renderer.
+        if post_separator {
+            match &event {
+                Event::Start(Tag::Paragraph) | Event::Start(Tag::BlockQuote(_)) => {
+                    let block_start = range.start;
+                    let is_paragraph = matches!(event, Event::Start(Tag::Paragraph));
+                    let mut block_events: Vec<Event<'_>> = vec![event];
+                    let mut depth = 1u32;
+                    let mut block_end = range.end;
+
+                    // Consume events until matching end
+                    loop {
+                        match event_iter.next() {
+                            None => break,
+                            Some((next_event, next_range)) => {
+                                block_end = next_range.end;
+                                match &next_event {
+                                    Event::Start(Tag::Paragraph)
+                                    | Event::Start(Tag::BlockQuote(_)) => {
+                                        depth += 1;
+                                    }
+                                    Event::End(TagEnd::Paragraph)
+                                    | Event::End(TagEnd::BlockQuote(_)) => {
+                                        depth -= 1;
+                                        block_events.push(next_event);
+                                        if depth == 0 {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                                block_events.push(next_event);
+                            }
+                        }
+                    }
+
+                    // Render collected events to HTML via pulldown-cmark
+                    let mut html = String::new();
+                    pulldown_html::push_html(&mut html, block_events.into_iter());
+                    let html = html.trim_end().to_string();
+
+                    // Only emit if non-empty — an empty paragraph (image-only) emits as image
+                    // Paragraphs that are purely images will have empty html after trim;
+                    // we skip those (images in body paragraphs are not yet handled specially).
+                    if !(html.is_empty() || is_paragraph && html == "<p></p>") {
+                        elements.push_back(Spanned {
+                            node: ContentElement::RawHtml { html },
+                            span: Span { start: block_start, end: block_end },
+                        });
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let heading_level = convert_heading_level(level)?;
@@ -248,6 +308,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     node: ContentElement::Separator,
                     span: Span::from(range),
                 });
+                post_separator = true;
                 state = State::Idle;
             }
 
@@ -748,5 +809,102 @@ headings
         assert_eq!(summary_slot.elements.len(), 1);
 
         assert_eq!(doc.body.len(), 1);
+    }
+
+    // ── Body inline markdown (RawHtml) ──────────────────────────────────────
+
+    #[test]
+    fn body_paragraph_with_bold_produces_raw_html() {
+        // In CommonMark: **bold** => <strong>, *italic* => <em>
+        let input = "# Title\n\nSummary.\n\n----\n\nThis has **bold** text.\n";
+        let doc = parse_document(input).unwrap();
+        let body_elements: Vec<_> = doc.elements.iter()
+            .skip_while(|e| !matches!(e.node, ContentElement::Separator))
+            .skip(1) // skip the separator itself
+            .collect();
+        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        let first = &body_elements[0].node;
+        match first {
+            ContentElement::RawHtml { html } => {
+                assert!(
+                    html.contains("<strong>bold</strong>"),
+                    "expected <strong>bold</strong> in html, got: {html}"
+                );
+            }
+            other => panic!("expected RawHtml for body paragraph with bold, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_paragraph_with_italic_produces_raw_html() {
+        let input = "# Title\n\nSummary.\n\n----\n\nThis has _italic_ text.\n";
+        let doc = parse_document(input).unwrap();
+        let body_elements: Vec<_> = doc.elements.iter()
+            .skip_while(|e| !matches!(e.node, ContentElement::Separator))
+            .skip(1)
+            .collect();
+        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        match &body_elements[0].node {
+            ContentElement::RawHtml { html } => {
+                assert!(
+                    html.contains("<em>italic</em>"),
+                    "expected <em>italic</em> in html, got: {html}"
+                );
+            }
+            other => panic!("expected RawHtml for body paragraph with italic, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_blockquote_produces_raw_html_with_blockquote_tag() {
+        let input = "# Title\n\nSummary.\n\n----\n\n> A quoted text.\n";
+        let doc = parse_document(input).unwrap();
+        let body_elements: Vec<_> = doc.elements.iter()
+            .skip_while(|e| !matches!(e.node, ContentElement::Separator))
+            .skip(1)
+            .collect();
+        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        match &body_elements[0].node {
+            ContentElement::RawHtml { html } => {
+                assert!(
+                    html.contains("<blockquote>"),
+                    "expected <blockquote> in html, got: {html}"
+                );
+            }
+            other => panic!("expected RawHtml for body blockquote, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preamble_paragraph_is_still_plain_paragraph() {
+        // Paragraphs BEFORE the separator should still be ContentElement::Paragraph
+        let input = "Summary text here.\n\n----\n\nBody content.\n";
+        let doc = parse_document(input).unwrap();
+        let preamble_elements: Vec<_> = doc.elements.iter()
+            .take_while(|e| !matches!(e.node, ContentElement::Separator))
+            .collect();
+        assert!(!preamble_elements.is_empty(), "expected preamble elements");
+        match &preamble_elements[0].node {
+            ContentElement::Paragraph { .. } => {}
+            other => panic!("expected Paragraph in preamble, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_heading_is_still_heading_element() {
+        // Body headings should remain ContentElement::Heading (not RawHtml)
+        let input = "# Title\n\n----\n\n### Body Heading\n\nBody paragraph.\n";
+        let doc = parse_document(input).unwrap();
+        let body_elements: Vec<_> = doc.elements.iter()
+            .skip_while(|e| !matches!(e.node, ContentElement::Separator))
+            .skip(1)
+            .collect();
+        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        match &body_elements[0].node {
+            ContentElement::Heading { level, .. } => {
+                assert_eq!(level.value(), 3, "expected H3 heading");
+            }
+            other => panic!("expected Heading for body heading, got: {other:?}"),
+        }
     }
 }

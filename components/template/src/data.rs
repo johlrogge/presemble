@@ -286,6 +286,11 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
                 }
             }
             ContentElement::Separator => continue,
+            ContentElement::RawHtml { html } => {
+                format!(
+                    "<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>"
+                )
+            }
             ContentElement::Table { headers, rows } => {
                 let header_cells = headers
                     .iter()

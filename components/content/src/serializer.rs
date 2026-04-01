@@ -73,6 +73,7 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
             lines.extend(row_lines);
             lines.join("\n")
         }
+        ContentElement::RawHtml { html } => html.clone(),
     }
 }
 

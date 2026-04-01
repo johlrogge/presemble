@@ -314,35 +314,25 @@ pub fn content_completions(
         );
     }
 
-    // Offer body content completions when separator exists and grammar has body rules
+    // Offer body heading completion when separator exists and grammar has body heading rules
     if let Some(body_rules) = &grammar.body
         && doc.has_separator
+        && let Some(heading_range) = &body_rules.heading_range
     {
-        if let Some(heading_range) = &body_rules.heading_range {
-            let min_level = heading_range.min.value();
-            let hashes = "#".repeat(min_level as usize);
-            completions.push(
-                SlotCompletion::snippet(
-                    format!("Body heading (H{})", min_level),
-                    format!("H{}-H{} heading", heading_range.min.value(), heading_range.max.value()),
-                    Some(format!(
-                        "Body section allows headings H{} through H{}",
-                        heading_range.min.value(),
-                        heading_range.max.value()
-                    )),
-                    format!("{hashes} ${{1:Heading}}"),
-                )
-                .with_sort_text("98"),
-            );
-        }
+        let min_level = heading_range.min.value();
+        let hashes = "#".repeat(min_level as usize);
         completions.push(
             SlotCompletion::snippet(
-                "Body paragraph",
-                "Body text",
-                Some("A paragraph in the body section".to_string()),
-                "${1:Body text.}",
+                format!("Body heading (H{})", min_level),
+                format!("H{}-H{} heading", heading_range.min.value(), heading_range.max.value()),
+                Some(format!(
+                    "Body section allows headings H{} through H{}",
+                    heading_range.min.value(),
+                    heading_range.max.value()
+                )),
+                format!("{hashes} ${{1:Heading}}"),
             )
-            .with_sort_text("97"),
+            .with_sort_text("98"),
         );
     }
 
@@ -1803,9 +1793,10 @@ mod tests {
         let grammar = article_grammar();
         let src = "# Hello World\n\nSummary text.\n\n[Author Name](/author/author-name)\n\n![cover](images/cover.jpg)\n\n----\n\n";
         let completions = content_completions(src, &grammar, None);
+        // Body paragraphs are free-form prose — no completion offered.
         assert!(
-            completions.iter().any(|c| c.label == "Body paragraph"),
-            "should offer body paragraph completion after separator: {completions:#?}"
+            !completions.iter().any(|c| c.label == "Body paragraph"),
+            "body paragraph should NOT be offered (free-form prose): {completions:#?}"
         );
         assert!(
             completions.iter().any(|c| c.label.starts_with("Body heading")),
