@@ -329,12 +329,9 @@ impl LanguageServer for PresembleLsp {
                     {
                         let canonical = content::serialize_document(&doc);
                         if canonical != src {
-                            // Write canonical form to disk
-                            let _ = std::fs::write(
-                                uri.to_file_path().unwrap_or_default(),
-                                &canonical,
-                            );
-                            // Send the canonical form to the editor
+                            // Send the canonical form to the editor buffer via applyEdit.
+                            // Don't write to disk — Helix will write on the next save,
+                            // avoiding the "document modified on disk" warning.
                             let mut changes = std::collections::HashMap::new();
                             changes.insert(uri.clone(), vec![TextEdit {
                                 range: Range {
