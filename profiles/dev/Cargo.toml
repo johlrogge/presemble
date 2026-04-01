@@ -37,6 +37,7 @@ template = { path = "components/template" }
 validation = { path = "components/validation" }
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
+im = "15"
 nng = "1"
 notify = "7"
 pulldown-cmark = "0.12"

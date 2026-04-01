@@ -14,6 +14,8 @@ pub struct Slot {
     pub element: Element,
     pub constraints: Vec<Constraint>,
     pub hint_text: Option<String>,
+    /// Byte range of this slot's definition line in the schema source.
+    pub span: crate::span::Span,
 }
 
 /// A semantic name for a slot, used for template references (e.g. `${article.title}`).

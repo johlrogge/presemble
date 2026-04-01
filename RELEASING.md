@@ -81,7 +81,7 @@ Run these agents in order before cutting a release:
 ## Notes
 
 - Agents never push — that always stays with the human
-- Always confirm with devops before finishing a release or hotfix
+- Always confirm with release-manager before finishing a release or hotfix
 - Multiple code-minions can run in parallel on different tasks within the same feature
 - The commit agent uses the conventional-commits skill for format
 - The architect never writes code — it designs and reviews only

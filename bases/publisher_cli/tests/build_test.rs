@@ -52,7 +52,7 @@ fn hello_world_is_valid_against_article_schema() {
         include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
 
     let grammar = schema::parse_schema(schema_src).expect("schema parses");
-    let doc = content::parse_document(content_src).expect("content parses");
+    let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
     let result = content::validate(&doc, &grammar);
 
     assert!(result.is_valid(), "hello-world should be valid: {result:?}");
@@ -65,7 +65,7 @@ fn invalid_post_fails_validation_with_title_and_body_errors() {
         include_str!("../../../fixtures/blog-site/content/article/invalid-post.md");
 
     let grammar = schema::parse_schema(schema_src).expect("schema parses");
-    let doc = content::parse_document(content_src).expect("content parses");
+    let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
     let result = content::validate(&doc, &grammar);
 
     assert!(!result.is_valid(), "invalid-post should fail validation");

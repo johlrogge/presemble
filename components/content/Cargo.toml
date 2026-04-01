@@ -9,3 +9,4 @@ interface = "content"
 [dependencies]
 schema = { workspace = true }
 pulldown-cmark = "0.12"
+im = { workspace = true }

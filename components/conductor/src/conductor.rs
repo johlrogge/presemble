@@ -160,7 +160,7 @@ impl Conductor {
             .map_err(|e| format!("schema error: {e:?}"))?;
 
         // Parse content from in-memory text
-        let doc = content::parse_document(text)
+        let doc = content::parse_and_assign(text, &grammar)
             .map_err(|e| format!("parse error: {e}"))?;
 
         // Build data graph (suggestion nodes fill missing slots)
@@ -339,7 +339,7 @@ impl Conductor {
                 };
 
                 // Parse, modify, serialize, and write
-                let mut doc = match content::parse_document(&content_src) {
+                let mut doc = match content::parse_and_assign(&content_src, &grammar) {
                     Ok(d) => d,
                     Err(e) => return CommandResult::error(format!("parse error: {e}")),
                 };

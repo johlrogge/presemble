@@ -5,6 +5,7 @@ let
 in
 {
   claude.code.enable = true;
+  env.METADEV_PROJECT = "presemble";
 
   git-hooks.enable = true;
   git-hooks.hooks.polylith-clippy = {

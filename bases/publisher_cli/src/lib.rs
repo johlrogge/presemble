@@ -399,7 +399,7 @@ pub fn build_content_page(
 
     let content_source = std::fs::read_to_string(content_path)?;
 
-    let doc = match content::parse_document(&content_source) {
+    let doc = match content::parse_and_assign(&content_source, grammar) {
         Ok(d) => d,
         Err(e) => {
             let msg = format!("parse error: {e}");
@@ -937,7 +937,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     {
         let index_md = index_content_dir.join("index.md");
         if let Ok(content_src) = std::fs::read_to_string(&index_md)
-            && let Ok(doc) = content::parse_document(&content_src)
+            && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
         {
             let mut index_graph = template::build_article_graph(&doc, &grammar);
             index_graph.insert("_presemble_file", template::Value::Text("content/index/index.md".to_string()));
