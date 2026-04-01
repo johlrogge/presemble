@@ -436,6 +436,8 @@ impl LanguageServer for PresembleLsp {
                     return Ok(None);
                 };
                 let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                let pos = p.text_document_position.position;
+                let line_end_char = line_length(&src, pos.line);
                 let items: Vec<CompletionItem> = content_completions(&src, &grammar, Some(self.site_index.site_dir()))
                     .into_iter()
                     .map(|c| CompletionItem {
@@ -446,7 +448,14 @@ impl LanguageServer for PresembleLsp {
                             kind: MarkupKind::Markdown,
                             value: d,
                         })),
-                        insert_text: Some(c.insert_text),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range: Range {
+                                start: Position { line: pos.line, character: 0 },
+                                end: Position { line: pos.line, character: line_end_char },
+                            },
+                            new_text: c.insert_text,
+                        })),
+                        insert_text: None,
                         insert_text_format: if c.is_snippet {
                             Some(InsertTextFormat::SNIPPET)
                         } else {
@@ -618,4 +627,11 @@ impl LanguageServer for PresembleLsp {
             }
         }
     }
+}
+
+fn line_length(src: &str, line: u32) -> u32 {
+    src.lines()
+        .nth(line as usize)
+        .map(|l| l.len() as u32)
+        .unwrap_or(0)
 }
