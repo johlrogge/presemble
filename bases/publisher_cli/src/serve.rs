@@ -810,10 +810,10 @@ type ContentSnapshot = Arc<Mutex<HashMap<std::path::PathBuf, Vec<ContentElement>
 fn body_elements_from_path(path: &std::path::Path) -> Option<Vec<ContentElement>> {
     let src = std::fs::read_to_string(path).ok()?;
     let doc = parse_document(&src).ok()?;
-    let start = doc.elements.iter().position(|e| matches!(e, ContentElement::Separator))
+    let start = doc.elements.iter().position(|e| matches!(e.node, ContentElement::Separator))
         .map(|i| i + 1)
         .unwrap_or(0);
-    Some(doc.elements[start..].to_vec())
+    Some(doc.elements[start..].iter().map(|s| s.node.clone()).collect())
 }
 
 fn collect_content_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {

@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use content::{ContentElement, ContentElementWithOffset};
+use content::{ContentElement, Document};
 use schema::{Element, Grammar, SlotName};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,15 +40,13 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
         }
     };
 
-    let elements_with_offsets = content::parse_document_with_offsets(src).unwrap_or_default();
-
     let result = content::validate(&doc, grammar);
 
     let mut diagnostics: Vec<Diagnostic> = result
         .diagnostics
         .iter()
         .map(|vd| {
-            let span = find_span_for_diagnostic(vd.slot.as_ref(), grammar, &elements_with_offsets);
+            let span = find_span_for_diagnostic(vd.slot.as_ref(), grammar, &doc);
             Diagnostic {
                 severity: match vd.severity {
                     content::Severity::Error => Severity::Error,
@@ -63,15 +61,16 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
 
     // Check for missing body separator or empty body when the grammar expects a body section.
     if grammar.body.is_some() {
-        let separator_pos = doc.elements.iter().position(|e| matches!(e, ContentElement::Separator));
+        let separator_pos = doc.elements.iter().position(|e| matches!(e.node, ContentElement::Separator));
         match separator_pos {
             None => {
                 // Position at the last preamble element (where ---- should follow)
-                let last_preamble_span = elements_with_offsets
+                let last_preamble_span = doc
+                    .elements
                     .iter()
                     .rev()
-                    .find(|e| !matches!(e.element, ContentElement::Separator))
-                    .map(|e| e.byte_range.clone());
+                    .find(|e| !matches!(e.node, ContentElement::Separator))
+                    .map(|e| Range::from(e.span));
                 let span = last_preamble_span.unwrap_or(src.len()..src.len());
                 diagnostics.push(Diagnostic {
                     severity: Severity::Warning,
@@ -85,9 +84,9 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
                 let body_elements = &doc.elements[sep_idx + 1..];
                 if body_elements.is_empty() {
                     // Find byte position of separator for the span
-                    let sep_span = elements_with_offsets.iter()
-                        .find(|e| matches!(e.element, ContentElement::Separator))
-                        .map(|e| e.byte_range.clone());
+                    let sep_span = doc.elements.iter()
+                        .find(|e| matches!(e.node, ContentElement::Separator))
+                        .map(|e| Range::from(e.span));
                     let span = sep_span
                         .map(|r| r.end..r.end)  // Point to just after the separator
                         .unwrap_or(src.len()..src.len());
@@ -109,14 +108,14 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
 fn find_span_for_diagnostic(
     slot_name: Option<&SlotName>,
     grammar: &Grammar,
-    elements_with_offsets: &[ContentElementWithOffset],
+    doc: &Document,
 ) -> Option<Range<usize>> {
     let slot_name = slot_name?;
     let slot = grammar.preamble.iter().find(|s| &s.name == slot_name)?;
-    elements_with_offsets
+    doc.elements
         .iter()
-        .find(|e| element_matches_slot_type(&e.element, &slot.element))
-        .map(|e| e.byte_range.clone())
+        .find(|e| element_matches_slot_type(&e.node, &slot.element))
+        .map(|e| Range::from(e.span))
 }
 
 /// Returns true if a `ContentElement` variant matches a grammar `Element` type.

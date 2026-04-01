@@ -1,5 +1,5 @@
 use content::{ContentElement, Document};
-use schema::{Element, Grammar};
+use schema::{Element, Grammar, Spanned};
 
 /// The kind of schema element a suggestion represents.
 #[derive(Debug, Clone)]
@@ -130,7 +130,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     for slot in &grammar.preamble {
         // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
         while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor]
+            if let ContentElement::Paragraph { text } = &elements[cursor].node
                 && is_annotation_paragraph(text)
             {
                 cursor += 1;
@@ -143,7 +143,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             break;
         }
 
-        if matches!(elements[cursor], ContentElement::Separator) {
+        if matches!(elements[cursor].node, ContentElement::Separator) {
             cursor += 1;
             separator_found = true;
             break;
@@ -153,7 +153,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
 
         match &slot.element {
             Element::Heading { .. } => {
-                if let ContentElement::Heading { text, .. } = &elements[cursor] {
+                if let ContentElement::Heading { text, .. } = &elements[cursor].node {
                     graph.insert(slot_key, Value::Text(text.clone()));
                     cursor += 1;
                 }
@@ -163,7 +163,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
                 let max = max_paragraphs(slot);
                 let mut paragraphs: Vec<Value> = Vec::new();
                 while cursor < elements.len() && paragraphs.len() < max {
-                    match &elements[cursor] {
+                    match &elements[cursor].node {
                         ContentElement::Paragraph { text } => {
                             paragraphs.push(Value::Text(text.clone()));
                             cursor += 1;
@@ -183,7 +183,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             }
 
             Element::Link { .. } => {
-                if let ContentElement::Link { text, href } = &elements[cursor] {
+                if let ContentElement::Link { text, href } = &elements[cursor].node {
                     let mut record = DataGraph::new();
                     record.insert("text", Value::Text(text.clone()));
                     record.insert("href", Value::Text(href.clone()));
@@ -193,7 +193,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             }
 
             Element::Image { .. } => {
-                if let ContentElement::Image { path, alt } = &elements[cursor] {
+                if let ContentElement::Image { path, alt } = &elements[cursor].node {
                     let mut record = DataGraph::new();
                     record.insert("path", Value::Text(path.clone()));
                     let alt_value = match alt {
@@ -207,7 +207,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             }
         }
 
-        if cursor < elements.len() && matches!(elements[cursor], ContentElement::Separator) {
+        if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
             cursor += 1;
             separator_found = true;
             break;
@@ -217,7 +217,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     // If separator was not yet consumed, scan forward to find it.
     if !separator_found {
         while cursor < elements.len() {
-            if matches!(elements[cursor], ContentElement::Separator) {
+            if matches!(elements[cursor].node, ContentElement::Separator) {
                 cursor += 1;
                 break;
             }
@@ -283,10 +283,10 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
+pub(crate) fn render_body_html(elements: &[Spanned<ContentElement>]) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for (idx, element) in elements.iter().enumerate() {
-        let html = match element {
+    for (idx, spanned) in elements.iter().enumerate() {
+        let html = match &spanned.node {
             ContentElement::Heading { level, text } => {
                 let l = level.value();
                 format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{}</h{l}>", escape_html(text))
@@ -358,7 +358,12 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
 mod tests {
     use super::*;
     use content::parse_document;
-    use schema::parse_schema;
+    use schema::{parse_schema, Span as SchemaSpan};
+
+    /// Wrap a plain `ContentElement` in a dummy `Spanned` for use in tests.
+    fn spanned(node: ContentElement) -> Spanned<ContentElement> {
+        Spanned { node, span: SchemaSpan { start: 0, end: 0 } }
+    }
 
     fn article_grammar() -> Grammar {
         let schema_input = include_str!("../../../fixtures/blog-site/schemas/article.md");
@@ -440,10 +445,10 @@ mod tests {
 
     #[test]
     fn body_code_block_renders_as_pre_code() {
-        let code_block = ContentElement::CodeBlock {
+        let code_block = spanned(ContentElement::CodeBlock {
             language: Some("rust".to_string()),
             code: "fn main() {}\n".to_string(),
-        };
+        });
         let html = super::render_body_html(&[code_block]);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code class=\"language-rust\">"),
@@ -457,10 +462,10 @@ mod tests {
 
     #[test]
     fn body_code_block_without_language_renders_plain_pre_code() {
-        let code_block = ContentElement::CodeBlock {
+        let code_block = spanned(ContentElement::CodeBlock {
             language: None,
             code: "some code\n".to_string(),
-        };
+        });
         let html = super::render_body_html(&[code_block]);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code>"),
@@ -475,8 +480,8 @@ mod tests {
     #[test]
     fn render_body_html_elements_have_data_presemble_slot_body() {
         let elements = vec![
-            ContentElement::Paragraph { text: "para".to_string() },
-            ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() },
+            spanned(ContentElement::Paragraph { text: "para".to_string() }),
+            spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() }),
         ];
         let html = render_body_html(&elements);
         assert!(
@@ -491,9 +496,9 @@ mod tests {
     #[test]
     fn render_body_html_assigns_sequential_ids() {
         let elements = vec![
-            ContentElement::Paragraph { text: "first".to_string() },
-            ContentElement::Separator,
-            ContentElement::Paragraph { text: "second".to_string() },
+            spanned(ContentElement::Paragraph { text: "first".to_string() }),
+            spanned(ContentElement::Separator),
+            spanned(ContentElement::Paragraph { text: "second".to_string() }),
         ];
         let html = render_body_html(&elements);
         assert!(html.contains("id=\"presemble-body-0\""), "first paragraph gets id 0");
@@ -517,7 +522,7 @@ mod tests {
     fn body_html_is_parseable_xml_when_content_has_angle_brackets() {
         use crate::dom::parse_template_xml;
         use content::parse_document;
-        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName};
+        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
 
         // Build a minimal document whose body paragraph contains angle brackets.
         // The separator (---) separates preamble from body.
@@ -536,6 +541,7 @@ mod tests {
                 },
                 constraints: vec![],
                 hint_text: None,
+                span: Span { start: 0, end: 0 },
             }],
             body: Some(BodyRules {
                 heading_range: None,

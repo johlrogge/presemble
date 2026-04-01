@@ -1,7 +1,7 @@
 use crate::document::{ContentElement, Document};
 use schema::{
     AltRequirement, BodyRules, Constraint, ContentConstraint, CountRange, Element, Grammar,
-    HeadingLevelRange, Slot, SlotName,
+    HeadingLevelRange, Slot, SlotName, Spanned,
 };
 
 /// The result of validating a document against a grammar.
@@ -57,7 +57,7 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     for slot in &grammar.preamble {
         // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
         while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor]
+            if let ContentElement::Paragraph { text } = &elements[cursor].node
                 && is_annotation_paragraph(text)
             {
                 cursor += 1;
@@ -118,7 +118,7 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
         }
 
         // If the next element is the separator, consume it and stop preamble processing.
-        if cursor < elements.len() && matches!(elements[cursor], ContentElement::Separator) {
+        if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
             cursor += 1;
             separator_consumed = true;
             break;
@@ -129,7 +129,7 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     // scan forward to find it so body validation starts at the right position.
     if !separator_consumed {
         while cursor < elements.len() {
-            if matches!(elements[cursor], ContentElement::Separator) {
+            if matches!(elements[cursor].node, ContentElement::Separator) {
                 cursor += 1;
                 break;
             }
@@ -257,7 +257,7 @@ fn describe_count_range(cr: &CountRange) -> String {
 /// Consume headings at `cursor` that match `level_range`, up to `expected_count` max.
 /// Returns count of consumed headings. Also applies text constraints on each consumed heading.
 fn consume_headings(
-    elements: &[ContentElement],
+    elements: &[Spanned<ContentElement>],
     cursor: &mut usize,
     level_range: &HeadingLevelRange,
     expected: ExpectedCount,
@@ -274,7 +274,7 @@ fn consume_headings(
         if *cursor >= elements.len() {
             break;
         }
-        match &elements[*cursor] {
+        match &elements[*cursor].node {
             ContentElement::Heading { level, text } => {
                 if level.value() >= level_range.min.value()
                     && level.value() <= level_range.max.value()
@@ -312,7 +312,7 @@ fn consume_headings(
 
 /// Consume paragraphs at `cursor` up to the expected count. Returns count consumed.
 fn consume_paragraphs(
-    elements: &[ContentElement],
+    elements: &[Spanned<ContentElement>],
     cursor: &mut usize,
     expected: ExpectedCount,
     slot: &Slot,
@@ -329,7 +329,7 @@ fn consume_paragraphs(
         if *cursor >= elements.len() {
             break;
         }
-        match &elements[*cursor] {
+        match &elements[*cursor].node {
             ContentElement::Paragraph { .. } => {
                 *cursor += 1;
                 count += 1;
@@ -365,7 +365,7 @@ fn consume_paragraphs(
 /// Consume link elements at `cursor` up to `expected` count.
 /// Returns count of consumed links.
 fn consume_links(
-    elements: &[ContentElement],
+    elements: &[Spanned<ContentElement>],
     cursor: &mut usize,
     expected: ExpectedCount,
     slot: &Slot,
@@ -381,7 +381,7 @@ fn consume_links(
         if *cursor >= elements.len() {
             break;
         }
-        match &elements[*cursor] {
+        match &elements[*cursor].node {
             ContentElement::Link { .. } => {
                 *cursor += 1;
                 count += 1;
@@ -405,7 +405,7 @@ fn consume_links(
 /// Consume image elements at `cursor` up to `expected` count.
 /// Returns count of consumed images. Also checks alt and orientation constraints.
 fn consume_images(
-    elements: &[ContentElement],
+    elements: &[Spanned<ContentElement>],
     cursor: &mut usize,
     expected: ExpectedCount,
     slot: &Slot,
@@ -421,7 +421,7 @@ fn consume_images(
         if *cursor >= elements.len() {
             break;
         }
-        match &elements[*cursor] {
+        match &elements[*cursor].node {
             ContentElement::Image { alt, .. } => {
                 *cursor += 1;
                 count += 1;
@@ -510,14 +510,14 @@ fn check_alt_constraints(
 
 /// Validate the body section (after the separator) against body rules.
 fn validate_body(
-    elements: &[ContentElement],
+    elements: &[Spanned<ContentElement>],
     start: usize,
     body_rules: &BodyRules,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     if let Some(heading_range) = &body_rules.heading_range {
-        for element in &elements[start..] {
-            if let ContentElement::Heading { level, text } = element {
+        for spanned in &elements[start..] {
+            if let ContentElement::Heading { level, text } = &spanned.node {
                 let in_range = level.value() >= heading_range.min.value()
                     && level.value() <= heading_range.max.value();
                 if !in_range {

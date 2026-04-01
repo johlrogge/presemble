@@ -7,8 +7,8 @@ use crate::document::{ContentElement, Document};
 pub fn serialize_document(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    for element in &doc.elements {
-        parts.push(serialize_element(element));
+    for spanned in &doc.elements {
+        parts.push(serialize_element(&spanned.node));
     }
 
     if parts.is_empty() {
@@ -62,10 +62,16 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::parser::parse_document;
-    use schema::HeadingLevel;
+    use schema::{HeadingLevel, Span, Spanned};
 
     fn doc(elements: Vec<ContentElement>) -> Document {
-        Document { elements }
+        let dummy_span = Span { start: 0, end: 0 };
+        Document {
+            elements: elements
+                .into_iter()
+                .map(|node| Spanned { node, span: dummy_span })
+                .collect(),
+        }
     }
 
     #[test]

@@ -1,9 +1,9 @@
-use schema::HeadingLevel;
+use schema::{HeadingLevel, Spanned};
 
-/// A parsed content document: an ordered sequence of content elements.
+/// A parsed content document: an ordered sequence of spanned content elements.
 #[derive(Debug, Clone)]
 pub struct Document {
-    pub elements: Vec<ContentElement>,
+    pub elements: Vec<Spanned<ContentElement>>,
 }
 
 /// A structural element within a content document.
@@ -32,5 +32,17 @@ mod tests {
         let c = ContentElement::Paragraph { text: "world".to_string() };
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn document_holds_spanned_elements() {
+        use schema::Span;
+        let span = Span { start: 0, end: 5 };
+        let elem = ContentElement::Paragraph { text: "hello".to_string() };
+        let spanned = Spanned { node: elem, span };
+        let doc = Document { elements: vec![spanned] };
+        assert_eq!(doc.elements.len(), 1);
+        assert_eq!(doc.elements[0].span.start, 0);
+        assert_eq!(doc.elements[0].span.end, 5);
     }
 }

@@ -3,6 +3,7 @@ use crate::grammar::{
     AltRequirement, BodyRules, Constraint, ContentConstraint, CountRange, Element, Grammar,
     HeadingLevel, HeadingLevelRange, Orientation, Slot, SlotName,
 };
+use crate::span::Span;
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -42,8 +43,21 @@ pub fn parse_schema(input: &str) -> Result<Grammar, SchemaError> {
     };
     let mut in_body = false;
 
+    let mut byte_offset: usize = 0;
     for raw_line in input.lines() {
         let line = raw_line;
+
+        // Compute the byte span of this line in the source.
+        // `str::lines()` strips the line ending, so account for the actual
+        // bytes consumed (line + '\n' or '\r\n').
+        let line_start = byte_offset;
+        let line_end = line_start + line.len();
+        byte_offset = line_end;
+        if input[byte_offset..].starts_with("\r\n") {
+            byte_offset += 2;
+        } else if input[byte_offset..].starts_with('\n') {
+            byte_offset += 1;
+        }
 
         match state {
             ParseState::ExpectingElement => {
@@ -61,7 +75,8 @@ pub fn parse_schema(input: &str) -> Result<Grammar, SchemaError> {
                 }
 
                 // Try to parse an element line
-                if let Some(slot) = try_parse_element(trimmed)? {
+                let span = Span { start: line_start, end: line_end };
+                if let Some(slot) = try_parse_element(trimmed, span)? {
                     preamble.push(slot);
                     state = ParseState::ReadingConstraints;
                 }
@@ -96,7 +111,8 @@ pub fn parse_schema(input: &str) -> Result<Grammar, SchemaError> {
                     // Stay in ReadingConstraints; more key/value pairs may follow
                 } else {
                     // This line is either a constraint key or a new element line.
-                    if let Some(slot) = try_parse_element(trimmed)? {
+                    let span = Span { start: line_start, end: line_end };
+                    if let Some(slot) = try_parse_element(trimmed, span)? {
                         // New element — push and stay in ReadingConstraints
                         preamble.push(slot);
                         pending_constraint_key = None;
@@ -135,26 +151,26 @@ pub fn parse_schema(input: &str) -> Result<Grammar, SchemaError> {
 /// Try to parse a line as a slot element. Returns `Ok(Some(slot))` on success,
 /// `Ok(None)` if the line doesn't match any element pattern, or an `Err` for
 /// lines that look like elements but are malformed.
-fn try_parse_element(line: &str) -> Result<Option<Slot>, SchemaError> {
+fn try_parse_element(line: &str, span: Span) -> Result<Option<Slot>, SchemaError> {
     // 1. Heading: `# text {#name}` or `## text {#name}` etc.
     if line.starts_with('#') {
-        return parse_heading_line(line).map(Some);
+        return parse_heading_line(line, span).map(Some);
     }
 
     // 2. Image: `![alt](pattern) {#name}` — check before Link
     if line.starts_with("![") {
-        return parse_image_line(line).map(Some);
+        return parse_image_line(line, span).map(Some);
     }
 
     // 3. Link: `[text](pattern) {#name}`
     if line.starts_with('[') {
-        return parse_link_line(line).map(Some);
+        return parse_link_line(line, span).map(Some);
     }
 
     // 4. Paragraph: any other line with a `{#name}` anchor is a paragraph slot.
     //    The line text becomes the hint shown to authors in the content editor.
     if line.contains("{#") {
-        return parse_paragraph_line(line).map(Some);
+        return parse_paragraph_line(line, span).map(Some);
     }
 
     Ok(None)
@@ -165,7 +181,7 @@ fn try_parse_element(line: &str) -> Result<Option<Slot>, SchemaError> {
 // ---------------------------------------------------------------------------
 
 /// Parse `# Your blog post title {#title}` → Slot with Element::Heading.
-fn parse_heading_line(line: &str) -> Result<Slot, SchemaError> {
+fn parse_heading_line(line: &str, span: Span) -> Result<Slot, SchemaError> {
     // Count leading `#` characters to determine level
     let level_count = line.chars().take_while(|&c| c == '#').count() as u8;
     let level = HeadingLevel::new(level_count).ok_or_else(|| {
@@ -193,13 +209,14 @@ fn parse_heading_line(line: &str) -> Result<Slot, SchemaError> {
         } else {
             Some(hint_text)
         },
+        span,
     })
 }
 
 /// Parse any line with a `{#name}` anchor that isn't a heading, image, or link
 /// into a paragraph slot. The line text (minus the anchor) becomes the hint shown
 /// to authors in the content editor.
-fn parse_paragraph_line(line: &str) -> Result<Slot, SchemaError> {
+fn parse_paragraph_line(line: &str, span: Span) -> Result<Slot, SchemaError> {
     let (hint_text, name) = extract_anchor(line.trim())?;
     Ok(Slot {
         name: SlotName::new(name),
@@ -210,11 +227,12 @@ fn parse_paragraph_line(line: &str) -> Result<Slot, SchemaError> {
         } else {
             Some(hint_text)
         },
+        span,
     })
 }
 
 /// Parse `[text](pattern) {#name}` → Slot with Element::Link.
-fn parse_link_line(line: &str) -> Result<Slot, SchemaError> {
+fn parse_link_line(line: &str, span: Span) -> Result<Slot, SchemaError> {
     let (text_part, pattern, after) = parse_md_link(line)?;
     let (hint_text, name) = extract_anchor(after.trim())?;
 
@@ -231,11 +249,12 @@ fn parse_link_line(line: &str) -> Result<Slot, SchemaError> {
         element: Element::Link { pattern },
         constraints: Vec::new(),
         hint_text: resolved_hint,
+        span,
     })
 }
 
 /// Parse `![alt](pattern) {#name}` → Slot with Element::Image.
-fn parse_image_line(line: &str) -> Result<Slot, SchemaError> {
+fn parse_image_line(line: &str, span: Span) -> Result<Slot, SchemaError> {
     let rest = line
         .strip_prefix('!')
         .ok_or_else(|| SchemaError::ParseError(format!("expected '!' prefix: {line}")))?;
@@ -256,6 +275,7 @@ fn parse_image_line(line: &str) -> Result<Slot, SchemaError> {
         element: Element::Image { pattern },
         constraints: Vec::new(),
         hint_text: resolved_hint,
+        span,
     })
 }
 
@@ -769,5 +789,51 @@ mod tests {
     fn invalid_occurs_value_is_an_error() {
         let err = parse_err("Summary text. {#summary}\noccurs\n: abc\n");
         assert!(matches!(err, SchemaError::ParseError(_)));
+    }
+
+    // -------------------------------------------------------------------
+    // Span tracking
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn heading_slot_span_is_first_line() {
+        // The heading is the first line; its span should start at 0
+        // and end at the length of the line (without the newline).
+        let input = "# Your blog post title {#title}\n";
+        let grammar = parse(input);
+        let slot = &grammar.preamble[0];
+        assert_eq!(slot.span.start, 0);
+        // The line "# Your blog post title {#title}" is 31 bytes.
+        let line = "# Your blog post title {#title}";
+        assert_eq!(slot.span.end, line.len());
+    }
+
+    #[test]
+    fn second_slot_span_starts_after_first_line() {
+        // Two slots separated by a blank line.
+        let input = "# Title {#title}\n\nSummary here. {#summary}\n";
+        let grammar = parse(input);
+        assert_eq!(grammar.preamble.len(), 2);
+        let title_slot = &grammar.preamble[0];
+        let summary_slot = &grammar.preamble[1];
+        // Title line: "# Title {#title}" (16 bytes), then '\n', then '\n'
+        let title_line = "# Title {#title}";
+        assert_eq!(title_slot.span.start, 0);
+        assert_eq!(title_slot.span.end, title_line.len());
+        // Summary line starts at byte 18 (16 + '\n' + '\n')
+        let summary_line = "Summary here. {#summary}";
+        let expected_start = title_line.len() + 2; // +2 for two '\n' characters
+        assert_eq!(summary_slot.span.start, expected_start);
+        assert_eq!(summary_slot.span.end, expected_start + summary_line.len());
+    }
+
+    #[test]
+    fn slot_span_covers_source_bytes() {
+        // Verify that the span byte range actually covers the slot definition text.
+        let input = "## Section {#section}\noccurs\n: exactly once\n";
+        let grammar = parse(input);
+        let slot = &grammar.preamble[0];
+        let covered = &input[slot.span.start..slot.span.end];
+        assert_eq!(covered, "## Section {#section}");
     }
 }

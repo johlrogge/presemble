@@ -1,5 +1,5 @@
-use content::{byte_to_position, parse_document_with_offsets, ContentElement};
-use schema::{Element, Grammar};
+use content::{byte_to_position, parse_document, ContentElement};
+use schema::{Element, Grammar, Span, Spanned};
 use template::Expr;
 
 /// A completion suggestion for a schema slot.
@@ -232,7 +232,7 @@ pub fn content_completions(
         let is_filled = doc
             .elements
             .iter()
-            .any(|e| element_matches_slot_type(e, &slot.element));
+            .any(|e| element_matches_slot_type(&e.node, &slot.element));
         if is_filled {
             continue;
         }
@@ -302,7 +302,7 @@ pub fn content_completions(
         let has_separator = doc
             .elements
             .iter()
-            .any(|e| matches!(e, content::ContentElement::Separator));
+            .any(|e| matches!(e.node, content::ContentElement::Separator));
         if !has_separator {
             completions.push(
                 SlotCompletion::plain(
@@ -321,7 +321,7 @@ pub fn content_completions(
         let has_separator = doc
             .elements
             .iter()
-            .any(|e| matches!(e, content::ContentElement::Separator));
+            .any(|e| matches!(e.node, content::ContentElement::Separator));
         if has_separator {
             if let Some(heading_range) = &body_rules.heading_range {
                 let min_level = heading_range.min.value();
@@ -522,14 +522,14 @@ pub fn definition_for_position(
     line: u32,
     site_dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let elements = parse_document_with_offsets(src).ok()?;
+    let doc = parse_document(src).ok()?;
     // Find a Link element at the given line
-    let target = elements.iter().find(|ewo| {
-        let start_line = byte_to_position(src, ewo.byte_range.start).0;
-        let end_line = byte_to_position(src, ewo.byte_range.end).0;
+    let target = doc.elements.iter().find(|spanned| {
+        let start_line = byte_to_position(src, spanned.span.start).0;
+        let end_line = byte_to_position(src, spanned.span.end).0;
         line >= start_line && line <= end_line
     })?;
-    let href = match &target.element {
+    let href = match &target.node {
         ContentElement::Link { href, .. } => href.clone(),
         _ => return None,
     };
@@ -550,18 +550,18 @@ pub fn definition_for_position(
 
 /// Hover text for the schema slot closest to the given line.
 pub fn hover_for_line(src: &str, grammar: &Grammar, line: u32) -> Option<String> {
-    let elements_with_offsets = parse_document_with_offsets(src).ok()?;
+    let doc = parse_document(src).ok()?;
 
-    let target = elements_with_offsets.iter().find(|ewo| {
-        let start_line = byte_to_position(src, ewo.byte_range.start).0;
-        let end_line = byte_to_position(src, ewo.byte_range.end).0;
+    let target = doc.elements.iter().find(|spanned| {
+        let start_line = byte_to_position(src, spanned.span.start).0;
+        let end_line = byte_to_position(src, spanned.span.end).0;
         line >= start_line && line <= end_line
     })?;
 
     let slot = grammar
         .preamble
         .iter()
-        .find(|s| element_matches_slot_type(&target.element, &s.element))?;
+        .find(|s| element_matches_slot_type(&target.node, &s.element))?;
 
     slot.hint_text.clone()
 }
@@ -919,8 +919,11 @@ pub fn apply_action(
             content::capitalize_slot(&mut doc, slot_name, grammar)?;
         }
         SlotAction::InsertSeparator => {
-            if !doc.elements.iter().any(|e| matches!(e, content::ContentElement::Separator)) {
-                doc.elements.push(content::ContentElement::Separator);
+            if !doc.elements.iter().any(|e| matches!(e.node, content::ContentElement::Separator)) {
+                doc.elements.push(Spanned {
+                    node: content::ContentElement::Separator,
+                    span: Span { start: 0, end: 0 },
+                });
             }
         }
     }
@@ -1671,16 +1674,16 @@ mod tests {
         let src = "# Old Title\n\nSummary text.\n\n[Author Name](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
         let result = write_slot_to_string(src, "title", &grammar, "New Title")
             .expect("write_slot_to_string should succeed");
-        let parsed = content::parse_document_with_offsets(&result);
+        let parsed = content::parse_document(&result);
         assert!(
             parsed.is_ok(),
             "result document should parse without errors: {parsed:?}"
         );
-        let elements = parsed.unwrap();
-        let has_new_title = elements.iter().any(|e| {
-            matches!(&e.element, content::ContentElement::Heading { text, .. } if text == "New Title")
+        let doc = parsed.unwrap();
+        let has_new_title = doc.elements.iter().any(|e| {
+            matches!(&e.node, content::ContentElement::Heading { text, .. } if text == "New Title")
         });
-        assert!(has_new_title, "parsed document should contain the new heading: {elements:#?}");
+        assert!(has_new_title, "parsed document should contain the new heading: {doc:#?}");
     }
 
     #[test]
