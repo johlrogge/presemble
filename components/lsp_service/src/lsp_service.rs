@@ -1,5 +1,5 @@
 use lsp_capabilities::{
-    apply_action, content_completions, definition_for_position, hover_for_line,
+    build_transform, content_completions, definition_for_position, hover_for_line,
     schema_completions, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
     DiagnosticSeverity, SlotAction, TemplateDefinitionTarget,
@@ -179,6 +179,64 @@ impl PresembleLsp {
     }
 }
 
+
+/// Convert a `content::SourceEdit` to an LSP `TextEdit` using byte-to-position mapping.
+fn source_edit_to_text_edit(src: &str, edit: &content::SourceEdit) -> TextEdit {
+    let (start_line, start_char) = content::byte_to_position(src, edit.span.start);
+    let (end_line, end_char) = content::byte_to_position(src, edit.span.end);
+    TextEdit {
+        range: Range {
+            start: Position { line: start_line, character: start_char },
+            end: Position { line: end_line, character: end_char },
+        },
+        new_text: edit.new_text.clone(),
+    }
+}
+
+/// Build targeted LSP TextEdits for a SlotAction by running the full diff pipeline.
+///
+/// Falls back to a full-document replacement if the diff produces complex changes
+/// (SlotAdded, SlotRemoved, SeparatorAdded, SeparatorRemoved).
+fn build_targeted_edits(src: &str, grammar: &schema::Grammar, action: &SlotAction) -> Vec<TextEdit> {
+    let transform: Box<dyn content::Transform> = match build_transform(grammar, action) {
+        Ok(t) => t,
+        Err(_) => return full_doc_replacement(src, grammar, action),
+    };
+    let before = match content::parse_and_assign(src, grammar) {
+        Ok(d) => d,
+        Err(_) => return full_doc_replacement(src, grammar, action),
+    };
+    let after = match transform.apply(before.clone()) {
+        Ok(d) => d,
+        Err(_) => return full_doc_replacement(src, grammar, action),
+    };
+    let diff = content::diff(&before, &after);
+    let source_edits = content::diff_to_source_edits(src, &before, &after, &diff);
+    if source_edits.is_empty() && !diff.is_empty() {
+        // Diff was non-empty but produced no edits — fall back to full replacement.
+        return full_doc_replacement(src, grammar, action);
+    }
+    source_edits
+        .iter()
+        .map(|e| source_edit_to_text_edit(src, e))
+        .collect()
+}
+
+/// Fall back to a full-document replacement TextEdit.
+fn full_doc_replacement(src: &str, grammar: &schema::Grammar, action: &SlotAction) -> Vec<TextEdit> {
+    use lsp_capabilities::apply_action;
+    let new_content = match apply_action(src, grammar, action) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    vec![TextEdit {
+        range: Range {
+            start: Position { line: 0, character: 0 },
+            end: Position { line: u32::MAX, character: 0 },
+        },
+        new_text: new_content,
+    }]
+}
 
 #[async_trait]
 impl LanguageServer for PresembleLsp {
@@ -483,24 +541,21 @@ impl LanguageServer for PresembleLsp {
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
         for (_diag, maybe_action) in stored {
             let Some(slot_action) = maybe_action else { continue };
-            let new_content = match apply_action(&src, &grammar, &slot_action) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
             let title = match &slot_action {
                 SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
                 SlotAction::InsertSlot { slot_name, .. } => format!("Insert {slot_name}"),
                 SlotAction::InsertSeparator => "Insert body separator".to_string(),
             };
-            let edit = TextEdit {
-                range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: u32::MAX, character: 0 },
-                },
-                new_text: new_content,
-            };
+
+            // Build targeted source edits using the diff pipeline.
+            let text_edits = build_targeted_edits(&src, &grammar, &slot_action);
+            // If targeted edits returned nothing, skip this action (shouldn't happen).
+            if text_edits.is_empty() {
+                continue;
+            }
+
             let mut changes = std::collections::HashMap::new();
-            changes.insert(uri.clone(), vec![edit]);
+            changes.insert(uri.clone(), text_edits);
             let workspace_edit = WorkspaceEdit {
                 changes: Some(changes),
                 ..Default::default()

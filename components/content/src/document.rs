@@ -27,25 +27,27 @@ pub struct Document {
     pub preamble: im::Vector<DocumentSlot>,
     pub body: im::Vector<Spanned<ContentElement>>,
     pub has_separator: bool,
+    pub separator_span: Option<Span>,
 }
 
 impl Document {
     /// Reconstruct the flat element sequence in declaration order.
     ///
     /// The order is: preamble slot elements (in slot order), an optional
-    /// synthetic separator, then body elements.
+    /// separator, then body elements.
     ///
-    /// Note: the separator span is not preserved in `Document`, so the
-    /// reconstructed separator carries a zero span.
+    /// When `separator_span` is available the reconstructed separator carries
+    /// that span; otherwise a zero span is used.
     pub fn flat_elements(&self) -> im::Vector<Spanned<ContentElement>> {
         let mut result = im::Vector::new();
         for slot in &self.preamble {
             result.append(slot.elements.clone());
         }
         if self.has_separator {
+            let span = self.separator_span.unwrap_or(Span { start: 0, end: 0 });
             result.push_back(Spanned {
                 node: ContentElement::Separator,
-                span: Span { start: 0, end: 0 },
+                span,
             });
         }
         result.append(self.body.clone());

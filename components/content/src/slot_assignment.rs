@@ -1,5 +1,5 @@
 use crate::document::{ContentElement, Document, DocumentSlot};
-use schema::{Constraint, CountRange, Element, Grammar, Slot, Spanned};
+use schema::{Constraint, CountRange, Element, Grammar, Slot, Span, Spanned};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -22,6 +22,7 @@ pub fn assign_slots(
     let mut cursor = 0usize;
     let mut preamble: im::Vector<DocumentSlot> = im::Vector::new();
     let mut has_separator = false;
+    let mut separator_span: Option<Span> = None;
 
     'slots: for slot in &grammar.preamble {
         // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
@@ -37,6 +38,7 @@ pub fn assign_slots(
 
         // Stop at separator — no more preamble slots after it.
         if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
+            separator_span = Some(elements[cursor].span);
             cursor += 1; // consume the separator
             has_separator = true;
             // Push empty slots for the current and remaining grammar slots.
@@ -75,6 +77,7 @@ pub fn assign_slots(
 
         // Check again for separator after consuming this slot's elements.
         if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
+            separator_span = Some(elements[cursor].span);
             cursor += 1; // consume the separator
             has_separator = true;
             break 'slots;
@@ -86,6 +89,7 @@ pub fn assign_slots(
     if !has_separator {
         while cursor < elements.len() {
             if matches!(elements[cursor].node, ContentElement::Separator) {
+                separator_span = Some(elements[cursor].span);
                 cursor += 1;
                 has_separator = true;
                 break;
@@ -102,6 +106,7 @@ pub fn assign_slots(
         preamble,
         body,
         has_separator,
+        separator_span,
     }
 }
 

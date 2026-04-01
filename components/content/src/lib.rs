@@ -1,3 +1,4 @@
+mod adapters;
 mod diff;
 mod document;
 mod error;
@@ -8,6 +9,10 @@ mod slot_editor;
 mod transform;
 mod validator;
 
+pub use adapters::{
+    diff_to_dom_patches, diff_to_source_edits, DomPatch, FileWriter, FullDocumentWriter,
+    SourceEdit,
+};
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{ContentElement, Document, DocumentSlot, FlatDocument};
 pub use error::ContentError;

@@ -1,4 +1,5 @@
 use crate::document::{ContentElement, Document};
+use schema::Spanned;
 
 /// Serialize a Document back to canonical markdown.
 ///
@@ -30,7 +31,14 @@ pub fn serialize_document(doc: &Document) -> String {
     parts.join("\n\n") + "\n"
 }
 
-fn serialize_element(element: &ContentElement) -> String {
+pub(crate) fn serialize_elements(elements: &im::Vector<Spanned<ContentElement>>) -> String {
+    elements.iter()
+        .map(|s| serialize_element(&s.node))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+pub(crate) fn serialize_element(element: &ContentElement) -> String {
     match element {
         ContentElement::Heading { level, text } => {
             let hashes = "#".repeat(level.value() as usize);
@@ -109,6 +117,7 @@ headings
                 .map(|node| Spanned { node, span: dummy_span })
                 .collect::<im::Vector<_>>(),
             has_separator: false,
+            separator_span: None,
         }
     }
 
@@ -125,6 +134,7 @@ headings
             preamble: im::vector![slot],
             body: im::Vector::new(),
             has_separator: false,
+            separator_span: None,
         }
     }
 
@@ -178,6 +188,7 @@ headings
             preamble: im::Vector::new(),
             body: im::Vector::new(),
             has_separator: true,
+            separator_span: None,
         };
         let output = serialize_document(&d);
         assert!(output.contains("----"), "expected '----' in: {output:?}");

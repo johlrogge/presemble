@@ -900,6 +900,29 @@ pub fn write_slot_to_string(
     Ok(content::serialize_document(&result_doc))
 }
 
+/// Build a [`content::Transform`] from a [`SlotAction`].
+///
+/// The grammar is cloned into an `Arc` so that the resulting transform can be
+/// used independently from its source.
+pub fn build_transform(grammar: &Grammar, action: &SlotAction) -> Result<Box<dyn content::Transform>, String> {
+    let grammar_arc = Arc::new(grammar.clone());
+    match action {
+        SlotAction::InsertSlot { slot_name, placeholder_value } => {
+            Ok(Box::new(
+                InsertSlot::new(Arc::clone(&grammar_arc), slot_name, placeholder_value.clone())
+                    .map_err(|e| e.to_string())?,
+            ))
+        }
+        SlotAction::Capitalize { slot_name } => {
+            Ok(Box::new(
+                Capitalize::new(Arc::clone(&grammar_arc), slot_name)
+                    .map_err(|e| e.to_string())?,
+            ))
+        }
+        SlotAction::InsertSeparator => Ok(Box::new(InsertSeparator)),
+    }
+}
+
 /// Apply a SlotAction to a source string, returning the new file content.
 /// Uses the Document-level pipeline: parse -> modify -> serialize.
 pub fn apply_action(
@@ -909,22 +932,7 @@ pub fn apply_action(
 ) -> Result<String, String> {
     let doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
-    let grammar_arc = Arc::new(grammar.clone());
-    let transform: Box<dyn Transform> = match action {
-        SlotAction::InsertSlot { slot_name, placeholder_value } => {
-            Box::new(
-                InsertSlot::new(Arc::clone(&grammar_arc), slot_name, placeholder_value.clone())
-                    .map_err(|e| e.to_string())?,
-            )
-        }
-        SlotAction::Capitalize { slot_name } => {
-            Box::new(
-                Capitalize::new(Arc::clone(&grammar_arc), slot_name)
-                    .map_err(|e| e.to_string())?,
-            )
-        }
-        SlotAction::InsertSeparator => Box::new(InsertSeparator),
-    };
+    let transform = build_transform(grammar, action)?;
     let result_doc = transform.apply(doc).map_err(|e| e.to_string())?;
     Ok(content::serialize_document(&result_doc))
 }
