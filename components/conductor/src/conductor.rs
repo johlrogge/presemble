@@ -330,11 +330,11 @@ impl Conductor {
                     None => return CommandResult::error(format!("no schema for: {stem}")),
                 };
 
-                // Read the content file
-                let content_src = match std::fs::read_to_string(&abs_path) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return CommandResult::error(format!("cannot read {file}: {e}"))
+                // Read from in-memory buffer (unsaved editor changes) or fall back to disk
+                let content_src = match self.document_text(&abs_path) {
+                    Some(s) => s,
+                    None => {
+                        return CommandResult::error(format!("cannot read {file}"))
                     }
                 };
 
@@ -349,9 +349,11 @@ impl Conductor {
                 }
 
                 let new_src = content::serialize_document(&doc);
-                if let Err(e) = std::fs::write(&abs_path, new_src) {
+                if let Err(e) = std::fs::write(&abs_path, &new_src) {
                     return CommandResult::error(format!("write error: {e}"));
                 }
+                // Update in-memory state to stay consistent
+                self.doc_sources.write().unwrap().insert(abs_path, new_src);
 
                 // Broadcast a PagesRebuilt event so connected browsers reload
                 let url = derive_url_from_content_path(&file);
