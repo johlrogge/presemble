@@ -279,6 +279,7 @@ dependencies = [
  "im",
  "pulldown-cmark",
  "schema",
+ "thiserror",
 ]
 
 [[package]]

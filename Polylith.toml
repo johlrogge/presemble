@@ -17,6 +17,7 @@ nng = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std"] }
 tower-lsp = "0.20"
 im = "15"
+thiserror = "2"
 
 [profiles]
 dev = "profiles/dev.profile"

@@ -10,3 +10,4 @@ interface = "content"
 schema = { workspace = true }
 pulldown-cmark = "0.12"
 im = { workspace = true }
+thiserror = { workspace = true }

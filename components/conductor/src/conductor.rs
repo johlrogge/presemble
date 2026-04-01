@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::protocol::{Command, ConductorEvent, Response};
 
@@ -339,14 +339,21 @@ impl Conductor {
                 };
 
                 // Parse, modify, serialize, and write
-                let mut doc = match content::parse_and_assign(&content_src, &grammar) {
+                let doc = match content::parse_and_assign(&content_src, &grammar) {
                     Ok(d) => d,
                     Err(e) => return CommandResult::error(format!("parse error: {e}")),
                 };
 
-                if let Err(e) = content::modify_slot(&mut doc, &slot, &grammar, &value) {
-                    return CommandResult::error(e);
-                }
+                let grammar_arc = Arc::new(grammar);
+                let transform = match content::InsertSlot::new(Arc::clone(&grammar_arc), &slot, value) {
+                    Ok(t) => t,
+                    Err(e) => return CommandResult::error(e.to_string()),
+                };
+                use content::Transform as _;
+                let doc = match transform.apply(doc) {
+                    Ok(d) => d,
+                    Err(e) => return CommandResult::error(e.to_string()),
+                };
 
                 let new_src = content::serialize_document(&doc);
                 if let Err(e) = std::fs::write(&abs_path, &new_src) {

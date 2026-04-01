@@ -1,5 +1,9 @@
-use content::{byte_to_position, parse_and_assign, parse_document, ContentElement};
+use content::{
+    byte_to_position, parse_and_assign, parse_document, ContentElement,
+    Capitalize, InsertSlot, InsertSeparator, Transform,
+};
 use schema::{Element, Grammar};
+use std::sync::Arc;
 use template::Expr;
 
 /// A completion suggestion for a schema slot.
@@ -887,10 +891,13 @@ pub fn write_slot_to_string(
     grammar: &Grammar,
     new_value: &str,
 ) -> Result<String, String> {
-    let mut doc = content::parse_and_assign(src, grammar)
+    let doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
-    content::modify_slot(&mut doc, slot_name, grammar, new_value)?;
-    Ok(content::serialize_document(&doc))
+    let grammar_arc = Arc::new(grammar.clone());
+    let transform = InsertSlot::new(grammar_arc, slot_name, new_value.to_string())
+        .map_err(|e| e.to_string())?;
+    let result_doc = transform.apply(doc).map_err(|e| e.to_string())?;
+    Ok(content::serialize_document(&result_doc))
 }
 
 /// Apply a SlotAction to a source string, returning the new file content.
@@ -900,22 +907,26 @@ pub fn apply_action(
     grammar: &Grammar,
     action: &SlotAction,
 ) -> Result<String, String> {
-    let mut doc = content::parse_and_assign(src, grammar)
+    let doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
-    match action {
+    let grammar_arc = Arc::new(grammar.clone());
+    let transform: Box<dyn Transform> = match action {
         SlotAction::InsertSlot { slot_name, placeholder_value } => {
-            content::modify_slot(&mut doc, slot_name, grammar, placeholder_value)?;
+            Box::new(
+                InsertSlot::new(Arc::clone(&grammar_arc), slot_name, placeholder_value.clone())
+                    .map_err(|e| e.to_string())?,
+            )
         }
         SlotAction::Capitalize { slot_name } => {
-            content::capitalize_slot(&mut doc, slot_name, grammar)?;
+            Box::new(
+                Capitalize::new(Arc::clone(&grammar_arc), slot_name)
+                    .map_err(|e| e.to_string())?,
+            )
         }
-        SlotAction::InsertSeparator => {
-            if !doc.has_separator {
-                doc.has_separator = true;
-            }
-        }
-    }
-    Ok(content::serialize_document(&doc))
+        SlotAction::InsertSeparator => Box::new(InsertSeparator),
+    };
+    let result_doc = transform.apply(doc).map_err(|e| e.to_string())?;
+    Ok(content::serialize_document(&result_doc))
 }
 
 #[cfg(test)]

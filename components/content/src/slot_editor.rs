@@ -11,7 +11,7 @@ const NO_SPAN: Span = Span { start: 0, end: 0 };
 /// inserts a new `DocumentSlot` at the correct grammar-order position.
 /// If the grammar has body rules and the document has no separator, sets
 /// `doc.has_separator = true`.
-pub fn modify_slot(
+pub(crate) fn modify_slot(
     doc: &mut Document,
     slot_name: &str,
     grammar: &Grammar,
@@ -77,7 +77,7 @@ fn find_preamble_insert_position(
 
 /// Capitalize the first character of the text in a named slot.
 /// Returns Ok(true) if a change was made, Ok(false) if already capitalized or no text.
-pub fn capitalize_slot(
+pub(crate) fn capitalize_slot(
     doc: &mut Document,
     slot_name: &str,
     grammar: &Grammar,
