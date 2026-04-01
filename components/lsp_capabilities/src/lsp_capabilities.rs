@@ -1,5 +1,5 @@
-use content::{byte_to_position, parse_document, ContentElement};
-use schema::{Element, Grammar, Span, Spanned};
+use content::{byte_to_position, parse_and_assign, parse_document, ContentElement};
+use schema::{Element, Grammar};
 use template::Expr;
 
 /// A completion suggestion for a schema slot.
@@ -218,7 +218,7 @@ pub fn content_completions(
     site_dir: Option<&std::path::Path>,
 ) -> Vec<SlotCompletion> {
     // Parse current document to find which slots are filled
-    let doc = match content::parse_document(src) {
+    let doc = match parse_and_assign(src, grammar) {
         Ok(d) => d,
         Err(_) => return vec![],
     };
@@ -228,11 +228,11 @@ pub fn content_completions(
 
     // Walk grammar preamble in order, offer completions for missing slots
     for (idx, slot) in grammar.preamble.iter().enumerate() {
-        // Check if this slot type is present in the document
+        // Check if this slot is present in the document preamble
         let is_filled = doc
-            .elements
+            .preamble
             .iter()
-            .any(|e| element_matches_slot_type(&e.node, &slot.element));
+            .any(|ds| ds.name == slot.name && !ds.elements.is_empty());
         if is_filled {
             continue;
         }
@@ -298,58 +298,48 @@ pub fn content_completions(
     }
 
     // Offer separator if missing and grammar has body rules
-    if grammar.body.is_some() {
-        let has_separator = doc
-            .elements
-            .iter()
-            .any(|e| matches!(e.node, content::ContentElement::Separator));
-        if !has_separator {
-            completions.push(
-                SlotCompletion::plain(
-                    "----",
-                    "Body separator",
-                    Some("Separates preamble slots from body content".to_string()),
-                    "----\n",
-                )
-                .with_sort_text("99"),
-            );
-        }
+    if grammar.body.is_some() && !doc.has_separator {
+        completions.push(
+            SlotCompletion::plain(
+                "----",
+                "Body separator",
+                Some("Separates preamble slots from body content".to_string()),
+                "----\n",
+            )
+            .with_sort_text("99"),
+        );
     }
 
     // Offer body content completions when separator exists and grammar has body rules
-    if let Some(body_rules) = &grammar.body {
-        let has_separator = doc
-            .elements
-            .iter()
-            .any(|e| matches!(e.node, content::ContentElement::Separator));
-        if has_separator {
-            if let Some(heading_range) = &body_rules.heading_range {
-                let min_level = heading_range.min.value();
-                let hashes = "#".repeat(min_level as usize);
-                completions.push(
-                    SlotCompletion::snippet(
-                        format!("Body heading (H{})", min_level),
-                        format!("H{}-H{} heading", heading_range.min.value(), heading_range.max.value()),
-                        Some(format!(
-                            "Body section allows headings H{} through H{}",
-                            heading_range.min.value(),
-                            heading_range.max.value()
-                        )),
-                        format!("{hashes} ${{1:Heading}}"),
-                    )
-                    .with_sort_text("98"),
-                );
-            }
+    if let Some(body_rules) = &grammar.body
+        && doc.has_separator
+    {
+        if let Some(heading_range) = &body_rules.heading_range {
+            let min_level = heading_range.min.value();
+            let hashes = "#".repeat(min_level as usize);
             completions.push(
                 SlotCompletion::snippet(
-                    "Body paragraph",
-                    "Body text",
-                    Some("A paragraph in the body section".to_string()),
-                    "${1:Body text.}",
+                    format!("Body heading (H{})", min_level),
+                    format!("H{}-H{} heading", heading_range.min.value(), heading_range.max.value()),
+                    Some(format!(
+                        "Body section allows headings H{} through H{}",
+                        heading_range.min.value(),
+                        heading_range.max.value()
+                    )),
+                    format!("{hashes} ${{1:Heading}}"),
                 )
-                .with_sort_text("97"),
+                .with_sort_text("98"),
             );
         }
+        completions.push(
+            SlotCompletion::snippet(
+                "Body paragraph",
+                "Body text",
+                Some("A paragraph in the body section".to_string()),
+                "${1:Body text.}",
+            )
+            .with_sort_text("97"),
+        );
     }
 
     completions
@@ -550,30 +540,31 @@ pub fn definition_for_position(
 
 /// Hover text for the schema slot closest to the given line.
 pub fn hover_for_line(src: &str, grammar: &Grammar, line: u32) -> Option<String> {
-    let doc = parse_document(src).ok()?;
+    let doc = parse_and_assign(src, grammar).ok()?;
 
-    let target = doc.elements.iter().find(|spanned| {
+    // Search preamble slots for an element whose span covers the target line
+    for slot in &doc.preamble {
+        for spanned in &slot.elements {
+            let start_line = byte_to_position(src, spanned.span.start).0;
+            let end_line = byte_to_position(src, spanned.span.end).0;
+            if line >= start_line && line <= end_line {
+                // Find the grammar slot by name to get its hint_text
+                let grammar_slot = grammar.preamble.iter().find(|s| s.name == slot.name)?;
+                return grammar_slot.hint_text.clone();
+            }
+        }
+    }
+
+    // Search body elements
+    for spanned in &doc.body {
         let start_line = byte_to_position(src, spanned.span.start).0;
         let end_line = byte_to_position(src, spanned.span.end).0;
-        line >= start_line && line <= end_line
-    })?;
+        if line >= start_line && line <= end_line {
+            return None;
+        }
+    }
 
-    let slot = grammar
-        .preamble
-        .iter()
-        .find(|s| element_matches_slot_type(&target.node, &s.element))?;
-
-    slot.hint_text.clone()
-}
-
-fn element_matches_slot_type(element: &ContentElement, slot_type: &Element) -> bool {
-    matches!(
-        (element, slot_type),
-        (ContentElement::Heading { .. }, Element::Heading { .. })
-            | (ContentElement::Paragraph { .. }, Element::Paragraph)
-            | (ContentElement::Link { .. }, Element::Link { .. })
-            | (ContentElement::Image { .. }, Element::Image { .. })
-    )
+    None
 }
 
 /// A data-path reference found in a template, with its source location.
@@ -896,7 +887,7 @@ pub fn write_slot_to_string(
     grammar: &Grammar,
     new_value: &str,
 ) -> Result<String, String> {
-    let mut doc = content::parse_document(src)
+    let mut doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
     content::modify_slot(&mut doc, slot_name, grammar, new_value)?;
     Ok(content::serialize_document(&doc))
@@ -909,7 +900,7 @@ pub fn apply_action(
     grammar: &Grammar,
     action: &SlotAction,
 ) -> Result<String, String> {
-    let mut doc = content::parse_document(src)
+    let mut doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
     match action {
         SlotAction::InsertSlot { slot_name, placeholder_value } => {
@@ -919,11 +910,8 @@ pub fn apply_action(
             content::capitalize_slot(&mut doc, slot_name, grammar)?;
         }
         SlotAction::InsertSeparator => {
-            if !doc.elements.iter().any(|e| matches!(e.node, content::ContentElement::Separator)) {
-                doc.elements.push_back(Spanned {
-                    node: content::ContentElement::Separator,
-                    span: Span { start: 0, end: 0 },
-                });
+            if !doc.has_separator {
+                doc.has_separator = true;
             }
         }
     }

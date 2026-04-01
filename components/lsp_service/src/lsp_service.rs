@@ -266,7 +266,9 @@ impl LanguageServer for PresembleLsp {
             match kind {
                 site_index::FileKind::Content { .. } => {
                     // Auto-format: parse and serialize to canonical form
-                    if let Ok(doc) = content::parse_document(&src) {
+                    if let Some((grammar, _)) = self.grammar_for_uri(&uri)
+                        && let Ok(doc) = content::parse_and_assign(&src, &grammar)
+                    {
                         let canonical = content::serialize_document(&doc);
                         if canonical != src {
                             // Write canonical form to disk

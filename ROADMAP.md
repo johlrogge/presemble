@@ -118,10 +118,57 @@ for missing content.
 
 ---
 
-## Current milestone — M5: "Browser editing"
+## Current milestone — M3.5: "Code action transformation model"
+
+**Goal:** Unify all content transformations (LSP code actions, browser edits, auto-format) under
+a single pure-functional pipeline. Fix the lost-error-markers bug in the LSP. Build the
+foundation that M5 browser editing will use for its edit pipeline.
+
+**Why now:** M5 browser editing needs a well-defined transformation pipeline — browser edits
+are content transforms that must flow to disk and back to the browser. Building that pipeline
+also fixes the lost-markers bug in the shipped LSP (M3), which currently replaces the entire
+document buffer on every code action, wiping all other diagnostics.
+
+**Prerequisites (infrastructure):**
+
+- [ ] Parser source span tracking — parsers predate LSP and do not carry source positions; needed for targeted TextEdits instead of full-buffer replacement
+- [ ] `im` crate adoption for persistent DOM trees — structural sharing makes before/after comparison efficient and independent code actions safe to compute without interference
+- [ ] Deeper DOM tree structure — slots as named children, not flat `Vec<ContentElement>`; required for slot-level semantic diffing
+
+**Tier 1: Transform trait**
+
+- [ ] Code actions as structs implementing `Transform` trait: `fn apply(&self, dom: Dom) -> Result<Dom>`
+- [ ] All parameters bound at construction (slot name, value) — no ambient context
+- [ ] Composition struct holding `Vec<Box<dyn Transform>>` for chaining
+- [ ] Migrate existing code actions (InsertSlot, Capitalize, InsertSeparator) to the new model
+
+**Tier 2: Structural diff**
+
+- [ ] Compare before/after DOM trees exploiting `im` structural sharing (Arc pointer comparison skips unchanged subtrees)
+- [ ] Slot-level semantic diff: SlotAdded, SlotChanged, SlotRemoved, SeparatorAdded
+
+**Tier 3: Consumer adapters**
+
+- [ ] LSP adapter: semantic diff to targeted LSP TextEdits using source spans
+- [ ] File writer adapter: serialize only changed regions
+- [ ] Browser adapter: semantic diff to DOM patches (stub — completed in M5)
+
+The Transform trait also defines the primitive operation vocabulary for M4's conductor protocol —
+transforms are the REPL's built-in functions.
+
+**Success gate:** Existing LSP code actions (InsertSlot, Capitalize, InsertSeparator) work
+through the new pipeline. Applying a code action no longer wipes other diagnostics. The browser
+adapter interface exists as a stub ready for M5 to implement.
+
+---
+
+## M5: "Browser editing"
 
 **Goal:** The served page IS the editor. Content authors who never touch a terminal can create
 and edit content directly in the browser.
+
+**Depends on:** M3.5 code action transformation model — browser edits use the Transform pipeline,
+structural diff, and browser adapter defined there.
 
 **Why now:** Suggestion nodes shipped in M3 Phase 5 are the direct foundation. `presemble serve` already has WebSocket and content in memory — no conductor needed to start.
 
@@ -159,11 +206,35 @@ and edit content directly in the browser.
 - [ ] Edit mode: inline editing of simple content fields
 - [ ] Suggest mode: mark-for-correction and suggest-changes
 - [ ] Suggestion persistence in `.presemble/suggestions/`
-- [ ] Conductor integration: browser edits flow through the standard edit pipeline
+- [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol
 
 **Success gate:** A content author can open a served page, click the mascot to enter edit mode,
 fill in missing content via suggestion nodes, and see the page update live. An editor in Helix
 sees browser suggestions as diagnostics with quickfixes.
+
+---
+
+## M6 — "CSS asset tracking"
+
+**Goal:** Close the asset-discovery gap for CSS. Today, Presemble only copies assets referenced
+from template DOM trees (ADR-010). Assets referenced via CSS `url()` — fonts, background images,
+cursors — are invisible to the build. This breaks the "clean output + complete site" guarantee.
+
+**Why now:** This is a correctness gap in shipped functionality (M1 asset discovery). A site
+with CSS-referenced fonts or images produces either broken output or requires workarounds.
+The fix is small, self-contained, and load-bearing.
+
+**Deliverables:**
+- [ ] New `css` polylith component — CSS parsing is its own concern
+- [ ] Parse CSS files and discover `url()` references (fonts, images, cursors)
+- [ ] Recursive `@import` walking — follow import chains to discover all referenced assets
+- [ ] Feed discovered CSS assets into dep_graph alongside template-discovered assets
+- [ ] Error on missing assets referenced from CSS (same behavior as template asset references)
+- [ ] Copy only what is used — no blind copying of the asset directory
+
+**Success gate:** A site with fonts or images referenced only from CSS `url()` builds correctly.
+Missing CSS-referenced assets produce clear build errors. No assets are copied that are not
+referenced.
 
 ---
 
@@ -173,6 +244,12 @@ sees browser suggestions as diagnostics with quickfixes.
 and `presemble serve` are separate processes with separate state. The conductor makes them thin
 clients of one authoritative process.
 
+The conductor is a REPL runtime. Clients jack in and interact with live site state via an
+S-expression protocol. Transforms (from M3.5) are write operations; queries drive rendering.
+The protocol form is designed so a future expression language evaluates the same syntax — no
+intermediate command format to translate later. This needs further design work (see
+conductor-as-repl brainstorm note).
+
 **Conductor owns:**
 - dep_graph (single source of truth)
 - Schema cache
@@ -181,12 +258,24 @@ clients of one authoritative process.
 
 **Clients connect via nng (nanomsg-next-gen) IPC:**
 - `presemble lsp site/` — thin bridge: Helix stdio to nng socket to conductor
-- `presemble serve site/` — thin HTTP/WebSocket client of conductor
-- `presemble repl site/` — REPL client (future, see Deferred)
+- `presemble serve site/` — query client: renders pages by querying conductor state, not by serving files
+- `presemble repl site/` — CLI REPL client (future, see Deferred — the protocol already exists)
+
+**Protocol — S-expressions over nng:**
+```clj
+;; Transforms (write operations — M3.5 primitives)
+(insert-slot "title" "Hello")
+(capitalize "title")
+
+;; Queries (read operations — serve client uses these)
+(render :page "/blog/my-post" :at :now)
+(query :from "/blog/my-post" :path "author.name")
+(deps :page "/blog/my-post")
+```
 
 **nng topology:**
 - PUB/SUB for broadcasts (file changed, rebuild done)
-- REQ/REP for commands (validate, apply edit)
+- REQ/REP for commands (transforms and queries)
 - Version counter per file for sync/conflict detection
 
 **Startup model (Kakoune-inspired):**
@@ -205,11 +294,12 @@ clients of one authoritative process.
 - Conflicts live in editor memory only as LSP diagnostics with quickfixes
 
 **Deliverables:**
-- [ ] ADR for conductor architecture
+- [ ] ADR for conductor architecture and REPL protocol
+- [ ] S-expression command protocol: EDN parsing, dispatch to transforms and queries
 - [ ] nng IPC layer with PUB/SUB and REQ/REP
 - [ ] Conductor process: dep_graph, schema cache, file watcher, in-memory content
 - [ ] `presemble lsp` as thin nng client
-- [ ] `presemble serve` as thin nng client
+- [ ] `presemble serve` as query client of conductor
 - [ ] Version counter and conflict detection
 
 **Success gate:** `presemble lsp` and `presemble serve` share state through the conductor.
@@ -243,7 +333,7 @@ preview the future state of the site.
 
 - Publish timestamps on content items
 - `presemble build --at <datetime>` — render the site as it will appear at a given moment
-- Timeline scrubber in the `presemble serve` UI
+- Timeline scrubber in the `presemble serve` UI — time-travel is a query parameter: `(render :page ... :at "2026-05-01")`
 - Publisher maintains a timetable of future publish events
 - Content saves push events into the timetable
 - Dual publish triggers: clock-driven (timetable) and event-driven (git push or content save)
@@ -253,21 +343,28 @@ preview the site at that date, and the publisher automatically publishes when th
 
 ---
 
-## M9 — "CSS assistance"
+## M9 — "CSS as a first-class language"
 
-**Goal:** CSS is a first-class concern. Authors and designers get validation, theming tools, and
-live feedback — not a blank stylesheet and guesswork.
+**Goal:** CSS participates in the knowledge graph. Authors and designers get class/ID completions
+across CSS and templates, and schema types produce discoverable CSS class names.
 
-**Why now:** CSS is a consistent pain point and must be addressed before distribution. Shipping
-Presemble to new users with no CSS story creates a bad first impression.
+**Why now:** CSS is a consistent pain point. With CSS asset tracking shipped (M6) and LSP
+infrastructure mature (M3), the foundation exists to make CSS a peer of content, templates,
+and schemas in the knowledge graph.
 
 **Deliverables:**
-- [ ] CSS validation against templates — flag missing styles for semantic slots, unused classes
-- [ ] Theme generation from design tokens or colour palettes
-- [ ] Live CSS hot reload in `presemble serve` — style changes apply without a full page rebuild
+- [ ] dep_graph supports heterogeneous node types (classes, IDs, selectors alongside files and assets)
+- [ ] Templates register their class/ID vocabulary into the knowledge graph
+- [ ] CSS selectors register their class/ID vocabulary into the knowledge graph
+- [ ] Bidirectional LSP completions: CSS editor suggests classes/IDs from templates; template editor suggests classes/IDs from CSS
+- [ ] Schema-driven `presemble-` class generation — schema types produce predictable class names stamped on rendered nodes (e.g. `presemble-article`)
+- [ ] `presemble-` prefix as natural LSP completion trigger in CSS files
+- [ ] Live CSS hot reload in `presemble serve` — style changes apply without full page rebuild
+- [ ] Diagnostics for unused CSS selectors and missing styles for schema-defined slots
 
-**Success gate:** A new site gets diagnostics for missing styles on schema-defined slots. A
-designer can generate a starter theme from a colour palette and see changes live in the browser.
+**Success gate:** Editing a CSS file shows completions for classes used in templates. Editing
+a template shows completions for classes defined in CSS. Schema types produce `presemble-`
+prefixed classes that are discoverable via CSS completions.
 
 ---
 
@@ -306,11 +403,11 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - Schema-to-template scaffolding (drag schema into template, auto-populate insert nodes)
 - Homoiconic editing: the edit surface and the content model are the same structure
 
-**Cider-compatible REPL:**
-- Interactive REPL for exploring schemas, templates, and the data graph from an editor
-- Emacs/Cider first-class; extensible to other editor REPL clients
-- Query the data graph, test template fragments, inspect schema validation — without leaving the editor
-- Requires the conductor's nng IPC backbone
+**REPL CLI client:**
+- The conductor (M4) already speaks an S-expression protocol — the REPL runtime exists
+- This deferred item is adding a CLI/editor client that jacks into the conductor
+- Calva and CIDER integration is possible because the protocol is nREPL-shaped
+- Evolution path: fixed vocabulary (M4) → composition and conditionals → embedded Lisp engine
 
 **Named body sections (brainstorm):**
 - The `----` separator could be extended with named sections: `---- {#named-section}`
@@ -336,6 +433,8 @@ These are real parts of the vision, not cut — just not needed to prove the cor
   - Schema doesn't exist → hard error
 - LSP link completions already enumerate existing content — extend to validate references at build time
 - "Create" quickfix would scaffold a new content file from the schema and open it in the editor
+
+**LSP code action robustness:** → Promoted to M3.5 (code action transformation model).
 
 **Live nodes — backend-backed template regions (brainstorm):**
 - Some template nodes could be backed by a live data source in production (database, API, etc.)

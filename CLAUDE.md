@@ -77,3 +77,6 @@ This project uses the shared metadev multi-agent workflow. Run `/init` on first 
 | `commit` | Writes conventional commit messages. |
 | `metadev` | Onboards the project, installs skills, audits CLAUDE.md. |
 | `product-owner` | Reviews vision and roadmap, advises on priorities. |
+| `release-manager` | Owns git flow lifecycle: features, releases, hotfixes. |
+| `devops` | Builds, deploys, and operates project infrastructure. |
+| `documenter` | Maintains README files and site docs for releases. |

@@ -113,65 +113,45 @@ fn max_paragraphs(slot: &schema::Slot) -> usize {
     1 // default: consume exactly 1
 }
 
-/// Returns true if the paragraph text is a bare slot anchor annotation (e.g. `{#cover}`).
-fn is_annotation_paragraph(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with("{#") && t.ends_with('}') && !t[2..t.len() - 1].contains('}')
-}
-
-/// Build a DataGraph from a validated Document and its Grammar.
+/// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
 pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     let mut graph = DataGraph::new();
-    let elements = &doc.elements;
-    let mut cursor = 0usize;
-    let mut separator_found = false;
 
+    // Iterate grammar preamble slots and map each to its DocumentSlot.
     for slot in &grammar.preamble {
-        // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
-        while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor].node
-                && is_annotation_paragraph(text)
-            {
-                cursor += 1;
-                continue;
-            }
-            break;
-        }
-
-        if cursor >= elements.len() {
-            break;
-        }
-
-        if matches!(elements[cursor].node, ContentElement::Separator) {
-            cursor += 1;
-            separator_found = true;
-            break;
-        }
-
         let slot_key = slot.name.as_str().to_string();
+
+        // Find the DocumentSlot for this grammar slot.
+        let doc_slot = doc.preamble.iter().find(|s| s.name == slot.name);
+        let elements = match doc_slot {
+            Some(s) if !s.elements.is_empty() => &s.elements,
+            _ => continue,
+        };
 
         match &slot.element {
             Element::Heading { .. } => {
-                if let ContentElement::Heading { text, .. } = &elements[cursor].node {
+                if let Some(spanned) = elements.front()
+                    && let ContentElement::Heading { text, .. } = &spanned.node
+                {
                     graph.insert(slot_key, Value::Text(text.clone()));
-                    cursor += 1;
                 }
             }
 
             Element::Paragraph => {
                 let max = max_paragraphs(slot);
-                let mut paragraphs: Vec<Value> = Vec::new();
-                while cursor < elements.len() && paragraphs.len() < max {
-                    match &elements[cursor].node {
-                        ContentElement::Paragraph { text } => {
-                            paragraphs.push(Value::Text(text.clone()));
-                            cursor += 1;
+                let paragraphs: Vec<Value> = elements
+                    .iter()
+                    .filter_map(|s| {
+                        if let ContentElement::Paragraph { text } = &s.node {
+                            Some(Value::Text(text.clone()))
+                        } else {
+                            None
                         }
-                        ContentElement::Separator => break,
-                        _ => break,
-                    }
-                }
+                    })
+                    .take(max)
+                    .collect();
+
                 // For single-value slots (exactly once), store as Text not List
                 // so templates don't need `as` to avoid span concatenation.
                 let value = if max == 1 {
@@ -183,17 +163,20 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             }
 
             Element::Link { .. } => {
-                if let ContentElement::Link { text, href } = &elements[cursor].node {
+                if let Some(spanned) = elements.front()
+                    && let ContentElement::Link { text, href } = &spanned.node
+                {
                     let mut record = DataGraph::new();
                     record.insert("text", Value::Text(text.clone()));
                     record.insert("href", Value::Text(href.clone()));
                     graph.insert(slot_key, Value::Record(record));
-                    cursor += 1;
                 }
             }
 
             Element::Image { .. } => {
-                if let ContentElement::Image { path, alt } = &elements[cursor].node {
+                if let Some(spanned) = elements.front()
+                    && let ContentElement::Image { path, alt } = &spanned.node
+                {
                     let mut record = DataGraph::new();
                     record.insert("path", Value::Text(path.clone()));
                     let alt_value = match alt {
@@ -202,32 +185,13 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
                     };
                     record.insert("alt", alt_value);
                     graph.insert(slot_key, Value::Record(record));
-                    cursor += 1;
                 }
             }
-        }
-
-        if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
-            cursor += 1;
-            separator_found = true;
-            break;
-        }
-    }
-
-    // If separator was not yet consumed, scan forward to find it.
-    if !separator_found {
-        while cursor < elements.len() {
-            if matches!(elements[cursor].node, ContentElement::Separator) {
-                cursor += 1;
-                break;
-            }
-            cursor += 1;
         }
     }
 
     // Render body elements as HTML.
-    let body_sliced: im::Vector<_> = elements.iter().skip(cursor).cloned().collect();
-    let body_html = render_body_html(&body_sliced);
+    let body_html = render_body_html(&doc.body);
     if !body_html.is_empty() {
         graph.insert("body", Value::Html(body_html));
     }
@@ -358,7 +322,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use content::parse_document;
+    use content::parse_and_assign;
     use schema::{parse_schema, Span as SchemaSpan};
 
     /// Wrap a plain `ContentElement` in a dummy `Spanned` for use in tests.
@@ -374,7 +338,8 @@ mod tests {
     fn hello_world_doc() -> Document {
         let doc_input =
             include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
-        parse_document(doc_input).expect("hello-world.md should parse")
+        let grammar = article_grammar();
+        parse_and_assign(doc_input, &grammar).expect("hello-world.md should parse")
     }
 
     #[test]
@@ -522,13 +487,11 @@ mod tests {
     #[test]
     fn body_html_is_parseable_xml_when_content_has_angle_brackets() {
         use crate::dom::parse_template_xml;
-        use content::parse_document;
         use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
 
         // Build a minimal document whose body paragraph contains angle brackets.
         // The separator (---) separates preamble from body.
         let doc_input = "# My Title\n\n---\n\nUse `<presemble:insert>` to insert values.\n";
-        let doc = parse_document(doc_input).expect("document should parse");
 
         // Construct a grammar directly with a single heading-1 slot called "title".
         let grammar = Grammar {
@@ -549,6 +512,7 @@ mod tests {
             }),
         };
 
+        let doc = parse_and_assign(doc_input, &grammar).expect("document should parse");
         let graph = build_article_graph(&doc, &grammar);
         let body_html = match graph.resolve(&["body"]) {
             Some(Value::Html(html)) => html.clone(),
@@ -627,7 +591,7 @@ mod tests {
         let content_src = "# My Title\n\nMy tagline.\n\nMy description paragraph.\n";
 
         let grammar = parse_schema(schema_src).expect("schema parses");
-        let doc = parse_document(content_src).expect("content parses");
+        let doc = parse_and_assign(content_src, &grammar).expect("content parses");
         let graph = build_article_graph(&doc, &grammar);
 
         // tagline should be exactly one text value
@@ -654,8 +618,8 @@ mod tests {
     fn empty_doc_gets_suggestions_for_all_article_slots() {
         // A document with only the separator — all preamble slots should become suggestions.
         let doc_input = "----\n";
-        let doc = parse_document(doc_input).expect("empty doc should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("empty doc should parse");
         let graph = build_article_graph(&doc, &grammar);
 
         // title — Heading suggestion
@@ -720,8 +684,8 @@ mod tests {
     fn doc_missing_only_cover_gets_only_cover_suggestion() {
         // Document has title, summary, author, but no cover.
         let doc_input = "# My Title\n\nMy summary.\n\n[Jo Hlrogge](/author/jo)\n\n----\n\n### Body\n";
-        let doc = parse_document(doc_input).expect("partial doc should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("partial doc should parse");
         let graph = build_article_graph(&doc, &grammar);
 
         // title should be real
@@ -757,7 +721,7 @@ mod tests {
         let content_src = "# My Title\n\n----\n\n### Body\n";
 
         let grammar = parse_schema(schema_src).expect("schema parses");
-        let doc = parse_document(content_src).expect("content parses");
+        let doc = parse_and_assign(content_src, &grammar).expect("content parses");
         let graph = build_article_graph(&doc, &grammar);
 
         // Missing tagline now becomes a Suggestion placeholder rather than Absent.

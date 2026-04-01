@@ -34,112 +34,69 @@ pub enum Severity {
     Warning,
 }
 
-/// Returns true if the paragraph text is a bare slot anchor annotation (e.g. `{#cover}`).
-///
-/// The parser sometimes produces these as paragraph artifacts when an image or link
-/// appears inside a markdown paragraph alongside inline slot annotations.
-fn is_annotation_paragraph(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with("{#") && t.ends_with('}') && !t[2..t.len() - 1].contains('}')
-}
-
 /// Validate a content document against a schema grammar.
 ///
 /// Checks that the document's structure matches the grammar's preamble slots
 /// and body rules, returning all diagnostics found.
 pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     let mut diagnostics: Vec<ValidationDiagnostic> = Vec::new();
-    let elements = &doc.elements;
-    let mut cursor = 0usize;
-    let mut separator_consumed = false;
 
     // ── Preamble validation ────────────────────────────────────────────────
-    for slot in &grammar.preamble {
-        // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
-        while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor].node
-                && is_annotation_paragraph(text)
-            {
-                cursor += 1;
+    for grammar_slot in &grammar.preamble {
+        // Find the corresponding DocumentSlot by name.
+        let slot_elements = doc
+            .preamble
+            .iter()
+            .find(|s| s.name == grammar_slot.name)
+            .map(|s| &s.elements);
+
+        let elements = match slot_elements {
+            Some(elems) => elems,
+            None => {
+                // Slot missing entirely — check minimum count requirement.
+                let expected = expected_count_for_slot(grammar_slot);
+                if expected.min() > 0 {
+                    diagnostics.push(ValidationDiagnostic {
+                        severity: Severity::Error,
+                        message: format!(
+                            "slot '{}': missing required element",
+                            grammar_slot.name
+                        ),
+                        slot: Some(grammar_slot.name.clone()),
+                    });
+                }
                 continue;
             }
-            break;
-        }
+        };
 
-        // Determine how many elements of this type to consume based on occurs constraint.
-        let expected_count = expected_count_for_slot(slot);
+        let expected_count = expected_count_for_slot(grammar_slot);
 
-        match &slot.element {
+        match &grammar_slot.element {
             Element::Heading { level: level_range } => {
-                let count = consume_headings(
-                    elements,
-                    &mut cursor,
-                    level_range,
-                    expected_count,
-                    slot,
-                    &mut diagnostics,
-                );
-                // Check occurs constraint
-                check_occurs_count(count, slot, &mut diagnostics);
+                let count = validate_headings(elements, level_range, grammar_slot, &mut diagnostics);
+                check_occurs_count(count, grammar_slot, &mut diagnostics);
             }
 
             Element::Paragraph => {
-                let count = consume_paragraphs(
-                    elements,
-                    &mut cursor,
-                    expected_count,
-                    slot,
-                    &mut diagnostics,
-                );
-                check_occurs_count(count, slot, &mut diagnostics);
+                let count = validate_paragraphs(elements, grammar_slot, &mut diagnostics);
+                check_occurs_count_paragraphs(count, &expected_count, grammar_slot, &mut diagnostics);
             }
 
             Element::Link { .. } => {
-                let count = consume_links(
-                    elements,
-                    &mut cursor,
-                    expected_count,
-                    slot,
-                    &mut diagnostics,
-                );
-                check_occurs_count(count, slot, &mut diagnostics);
+                let count = validate_links(elements, grammar_slot, &mut diagnostics);
+                check_occurs_count(count, grammar_slot, &mut diagnostics);
             }
 
             Element::Image { .. } => {
-                let count = consume_images(
-                    elements,
-                    &mut cursor,
-                    expected_count,
-                    slot,
-                    &mut diagnostics,
-                );
-                check_occurs_count(count, slot, &mut diagnostics);
+                let count = validate_images(elements, grammar_slot, &mut diagnostics);
+                check_occurs_count(count, grammar_slot, &mut diagnostics);
             }
-        }
-
-        // If the next element is the separator, consume it and stop preamble processing.
-        if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
-            cursor += 1;
-            separator_consumed = true;
-            break;
-        }
-    }
-
-    // If the separator was not encountered during preamble slot processing,
-    // scan forward to find it so body validation starts at the right position.
-    if !separator_consumed {
-        while cursor < elements.len() {
-            if matches!(elements[cursor].node, ContentElement::Separator) {
-                cursor += 1;
-                break;
-            }
-            cursor += 1;
         }
     }
 
     // ── Body validation ────────────────────────────────────────────────────
     if let Some(body_rules) = &grammar.body {
-        validate_body(elements, cursor, body_rules, &mut diagnostics);
+        validate_body(&doc.body, body_rules, &mut diagnostics);
     }
 
     ValidationResult { diagnostics }
@@ -251,50 +208,43 @@ fn describe_count_range(cr: &CountRange) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Element consumers
+// Element validators (operate on a slot's pre-assigned elements)
 // ---------------------------------------------------------------------------
 
-/// Consume headings at `cursor` that match `level_range`, up to `expected_count` max.
-/// Returns count of consumed headings. Also applies text constraints on each consumed heading.
-fn consume_headings(
+/// Validate headings in a slot's elements. Returns the count of valid headings.
+fn validate_headings(
     elements: &im::Vector<Spanned<ContentElement>>,
-    cursor: &mut usize,
     level_range: &HeadingLevelRange,
-    expected: ExpectedCount,
     slot: &Slot,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
     let mut count = 0usize;
-    let max = expected.max();
 
-    loop {
-        if let Some(limit) = max && count >= limit {
-            break;
-        }
-        if *cursor >= elements.len() {
-            break;
-        }
-        match &elements[*cursor].node {
-            ContentElement::Heading { level, text } => {
-                if level.value() >= level_range.min.value()
-                    && level.value() <= level_range.max.value()
-                {
-                    *cursor += 1;
-                    count += 1;
-                    // Check content constraints
-                    check_content_constraints(text, slot, diagnostics);
-                } else {
-                    // Wrong level — stop consuming for this slot
-                    break;
-                }
+    for spanned in elements {
+        if let ContentElement::Heading { level, text } = &spanned.node {
+            if level.value() >= level_range.min.value()
+                && level.value() <= level_range.max.value()
+            {
+                count += 1;
+                check_content_constraints(text, slot, diagnostics);
+            } else {
+                diagnostics.push(ValidationDiagnostic {
+                    severity: Severity::Error,
+                    message: format!(
+                        "slot '{}': heading level H{} is not in allowed range H{}-H{}",
+                        slot.name,
+                        level.value(),
+                        level_range.min.value(),
+                        level_range.max.value(),
+                    ),
+                    slot: Some(slot.name.clone()),
+                });
             }
-            ContentElement::Separator => break,
-            _ => break,
         }
     }
 
-    // If we consumed 0 but min > 0, the slot is missing
-    if count == 0 && expected.min() > 0 {
+    // If 0 headings found but minimum > 0, report missing heading.
+    if count == 0 && expected_count_for_slot(slot).min() > 0 {
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message: format!(
@@ -310,34 +260,27 @@ fn consume_headings(
     count
 }
 
-/// Consume paragraphs at `cursor` up to the expected count. Returns count consumed.
-fn consume_paragraphs(
+/// Validate paragraphs in a slot's elements. Returns count consumed.
+fn validate_paragraphs(
     elements: &im::Vector<Spanned<ContentElement>>,
-    cursor: &mut usize,
-    expected: ExpectedCount,
+    _slot: &Slot,
+    _diagnostics: &mut Vec<ValidationDiagnostic>,
+) -> usize {
+    elements
+        .iter()
+        .filter(|s| matches!(s.node, ContentElement::Paragraph { .. }))
+        .count()
+}
+
+/// Check paragraph count bounds.
+fn check_occurs_count_paragraphs(
+    count: usize,
+    expected: &ExpectedCount,
     slot: &Slot,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) -> usize {
+) {
     let min = expected.min();
     let max = expected.max();
-    let mut count = 0usize;
-
-    loop {
-        if let Some(limit) = max && count >= limit {
-            break;
-        }
-        if *cursor >= elements.len() {
-            break;
-        }
-        match &elements[*cursor].node {
-            ContentElement::Paragraph { .. } => {
-                *cursor += 1;
-                count += 1;
-            }
-            ContentElement::Separator => break,
-            _ => break,
-        }
-    }
 
     if count < min {
         diagnostics.push(ValidationDiagnostic {
@@ -358,40 +301,20 @@ fn consume_paragraphs(
             slot: Some(slot.name.clone()),
         });
     }
-
-    count
 }
 
-/// Consume link elements at `cursor` up to `expected` count.
-/// Returns count of consumed links.
-fn consume_links(
+/// Validate links in a slot's elements. Returns count of links.
+fn validate_links(
     elements: &im::Vector<Spanned<ContentElement>>,
-    cursor: &mut usize,
-    expected: ExpectedCount,
     slot: &Slot,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
-    let mut count = 0usize;
-    let max = expected.max();
+    let count = elements
+        .iter()
+        .filter(|s| matches!(s.node, ContentElement::Link { .. }))
+        .count();
 
-    loop {
-        if let Some(limit) = max && count >= limit {
-            break;
-        }
-        if *cursor >= elements.len() {
-            break;
-        }
-        match &elements[*cursor].node {
-            ContentElement::Link { .. } => {
-                *cursor += 1;
-                count += 1;
-            }
-            ContentElement::Separator => break,
-            _ => break,
-        }
-    }
-
-    if count == 0 && expected.min() > 0 {
+    if count == 0 && expected_count_for_slot(slot).min() > 0 {
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message: format!("slot '{}': missing required link", slot.name),
@@ -402,39 +325,22 @@ fn consume_links(
     count
 }
 
-/// Consume image elements at `cursor` up to `expected` count.
-/// Returns count of consumed images. Also checks alt and orientation constraints.
-fn consume_images(
+/// Validate images in a slot's elements. Returns count of images.
+fn validate_images(
     elements: &im::Vector<Spanned<ContentElement>>,
-    cursor: &mut usize,
-    expected: ExpectedCount,
     slot: &Slot,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
     let mut count = 0usize;
-    let max = expected.max();
 
-    loop {
-        if let Some(limit) = max && count >= limit {
-            break;
-        }
-        if *cursor >= elements.len() {
-            break;
-        }
-        match &elements[*cursor].node {
-            ContentElement::Image { alt, .. } => {
-                *cursor += 1;
-                count += 1;
-                // Check alt constraint
-                check_alt_constraints(alt.as_deref(), slot, diagnostics);
-                // Orientation: skip (cannot check visually at this stage)
-            }
-            ContentElement::Separator => break,
-            _ => break,
+    for spanned in elements {
+        if let ContentElement::Image { alt, .. } = &spanned.node {
+            count += 1;
+            check_alt_constraints(alt.as_deref(), slot, diagnostics);
         }
     }
 
-    if count == 0 && expected.min() > 0 {
+    if count == 0 && expected_count_for_slot(slot).min() > 0 {
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message: format!("slot '{}': missing required image", slot.name),
@@ -508,15 +414,14 @@ fn check_alt_constraints(
 // Body validation
 // ---------------------------------------------------------------------------
 
-/// Validate the body section (after the separator) against body rules.
+/// Validate the body section against body rules.
 fn validate_body(
     elements: &im::Vector<Spanned<ContentElement>>,
-    start: usize,
     body_rules: &BodyRules,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     if let Some(heading_range) = &body_rules.heading_range {
-        for spanned in elements.iter().skip(start) {
+        for spanned in elements.iter() {
             if let ContentElement::Heading { level, text } = &spanned.node {
                 let in_range = level.value() >= heading_range.min.value()
                     && level.value() <= heading_range.max.value();
@@ -545,7 +450,7 @@ fn validate_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse_document;
+    use crate::parser::parse_and_assign;
     use schema::parse_schema;
 
     /// Parse the article schema fixture.
@@ -561,8 +466,8 @@ mod tests {
     fn valid_hello_world_document_passes() {
         let doc_input =
             include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
-        let doc = parse_document(doc_input).expect("hello-world.md should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("hello-world.md should parse");
 
         let result = validate(&doc, &grammar);
 
@@ -579,8 +484,8 @@ mod tests {
     fn missing_required_slot_produces_error() {
         // Document with no H1 title — the title slot requires exactly 1 H1.
         let doc_input = "Some paragraph without a title.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body heading\n";
-        let doc = parse_document(doc_input).expect("should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
 
         let result = validate(&doc, &grammar);
 
@@ -605,8 +510,8 @@ mod tests {
     fn wrong_heading_level_in_body_produces_error() {
         // Valid preamble, but body has an H2 which is forbidden (only H3-H6 allowed).
         let doc_input = "# Valid Title\n\nSummary paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n## Forbidden H2 In Body\n";
-        let doc = parse_document(doc_input).expect("should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
 
         let result = validate(&doc, &grammar);
 
@@ -631,8 +536,8 @@ mod tests {
     fn non_capitalized_title_produces_error() {
         // Title that starts lowercase violates the `content: capitalized` constraint.
         let doc_input = "# lowercase title\n\nSummary paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
-        let doc = parse_document(doc_input).expect("should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
 
         let result = validate(&doc, &grammar);
 

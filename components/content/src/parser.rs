@@ -1,7 +1,8 @@
-use crate::document::{ContentElement, Document};
+use crate::document::{ContentElement, Document, FlatDocument};
 use crate::error::ContentError;
+use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use schema::{HeadingLevel, Span, Spanned};
+use schema::{Grammar, HeadingLevel, Span, Spanned};
 
 /// Convert a byte offset in `src` to a zero-indexed LSP (line, character) Position.
 /// `character` is a UTF-16 code unit offset as required by the LSP specification.
@@ -16,11 +17,13 @@ pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
     (line, character)
 }
 
-/// Parse a markdown content document and return a `Document` with source byte spans.
+/// Parse a markdown content document and return a `FlatDocument` with source byte spans.
 ///
 /// Each element in `doc.elements` is a `Spanned<ContentElement>` carrying both
 /// the parsed element and its byte range in the original source.
-pub fn parse_document(input: &str) -> Result<Document, ContentError> {
+///
+/// For the structured slotted form, use [`parse_and_assign`] instead.
+pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     let parser = Parser::new_ext(input, Options::ENABLE_TABLES).into_offset_iter();
     let mut elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
 
@@ -294,7 +297,17 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
         }
     }
 
-    Ok(Document { elements })
+    Ok(FlatDocument { elements })
+}
+
+/// Parse a markdown content document and assign its elements to grammar slots.
+///
+/// This is the primary entry point for structured document processing.
+/// It combines [`parse_document`] with [`assign_slots`] in a single call,
+/// returning a [`Document`] with named preamble slots and a body section.
+pub fn parse_and_assign(input: &str, grammar: &Grammar) -> Result<Document, ContentError> {
+    let flat = parse_document(input)?;
+    Ok(assign_slots(&flat.elements, grammar))
 }
 
 /// Convert a pulldown-cmark HeadingLevel to schema's HeadingLevel.
@@ -320,7 +333,7 @@ mod tests {
     use crate::document::ContentElement;
 
     // Helper: assert document has exactly the given number of elements.
-    fn assert_element_count(doc: &Document, n: usize) {
+    fn assert_element_count(doc: &FlatDocument, n: usize) {
         assert_eq!(
             doc.elements.len(),
             n,
@@ -694,5 +707,46 @@ Body paragraph."#;
         assert!(heading.is_some(), "expected a heading element");
         let h = heading.unwrap();
         assert_eq!(h.span.start, 0, "heading should start at byte 0");
+    }
+
+    // ── parse_and_assign ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_and_assign_returns_slotted_document() {
+        use schema::parse_schema;
+        let schema_src = r#"# Title {#title}
+occurs
+: exactly once
+
+Summary. {#summary}
+occurs
+: exactly once
+
+----
+
+Body content.
+headings
+: h3..h6
+"#;
+        let grammar = parse_schema(schema_src).expect("schema should parse");
+        let src = "# My Title\n\nA summary.\n\n----\n\n### Body section\n";
+        let doc = parse_and_assign(src, &grammar).expect("should parse and assign");
+
+        assert!(doc.has_separator, "should detect separator");
+        assert_eq!(doc.preamble.len(), 2, "should have 2 preamble slots");
+
+        let title_slot = &doc.preamble[0];
+        assert_eq!(title_slot.name.as_str(), "title");
+        assert_eq!(title_slot.elements.len(), 1);
+        assert!(matches!(
+            &title_slot.elements[0].node,
+            ContentElement::Heading { level, .. } if level.value() == 1
+        ));
+
+        let summary_slot = &doc.preamble[1];
+        assert_eq!(summary_slot.name.as_str(), "summary");
+        assert_eq!(summary_slot.elements.len(), 1);
+
+        assert_eq!(doc.body.len(), 1);
     }
 }

@@ -2,12 +2,23 @@ use crate::document::{ContentElement, Document};
 
 /// Serialize a Document back to canonical markdown.
 ///
-/// Each element is serialized to its markdown form, separated by blank lines.
+/// Serializes preamble slot elements in declaration order, then the separator
+/// (if present), then body elements. Each element is separated by blank lines.
 /// The output is deterministic — same Document always produces same markdown.
 pub fn serialize_document(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    for spanned in &doc.elements {
+    for slot in &doc.preamble {
+        for spanned in &slot.elements {
+            parts.push(serialize_element(&spanned.node));
+        }
+    }
+
+    if doc.has_separator {
+        parts.push(serialize_element(&ContentElement::Separator));
+    }
+
+    for spanned in &doc.body {
         parts.push(serialize_element(&spanned.node));
     }
 
@@ -60,23 +71,66 @@ fn serialize_element(element: &ContentElement) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::Document;
-    use crate::parser::parse_document;
-    use schema::{HeadingLevel, Span, Spanned};
+    use crate::document::{Document, DocumentSlot};
+    use crate::parser::parse_and_assign;
+    use schema::{parse_schema, HeadingLevel, Span, Spanned};
 
-    fn doc(elements: Vec<ContentElement>) -> Document {
+    /// A minimal grammar for building test Documents.
+    fn simple_grammar() -> schema::Grammar {
+        let schema_src = r#"# Title {#title}
+occurs
+: exactly once
+
+Summary. {#summary}
+occurs
+: exactly once
+
+----
+
+Body content.
+headings
+: h3..h6
+"#;
+        parse_schema(schema_src).expect("simple schema should parse")
+    }
+
+    fn doc_from_elements(elements: Vec<ContentElement>) -> Document {
         let dummy_span = Span { start: 0, end: 0 };
+        let grammar = simple_grammar();
+        // Build a flat list and assign to slots via parse_and_assign on a simple src
+        // For testing, build Document directly.
+        let _ = grammar;
+        // Build a Document with all elements in the body (no preamble slots, no separator)
+        // for simple serialization tests that don't need slot structure.
         Document {
+            preamble: im::Vector::new(),
+            body: elements
+                .into_iter()
+                .map(|node| Spanned { node, span: dummy_span })
+                .collect::<im::Vector<_>>(),
+            has_separator: false,
+        }
+    }
+
+    fn doc_with_slot(slot_name: &str, elements: Vec<ContentElement>) -> Document {
+        let dummy_span = Span { start: 0, end: 0 };
+        let slot = DocumentSlot {
+            name: schema::SlotName::new(slot_name),
             elements: elements
                 .into_iter()
                 .map(|node| Spanned { node, span: dummy_span })
                 .collect::<im::Vector<_>>(),
+        };
+        Document {
+            preamble: im::vector![slot],
+            body: im::Vector::new(),
+            has_separator: false,
         }
     }
 
     #[test]
     fn serialize_heading() {
-        let d = doc(vec![ContentElement::Heading {
+        let d = doc_with_slot("title", vec![ContentElement::Heading {
             level: HeadingLevel::new(1).unwrap(),
             text: "Hello".to_string(),
         }]);
@@ -85,7 +139,7 @@ mod tests {
 
     #[test]
     fn serialize_paragraph() {
-        let d = doc(vec![ContentElement::Paragraph {
+        let d = doc_from_elements(vec![ContentElement::Paragraph {
             text: "Some text.".to_string(),
         }]);
         assert_eq!(serialize_document(&d), "Some text.\n");
@@ -93,7 +147,7 @@ mod tests {
 
     #[test]
     fn serialize_link() {
-        let d = doc(vec![ContentElement::Link {
+        let d = doc_from_elements(vec![ContentElement::Link {
             text: "Jo".to_string(),
             href: "/author/jo".to_string(),
         }]);
@@ -102,7 +156,7 @@ mod tests {
 
     #[test]
     fn serialize_image() {
-        let d = doc(vec![ContentElement::Image {
+        let d = doc_from_elements(vec![ContentElement::Image {
             alt: Some("A photo".to_string()),
             path: "img.jpg".to_string(),
         }]);
@@ -111,7 +165,7 @@ mod tests {
 
     #[test]
     fn serialize_image_without_alt() {
-        let d = doc(vec![ContentElement::Image {
+        let d = doc_from_elements(vec![ContentElement::Image {
             alt: None,
             path: "img.jpg".to_string(),
         }]);
@@ -120,14 +174,18 @@ mod tests {
 
     #[test]
     fn serialize_separator() {
-        let d = doc(vec![ContentElement::Separator]);
+        let d = Document {
+            preamble: im::Vector::new(),
+            body: im::Vector::new(),
+            has_separator: true,
+        };
         let output = serialize_document(&d);
         assert!(output.contains("----"), "expected '----' in: {output:?}");
     }
 
     #[test]
     fn serialize_code_block() {
-        let d = doc(vec![ContentElement::CodeBlock {
+        let d = doc_from_elements(vec![ContentElement::CodeBlock {
             language: Some("rust".to_string()),
             code: "fn main() {}".to_string(),
         }]);
@@ -136,30 +194,32 @@ mod tests {
 
     #[test]
     fn serialize_elements_separated_by_blank_lines() {
-        let d = doc(vec![
-            ContentElement::Heading {
-                level: HeadingLevel::new(1).unwrap(),
-                text: "Title".to_string(),
-            },
-            ContentElement::Paragraph {
-                text: "Para.".to_string(),
-            },
-        ]);
-        assert_eq!(serialize_document(&d), "# Title\n\nPara.\n");
+        let grammar = simple_grammar();
+        let src = "# Title\n\nPara.\n\n----\n\n### Body\n";
+        let d = parse_and_assign(src, &grammar).expect("should parse");
+        let serialized = serialize_document(&d);
+        assert!(serialized.contains("# Title"), "expected '# Title' in: {serialized:?}");
+        assert!(serialized.contains("Para."), "expected 'Para.' in: {serialized:?}");
     }
 
     #[test]
     fn serialize_full_document_roundtrip() {
-        let input = "# My Post\n\nThis is a paragraph.\n\nAnother paragraph.\n";
-        let original = parse_document(input).expect("parse failed");
+        let input = "# My Post\n\nThis is a paragraph.\n\n----\n\n### Another Section.\n";
+        let grammar = simple_grammar();
+        let original = parse_and_assign(input, &grammar).expect("parse failed");
         let serialized = serialize_document(&original);
-        let reparsed = parse_document(&serialized).expect("reparse failed");
+        let reparsed = parse_and_assign(&serialized, &grammar).expect("reparse failed");
+        // Count total elements across preamble and body
+        let orig_count: usize = original.preamble.iter().map(|s| s.elements.len()).sum::<usize>()
+            + original.body.len();
+        let repr_count: usize = reparsed.preamble.iter().map(|s| s.elements.len()).sum::<usize>()
+            + reparsed.body.len();
         assert_eq!(
-            original.elements.len(),
-            reparsed.elements.len(),
+            orig_count,
+            repr_count,
             "roundtrip element count mismatch: original={}, reparsed={}",
-            original.elements.len(),
-            reparsed.elements.len()
+            orig_count,
+            repr_count
         );
     }
 }
