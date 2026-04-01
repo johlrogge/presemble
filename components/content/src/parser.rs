@@ -69,6 +69,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             text: String,
             byte_range: std::ops::Range<usize>,
         },
+        List {
+            byte_range: std::ops::Range<usize>,
+            depth: u32,
+        },
     }
 
     let mut state = State::Idle;
@@ -94,9 +98,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Start(Tag::Paragraph) => {
-                // If we're inside a blockquote, the inner paragraph events
-                // are suppressed — text will accumulate in Blockquote state.
-                if !matches!(state, State::Blockquote { .. }) {
+                // If we're inside a blockquote or list, the inner paragraph events
+                // are suppressed — raw source captures the content.
+                if !matches!(state, State::Blockquote { .. } | State::List { .. }) {
                     state = State::Paragraph {
                         text: String::new(),
                         images: Vec::new(),
@@ -241,6 +245,40 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
 
+            Event::Start(Tag::List(_)) => {
+                // Track list nesting depth — only the outermost list emits an element.
+                match &mut state {
+                    State::List { depth, .. } => *depth += 1,
+                    _ => {
+                        state = State::List {
+                            byte_range: range,
+                            depth: 1,
+                        };
+                    }
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                if let State::List { byte_range, depth } = &mut state {
+                    *depth -= 1;
+                    if *depth == 0 {
+                        // Extract raw markdown source for the list block.
+                        let end = range.end;
+                        let source = input.get(byte_range.start..end)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_default();
+                        if !source.is_empty() {
+                            elements.push_back(Spanned {
+                                node: ContentElement::List { source },
+                                span: Span { start: byte_range.start, end },
+                            });
+                        }
+                        state = State::Idle;
+                    }
+                }
+            }
+            // List items and their content are captured via the raw source approach above.
+            Event::Start(Tag::Item) | Event::End(TagEnd::Item) => {}
+
             Event::Start(Tag::CodeBlock(kind)) => {
                 let language = match &kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
@@ -314,6 +352,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Table { current_cell, .. } => current_cell.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
+                    State::List { .. } => {} // Raw source captures list content
                     State::Idle => {}
                 }
             }
@@ -336,6 +375,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                         current_cell.push_str("</code>");
                     }
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
+                    State::List { .. } => {} // Raw source captures list content
                     State::Idle => {}
                 }
             }

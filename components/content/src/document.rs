@@ -72,6 +72,8 @@ pub enum ContentElement {
     RawHtml { html: String },
     /// A blockquote element containing quoted text.
     Blockquote { text: String },
+    /// A list (ordered or unordered) stored as raw markdown source.
+    List { source: String },
 }
 
 #[cfg(test)]

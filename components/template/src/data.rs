@@ -311,6 +311,11 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
                 let inner = render_inline_markdown(text);
                 format!("<blockquote id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</blockquote>")
             }
+            ContentElement::List { source } => {
+                // Render the raw markdown list source to HTML via pulldown-cmark.
+                let html = render_inline_markdown(source);
+                format!("<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>")
+            }
             ContentElement::Table { headers, rows } => {
                 let header_cells = headers
                     .iter()

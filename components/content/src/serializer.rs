@@ -77,6 +77,7 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
         ContentElement::Blockquote { text } => {
             text.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
         }
+        ContentElement::List { source } => source.clone(),
     }
 }
 
