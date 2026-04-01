@@ -70,6 +70,8 @@ pub enum ContentElement {
     },
     /// Pre-rendered HTML block from body content (inline markdown preserved).
     RawHtml { html: String },
+    /// A blockquote element containing quoted text.
+    Blockquote { text: String },
 }
 
 #[cfg(test)]

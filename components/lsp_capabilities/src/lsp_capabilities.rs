@@ -314,26 +314,27 @@ pub fn content_completions(
         );
     }
 
-    // Offer body heading completion when separator exists and grammar has body heading rules
+    // Offer body heading completions for each allowed level
     if let Some(body_rules) = &grammar.body
         && doc.has_separator
         && let Some(heading_range) = &body_rules.heading_range
     {
-        let min_level = heading_range.min.value();
-        let hashes = "#".repeat(min_level as usize);
-        completions.push(
-            SlotCompletion::snippet(
-                format!("Body heading (H{})", min_level),
-                format!("H{}-H{} heading", heading_range.min.value(), heading_range.max.value()),
-                Some(format!(
-                    "Body section allows headings H{} through H{}",
-                    heading_range.min.value(),
-                    heading_range.max.value()
-                )),
-                format!("{hashes} ${{1:Heading}}"),
-            )
-            .with_sort_text("98"),
-        );
+        for level in heading_range.min.value()..=heading_range.max.value() {
+            let hashes = "#".repeat(level as usize);
+            completions.push(
+                SlotCompletion::snippet(
+                    format!("H{level} heading"),
+                    format!("Body heading level {level}"),
+                    Some(format!(
+                        "Body section allows headings H{} through H{}",
+                        heading_range.min.value(),
+                        heading_range.max.value()
+                    )),
+                    format!("{hashes} ${{1:Heading}}"),
+                )
+                .with_sort_text(format!("{:02}", 98 - (level - heading_range.min.value()))),
+            );
+        }
     }
 
     completions
@@ -1800,7 +1801,7 @@ mod tests {
             "body paragraph should NOT be offered (free-form prose): {completions:#?}"
         );
         assert!(
-            completions.iter().any(|c| c.label.starts_with("Body heading")),
+            completions.iter().any(|c| c.label.starts_with("H") && c.label.ends_with("heading")),
             "should offer body heading completion after separator: {completions:#?}"
         );
         // Separator should NOT be offered since it's already present

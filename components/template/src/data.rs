@@ -1,5 +1,6 @@
 use content::{ContentElement, Document};
 use schema::{Element, Grammar, Spanned};
+use pulldown_cmark;
 
 /// The kind of schema element a suggestion represents.
 #[derive(Debug, Clone)]
@@ -248,16 +249,31 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Render a single paragraph's markdown text to inline HTML, stripping the outer `<p>` wrapper.
+fn render_inline_markdown(text: &str) -> String {
+    let parser = pulldown_cmark::Parser::new(text);
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, parser);
+    let html = html.trim();
+    // Strip outer <p>...</p> if present — we add our own wrapper element
+    html.strip_prefix("<p>")
+        .and_then(|s| s.strip_suffix("</p>"))
+        .unwrap_or(html)
+        .to_string()
+}
+
 pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (idx, spanned) in elements.iter().enumerate() {
         let html = match &spanned.node {
             ContentElement::Heading { level, text } => {
                 let l = level.value();
-                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{}</h{l}>", escape_html(text))
+                let inner = render_inline_markdown(text);
+                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</h{l}>")
             }
             ContentElement::Paragraph { text } => {
-                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{}</p>", escape_html(text))
+                let inner = render_inline_markdown(text);
+                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</p>")
             }
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
@@ -290,6 +306,10 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
                 format!(
                     "<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>"
                 )
+            }
+            ContentElement::Blockquote { text } => {
+                let inner = render_inline_markdown(text);
+                format!("<blockquote id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</blockquote>")
             }
             ContentElement::Table { headers, rows } => {
                 let header_cells = headers
@@ -736,5 +756,70 @@ mod tests {
             }
             other => panic!("expected Suggestion for missing tagline, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Inline markdown rendering tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn body_paragraph_with_bold_renders_as_strong() {
+        // **bold** in a paragraph stored with markdown syntax should render as <strong>
+        let para = spanned(ContentElement::Paragraph { text: "This has **bold** text.".to_string() });
+        let html = render_body_html(&im::vector![para]);
+        assert!(
+            html.contains("<strong>bold</strong>"),
+            "expected <strong>bold</strong> in body HTML; got: {html}"
+        );
+        // The HTML wrapper should be <p>, not a raw markdown string
+        assert!(
+            html.contains("<p "),
+            "expected paragraph element wrapper; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_paragraph_with_italic_renders_as_em() {
+        let para = spanned(ContentElement::Paragraph { text: "This has _italic_ text.".to_string() });
+        let html = render_body_html(&im::vector![para]);
+        assert!(
+            html.contains("<em>italic</em>"),
+            "expected <em>italic</em> in body HTML; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_blockquote_renders_as_blockquote_tag() {
+        let bq = spanned(ContentElement::Blockquote { text: "A wise quote.".to_string() });
+        let html = render_body_html(&im::vector![bq]);
+        assert!(
+            html.contains("<blockquote"),
+            "expected <blockquote tag in body HTML; got: {html}"
+        );
+        assert!(
+            html.contains("A wise quote."),
+            "expected quote text in body HTML; got: {html}"
+        );
+        assert!(
+            html.contains("data-presemble-slot=\"body\""),
+            "expected data-presemble-slot attribute on blockquote; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_heading_with_inline_markdown_renders_correctly() {
+        let heading = spanned(ContentElement::Heading {
+            level: schema::HeadingLevel::new(3).unwrap(),
+            text: "Section with *emphasis*".to_string(),
+        });
+        let html = render_body_html(&im::vector![heading]);
+        assert!(
+            html.contains("<h3"),
+            "expected h3 tag; got: {html}"
+        );
+        assert!(
+            html.contains("<em>emphasis</em>"),
+            "expected <em>emphasis</em> in heading; got: {html}"
+        );
     }
 }

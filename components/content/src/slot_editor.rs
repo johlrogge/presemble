@@ -170,6 +170,7 @@ fn element_text_mut(element: &mut ContentElement) -> Option<&mut String> {
         ContentElement::Paragraph { text } => Some(text),
         ContentElement::Link { text, .. } => Some(text),
         ContentElement::Image { alt: Some(alt), .. } => Some(alt),
+        ContentElement::Blockquote { text } => Some(text),
         _ => None,
     }
 }
