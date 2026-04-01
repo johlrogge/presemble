@@ -118,7 +118,7 @@ for missing content.
 
 ---
 
-## Current milestone — M3.5: "Code action transformation model"
+## Done — M3.5: "Code action transformation model"
 
 **Goal:** Unify all content transformations (LSP code actions, browser edits, auto-format) under
 a single pure-functional pipeline. Fix the lost-error-markers bug in the LSP. Build the
@@ -131,27 +131,27 @@ document buffer on every code action, wiping all other diagnostics.
 
 **Prerequisites (infrastructure):**
 
-- [ ] Parser source span tracking — parsers predate LSP and do not carry source positions; needed for targeted TextEdits instead of full-buffer replacement
-- [ ] `im` crate adoption for persistent DOM trees — structural sharing makes before/after comparison efficient and independent code actions safe to compute without interference
-- [ ] Deeper DOM tree structure — slots as named children, not flat `Vec<ContentElement>`; required for slot-level semantic diffing
+- [x] Parser source span tracking — parsers carry byte-range source positions; unified content parser eliminates ~250 lines of duplication (ADR-017)
+- [x] `im` crate adoption for persistent DOM trees — structural sharing makes before/after comparison efficient and O(1) document cloning (ADR-021)
+- [x] Deeper DOM tree structure — slots as named children via `DocumentSlot`; two-phase parsing with `assign_slots` eliminates duplicated cursor-walk from five consumers (ADR-022)
 
 **Tier 1: Transform trait**
 
-- [ ] Code actions as structs implementing `Transform` trait: `fn apply(&self, dom: Dom) -> Result<Dom>`
-- [ ] All parameters bound at construction (slot name, value) — no ambient context
-- [ ] Composition struct holding `Vec<Box<dyn Transform>>` for chaining
-- [ ] Migrate existing code actions (InsertSlot, Capitalize, InsertSeparator) to the new model
+- [x] Code actions as structs implementing `Transform` trait: `fn apply(&self, doc: Document) -> Result<Document, TransformError>` (ADR-023)
+- [x] All parameters bound at construction (slot name, value, `Arc<Grammar>`) — no ambient context
+- [x] `CompositeTransform` holding `Vec<Box<dyn Transform>>` for chaining via `try_fold`
+- [x] Existing code actions (InsertSlot, Capitalize, InsertSeparator) migrated to the new model; `modify_slot`/`capitalize_slot` became `pub(crate)` internals
 
 **Tier 2: Structural diff**
 
-- [ ] Compare before/after DOM trees exploiting `im` structural sharing (Arc pointer comparison skips unchanged subtrees)
-- [ ] Slot-level semantic diff: SlotAdded, SlotChanged, SlotRemoved, SeparatorAdded
+- [x] Compare before/after DOM trees exploiting `im` structural sharing (`im::Vector::ptr_eq` skips unchanged subtrees) (ADR-024)
+- [x] Slot-level semantic diff: SlotAdded, SlotChanged, SlotRemoved, SeparatorAdded, SeparatorRemoved, BodyChanged
 
 **Tier 3: Consumer adapters**
 
-- [ ] LSP adapter: semantic diff to targeted LSP TextEdits using source spans
-- [ ] File writer adapter: serialize only changed regions
-- [ ] Browser adapter: semantic diff to DOM patches (stub — completed in M5)
+- [x] LSP adapter: `diff_to_source_edits` produces targeted byte-range edits; `lsp_service` maps to LSP TextEdits using source spans (ADR-025)
+- [x] File writer adapter: `FileWriter` trait with `FullDocumentWriter` (full serialization; partial write optimization deferred)
+- [x] Browser adapter: `DomPatch` enum and `diff_to_dom_patches` stub — ready for M5
 
 The Transform trait also defines the primitive operation vocabulary for M4's conductor protocol —
 transforms are the REPL's built-in functions.
