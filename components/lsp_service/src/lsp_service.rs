@@ -457,7 +457,7 @@ impl LanguageServer for PresembleLsp {
                             label: c.label.clone(),
                             kind: Some(CompletionItemKind::REFERENCE),
                             detail: Some(c.detail.clone()),
-                            filter_text: Some(format!("[{} {}", c.detail, c.label)),
+                            filter_text: Some(format!("[{} {}", c.label, c.detail)),
                             text_edit: Some(CompletionTextEdit::Edit(TextEdit {
                                 range: Range {
                                     start: Position {
