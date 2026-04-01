@@ -343,9 +343,10 @@ pub fn content_completions(
 fn template_for_slot(slot: &schema::Slot) -> String {
     let hint = slot.hint_text.as_deref().unwrap_or(slot.name.as_str());
     match &slot.element {
-        Element::Heading { level } => {
-            let hashes = "#".repeat(level.min.value() as usize);
-            format!("{hashes} {hint}")
+        Element::Heading { .. } => {
+            // No # prefix — build_element adds the heading level from the grammar,
+            // and serialize_element adds the # prefix when serializing.
+            hint.to_string()
         }
         Element::Paragraph => {
             format!("{hint}.")
@@ -1764,9 +1765,9 @@ mod tests {
         let src = "Summary text.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
         let result = apply_action(src, &grammar, &SlotAction::InsertSlot {
             slot_name: "title".to_string(),
-            placeholder_value: "# New Title".to_string(),
+            placeholder_value: "New Title".to_string(),
         }).unwrap();
-        assert!(result.contains("# New Title"), "should contain inserted title: {result}");
+        assert!(result.contains("# New Title"), "should contain heading with # prefix: {result}");
     }
 
     #[test]
