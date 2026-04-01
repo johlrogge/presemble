@@ -1,3 +1,4 @@
+mod diff;
 mod document;
 mod error;
 mod parser;
@@ -7,6 +8,7 @@ mod slot_editor;
 mod transform;
 mod validator;
 
+pub use diff::{diff, Change, DocumentDiff};
 pub use document::{ContentElement, Document, DocumentSlot, FlatDocument};
 pub use error::ContentError;
 pub use parser::{byte_to_position, parse_and_assign, parse_document};
