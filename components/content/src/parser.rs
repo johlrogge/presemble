@@ -191,12 +191,24 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Start(Tag::Link { dest_url, .. }) => {
-                let href = dest_url.to_string();
-                state = State::Link {
-                    text: String::new(),
-                    href,
-                    byte_range: range,
+                // When inside a paragraph that already has non-whitespace text,
+                // the link is inline — stay in paragraph state.
+                // The raw source text captures `[text](url)` and the renderer handles it.
+                // When the paragraph has no text yet, the link IS the paragraph
+                // (a standalone link-type preamble slot like `[Author](/author/name)`).
+                let is_inline = match &state {
+                    State::Paragraph { text, .. } => !text.trim().is_empty(),
+                    State::Blockquote { .. } => true,
+                    _ => false,
                 };
+                if !is_inline {
+                    let href = dest_url.to_string();
+                    state = State::Link {
+                        text: String::new(),
+                        href,
+                        byte_range: range,
+                    };
+                }
             }
             Event::End(TagEnd::Link) => {
                 if let State::Link { text, href, byte_range } = state {
@@ -206,6 +218,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     });
                     state = State::Idle;
                 }
+                // If in Paragraph or Blockquote state, the link end is a no-op —
+                // the text was accumulated normally.
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
