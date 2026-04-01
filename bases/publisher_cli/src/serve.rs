@@ -813,7 +813,7 @@ fn body_elements_from_path(path: &std::path::Path) -> Option<Vec<ContentElement>
     let start = doc.elements.iter().position(|e| matches!(e.node, ContentElement::Separator))
         .map(|i| i + 1)
         .unwrap_or(0);
-    Some(doc.elements[start..].iter().map(|s| s.node.clone()).collect())
+    Some(doc.elements.iter().skip(start).map(|s| s.node.clone()).collect())
 }
 
 fn collect_content_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {

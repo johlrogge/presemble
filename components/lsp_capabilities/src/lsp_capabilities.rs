@@ -920,7 +920,7 @@ pub fn apply_action(
         }
         SlotAction::InsertSeparator => {
             if !doc.elements.iter().any(|e| matches!(e.node, content::ContentElement::Separator)) {
-                doc.elements.push(Spanned {
+                doc.elements.push_back(Spanned {
                     node: content::ContentElement::Separator,
                     span: Span { start: 0, end: 0 },
                 });

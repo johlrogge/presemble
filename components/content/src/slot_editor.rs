@@ -92,7 +92,10 @@ pub fn modify_slot(
     match (slot_start, slot_end) {
         (Some(start), Some(end)) if end > start => {
             // Replace the consumed elements with the single new element.
-            doc.elements.splice(start..end, [new_spanned]);
+            let tail = doc.elements.split_off(end);
+            doc.elements.truncate(start);
+            doc.elements.push_back(new_spanned);
+            doc.elements.append(tail);
         }
         (Some(start), Some(_end)) => {
             // Slot position found but 0 elements consumed — insert at cursor position.
@@ -124,7 +127,7 @@ pub fn modify_slot(
 /// Find the position to insert a separator: after all inserted preamble content
 /// but before any existing body content (headings that aren't H1, paragraphs after insert).
 /// For simplicity, we insert after all current elements (appending separator at end).
-fn find_separator_insert_position(elements: &[Spanned<ContentElement>], _after: usize) -> usize {
+fn find_separator_insert_position(elements: &im::Vector<Spanned<ContentElement>>, _after: usize) -> usize {
     // Insert separator at the end of the document.
     elements.len()
 }

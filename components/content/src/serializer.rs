@@ -70,7 +70,7 @@ mod tests {
             elements: elements
                 .into_iter()
                 .map(|node| Spanned { node, span: dummy_span })
-                .collect(),
+                .collect::<im::Vector<_>>(),
         }
     }
 

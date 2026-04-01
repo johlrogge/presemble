@@ -81,8 +81,8 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
             }
             Some(sep_idx) => {
                 // Check if there's any content after the separator
-                let body_elements = &doc.elements[sep_idx + 1..];
-                if body_elements.is_empty() {
+                let body_elements_count = doc.elements.len().saturating_sub(sep_idx + 1);
+                if body_elements_count == 0 {
                     // Find byte position of separator for the span
                     let sep_span = doc.elements.iter()
                         .find(|e| matches!(e.node, ContentElement::Separator))

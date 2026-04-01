@@ -226,7 +226,8 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     }
 
     // Render body elements as HTML.
-    let body_html = render_body_html(&elements[cursor..]);
+    let body_sliced: im::Vector<_> = elements.iter().skip(cursor).cloned().collect();
+    let body_html = render_body_html(&body_sliced);
     if !body_html.is_empty() {
         graph.insert("body", Value::Html(body_html));
     }
@@ -283,7 +284,7 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub(crate) fn render_body_html(elements: &[Spanned<ContentElement>]) -> String {
+pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (idx, spanned) in elements.iter().enumerate() {
         let html = match &spanned.node {
@@ -449,7 +450,7 @@ mod tests {
             language: Some("rust".to_string()),
             code: "fn main() {}\n".to_string(),
         });
-        let html = super::render_body_html(&[code_block]);
+        let html = super::render_body_html(&im::vector![code_block]);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
@@ -466,7 +467,7 @@ mod tests {
             language: None,
             code: "some code\n".to_string(),
         });
-        let html = super::render_body_html(&[code_block]);
+        let html = super::render_body_html(&im::vector![code_block]);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code>"),
             "expected plain pre/code in output; got: {html}"
@@ -479,10 +480,10 @@ mod tests {
 
     #[test]
     fn render_body_html_elements_have_data_presemble_slot_body() {
-        let elements = vec![
+        let elements: im::Vector<_> = vec![
             spanned(ContentElement::Paragraph { text: "para".to_string() }),
             spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() }),
-        ];
+        ].into_iter().collect();
         let html = render_body_html(&elements);
         assert!(
             html.contains("data-presemble-slot=\"body\""),
@@ -495,11 +496,11 @@ mod tests {
 
     #[test]
     fn render_body_html_assigns_sequential_ids() {
-        let elements = vec![
+        let elements: im::Vector<_> = vec![
             spanned(ContentElement::Paragraph { text: "first".to_string() }),
             spanned(ContentElement::Separator),
             spanned(ContentElement::Paragraph { text: "second".to_string() }),
-        ];
+        ].into_iter().collect();
         let html = render_body_html(&elements);
         assert!(html.contains("id=\"presemble-body-0\""), "first paragraph gets id 0");
         assert!(html.contains("id=\"presemble-body-2\""), "element after separator gets id 2");

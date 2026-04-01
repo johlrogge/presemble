@@ -257,7 +257,7 @@ fn describe_count_range(cr: &CountRange) -> String {
 /// Consume headings at `cursor` that match `level_range`, up to `expected_count` max.
 /// Returns count of consumed headings. Also applies text constraints on each consumed heading.
 fn consume_headings(
-    elements: &[Spanned<ContentElement>],
+    elements: &im::Vector<Spanned<ContentElement>>,
     cursor: &mut usize,
     level_range: &HeadingLevelRange,
     expected: ExpectedCount,
@@ -312,7 +312,7 @@ fn consume_headings(
 
 /// Consume paragraphs at `cursor` up to the expected count. Returns count consumed.
 fn consume_paragraphs(
-    elements: &[Spanned<ContentElement>],
+    elements: &im::Vector<Spanned<ContentElement>>,
     cursor: &mut usize,
     expected: ExpectedCount,
     slot: &Slot,
@@ -365,7 +365,7 @@ fn consume_paragraphs(
 /// Consume link elements at `cursor` up to `expected` count.
 /// Returns count of consumed links.
 fn consume_links(
-    elements: &[Spanned<ContentElement>],
+    elements: &im::Vector<Spanned<ContentElement>>,
     cursor: &mut usize,
     expected: ExpectedCount,
     slot: &Slot,
@@ -405,7 +405,7 @@ fn consume_links(
 /// Consume image elements at `cursor` up to `expected` count.
 /// Returns count of consumed images. Also checks alt and orientation constraints.
 fn consume_images(
-    elements: &[Spanned<ContentElement>],
+    elements: &im::Vector<Spanned<ContentElement>>,
     cursor: &mut usize,
     expected: ExpectedCount,
     slot: &Slot,
@@ -510,13 +510,13 @@ fn check_alt_constraints(
 
 /// Validate the body section (after the separator) against body rules.
 fn validate_body(
-    elements: &[Spanned<ContentElement>],
+    elements: &im::Vector<Spanned<ContentElement>>,
     start: usize,
     body_rules: &BodyRules,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     if let Some(heading_range) = &body_rules.heading_range {
-        for spanned in &elements[start..] {
+        for spanned in elements.iter().skip(start) {
             if let ContentElement::Heading { level, text } = &spanned.node {
                 let in_range = level.value() >= heading_range.min.value()
                     && level.value() <= heading_range.max.value();

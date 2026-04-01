@@ -22,7 +22,7 @@ pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
 /// the parsed element and its byte range in the original source.
 pub fn parse_document(input: &str) -> Result<Document, ContentError> {
     let parser = Parser::new_ext(input, Options::ENABLE_TABLES).into_offset_iter();
-    let mut elements: Vec<Spanned<ContentElement>> = Vec::new();
+    let mut elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
 
     enum State {
         Idle,
@@ -78,7 +78,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let State::Heading { level, text, byte_range } = state {
-                    elements.push(Spanned {
+                    elements.push_back(Spanned {
                         node: ContentElement::Heading { level, text },
                         span: Span::from(byte_range),
                     });
@@ -97,7 +97,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
                 if let State::Paragraph { text, images, byte_range } = state {
                     let trimmed = text.trim().to_string();
                     if !trimmed.is_empty() {
-                        elements.push(Spanned {
+                        elements.push_back(Spanned {
                             node: ContentElement::Paragraph { text: trimmed },
                             span: Span::from(byte_range),
                         });
@@ -161,7 +161,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
                             byte_range: paragraph_range,
                         };
                     } else {
-                        elements.push(image_spanned);
+                        elements.push_back(image_spanned);
                         state = State::Idle;
                     }
                 }
@@ -177,7 +177,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
             }
             Event::End(TagEnd::Link) => {
                 if let State::Link { text, href, byte_range } = state {
-                    elements.push(Spanned {
+                    elements.push_back(Spanned {
                         node: ContentElement::Link { text, href },
                         span: Span::from(byte_range),
                     });
@@ -194,7 +194,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let State::CodeBlock { language, code, byte_range } = state {
-                    elements.push(Spanned {
+                    elements.push_back(Spanned {
                         node: ContentElement::CodeBlock { language, code },
                         span: Span::from(byte_range),
                     });
@@ -232,7 +232,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
             }
             Event::End(TagEnd::Table) => {
                 if let State::Table { headers, rows, byte_range, .. } = state {
-                    elements.push(Spanned {
+                    elements.push_back(Spanned {
                         node: ContentElement::Table { headers, rows },
                         span: Span::from(byte_range),
                     });
@@ -241,7 +241,7 @@ pub fn parse_document(input: &str) -> Result<Document, ContentError> {
             }
 
             Event::Rule => {
-                elements.push(Spanned {
+                elements.push_back(Spanned {
                     node: ContentElement::Separator,
                     span: Span::from(range),
                 });
