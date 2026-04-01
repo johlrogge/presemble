@@ -1,5 +1,6 @@
 use lsp_capabilities::{
     build_transform, content_completions, definition_for_position, hover_for_line,
+    link_completions,
     schema_completions, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
     DiagnosticSeverity, SlotAction, TemplateDefinitionTarget,
@@ -434,6 +435,50 @@ impl LanguageServer for PresembleLsp {
                 };
                 let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
                 let pos = p.text_document_position.position;
+
+                // When triggered by `[` and cursor is in the body section, offer link completions
+                let trigger = p
+                    .context
+                    .as_ref()
+                    .and_then(|c| c.trigger_character.as_deref());
+                if trigger == Some("[")
+                    && separator_line(&src).is_some_and(|sl| pos.line > sl)
+                {
+                    let link_items = link_completions(self.site_index.site_dir());
+                    let current_line = line_text(&src, pos.line);
+                    let bracket_col = current_line[..pos.character as usize]
+                        .rfind('[')
+                        .map(|i| i as u32)
+                        .unwrap_or(pos.character);
+
+                    let items: Vec<CompletionItem> = link_items
+                        .into_iter()
+                        .map(|c| CompletionItem {
+                            label: c.label.clone(),
+                            kind: Some(CompletionItemKind::REFERENCE),
+                            detail: Some(c.detail.clone()),
+                            filter_text: Some(format!("[{} {}", c.detail, c.label)),
+                            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                                range: Range {
+                                    start: Position {
+                                        line: pos.line,
+                                        character: bracket_col,
+                                    },
+                                    end: Position {
+                                        line: pos.line,
+                                        character: pos.character,
+                                    },
+                                },
+                                new_text: c.insert_text,
+                            })),
+                            insert_text: None,
+                            insert_text_format: None,
+                            ..Default::default()
+                        })
+                        .collect();
+                    return Ok(Some(CompletionResponse::Array(items)));
+                }
+
                 let line_end_char = line_length(&src, pos.line);
                 let current_line = line_text(&src, pos.line);
                 let at_heading_start = current_line.trim().is_empty()
@@ -650,4 +695,11 @@ fn line_text(src: &str, line: u32) -> String {
         .nth(line as usize)
         .unwrap_or("")
         .to_string()
+}
+
+fn separator_line(src: &str) -> Option<u32> {
+    src.lines()
+        .enumerate()
+        .find(|(_, l)| l.trim() == "----")
+        .map(|(i, _)| i as u32)
 }

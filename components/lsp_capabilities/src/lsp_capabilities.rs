@@ -340,6 +340,67 @@ pub fn content_completions(
     completions
 }
 
+/// Offer inline link completions for all content pages in the site.
+///
+/// Returns one completion per content page, with the title as label
+/// and `[Title](/type/slug)` as insert text.
+pub fn link_completions(site_dir: &std::path::Path) -> Vec<SlotCompletion> {
+    let content_dir = site_dir.join("content");
+    let mut completions = Vec::new();
+
+    let Ok(types) = std::fs::read_dir(&content_dir) else {
+        return completions;
+    };
+
+    for type_entry in types.filter_map(|e| e.ok()) {
+        let type_path = type_entry.path();
+        if !type_path.is_dir() {
+            continue;
+        }
+        let type_stem = type_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let Ok(files) = std::fs::read_dir(&type_path) else {
+            continue;
+        };
+
+        for file_entry in files.filter_map(|e| e.ok()) {
+            let file_path = file_entry.path();
+            if file_path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let file_slug = file_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Skip index files — they represent the type listing, not a linkable page
+            if file_slug == "index" {
+                continue;
+            }
+
+            let title = read_title_from_md(&file_path).unwrap_or_else(|| file_slug.clone());
+            let url = format!("/{type_stem}/{file_slug}");
+            let link_text = format!("[{title}]({url})");
+
+            completions.push(SlotCompletion::plain(
+                title.clone(),
+                format!("{type_stem}/{file_slug}"),
+                None,
+                link_text,
+            ));
+        }
+    }
+
+    // Sort by type then slug for stable ordering
+    completions.sort_by(|a, b| a.detail.cmp(&b.detail));
+    completions
+}
+
 /// Generate a template string for a slot element type.
 fn template_for_slot(slot: &schema::Slot) -> String {
     let hint = slot.hint_text.as_deref().unwrap_or(slot.name.as_str());
@@ -1809,5 +1870,35 @@ mod tests {
             !completions.iter().any(|c| c.label == "----"),
             "separator should not be offered when already present: {completions:#?}"
         );
+    }
+
+    #[test]
+    fn link_completions_returns_content_pages() {
+        let site_dir = std::path::Path::new("../../fixtures/blog-site");
+        let completions = link_completions(site_dir);
+        assert!(!completions.is_empty(), "should find content pages");
+    }
+
+    #[test]
+    fn link_completions_insert_text_is_markdown_link() {
+        let site_dir = std::path::Path::new("../../fixtures/blog-site");
+        let completions = link_completions(site_dir);
+        for c in &completions {
+            assert!(
+                c.insert_text.starts_with('['),
+                "should start with [: {}",
+                c.insert_text
+            );
+            assert!(
+                c.insert_text.contains("]("),
+                "should contain ](: {}",
+                c.insert_text
+            );
+            assert!(
+                c.insert_text.ends_with(')'),
+                "should end with ): {}",
+                c.insert_text
+            );
+        }
     }
 }
