@@ -438,8 +438,20 @@ impl LanguageServer for PresembleLsp {
                 let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
                 let pos = p.text_document_position.position;
                 let line_end_char = line_length(&src, pos.line);
+                let current_line = line_text(&src, pos.line);
+                let at_heading_start = current_line.trim().is_empty()
+                    || current_line.trim().chars().all(|c| c == '#')
+                    || current_line.trim().starts_with('#');
                 let items: Vec<CompletionItem> = content_completions(&src, &grammar, Some(self.site_index.site_dir()))
                     .into_iter()
+                    .filter(|c| {
+                        // Body heading completions only on lines that look like heading starts
+                        if c.label.starts_with('H') && c.label.ends_with("heading") {
+                            at_heading_start
+                        } else {
+                            true
+                        }
+                    })
                     .map(|c| CompletionItem {
                         label: c.label,
                         kind: Some(CompletionItemKind::FIELD),
@@ -634,4 +646,11 @@ fn line_length(src: &str, line: u32) -> u32 {
         .nth(line as usize)
         .map(|l| l.len() as u32)
         .unwrap_or(0)
+}
+
+fn line_text(src: &str, line: u32) -> String {
+    src.lines()
+        .nth(line as usize)
+        .unwrap_or("")
+        .to_string()
 }
