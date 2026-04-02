@@ -6,11 +6,11 @@ members = [
     "components/conductor",
     "components/content",
     "components/dep_graph",
-    "components/fs_site_repository",
     "components/lsp_capabilities",
     "components/lsp_service",
     "components/schema",
     "components/site_index",
+    "components/fs_site_repository",
     "components/template",
     "components/validation",
     "bases/editor_server",
@@ -29,12 +29,13 @@ conductor = { path = "components/conductor" }
 content = { path = "components/content" }
 dep_graph = { path = "components/dep_graph" }
 editor_server = { path = "bases/editor_server" }
-fs_site_repository = { path = "components/fs_site_repository" }
 lsp_capabilities = { path = "components/lsp_capabilities" }
 lsp_service = { path = "components/lsp_service" }
+mem_site_repository = { path = "components/mem_site_repository" }
 publisher_cli = { path = "bases/publisher_cli" }
 schema = { path = "components/schema" }
 site_index = { path = "components/site_index" }
+site_repository = { path = "components/fs_site_repository" }
 template = { path = "components/template" }
 validation = { path = "components/validation" }
 axum = { version = "0.8", features = ["ws"] }

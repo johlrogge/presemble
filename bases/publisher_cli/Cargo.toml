@@ -10,7 +10,7 @@ template = { workspace = true }
 dep_graph = { workspace = true }
 conductor = { workspace = true }
 editor_server = { workspace = true }
-fs_site_repository = { workspace = true }
+site_repository = { workspace = true }
 site_index = { workspace = true }
 lsp_capabilities = { workspace = true }
 lsp_service = { workspace = true }

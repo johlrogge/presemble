@@ -717,7 +717,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
 
     println!("Building site: {}", site_dir.display());
 
-    let repo = fs_site_repository::SiteRepository::new(site_dir);
+    let repo = site_repository::SiteRepository::new(site_dir);
 
     let mut files_built: usize = 0;
     let mut files_failed: usize = 0;

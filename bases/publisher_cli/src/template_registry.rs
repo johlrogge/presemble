@@ -21,13 +21,13 @@ type ParsedTemplate = (Vec<Node>, HashMap<String, Vec<Node>>);
 ///
 /// Note: file-qualified paths strip any leading `templates/` prefix before lookup.
 pub struct FileTemplateRegistry {
-    repo: fs_site_repository::SiteRepository,
+    repo: site_repository::SiteRepository,
     /// Cache: file_stem -> parsed template (main nodes + named definitions)
     cache: RefCell<HashMap<String, ParsedTemplate>>,
 }
 
 impl FileTemplateRegistry {
-    pub fn new(repo: fs_site_repository::SiteRepository) -> Self {
+    pub fn new(repo: site_repository::SiteRepository) -> Self {
         Self {
             repo,
             cache: RefCell::new(HashMap::new()),
@@ -97,7 +97,7 @@ mod tests {
     /// Build a `FileTemplateRegistry` rooted at `dir`. The directory is treated as
     /// the site root — templates go under `dir/templates/`.
     fn registry_for(dir: &TempDir) -> FileTemplateRegistry {
-        let repo = fs_site_repository::SiteRepository::new(dir.path());
+        let repo = site_repository::SiteRepository::new(dir.path());
         FileTemplateRegistry::new(repo)
     }
 

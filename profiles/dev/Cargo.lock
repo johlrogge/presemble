@@ -260,13 +260,13 @@ version = "0.12.0"
 dependencies = [
  "content",
  "dep_graph",
- "fs_site_repository",
  "nng",
  "notify",
  "schema",
  "serde",
  "serde_json",
  "site_index",
+ "site_repository",
  "tempfile",
  "template",
  "tokio",
@@ -414,14 +414,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
-]
-
-[[package]]
-name = "fs_site_repository"
-version = "0.16.1"
-dependencies = [
- "site_index",
- "tempfile",
 ]
 
 [[package]]
@@ -925,9 +917,9 @@ name = "lsp_capabilities"
 version = "0.12.0"
 dependencies = [
  "content",
- "fs_site_repository",
  "schema",
  "site_index",
+ "site_repository",
  "template",
  "validation",
 ]
@@ -938,10 +930,10 @@ version = "0.12.0"
 dependencies = [
  "conductor",
  "content",
- "fs_site_repository",
  "lsp_capabilities",
  "schema",
  "site_index",
+ "site_repository",
  "tokio",
  "tower-lsp",
 ]
@@ -1147,7 +1139,6 @@ dependencies = [
  "content",
  "dep_graph",
  "editor_server",
- "fs_site_repository",
  "lsp_capabilities",
  "lsp_service",
  "notify",
@@ -1155,6 +1146,7 @@ dependencies = [
  "serde",
  "serde_json",
  "site_index",
+ "site_repository",
  "tempfile",
  "template",
  "tokio",
@@ -1418,6 +1410,14 @@ dependencies = [
  "schema",
  "tempfile",
  "template",
+]
+
+[[package]]
+name = "site_repository"
+version = "0.17.0"
+dependencies = [
+ "site_index",
+ "tempfile",
 ]
 
 [[package]]

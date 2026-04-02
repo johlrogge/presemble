@@ -51,7 +51,7 @@ fn derive_url_from_content_path(file: &str) -> String {
 /// A simple TemplateRegistry backed by the site repository (no caching).
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
-    repo: fs_site_repository::SiteRepository,
+    repo: site_repository::SiteRepository,
 }
 
 impl template::TemplateRegistry for SimpleTemplateRegistry {
@@ -100,7 +100,7 @@ pub struct Conductor {
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
     doc_sources: RwLock<HashMap<PathBuf, String>>, // path -> in-memory text
     site_index: site_index::SiteIndex,
-    repo: fs_site_repository::SiteRepository,
+    repo: site_repository::SiteRepository,
 }
 
 impl Conductor {
@@ -113,7 +113,7 @@ impl Conductor {
             site_dir.parent().unwrap_or(&site_dir).join("output").join(name)
         };
 
-        let repo = fs_site_repository::SiteRepository::new(&site_dir);
+        let repo = site_repository::SiteRepository::new(&site_dir);
 
         // Populate schema cache via repo
         let mut schema_cache = HashMap::new();
