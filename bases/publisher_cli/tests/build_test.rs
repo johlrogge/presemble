@@ -316,13 +316,10 @@ fn cross_content_reference_resolves_author_data() {
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
     // The post should have its author resolved with data from the author page
-    let posts: Vec<_> = outcome.site_graph
+    let post = outcome.site_graph
         .iter_by_kind(EntryKind::Item)
-        .filter(|e| e.schema_stem.as_str() == "article")
-        .collect();
-    assert!(!posts.is_empty(), "at least one article should exist");
-
-    let post = posts[0];
+        .find(|e| e.schema_stem.as_str() == "article" && e.url_path.as_str() == "/article/hello-world")
+        .expect("hello-world article should exist");
 
     // author.href should still be the original link href
     match post.data.resolve(&["author", "href"]) {
