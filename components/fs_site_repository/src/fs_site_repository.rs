@@ -78,7 +78,7 @@ impl SiteRepository {
         std::fs::read_to_string(self.schema_path(stem)).ok()
     }
 
-    /// Read the collection schema source (`schemas/{stem}/collection.md`).
+    /// Read the collection schema source (`schemas/{stem}/index.md`).
     pub fn collection_schema_source(&self, stem: &SchemaStem) -> Option<String> {
         std::fs::read_to_string(self.collection_schema_path(stem)).ok()
     }
@@ -180,7 +180,7 @@ impl SiteRepository {
         self.site_dir
             .join("schemas")
             .join(stem.as_str())
-            .join("collection.md")
+            .join("index.md")
     }
 
     /// Canonical path for the index content: `content/index.md`.

@@ -416,6 +416,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs_site_repository"
+version = "0.16.1"
+dependencies = [
+ "site_index",
+ "tempfile",
+]
+
+[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1135,6 +1143,7 @@ dependencies = [
  "content",
  "dep_graph",
  "editor_server",
+ "fs_site_repository",
  "lsp_capabilities",
  "lsp_service",
  "notify",
