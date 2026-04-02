@@ -272,14 +272,10 @@ impl Conductor {
 
         let byte_offset = line_to_byte_offset(src, line);
 
-        // Check preamble slots first
-        for slot in &doc.preamble {
-            for spanned in &slot.elements {
-                if spanned.span.start <= byte_offset && byte_offset < spanned.span.end {
-                    return Some(format!("presemble-slot-{}", slot.name));
-                }
-            }
-        }
+        // Skip preamble — preamble elements don't have id attributes in the
+        // rendered HTML yet, so scrolling to them would silently fail.
+        // TODO: add id="presemble-slot-{name}" to rendered preamble elements,
+        // then re-enable preamble scroll.
 
         // Check body elements — exact match
         for (idx, spanned) in doc.body.iter().enumerate() {
