@@ -91,6 +91,15 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.17.0
+
+SiteRepository abstraction — filesystem access decoupled from build pipeline.
+
+**`fs_site_repository` component**
+New polylith component (interface group: `site_repository`) encapsulating all filesystem access for site sources. `SiteRepository` provides typed methods for reading schemas, content, and templates using `SchemaStem` keys. The build pipeline, template registry, conductor, and LSP capabilities all read through the repository instead of scattered `fs::read_to_string` calls. Foundation for an in-memory implementation (`mem_site_repository`) that enables fast, filesystem-free tests.
+
+---
+
 ### v0.16.0
 
 Unified SiteGraph architecture and curated homepage features.
