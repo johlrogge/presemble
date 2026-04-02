@@ -12,5 +12,6 @@ lsp_capabilities = { workspace = true }
 content = { workspace = true }
 schema = { workspace = true }
 site_index = { workspace = true }
+fs_site_repository = { workspace = true }
 tower-lsp = { workspace = true }
 tokio = { workspace = true }

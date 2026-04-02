@@ -87,9 +87,8 @@ fn stem_from_link_pattern(pattern: &str) -> Option<String> {
     }
 }
 
-/// Read the first H1 heading text from a markdown file
-fn read_title_from_md(path: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+/// Extract the first H1 heading text from markdown source text.
+fn extract_title(content: &str) -> Option<String> {
     content
         .lines()
         .find(|l| l.starts_with("# "))
@@ -120,7 +119,7 @@ fn url_from_pattern(pattern: &str, slug: &str) -> String {
 pub fn completions_for_schema(
     grammar: &Grammar,
     stem: &str,
-    site_dir: Option<&std::path::Path>,
+    repo: Option<&fs_site_repository::SiteRepository>,
 ) -> Vec<SlotCompletion> {
     grammar
         .preamble
@@ -128,33 +127,24 @@ pub fn completions_for_schema(
         .flat_map(|slot| {
             match &slot.element {
                 Element::Link { pattern } => {
-                    if let Some(dir) = site_dir {
+                    if let Some(repo) = repo {
                         let link_stem = stem_from_link_pattern(pattern);
                         if let Some(content_stem) = link_stem {
-                            let content_dir = dir.join("content").join(&content_stem);
-                            if let Ok(entries) = std::fs::read_dir(&content_dir) {
-                                let items: Vec<SlotCompletion> = entries
-                                    .filter_map(|e| e.ok())
-                                    .filter(|e| {
-                                        e.path().extension().and_then(|ex| ex.to_str())
-                                            == Some("md")
-                                    })
-                                    .map(|e| {
-                                        let path = e.path();
-                                        let file_slug = path
-                                            .file_stem()
-                                            .and_then(|s| s.to_str())
-                                            .unwrap_or("")
-                                            .to_string();
-                                        let title = read_title_from_md(&path)
+                            let schema_stem = site_index::SchemaStem::new(&content_stem);
+                            let slugs = repo.content_slugs(&schema_stem);
+                            if !slugs.is_empty() {
+                                let items: Vec<SlotCompletion> = slugs
+                                    .into_iter()
+                                    .map(|file_slug| {
+                                        let title = repo
+                                            .content_source(&schema_stem, &file_slug)
+                                            .and_then(|src| extract_title(&src))
                                             .unwrap_or_else(|| file_slug.clone());
                                         let url = url_from_pattern(pattern, &file_slug);
                                         SlotCompletion::plain(title.clone(), url.clone(), slot.hint_text.clone(), format!("[{title}]({url})"))
                                     })
                                     .collect();
-                                if !items.is_empty() {
-                                    return items;
-                                }
+                                return items;
                             }
                         }
                     }
@@ -219,7 +209,7 @@ fn snippet_for_slot(slot: &schema::Slot) -> String {
 pub fn content_completions(
     src: &str,
     grammar: &Grammar,
-    site_dir: Option<&std::path::Path>,
+    repo: Option<&fs_site_repository::SiteRepository>,
 ) -> Vec<SlotCompletion> {
     // Parse current document to find which slots are filled
     let doc = match parse_and_assign(src, grammar) {
@@ -243,20 +233,21 @@ pub fn content_completions(
 
         let sort_text = format!("{idx:02}");
 
-        // For link slots with site_dir, enumerate actual content files
+        // For link slots with repo, enumerate actual content files
         if let Element::Link { pattern } = &slot.element
-            && let Some(dir) = site_dir
+            && let Some(repo) = repo
             && let Some(content_stem) = stem_from_link_pattern(pattern)
         {
-            let content_dir = dir.join("content").join(&content_stem);
-            if let Ok(entries) = std::fs::read_dir(&content_dir) {
-                let items: Vec<SlotCompletion> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().and_then(|ex| ex.to_str()) == Some("md"))
-                    .map(|e| {
-                        let path = e.path();
-                        let file_slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                        let title = read_title_from_md(&path).unwrap_or_else(|| file_slug.clone());
+            let schema_stem = site_index::SchemaStem::new(&content_stem);
+            let slugs = repo.content_slugs(&schema_stem);
+            if !slugs.is_empty() {
+                let items: Vec<SlotCompletion> = slugs
+                    .into_iter()
+                    .map(|file_slug| {
+                        let title = repo
+                            .content_source(&schema_stem, &file_slug)
+                            .and_then(|src| extract_title(&src))
+                            .unwrap_or_else(|| file_slug.clone());
                         let url = format!("/{content_stem}/{file_slug}");
                         let escaped_title = escape_snippet(&title);
                         let escaped_url = escape_snippet(&url);
@@ -344,46 +335,16 @@ pub fn content_completions(
 ///
 /// Returns one completion per content page, with the title as label
 /// and `[Title](/type/slug)` as insert text.
-pub fn link_completions(site_dir: &std::path::Path) -> Vec<SlotCompletion> {
-    let content_dir = site_dir.join("content");
+pub fn link_completions(repo: &fs_site_repository::SiteRepository) -> Vec<SlotCompletion> {
     let mut completions = Vec::new();
 
-    let Ok(types) = std::fs::read_dir(&content_dir) else {
-        return completions;
-    };
-
-    for type_entry in types.filter_map(|e| e.ok()) {
-        let type_path = type_entry.path();
-        if !type_path.is_dir() {
-            continue;
-        }
-        let type_stem = type_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        let Ok(files) = std::fs::read_dir(&type_path) else {
-            continue;
-        };
-
-        for file_entry in files.filter_map(|e| e.ok()) {
-            let file_path = file_entry.path();
-            if file_path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            let file_slug = file_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            // Skip index files — they represent the type listing, not a linkable page
-            if file_slug == "index" {
-                continue;
-            }
-
-            let title = read_title_from_md(&file_path).unwrap_or_else(|| file_slug.clone());
+    for schema_stem in repo.schema_stems() {
+        let type_stem = schema_stem.as_str().to_string();
+        for file_slug in repo.content_slugs(&schema_stem) {
+            let title = repo
+                .content_source(&schema_stem, &file_slug)
+                .and_then(|src| extract_title(&src))
+                .unwrap_or_else(|| file_slug.clone());
             let url = format!("/{type_stem}/{file_slug}");
             let link_text = format!("[{title}]({url})");
 
@@ -1032,8 +993,8 @@ mod tests {
     fn completions_for_link_slot_returns_content_items() {
         let grammar = article_grammar();
         // fixtures/blog-site/content/author/ has johlrogge.md
-        let site_dir = std::path::Path::new("../../fixtures/blog-site");
-        let completions = completions_for_schema(&grammar, "article", Some(site_dir));
+        let repo = fs_site_repository::SiteRepository::new("../../fixtures/blog-site");
+        let completions = completions_for_schema(&grammar, "article", Some(&repo));
         // should include an author completion with href containing "johlrogge"
         assert!(
             completions.iter().any(|c| c.detail.contains("johlrogge")),
@@ -1878,15 +1839,15 @@ mod tests {
 
     #[test]
     fn link_completions_returns_content_pages() {
-        let site_dir = std::path::Path::new("../../fixtures/blog-site");
-        let completions = link_completions(site_dir);
+        let repo = fs_site_repository::SiteRepository::new("../../fixtures/blog-site");
+        let completions = link_completions(&repo);
         assert!(!completions.is_empty(), "should find content pages");
     }
 
     #[test]
     fn link_completions_insert_text_is_markdown_link() {
-        let site_dir = std::path::Path::new("../../fixtures/blog-site");
-        let completions = link_completions(site_dir);
+        let repo = fs_site_repository::SiteRepository::new("../../fixtures/blog-site");
+        let completions = link_completions(&repo);
         for c in &completions {
             assert!(
                 c.insert_text.starts_with('['),

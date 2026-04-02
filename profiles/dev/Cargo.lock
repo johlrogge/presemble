@@ -925,7 +925,9 @@ name = "lsp_capabilities"
 version = "0.12.0"
 dependencies = [
  "content",
+ "fs_site_repository",
  "schema",
+ "site_index",
  "template",
  "validation",
 ]
@@ -936,6 +938,7 @@ version = "0.12.0"
 dependencies = [
  "conductor",
  "content",
+ "fs_site_repository",
  "lsp_capabilities",
  "schema",
  "site_index",
