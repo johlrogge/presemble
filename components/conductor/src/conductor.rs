@@ -48,10 +48,10 @@ fn derive_url_from_content_path(file: &str) -> String {
     format!("/{without_ext}")
 }
 
-/// A simple TemplateRegistry backed by the filesystem (no caching).
+/// A simple TemplateRegistry backed by the site repository (no caching).
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
-    templates_dir: PathBuf,
+    repo: fs_site_repository::SiteRepository,
 }
 
 impl template::TemplateRegistry for SimpleTemplateRegistry {
@@ -76,31 +76,18 @@ impl template::TemplateRegistry for SimpleTemplateRegistry {
 }
 
 impl SimpleTemplateRegistry {
-    /// Load and parse a template file by stem (tries .html then .hiccup).
-    /// Prefers new directory-based convention (`{stem}/item.html`) over
-    /// legacy flat convention (`{stem}.html`).
+    /// Load and parse a template file by stem using the repo.
+    /// Tries item template first, then partial.
     fn load_nodes(&self, file_stem: &str) -> Option<Vec<template::dom::Node>> {
-        // New directory-based convention
-        let dir_html = self.templates_dir.join(file_stem).join("item.html");
-        let dir_hiccup = self.templates_dir.join(file_stem).join("item.hiccup");
-        // Legacy flat convention
-        let html_path = self.templates_dir.join(format!("{file_stem}.html"));
-        let hiccup_path = self.templates_dir.join(format!("{file_stem}.hiccup"));
-
-        if dir_html.exists() {
-            let src = std::fs::read_to_string(&dir_html).ok()?;
-            template::parse_template_xml(&src).ok()
-        } else if dir_hiccup.exists() {
-            let src = std::fs::read_to_string(&dir_hiccup).ok()?;
-            template::parse_template_hiccup(&src).ok()
-        } else if html_path.exists() {
-            let src = std::fs::read_to_string(&html_path).ok()?;
-            template::parse_template_xml(&src).ok()
-        } else if hiccup_path.exists() {
-            let src = std::fs::read_to_string(&hiccup_path).ok()?;
+        let stem = site_index::SchemaStem::new(file_stem);
+        let (src, is_hiccup) = self
+            .repo
+            .item_template_source(&stem)
+            .or_else(|| self.repo.partial_template_source(file_stem))?;
+        if is_hiccup {
             template::parse_template_hiccup(&src).ok()
         } else {
-            None
+            template::parse_template_xml(&src).ok()
         }
     }
 }
@@ -109,11 +96,11 @@ impl SimpleTemplateRegistry {
 pub struct Conductor {
     site_dir: PathBuf,
     output_dir: PathBuf,
-    templates_dir: PathBuf,
     dep_graph: RwLock<dep_graph::DependencyGraph>,
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
     doc_sources: RwLock<HashMap<PathBuf, String>>, // path -> in-memory text
     site_index: site_index::SiteIndex,
+    repo: fs_site_repository::SiteRepository,
 }
 
 impl Conductor {
@@ -125,25 +112,25 @@ impl Conductor {
             let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
             site_dir.parent().unwrap_or(&site_dir).join("output").join(name)
         };
-        let templates_dir = site_dir.join("templates");
 
-        // Populate schema cache
+        let repo = fs_site_repository::SiteRepository::new(&site_dir);
+
+        // Populate schema cache via repo
         let mut schema_cache = HashMap::new();
-        for stem in site_index.schema_stems() {
-            let schema_path = site_index.schema_path(&stem);
-            if let Ok(src) = std::fs::read_to_string(&schema_path) {
-                schema_cache.insert(stem, src);
+        for stem in repo.schema_stems() {
+            if let Some(src) = repo.schema_source(&stem) {
+                schema_cache.insert(stem.as_str().to_string(), src);
             }
         }
 
         Ok(Self {
             site_dir,
             output_dir,
-            templates_dir,
             dep_graph: RwLock::new(dep_graph::DependencyGraph::new()),
             schema_cache: RwLock::new(schema_cache),
             doc_sources: RwLock::new(HashMap::new()),
             site_index,
+            repo,
         })
     }
 
@@ -218,26 +205,26 @@ impl Conductor {
         link_graph.insert("text", template::Value::Text(title));
         graph.insert("link", template::Value::Record(link_graph));
 
-        // Load and parse template
-        let template_path = self
-            .site_index
-            .template_for(&stem)
+        // Load and parse template via repo (try directory-based item template first,
+        // then flat partial convention for backward compatibility)
+        let stem_obj = site_index::SchemaStem::new(&stem);
+        let (tmpl_src, is_hiccup) = self
+            .repo
+            .item_template_source(&stem_obj)
+            .or_else(|| self.repo.partial_template_source(&stem))
             .ok_or_else(|| format!("no template for {stem}"))?;
-        let tmpl_src = std::fs::read_to_string(&template_path)
-            .map_err(|e| format!("template read error: {e}"))?;
-        let raw_nodes =
-            if template_path.extension().and_then(|e| e.to_str()) == Some("hiccup") {
-                template::parse_template_hiccup(&tmpl_src)
-                    .map_err(|e| format!("{e}"))?
-            } else {
-                template::parse_template_xml(&tmpl_src)
-                    .map_err(|e| format!("{e}"))?
-            };
+        let raw_nodes = if is_hiccup {
+            template::parse_template_hiccup(&tmpl_src)
+                .map_err(|e| format!("{e}"))?
+        } else {
+            template::parse_template_xml(&tmpl_src)
+                .map_err(|e| format!("{e}"))?
+        };
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
         // Create render context
         let registry = SimpleTemplateRegistry {
-            templates_dir: self.templates_dir.clone(),
+            repo: self.repo.clone(),
         };
         let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
@@ -366,9 +353,9 @@ impl Conductor {
                 for p in &paths {
                     let path = std::path::Path::new(p);
                     if let site_index::FileKind::Schema { stem } = self.site_index.classify(path)
-                        && let Ok(src) = std::fs::read_to_string(path)
+                        && let Some(src) = self.repo.schema_source(&stem)
                     {
-                        self.schema_cache.write().unwrap().insert(stem.to_string(), src);
+                        self.schema_cache.write().unwrap().insert(stem.as_str().to_string(), src);
                     }
                 }
                 CommandResult::ok()
