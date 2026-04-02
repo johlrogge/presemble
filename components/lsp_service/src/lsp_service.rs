@@ -532,6 +532,16 @@ impl LanguageServer for PresembleLsp {
         drop(sources);
         let line = p.text_document_position_params.position.line;
         let path = uri.to_file_path().unwrap_or_default();
+        // Notify conductor of cursor position for browser scroll-follow.
+        // Fire-and-forget: if conductor is unavailable, hover still works.
+        if let Some(ref cond) = self.conductor {
+            let rel = path
+                .strip_prefix(&self.site_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
+        }
         let kind = self.site_index.classify(&path);
         match kind {
             site_index::FileKind::Template { .. } => {

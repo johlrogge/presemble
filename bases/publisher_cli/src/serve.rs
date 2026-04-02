@@ -23,31 +23,46 @@ use tokio::sync::broadcast;
 /// Message sent over the WebSocket reload channel.
 /// Empty `pages` = full rebuild → reload in place.
 #[derive(Clone, Debug)]
-struct ReloadMessage {
-    pages: Vec<String>,
-    anchor: Option<String>,
+enum BrowserMessage {
+    Reload {
+        pages: Vec<String>,
+        anchor: Option<String>,
+    },
+    ScrollTo {
+        anchor: String,
+    },
 }
 
-impl ReloadMessage {
+impl BrowserMessage {
     fn to_json(&self) -> String {
-        let anchor_json = match &self.anchor {
-            Some(a) => format!(r#","anchor":"{}""#, a.replace('\\', "\\\\").replace('"', "\\\"")),
-            None => String::new(),
-        };
-        if self.pages.is_empty() {
-            format!(r#"{{"pages":[],"primary":""{}}}"#, anchor_json)
-        } else {
-            let pages_json = self.pages
-                .iter()
-                .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                r#"{{"pages":[{}],"primary":"{}"{}}}"#,
-                pages_json,
-                self.pages[0].replace('\\', "\\\\").replace('"', "\\\""),
-                anchor_json
-            )
+        match self {
+            BrowserMessage::Reload { pages, anchor } => {
+                let anchor_json = match anchor {
+                    Some(a) => format!(r#","anchor":"{}""#, a.replace('\\', "\\\\").replace('"', "\\\"")),
+                    None => String::new(),
+                };
+                if pages.is_empty() {
+                    format!(r#"{{"type":"reload","pages":[],"primary":""{}}}"#, anchor_json)
+                } else {
+                    let pages_json = pages
+                        .iter()
+                        .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!(
+                        r#"{{"type":"reload","pages":[{}],"primary":"{}"{}}}"#,
+                        pages_json,
+                        pages[0].replace('\\', "\\\\").replace('"', "\\\""),
+                        anchor_json
+                    )
+                }
+            }
+            BrowserMessage::ScrollTo { anchor } => {
+                format!(
+                    r#"{{"type":"scroll","anchor":"{}"}}"#,
+                    anchor.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            }
         }
     }
 }
@@ -61,7 +76,7 @@ pub fn serve_site(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<
 #[derive(Clone)]
 struct AppState {
     output_dir: std::path::PathBuf,
-    reload_tx: broadcast::Sender<ReloadMessage>,
+    reload_tx: broadcast::Sender<BrowserMessage>,
     build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
     site_dir: std::path::PathBuf,
     conductor: Option<Arc<conductor::ConductorClient>>,
@@ -94,7 +109,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         }
     }
 
-    let (reload_tx, _) = broadcast::channel::<ReloadMessage>(16);
+    let (reload_tx, _) = broadcast::channel::<BrowserMessage>(16);
 
     let snapshot: ContentSnapshot = Arc::new(Mutex::new(HashMap::new()));
     {
@@ -144,10 +159,13 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                 loop {
                     match sub.recv() {
                         Ok(conductor::ConductorEvent::PagesRebuilt { pages, anchor }) => {
-                            let _ = reload_tx_clone.send(ReloadMessage { pages, anchor });
+                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor });
                         }
                         Ok(conductor::ConductorEvent::BuildFailed { error_pages }) => {
-                            let _ = reload_tx_clone.send(ReloadMessage { pages: error_pages, anchor: None });
+                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages: error_pages, anchor: None });
+                        }
+                        Ok(conductor::ConductorEvent::CursorScrollTo { anchor }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::ScrollTo { anchor });
                         }
                         Err(e) => {
                             eprintln!("Conductor subscription error: {e}");
@@ -418,7 +436,7 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws(socket, state.reload_tx.subscribe()))
 }
 
-async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<ReloadMessage>) {
+async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<BrowserMessage>) {
     loop {
         tokio::select! {
             result = rx.recv() => {
@@ -588,10 +606,24 @@ const INJECT: &str = concat!(
     "</style>",
     "<script>(function(){",
     "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
+    "var _userScrolled=false;var _scrollTimer=null;",
+    "window.addEventListener('scroll',function(){_userScrolled=true;clearTimeout(_scrollTimer);_scrollTimer=setTimeout(function(){_userScrolled=false;},3000);},true);",
     "ws.onmessage=function(e){",
       "var m=JSON.parse(e.data);",
+      "if(m.type==='scroll'){",
+        "if(!_userScrolled&&m.anchor){",
+          "var el=document.getElementById(m.anchor);",
+          "if(el){",
+            "var r=el.getBoundingClientRect();",
+            "if(r.top<0||r.bottom>window.innerHeight){",
+              "el.scrollIntoView({behavior:'smooth',block:'center'});",
+            "}",
+          "}",
+        "}",
+        "return;",
+      "}",
       "if(m.anchor){sessionStorage.setItem('presemble-anchor',m.anchor);}",
-      "if(!m.pages.length||m.pages.indexOf(location.pathname)!==-1){location.reload();}",
+      "if(!m.pages||!m.pages.length||m.pages.indexOf(location.pathname)!==-1){location.reload();}",
       "else{location.href=m.primary;}",
     "};",
     "ws.onclose=function(){setTimeout(function(){location.reload();},1000);};",
@@ -845,7 +877,7 @@ fn watch_and_rebuild(
     site_dir: &Path,
     graph: Arc<Mutex<DependencyGraph>>,
     url_config: &UrlConfig,
-    reload_tx: broadcast::Sender<ReloadMessage>,
+    reload_tx: broadcast::Sender<BrowserMessage>,
     snapshot: ContentSnapshot,
     build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) {
@@ -980,7 +1012,7 @@ fn watch_and_rebuild(
                     eprintln!("Rebuild completed with {} error(s)", outcome.files_failed);
                     // Send a reload so the browser navigates to the error page.
                     let error_pages: Vec<String> = outcome.build_errors.keys().cloned().collect();
-                    let _ = reload_tx.send(ReloadMessage { pages: error_pages, anchor: None });
+                    let _ = reload_tx.send(BrowserMessage::Reload { pages: error_pages, anchor: None });
                 } else if outcome.files_built > 0 || outcome.files_with_suggestions > 0 {
                     println!("Rebuild complete ({} file(s), {} with suggestions)", outcome.files_built, outcome.files_with_suggestions);
                     let mut pages: Vec<String> = outcome.built_pages
@@ -1019,7 +1051,7 @@ fn watch_and_rebuild(
                         }
                     }
 
-                    let _ = reload_tx.send(ReloadMessage { pages, anchor });
+                    let _ = reload_tx.send(BrowserMessage::Reload { pages, anchor });
                 }
             }
             Err(e) => {
@@ -1031,7 +1063,7 @@ fn watch_and_rebuild(
                         // Update error map from full rebuild
                         *build_errors.lock().unwrap() = outcome.build_errors;
                         println!("Full rebuild complete");
-                        let _ = reload_tx.send(ReloadMessage { pages: Vec::new(), anchor: None });
+                        let _ = reload_tx.send(BrowserMessage::Reload { pages: Vec::new(), anchor: None });
                     }
                     Err(e2) => eprintln!("Full rebuild failed: {e2}"),
                 }
@@ -1103,20 +1135,20 @@ mod tests {
 
     #[test]
     fn reload_message_full_rebuild_json() {
-        let msg = ReloadMessage { pages: vec![], anchor: None };
-        assert_eq!(msg.to_json(), r#"{"pages":[],"primary":""}"#);
+        let msg = BrowserMessage::Reload { pages: vec![], anchor: None };
+        assert_eq!(msg.to_json(), r#"{"type":"reload","pages":[],"primary":""}"#);
     }
 
     #[test]
     fn reload_message_single_page_json() {
-        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()], anchor: None };
+        let msg = BrowserMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
         let json = msg.to_json();
-        assert_eq!(json, r#"{"pages":["/article/hello"],"primary":"/article/hello"}"#);
+        assert_eq!(json, r#"{"type":"reload","pages":["/article/hello"],"primary":"/article/hello"}"#);
     }
 
     #[test]
     fn reload_message_multiple_pages_primary_is_first() {
-        let msg = ReloadMessage {
+        let msg = BrowserMessage::Reload {
             pages: vec!["/article/a".to_string(), "/article/b".to_string()],
             anchor: None,
         };
@@ -1126,20 +1158,20 @@ mod tests {
 
     #[test]
     fn reload_message_escapes_double_quote_in_url() {
-        let msg = ReloadMessage { pages: vec!["/bad\"path".to_string()], anchor: None };
+        let msg = BrowserMessage::Reload { pages: vec!["/bad\"path".to_string()], anchor: None };
         let json = msg.to_json();
         assert!(json.contains(r#"\/bad\"path"#) || json.contains(r#"/bad\""#));
     }
 
     #[test]
     fn reload_message_with_anchor_includes_field() {
-        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()], anchor: Some("presemble-body-3".to_string()) };
+        let msg = BrowserMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: Some("presemble-body-3".to_string()) };
         assert!(msg.to_json().contains(r#""anchor":"presemble-body-3""#));
     }
 
     #[test]
     fn reload_message_without_anchor_omits_field() {
-        let msg = ReloadMessage { pages: vec!["/article/hello".to_string()], anchor: None };
+        let msg = BrowserMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
         assert!(!msg.to_json().contains("anchor"));
     }
 

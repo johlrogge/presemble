@@ -29,6 +29,17 @@ impl CommandResult {
     }
 }
 
+/// Convert a 0-based line number to a byte offset in `src`.
+///
+/// The offset points to the first byte of that line. If `line` exceeds the
+/// number of lines in `src`, the offset of the last byte is returned.
+fn line_to_byte_offset(src: &str, line: u32) -> usize {
+    src.lines()
+        .take(line as usize)
+        .map(|l| l.len() + 1) // +1 for newline
+        .sum()
+}
+
 /// Derive a URL path from a content-relative file path.
 /// e.g. "content/post/hello.md" → "/post/hello"
 fn derive_url_from_content_path(file: &str) -> String {
@@ -243,6 +254,61 @@ impl Conductor {
         Ok(vec![url_path])
     }
 
+    /// Map a cursor line to the anchor of the nearest body element (or preamble slot).
+    ///
+    /// Returns `None` if the document cannot be parsed or has no relevant elements.
+    fn body_element_anchor_at_line(&self, src: &str, path: &str, line: u32) -> Option<String> {
+        // Derive schema stem from path (e.g., "content/post/my-post.md" → "post")
+        let stem = path
+            .strip_prefix("content/")
+            .and_then(|p| p.split('/').next())?;
+
+        // Load grammar from cache
+        let schema_src = self.schema_source(stem)?;
+        let grammar = schema::parse_schema(&schema_src).ok()?;
+
+        // Parse and assign slots
+        let doc = content::parse_and_assign(src, &grammar).ok()?;
+
+        let byte_offset = line_to_byte_offset(src, line);
+
+        // Check preamble slots first
+        for slot in &doc.preamble {
+            for spanned in &slot.elements {
+                if spanned.span.start <= byte_offset && byte_offset < spanned.span.end {
+                    return Some(format!("presemble-slot-{}", slot.name));
+                }
+            }
+        }
+
+        // Check body elements — exact match
+        for (idx, spanned) in doc.body.iter().enumerate() {
+            if spanned.span.start <= byte_offset && byte_offset < spanned.span.end {
+                return Some(format!("presemble-body-{idx}"));
+            }
+        }
+
+        // Cursor might be between elements — find the nearest body element
+        if doc.has_separator && !doc.body.is_empty() {
+            let mut closest_idx = 0;
+            let mut closest_dist = usize::MAX;
+            for (idx, spanned) in doc.body.iter().enumerate() {
+                let dist = if byte_offset < spanned.span.start {
+                    spanned.span.start - byte_offset
+                } else {
+                    byte_offset - spanned.span.end
+                };
+                if dist < closest_dist {
+                    closest_dist = dist;
+                    closest_idx = idx;
+                }
+            }
+            return Some(format!("presemble-body-{closest_idx}"));
+        }
+
+        None
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -296,6 +362,17 @@ impl Conductor {
                     {
                         self.schema_cache.write().unwrap().insert(stem, src);
                     }
+                }
+                CommandResult::ok()
+            }
+            Command::CursorMoved { path, line } => {
+                let abs_path = self.site_dir.join(&path);
+                if let Some(src) = self.document_text(&abs_path)
+                    && let Some(anchor) = self.body_element_anchor_at_line(&src, &path, line)
+                {
+                    return CommandResult::ok_with_events(vec![
+                        ConductorEvent::CursorScrollTo { anchor },
+                    ]);
                 }
                 CommandResult::ok()
             }

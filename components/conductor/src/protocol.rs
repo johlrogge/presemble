@@ -22,6 +22,8 @@ pub enum Command {
     Ping,
     /// Request conductor shutdown.
     Shutdown,
+    /// Editor cursor moved to a new position.
+    CursorMoved { path: String, line: u32 },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -47,4 +49,6 @@ pub enum ConductorEvent {
     BuildFailed {
         error_pages: Vec<String>,
     },
+    /// Browser should scroll to follow cursor.
+    CursorScrollTo { anchor: String },
 }
