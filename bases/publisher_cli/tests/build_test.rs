@@ -77,7 +77,7 @@ fn invalid_post_fails_validation_with_title_and_body_errors() {
     );
 }
 
-// ── Build tests (each gets its own temp dir) ──────────────────────────────
+// ── Build tests (each gets its own temp dir) ─────────────────────────────────
 
 #[test]
 fn build_produces_index_html() {
@@ -660,5 +660,239 @@ fn broken_link_reference_is_warning_in_serve_mode() {
     assert!(
         all_suggestions.iter().any(|msg| msg.contains("ghost-writer") || msg.contains("broken link")),
         "page_suggestions should mention the broken reference in Serve mode; suggestions: {all_suggestions:?}"
+    );
+}
+
+#[test]
+fn collection_page_is_built_when_index_content_and_template_exist() {
+    // Build a site with content/article/index.md, schemas/article/index.md,
+    // and templates/article/index.html — verify that output/article/index.html
+    // is produced and contains the collection listing.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("collection-page-site");
+
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    // Item schema and content
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/article/hello.md"),
+        "# Hello Article\n",
+    )
+    .unwrap();
+
+    // Collection schema (for content/article/index.md)
+    fs::write(
+        site.join("schemas/article/index.md"),
+        "# Page heading {#heading}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+
+    // Collection content
+    fs::write(
+        site.join("content/article/index.md"),
+        "# All Articles\n",
+    )
+    .unwrap();
+
+    // Item template
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+
+    // Collection (index) template that renders the heading and iterates articles
+    // Note: data-each only works on <template> elements; within the loop, fields
+    // are accessed directly (e.g. "title"), not as "item.title".
+    fs::write(
+        site.join("templates/article/index.html"),
+        r#"<!DOCTYPE html>
+<html>
+<body>
+<h1><presemble:insert data="article.heading" /></h1>
+<ul><template data-each="articles"><li><presemble:insert data="title" as="li" /></li></template></ul>
+</body>
+</html>"#,
+    )
+    .unwrap();
+
+    // Index template (required to avoid a warning)
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Home</h1></body></html>"#,
+    )
+    .unwrap();
+
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let outcome =
+        publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+            .expect("build should succeed");
+    assert_eq!(
+        outcome.files_failed, 0,
+        "no pages should fail; errors: {:?}",
+        outcome.build_errors
+    );
+
+    // The collection page should exist
+    let collection_output = publisher_cli::output_dir(&site).join("article/index.html");
+    assert!(
+        collection_output.exists(),
+        "output/article/index.html should be created for the collection page"
+    );
+
+    let html = fs::read_to_string(&collection_output).unwrap();
+
+    // The collection heading from collection content should appear
+    assert!(
+        html.contains("All Articles"),
+        "collection page should contain heading from collection content: {html}"
+    );
+
+    // The item title from the individual article should appear (via data-each iteration)
+    assert!(
+        html.contains("Hello Article"),
+        "collection page should contain item title via data-each: {html}"
+    );
+}
+
+#[test]
+fn collection_page_without_collection_content_is_skipped() {
+    // If content/article/index.md does NOT exist, no collection page is built
+    // and no failure is recorded.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("no-collection-content-site");
+
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/article/hello.md"),
+        "# Hello Article\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Home</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let outcome =
+        publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+            .expect("build should succeed");
+
+    assert_eq!(
+        outcome.files_failed, 0,
+        "no failures should occur when collection content is absent"
+    );
+
+    // No collection page should exist
+    let collection_output = publisher_cli::output_dir(&site).join("article/index.html");
+    assert!(
+        !collection_output.exists(),
+        "output/article/index.html should NOT exist when collection content is absent"
+    );
+}
+
+#[test]
+fn collection_page_dep_graph_tracks_template_and_content() {
+    // Verify that changes to the collection template or collection content
+    // will trigger a rebuild of the collection page.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("collection-dep-site");
+
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/article/hello.md"),
+        "# Hello Article\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("schemas/article/index.md"),
+        "# Page heading {#heading}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/article/index.md"),
+        "# All Articles\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/article/index.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.heading" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Home</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let site = fs::canonicalize(&site).unwrap();
+    let outcome =
+        publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+            .expect("build should succeed");
+    assert_eq!(outcome.files_failed, 0, "no failures expected");
+
+    let collection_output = publisher_cli::output_dir(&site).join("article/index.html");
+    let collection_template = site.join("templates/article/index.html");
+    let collection_content = site.join("content/article/index.md");
+    let item_content = site.join("content/article/hello.md");
+
+    // Template change should affect collection page
+    let affected = outcome.dep_graph.affected_outputs(&collection_template);
+    assert!(
+        affected.contains(&collection_output),
+        "collection template change should affect collection page; affected: {affected:?}"
+    );
+
+    // Collection content change should affect collection page
+    let affected = outcome.dep_graph.affected_outputs(&collection_content);
+    assert!(
+        affected.contains(&collection_output),
+        "collection content change should affect collection page; affected: {affected:?}"
+    );
+
+    // Item content change should affect collection page (items are deps)
+    let affected = outcome.dep_graph.affected_outputs(&item_content);
+    assert!(
+        affected.contains(&collection_output),
+        "item content change should affect collection page; affected: {affected:?}"
     );
 }

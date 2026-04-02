@@ -984,6 +984,131 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         site_context.insert(collection_key, template::Value::List(collection));
     }
 
+    // Phase: Build collection pages for each content type
+    let templates_dir = site_dir.join("templates");
+    for schema_stem in site_index.schema_stems() {
+        if schema_stem == "index" {
+            continue; // homepage handled separately
+        }
+
+        // Check for collection content: content/{stem}/index.md
+        let collection_content_path = site_dir.join("content").join(&schema_stem).join("index.md");
+        if !collection_content_path.exists() {
+            continue; // No collection content — no listing page
+        }
+
+        // Collection content requires a schema: schemas/{stem}/index.md
+        let collection_schema_path = site_dir.join("schemas").join(&schema_stem).join("index.md");
+        if !collection_schema_path.exists() {
+            eprintln!(
+                "{}/index.md: FAIL (collection content exists but schemas/{}/index.md is missing)",
+                schema_stem, schema_stem
+            );
+            files_failed += 1;
+            continue;
+        }
+
+        // Check for collection template: templates/{stem}/index.hiccup or .html
+        let collection_template =
+            template::resolve_template_file(&templates_dir, &format!("{schema_stem}/index"));
+        let Ok((raw_nodes, collection_template_path)) = collection_template else {
+            eprintln!("{}/index.md: FAIL (no collection template found)", schema_stem);
+            files_failed += 1;
+            continue;
+        };
+
+        // Parse the collection schema
+        let schema_src = match std::fs::read_to_string(&collection_schema_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (cannot read schema: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+        let collection_grammar = match schema::parse_schema(&schema_src) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (schema error: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+
+        // Parse collection content
+        let content_src = match std::fs::read_to_string(&collection_content_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (cannot read content: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+        let collection_doc = match content::parse_and_assign(&content_src, &collection_grammar) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (parse error: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+
+        // Validate (continue with warnings, same as item pages)
+        let validation = content::validate(&collection_doc, &collection_grammar);
+        if !validation.is_valid() {
+            for diag in &validation.diagnostics {
+                eprintln!("{}/index.md: {:?}: {}", schema_stem, diag.severity, diag.message);
+            }
+        }
+
+        // Build render context: site_context (has {stem}s lists) + collection's own data under stem key
+        let mut render_context = site_context.clone();
+        let collection_graph =
+            template::build_article_graph(&collection_doc, &collection_grammar);
+        render_context.insert(schema_stem.clone(), template::Value::Record(collection_graph));
+
+        // Render
+        let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+        let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
+        match template::transform(nodes, &render_context, &ctx) {
+            Ok(transformed) => {
+                let url_path = format!("/{schema_stem}");
+                let rewriter = make_rewriter(&url_path, url_config);
+                let rewritten = template::rewrite_urls(transformed, &rewriter);
+                let html = template::serialize_nodes(&rewritten);
+
+                let out_dir = output_dir(site_dir).join(&schema_stem);
+                std::fs::create_dir_all(&out_dir).ok();
+                let output_path = out_dir.join("index.html");
+                if let Err(e) = std::fs::write(&output_path, &html) {
+                    eprintln!("{}/index.md: FAIL (write error: {e})", schema_stem);
+                    files_failed += 1;
+                    continue;
+                }
+
+                println!("{}/index.md: PASS", schema_stem);
+                println!("  \u{2192} {}", output_path.display());
+                files_built += 1;
+
+                // Register dependencies: template, collection content, collection schema,
+                // and all item content files for this type
+                let mut deps: std::collections::HashSet<std::path::PathBuf> =
+                    std::collections::HashSet::new();
+                deps.insert(collection_template_path);
+                deps.insert(collection_content_path);
+                deps.insert(collection_schema_path);
+                for item_content_path in site_index.content_files(&schema_stem) {
+                    deps.insert(item_content_path);
+                }
+                dep_graph.register(output_path, deps);
+            }
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (render error: {e})", schema_stem);
+                files_failed += 1;
+            }
+        }
+    }
+
     // Load index content if schema and content exist.
     // The root index is flat: schemas/index.md and content/index.md (no directory).
     let index_schema_path = site_index.schema_path("index");

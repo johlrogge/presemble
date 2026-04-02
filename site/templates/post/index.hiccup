@@ -1,0 +1,24 @@
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Presemble — Blog"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]
+  ]
+  [:body
+    [:presemble/include {:src "header"}]
+    [:main {:class "post-listing"}
+      [:presemble/insert {:data "post.title" :as "h1"}]
+      [:ul {:class "post-listing__items"}
+        [:template {:data-each "posts"}
+          [:li {:class "post-card"}
+            [:presemble/insert {:data "title" :as "h2"}]
+            [:presemble/insert {:data "summary"}]
+            [:presemble/insert {:data "link"}]
+          ]
+        ]
+      ]
+    ]
+    [:presemble/include {:src "footer"}]
+  ]
+]
