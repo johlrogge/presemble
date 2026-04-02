@@ -91,6 +91,21 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.16.0
+
+Unified SiteGraph architecture and curated homepage features.
+
+**SiteGraph as single source of truth (ADR-026)**
+The build pipeline is rewritten around a unified `SiteGraph` that holds all site data — items, collection pages, and the site index — in one structure. The three-phase build (build all entries → resolve all references once → render all entries) replaces the previous ad-hoc assembly with three separate code paths. Reference resolution now covers all content kinds uniformly. `SchemaStem` and `UrlPath` newtypes eliminate stringly-typed HashMap keys.
+
+**Curated homepage features via resolved link slots**
+The homepage now links to 4 specific features (via link slots in the index schema) instead of iterating all features with `data-each`. Cross-content reference resolution enriches the link records with full feature data (title, tagline, description). Reference resolution now also walks into list items for multi-occurrence link slots.
+
+**Incremental rebuild with filtered output**
+`rebuild_affected` performs a full build for correctness (SiteGraph reference resolution requires the complete graph) but filters the returned site graph to only affected entries. The serve loop only sends browser-reload notifications for pages that actually changed.
+
+---
+
 ### v0.15.0
 
 Collection pages and complete publishing model.
