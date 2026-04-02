@@ -128,7 +128,9 @@ impl SiteIndex {
         if let Ok(entries) = std::fs::read_dir(&content_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if path.extension().and_then(|e| e.to_str()) == Some("md")
+                    && path.file_name().and_then(|n| n.to_str()) != Some("index.md")
+                {
                     files.push(path);
                 }
             }
