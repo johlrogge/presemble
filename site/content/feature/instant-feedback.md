@@ -37,6 +37,13 @@ file, and template it was built from. When a file changes, only the pages that d
 on it rebuild. A site with 500 articles rebuilds 1 article (plus the index) when you
 fix a typo — not all 500.
 
+### Cursor-follow scroll
+
+When the LSP is active, moving your cursor in Helix scrolls the browser preview to the
+matching element. Source map annotations tie each rendered DOM node back to its source
+position, so the browser always shows the section you are editing without a manual
+scroll.
+
 ### Editor feedback without saving
 
 `presemble lsp` starts an LSP server that provides completions, diagnostics, hover,

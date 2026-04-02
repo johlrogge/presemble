@@ -402,6 +402,29 @@ fn extract_include_names_recursive(nodes: &[Node], found: &mut std::collections:
     }
 }
 
+/// Remove text nodes that consist entirely of whitespace.
+/// Recurses into element children.
+pub fn strip_whitespace_text_nodes(nodes: Vec<Node>) -> Vec<Node> {
+    nodes
+        .into_iter()
+        .filter(|n| {
+            if let Node::Text(t) = n {
+                !t.chars().all(|c| c.is_ascii_whitespace())
+            } else {
+                true
+            }
+        })
+        .map(|n| {
+            if let Node::Element(mut el) = n {
+                el.children = strip_whitespace_text_nodes(el.children);
+                Node::Element(el)
+            } else {
+                n
+            }
+        })
+        .collect()
+}
+
 /// Extract the names of template files referenced via `<presemble:apply template="...">` elements.
 ///
 /// Only file-qualified names (containing "::") contribute a file stem — bare names resolve from

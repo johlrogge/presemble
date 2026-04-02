@@ -91,6 +91,45 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.13.0
+
+M3.5 complete — code action transformation model and content authoring improvements.
+
+**Code action transformation model (ADR-023, ADR-024, ADR-025)**
+Code actions are now pure-functional structs implementing a `Transform` trait. A structural differ computes slot-level semantic diffs using `im::Vector` structural sharing (ADR-024). Consumer adapters translate diffs into targeted LSP `TextEdit` arrays, file writes, or browser updates (ADR-025). This fixes the lost-error-markers bug that previously caused diagnostics to disappear after a code action was applied.
+
+**Inline markdown rendering in body**
+Bold, italic, blockquotes, and lists are parsed and rendered in the body section. Blockquote and list syntax is now recognised by the content parser.
+
+**Inline link completions**
+Typing `[` in a content body triggers a completions list of all content pages in the site, formatted as `[Title](/type/slug)`. The list is narrowable as you continue typing.
+
+**Body heading completions**
+The LSP offers H3–H6 heading completions in content body sections. Completions are only offered at the start of a line, matching the heading constraint of the body slot.
+
+**Code action fix: heading `InsertSlot` prefix**
+The quickfix that inserts a missing heading slot no longer doubles the `#` prefix in the inserted text.
+
+**Completion fix: content completions use `text_edit`**
+Content completions now replace the whole current line using `text_edit`, preventing partial overwrites when a line already has a prefix.
+
+**Save fix: auto-format preserves body text**
+Auto-format on save no longer replaces body text with rendered HTML tags. Body content is preserved verbatim on round-trip.
+
+**Save fix: no spurious "modified on disk" warning**
+Auto-format no longer rewrites the file in a way that triggers the editor's external-modification warning.
+
+**Browser preview: cursor-follow scroll**
+Hovering over an element in Helix scrolls the browser preview to the matching body element using source map annotations. Programmatic scroll no longer blocks subsequent cursor-follow events.
+
+**Infrastructure**
+- `im` crate for persistent DOM trees (ADR-021)
+- Slotted document structure with named slots (ADR-022)
+- `nng` socket timeouts prevent LSP shutdown hang
+- ADRs 021–025 added
+
+---
+
 ### v0.6.0
 
 M3 Phase 4: Template and schema LSP support.
