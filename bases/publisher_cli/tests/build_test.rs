@@ -409,7 +409,6 @@ fn index_content_is_rendered_into_index_page() {
 
     fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
-    fs::create_dir_all(site.join("content/index")).unwrap();
     fs::create_dir_all(site.join("templates/article")).unwrap();
     fs::create_dir_all(site.join("assets")).unwrap();
 
@@ -432,9 +431,9 @@ fn index_content_is_rendered_into_index_page() {
     )
     .unwrap();
 
-    // Index content
+    // Index content (flat, at content root)
     fs::write(
-        site.join("content/index/index.md"),
+        site.join("content/index.md"),
         "# My Awesome Site\n\nBuilt with Presemble.\n",
     )
     .unwrap();
@@ -490,7 +489,6 @@ fn index_content_schema_and_content_tracked_as_deps() {
 
     fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
-    fs::create_dir_all(site.join("content/index")).unwrap();
     fs::create_dir_all(site.join("templates/article")).unwrap();
     fs::create_dir_all(site.join("assets")).unwrap();
 
@@ -511,7 +509,7 @@ fn index_content_schema_and_content_tracked_as_deps() {
     )
     .unwrap();
     fs::write(
-        site.join("content/index/index.md"),
+        site.join("content/index.md"),
         "# My Site\n",
     )
     .unwrap();
@@ -535,7 +533,7 @@ fn index_content_schema_and_content_tracked_as_deps() {
 
     let index_output = publisher_cli::output_dir(&site).join("index.html");
     let index_schema = site.join("schemas/index.md");
-    let index_content = site.join("content/index/index.md");
+    let index_content = site.join("content/index.md");
 
     let affected_by_schema = outcome.dep_graph.affected_outputs(&index_schema);
     assert!(
@@ -546,7 +544,7 @@ fn index_content_schema_and_content_tracked_as_deps() {
     let affected_by_content = outcome.dep_graph.affected_outputs(&index_content);
     assert!(
         affected_by_content.contains(&index_output),
-        "content/index/index.md change should affect index.html; affected: {affected_by_content:?}"
+        "content/index.md change should affect index.html; affected: {affected_by_content:?}"
     );
 }
 

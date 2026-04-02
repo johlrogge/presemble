@@ -984,22 +984,20 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         site_context.insert(collection_key, template::Value::List(collection));
     }
 
-    // Load index content if schema and content exist
+    // Load index content if schema and content exist.
+    // The root index is flat: schemas/index.md and content/index.md (no directory).
     let index_schema_path = site_index.schema_path("index");
-    let index_content_dir = site_dir.join("content/index");
+    let index_content_path = site_dir.join("content/index.md");
     if index_schema_path.exists()
         && let Ok(schema_src) = std::fs::read_to_string(&index_schema_path)
         && let Ok(grammar) = schema::parse_schema(&schema_src)
+        && let Ok(content_src) = std::fs::read_to_string(&index_content_path)
+        && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
     {
-        let index_md = index_content_dir.join("index.md");
-        if let Ok(content_src) = std::fs::read_to_string(&index_md)
-            && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
-        {
-            let mut index_graph = template::build_article_graph(&doc, &grammar);
-            index_graph.insert("_presemble_file", template::Value::Text("content/index/index.md".to_string()));
-            index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
-            site_context.insert("index", template::Value::Record(index_graph));
-        }
+        let mut index_graph = template::build_article_graph(&doc, &grammar);
+        index_graph.insert("_presemble_file", template::Value::Text("content/index.md".to_string()));
+        index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
+        site_context.insert("index", template::Value::Record(index_graph));
     }
 
     // Render the index template (homepage) if it exists
@@ -1031,7 +1029,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
                     index_deps.extend(all_content_paths.iter().cloned());
                     index_deps.extend(all_schema_paths.iter().cloned());
                     index_deps.insert(index_schema_path.clone());
-                    index_deps.insert(index_content_dir.join("index.md"));
+                    index_deps.insert(index_content_path.clone());
                     dep_graph.register(index_output.clone(), index_deps);
                 }
                 Err(e) => {
