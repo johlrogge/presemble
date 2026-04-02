@@ -1,10 +1,6 @@
 [workspace]
 schema_version = 1
 
-[workspace.package]
-version = "0.17.0"
-edition = "2024"
-
 [libraries]
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
