@@ -91,6 +91,18 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.15.0
+
+Collection pages and complete publishing model.
+
+**Collection page building**
+The publisher now builds per-type listing pages. If a content type has `content/{stem}/index.md`, `schemas/{stem}/index.md`, and `templates/{stem}/index.hiccup`, a collection page is generated at `/{stem}/index.html`. Collection content without a schema is an error (consistent with item pages). The collection template has access to the full site context, so `data-each="posts"` iterates all items. The collection's own content (title, description) is available under the stem key.
+
+**presemble.io site listing pages**
+The presemble.io site now has `/post/` and `/feature/` listing pages with titles and item summaries.
+
+---
+
 ### v0.14.0
 
 Template format unification and directory-based naming.
