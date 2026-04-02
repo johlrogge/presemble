@@ -24,9 +24,9 @@
         ]
       ]
       [:section {:class "feature-grid"}
-        [:h2 "Core Principles"]
+        [:h2 "Features"]
         [:ul {:class "feature-grid__items"}
-          [:template {:data-each "features"}
+          [:template {:data-each "index.highlight"}
             [:li {:class "feature-card"}
               [:presemble/insert {:data "title" :as "h3"}]
               [:presemble/insert {:data "tagline"}]
@@ -34,6 +34,9 @@
               [:presemble/insert {:data "link"}]
             ]
           ]
+        ]
+        [:p {:class "feature-grid__all"}
+          [:a {:href "/feature"} "See all features →"]
         ]
       ]
       [:section {:class "latest-posts"}

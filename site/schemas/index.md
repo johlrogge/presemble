@@ -6,6 +6,10 @@ The site introduction. {#pitch}
 occurs
 : 1..3
 
+[<name>](/feature/<name>) {#highlight}
+occurs
+: 1..6
+
 ----
 
 Additional homepage sections.

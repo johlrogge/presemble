@@ -546,6 +546,36 @@ fn resolve_graph(
             sub.merge_from(referenced, &["href", "text"]);
         }
     }
+
+    // Also resolve records inside lists (multi-occurrence link slots)
+    let list_keys: Vec<String> = graph
+        .iter()
+        .filter_map(|(key, value)| {
+            if matches!(value, template::Value::List(_)) {
+                Some(key.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for key in list_keys {
+        if let Some(template::Value::List(items)) = graph.resolve_mut(&[&key]) {
+            for item in items.iter_mut() {
+                if let template::Value::Record(sub) = item {
+                    // Check if this record has an href that matches a built page
+                    let href = sub.resolve(&["href"]).and_then(|v| {
+                        if let template::Value::Text(s) = v { Some(s.clone()) } else { None }
+                    });
+                    if let Some(href) = href
+                        && let Some(referenced) = url_index.get(&href)
+                    {
+                        sub.merge_from(referenced, &["href", "text"]);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
@@ -1122,6 +1152,13 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         let mut index_graph = template::build_article_graph(&doc, &grammar);
         index_graph.insert("_presemble_file", template::Value::Text("content/index.md".to_string()));
         index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
+        // Resolve cross-content references in the index data (e.g., highlight links → feature pages)
+        let url_index: std::collections::HashMap<String, template::DataGraph> = built_pages
+            .values()
+            .flatten()
+            .map(|p| (p.url_path.clone(), p.data.clone()))
+            .collect();
+        resolve_graph(&mut index_graph, &url_index);
         site_context.insert("index", template::Value::Record(index_graph));
     }
 

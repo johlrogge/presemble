@@ -6,6 +6,14 @@ You never wonder "did I forget something?" Presemble tells you — in the editor
 
 Start a new page and Presemble shows you exactly what it needs. Fill in the blanks, save, and watch the site update in your browser. That is the workflow. No surprises, no guesswork, no broken deploys.
 
+[Schemas As Contracts](/feature/schemas-as-contracts)
+
+[Templates Are Data](/feature/templates-are-data)
+
+[Instant Feedback](/feature/instant-feedback)
+
+[Editor LSP Support](/feature/editor-lsp-support)
+
 ----
 
 ### Content is data, not text
