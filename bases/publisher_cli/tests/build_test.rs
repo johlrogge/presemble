@@ -1,3 +1,5 @@
+use site_index::EntryKind;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -98,7 +100,7 @@ fn build_produces_index_html() {
         "index should contain article title: {content}"
     );
     assert!(
-        outcome.built_pages.contains_key("article"),
+        outcome.site_graph.iter_by_kind(EntryKind::Item).any(|e| e.schema_stem.as_str() == "article"),
         "article pages should be collected"
     );
 }
@@ -164,18 +166,18 @@ fn build_site_articles_collection_has_url_field() {
 
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let articles = outcome
-        .built_pages
-        .get("article")
-        .expect("article pages should exist");
+    let articles: Vec<_> = outcome.site_graph
+        .iter_by_kind(EntryKind::Item)
+        .filter(|e| e.schema_stem.as_str() == "article")
+        .collect();
     assert!(!articles.is_empty(), "should have at least one article");
 
-    let article = &articles[0];
-    assert!(!article.url_path.is_empty(), "url_path should be set");
+    let article = articles[0];
+    assert!(!article.url_path.as_str().is_empty(), "url_path should be set");
     assert!(
-        article.url_path.starts_with("/article/"),
+        article.url_path.as_str().starts_with("/article/"),
         "url_path should start with /article/: {}",
-        article.url_path
+        article.url_path.as_str()
     );
 
     match article.data.resolve(&["url"]) {
@@ -314,10 +316,13 @@ fn cross_content_reference_resolves_author_data() {
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
     // The post should have its author resolved with data from the author page
-    let posts = outcome.built_pages.get("article").expect("article pages exist");
+    let posts: Vec<_> = outcome.site_graph
+        .iter_by_kind(EntryKind::Item)
+        .filter(|e| e.schema_stem.as_str() == "article")
+        .collect();
     assert!(!posts.is_empty(), "at least one article should exist");
 
-    let post = &posts[0];
+    let post = posts[0];
 
     // author.href should still be the original link href
     match post.data.resolve(&["author", "href"]) {
@@ -343,18 +348,18 @@ fn invalid_post_is_rendered_with_suggestions_not_skipped() {
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
         .expect("build should succeed");
 
-    // The invalid-post should appear in built_pages (rendered with suggestion nodes)
-    let articles = outcome
-        .built_pages
-        .get("article")
-        .expect("article pages should exist");
+    // The invalid-post should appear in site_graph (rendered with suggestion nodes)
+    let articles: Vec<_> = outcome.site_graph
+        .iter_by_kind(EntryKind::Item)
+        .filter(|e| e.schema_stem.as_str() == "article")
+        .collect();
     let invalid_page = articles
         .iter()
-        .find(|p| p.url_path.contains("invalid-post"));
+        .find(|e| e.url_path.as_str().contains("invalid-post"));
     assert!(
         invalid_page.is_some(),
-        "invalid-post should be in built_pages (rendered with suggestions), got url_paths: {:?}",
-        articles.iter().map(|p| &p.url_path).collect::<Vec<_>>()
+        "invalid-post should be in site_graph (rendered with suggestions), got url_paths: {:?}",
+        articles.iter().map(|e| e.url_path.as_str()).collect::<Vec<_>>()
     );
 
     // It should NOT be in build_errors (those are parse failures only)
@@ -895,4 +900,130 @@ fn collection_page_dep_graph_tracks_template_and_content() {
         affected.contains(&collection_output),
         "item content change should affect collection page; affected: {affected:?}"
     );
+}
+
+#[test]
+fn rebuild_affected_only_returns_affected_entries_in_site_graph() {
+    // Build a site with two article pages.  Then call rebuild_affected with
+    // only one content file as the dirty source and verify that site_graph in
+    // the returned outcome contains only that one article — not both.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("incremental-site");
+
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(site.join("content/article/alpha.md"), "# Alpha\n").unwrap();
+    fs::write(site.join("content/article/beta.md"), "# Beta\n").unwrap();
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Home</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let site = fs::canonicalize(&site).unwrap();
+
+    // Initial full build to get the dep_graph
+    let initial = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("initial build should succeed");
+    assert_eq!(initial.files_failed, 0);
+
+    // Dirty only content/article/alpha.md
+    let alpha_content = site.join("content/article/alpha.md");
+    let mut dirty: HashSet<PathBuf> = HashSet::new();
+    dirty.insert(alpha_content.clone());
+
+    let rebuild = publisher_cli::rebuild_affected(
+        &site,
+        &dirty,
+        &initial.dep_graph,
+        &publisher_cli::UrlConfig::default(),
+        &[],
+        &publisher_cli::BuildPolicy::lenient(),
+    )
+    .expect("rebuild_affected should succeed");
+
+    // site_graph should contain only the entry for alpha, not beta
+    let url_paths: Vec<_> = rebuild.site_graph
+        .iter()
+        .map(|e| e.url_path.as_str().to_string())
+        .collect();
+
+    assert!(
+        url_paths.iter().any(|u| u.contains("alpha")),
+        "alpha should be in rebuilt site_graph; url_paths: {url_paths:?}"
+    );
+    assert!(
+        !url_paths.iter().any(|u| u.contains("beta")),
+        "beta should NOT be in rebuilt site_graph (not dirty); url_paths: {url_paths:?}"
+    );
+}
+
+#[test]
+fn rebuild_affected_returns_empty_when_nothing_affected() {
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("empty-rebuild-site");
+
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(site.join("content/article/sample.md"), "# Sample\n").unwrap();
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Home</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let site = fs::canonicalize(&site).unwrap();
+
+    let initial = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("initial build should succeed");
+
+    // Dirty an untracked file — not a dep of any output
+    let unrelated = site.join("content/article/does-not-exist.md");
+    let mut dirty: HashSet<PathBuf> = HashSet::new();
+    dirty.insert(unrelated);
+
+    let rebuild = publisher_cli::rebuild_affected(
+        &site,
+        &dirty,
+        &initial.dep_graph,
+        &publisher_cli::UrlConfig::default(),
+        &[],
+        &publisher_cli::BuildPolicy::lenient(),
+    )
+    .expect("rebuild_affected should succeed");
+
+    assert!(
+        rebuild.site_graph.is_empty(),
+        "site_graph should be empty when no outputs are affected"
+    );
+    assert_eq!(rebuild.files_built, 0);
+    assert_eq!(rebuild.files_failed, 0);
 }

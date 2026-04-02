@@ -8,6 +8,7 @@ interface = "site_index"
 
 [dependencies]
 schema = { workspace = true }
+template = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

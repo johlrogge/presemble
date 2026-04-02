@@ -171,7 +171,7 @@ impl Conductor {
     fn rebuild_page(&self, content_path: &Path, text: &str) -> Result<Vec<String>, String> {
         // Classify file to get schema stem
         let stem = match self.site_index.classify(content_path) {
-            site_index::FileKind::Content { schema_stem } => schema_stem,
+            site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
             _ => return Err(format!("not a content file: {}", content_path.display())),
         };
 
@@ -368,7 +368,7 @@ impl Conductor {
                     if let site_index::FileKind::Schema { stem } = self.site_index.classify(path)
                         && let Ok(src) = std::fs::read_to_string(path)
                     {
-                        self.schema_cache.write().unwrap().insert(stem, src);
+                        self.schema_cache.write().unwrap().insert(stem.to_string(), src);
                     }
                 }
                 CommandResult::ok()

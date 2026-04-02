@@ -998,12 +998,10 @@ fn watch_and_rebuild(
                 // then record errors for newly failed pages.
                 {
                     let mut errors = build_errors.lock().unwrap();
-                    for pages in outcome.built_pages.values() {
-                        for page in pages {
-                            let bare = page.url_path.trim_end_matches('/').to_string();
-                            errors.remove(&bare);
-                            errors.remove(&format!("{bare}/"));
-                        }
+                    for entry in outcome.site_graph.iter() {
+                        let bare = entry.url_path.as_str().trim_end_matches('/').to_string();
+                        errors.remove(&bare);
+                        errors.remove(&format!("{bare}/"));
                     }
                     for (url, msgs) in &outcome.build_errors {
                         errors.insert(url.clone(), msgs.clone());
@@ -1017,9 +1015,9 @@ fn watch_and_rebuild(
                     let _ = reload_tx.send(BrowserMessage::Reload { pages: error_pages, anchor: None });
                 } else if outcome.files_built > 0 || outcome.files_with_suggestions > 0 {
                     println!("Rebuild complete ({} file(s), {} with suggestions)", outcome.files_built, outcome.files_with_suggestions);
-                    let mut pages: Vec<String> = outcome.built_pages
-                        .values()
-                        .flat_map(|pages| pages.iter().map(|p| p.url_path.clone()))
+                    let mut pages: Vec<String> = outcome.site_graph
+                        .iter()
+                        .map(|e| e.url_path.as_str().to_string())
                         .collect();
                     pages.sort();
 
