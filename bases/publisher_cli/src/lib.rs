@@ -70,8 +70,17 @@ pub fn output_dir(site_dir: &Path) -> std::path::PathBuf {
 }
 
 /// Find a template for the given schema stem, trying extensions in order.
-/// Tries .html first (XML), then .hiccup (Hiccup/EDN).
+/// Prefers the new directory-based convention (`{stem}/item.html`) over the
+/// legacy flat convention (`{stem}.html`).
 fn find_template(templates_dir: &std::path::Path, schema_stem: &str) -> Option<std::path::PathBuf> {
+    // New directory-based convention: templates/{stem}/item.html or item.hiccup
+    for ext in &["html", "hiccup"] {
+        let path = templates_dir.join(schema_stem).join(format!("item.{ext}"));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    // Legacy flat convention: templates/{stem}.html or {stem}.hiccup
     for ext in &["html", "hiccup"] {
         let path = templates_dir.join(format!("{schema_stem}.{ext}"));
         if path.exists() {
@@ -604,14 +613,14 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
         }
     }
 
-    // Create directories
-    for sub in ["schemas", "content/note", "templates", "assets"] {
+    // Create directories using new directory-based convention
+    for sub in ["schemas/note", "content/note", "templates/note", "templates", "assets"] {
         std::fs::create_dir_all(site_dir.join(sub))?;
     }
 
-    // Write scaffold files
+    // Write scaffold files using new convention: schemas/{stem}/item.md and templates/{stem}/item.html
     std::fs::write(
-        site_dir.join("schemas/note.md"),
+        site_dir.join("schemas/note/item.md"),
         "# Note title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody content.\nheadings\n: h2..h6\n",
     )?;
 
@@ -626,7 +635,7 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
     )?;
 
     std::fs::write(
-        site_dir.join("templates/note.html"),
+        site_dir.join("templates/note/item.html"),
         "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title data=\"note.title\"></title>\n  <link rel=\"stylesheet\" href=\"/assets/style.css\">\n</head>\n<body>\n  <a href=\"/\">\u{2190} Home</a>\n  <presemble:insert data=\"note.title\" as=\"h1\" />\n  <presemble:insert data=\"note.body\" />\n</body>\n</html>\n",
     )?;
 
@@ -637,11 +646,11 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
 
     let dir_display = site_dir.display();
     println!("Created {dir_display}/");
-    println!("  schemas/note.md              \u{2014} defines the \"note\" content type");
-    println!("  content/note/hello-world.md  \u{2014} your first note");
-    println!("  templates/index.html         \u{2014} home page listing all notes");
-    println!("  templates/note.html          \u{2014} template for individual notes");
-    println!("  assets/style.css             \u{2014} minimal stylesheet");
+    println!("  schemas/note/item.md          \u{2014} defines the \"note\" content type");
+    println!("  content/note/hello-world.md   \u{2014} your first note");
+    println!("  templates/index.html          \u{2014} home page listing all notes");
+    println!("  templates/note/item.html      \u{2014} template for individual notes");
+    println!("  assets/style.css              \u{2014} minimal stylesheet");
     println!();
     println!("Run:");
     println!("  presemble build {dir_display}/");
@@ -680,23 +689,56 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     let mut all_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut included_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if templates_dir.exists() {
-        let mut template_entries: Vec<_> = std::fs::read_dir(&templates_dir)?
-            .flatten()
-            .filter(|e| {
-                matches!(
-                    e.path().extension().and_then(|x| x.to_str()),
+        // Collect template files to scan: both flat top-level files and
+        // directory-based item files (new convention: {stem}/item.html).
+        let mut template_files: Vec<(String, std::path::PathBuf)> = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&templates_dir) {
+            let mut sorted: Vec<_> = entries.flatten().collect();
+            sorted.sort_by_key(|e| e.file_name());
+            for entry in sorted {
+                let path = entry.path();
+                if path.is_dir() {
+                    // New convention: {stem}/item.html or {stem}/item.hiccup
+                    let dir_stem = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    for ext in &["html", "hiccup"] {
+                        let item_path = path.join(format!("item.{ext}"));
+                        if item_path.exists() {
+                            template_files.push((dir_stem.clone(), item_path));
+                            break; // prefer html over hiccup
+                        }
+                    }
+                } else if matches!(
+                    path.extension().and_then(|x| x.to_str()),
                     Some("html" | "hiccup")
-                )
-            })
-            .collect();
-        template_entries.sort_by_key(|e| e.file_name());
-        for entry in template_entries {
-            let template_path = entry.path();
-            // Track the file stem of every template file
-            if let Some(stem) = template_path.file_stem().and_then(|s| s.to_str()) {
-                all_template_stems.insert(stem.to_string());
+                ) {
+                    // Flat convention: {stem}.html or {stem}.hiccup
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    template_files.push((stem, path));
+                }
             }
-            let tmpl_src = std::fs::read_to_string(&template_path)?;
+        }
+
+        for (stem, template_path) in template_files {
+            all_template_stems.insert(stem);
+            let tmpl_src = match std::fs::read_to_string(&template_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "warning: skipping asset scan for {} (read error: {e})",
+                        template_path.display()
+                    );
+                    continue;
+                }
+            };
             match template_path.extension().and_then(|e| e.to_str()) {
                 Some("hiccup") => {
                     match template::parse_template_hiccup(&tmpl_src) {
@@ -943,7 +985,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     }
 
     // Load index content if schema and content exist
-    let index_schema_path = site_dir.join("schemas/index.md");
+    let index_schema_path = site_index.schema_path("index");
     let index_content_dir = site_dir.join("content/index");
     if index_schema_path.exists()
         && let Ok(schema_src) = std::fs::read_to_string(&index_schema_path)
@@ -1554,14 +1596,18 @@ fn warn_unused_sources(
             || stem == "index"
             || included_template_stems.contains(stem);
         if !is_used {
-            // Reconstruct filename
-            let html_path = site_dir.join("templates").join(format!("{stem}.html"));
-            let filename = if html_path.exists() {
+            // Reconstruct the display path: prefer new convention, fall back to flat
+            let templates_dir = site_dir.join("templates");
+            let display = if templates_dir.join(stem).join("item.html").exists() {
+                format!("{stem}/item.html")
+            } else if templates_dir.join(stem).join("item.hiccup").exists() {
+                format!("{stem}/item.hiccup")
+            } else if templates_dir.join(format!("{stem}.html")).exists() {
                 format!("{stem}.html")
             } else {
                 format!("{stem}.hiccup")
             };
-            eprintln!("warning: templates/{filename} is not used by any schema or include, consider deleting it");
+            eprintln!("warning: templates/{display} is not used by any schema or include, consider deleting it");
         }
     }
 
@@ -1576,7 +1622,14 @@ fn warn_unused_sources(
             false
         };
         if !has_md {
-            eprintln!("warning: schemas/{stem}.md has no content files in content/{stem}/, consider deleting it");
+            // Display the actual schema path (new or legacy convention)
+            let schema_display =
+                if site_dir.join("schemas").join(stem).join("item.md").exists() {
+                    format!("{stem}/item.md")
+                } else {
+                    format!("{stem}.md")
+                };
+            eprintln!("warning: schemas/{schema_display} has no content files in content/{stem}/, consider deleting it");
         }
     }
 

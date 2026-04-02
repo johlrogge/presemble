@@ -866,10 +866,14 @@ pub fn template_definition(
         }
     }
 
-    // 3. External template file
-    let path = site_dir.join("templates").join(format!("{name}.html"));
-    if path.exists() {
-        return Some(TemplateDefinitionTarget::File(path));
+    // 3. External template file — check new directory-based convention first, then flat
+    let dir_path = site_dir.join("templates").join(&name).join("item.html");
+    if dir_path.exists() {
+        return Some(TemplateDefinitionTarget::File(dir_path));
+    }
+    let flat_path = site_dir.join("templates").join(format!("{name}.html"));
+    if flat_path.exists() {
+        return Some(TemplateDefinitionTarget::File(flat_path));
     }
 
     None
@@ -996,7 +1000,7 @@ mod tests {
     use schema::parse_schema;
 
     fn article_grammar() -> Grammar {
-        let schema_input = include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let schema_input = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         parse_schema(schema_input).expect("article schema should parse")
     }
 
@@ -1490,7 +1494,7 @@ mod tests {
 
     #[test]
     fn validate_schema_with_positions_valid_schema_returns_empty() {
-        let src = include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         let diags = validate_schema_with_positions(src);
         assert!(
             diags.is_empty(),

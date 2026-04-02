@@ -2,9 +2,9 @@ use template;
 
 #[test]
 fn render_article_with_dom_transformer() {
-    let schema_src = include_str!("../../../fixtures/blog-site/schemas/article.md");
+    let schema_src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
     let content_src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
-    let template_src = include_str!("../../../fixtures/blog-site/templates/article.html");
+    let template_src = include_str!("../../../fixtures/blog-site/templates/article/item.html");
 
     let grammar = schema::parse_schema(schema_src).expect("schema parses");
     let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");

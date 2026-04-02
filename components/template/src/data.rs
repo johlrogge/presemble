@@ -361,7 +361,7 @@ mod tests {
     }
 
     fn article_grammar() -> Grammar {
-        let schema_input = include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let schema_input = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         parse_schema(schema_input).expect("article schema should parse")
     }
 

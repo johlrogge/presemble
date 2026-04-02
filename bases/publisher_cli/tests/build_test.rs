@@ -40,14 +40,15 @@ fn copy_dir_excluding(src: &Path, dest: &Path, exclude: &str) {
 #[test]
 fn fixture_blog_site_has_required_inputs() {
     let site = fixture_src();
-    assert!(site.join("schemas/article.md").exists());
-    assert!(site.join("templates/article.html").exists());
+    // New directory-based convention: schemas/{stem}/item.md and templates/{stem}/item.html
+    assert!(site.join("schemas/article/item.md").exists());
+    assert!(site.join("templates/article/item.html").exists());
     assert!(site.join("content/article/hello-world.md").exists());
 }
 
 #[test]
 fn hello_world_is_valid_against_article_schema() {
-    let schema_src = include_str!("../../../fixtures/blog-site/schemas/article.md");
+    let schema_src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
     let content_src =
         include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
 
@@ -60,7 +61,7 @@ fn hello_world_is_valid_against_article_schema() {
 
 #[test]
 fn invalid_post_fails_validation_with_title_and_body_errors() {
-    let schema_src = include_str!("../../../fixtures/blog-site/schemas/article.md");
+    let schema_src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
     let content_src =
         include_str!("../../../fixtures/blog-site/content/article/invalid-post.md");
 
@@ -109,7 +110,7 @@ fn build_site_populates_dep_graph_for_article() {
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
     let article_output = publisher_cli::output_dir(&site_dir).join("article/hello-world/index.html");
-    let schema_path = site_dir.join("schemas/article.md");
+    let schema_path = site_dir.join("schemas/article/item.md");
     let content_path = site_dir.join("content/article/hello-world.md");
 
     let affected = outcome.dep_graph.affected_outputs(&schema_path);
@@ -210,14 +211,14 @@ fn presemble_include_inlines_header_and_footer_fragments() {
     let site = tmp.path().join("include-site");
 
     // Create directory structure
-    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
-    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
     fs::create_dir_all(site.join("assets")).unwrap();
 
     // Schema
     fs::write(
-        site.join("schemas/article.md"),
+        site.join("schemas/article/item.md"),
         "# Article title {#title}\noccurs\n: exactly once\n",
     )
     .unwrap();
@@ -243,7 +244,7 @@ fn presemble_include_inlines_header_and_footer_fragments() {
 
     // Article template using presemble:include
     fs::write(
-        site.join("templates/article.html"),
+        site.join("templates/article/item.html"),
         r#"<!DOCTYPE html>
 <html lang="en">
 <head><title>Test</title></head>
@@ -406,15 +407,15 @@ fn index_content_is_rendered_into_index_page() {
     let tmp = TempDir::new().unwrap();
     let site = tmp.path().join("index-content-site");
 
-    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
     fs::create_dir_all(site.join("content/index")).unwrap();
-    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
     fs::create_dir_all(site.join("assets")).unwrap();
 
     // Article schema and content (required for a valid site)
     fs::write(
-        site.join("schemas/article.md"),
+        site.join("schemas/article/item.md"),
         "# Article title {#title}\noccurs\n: exactly once\n",
     )
     .unwrap();
@@ -440,7 +441,7 @@ fn index_content_is_rendered_into_index_page() {
 
     // Article template
     fs::write(
-        site.join("templates/article.html"),
+        site.join("templates/article/item.html"),
         r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
     )
     .unwrap();
@@ -487,14 +488,14 @@ fn index_content_schema_and_content_tracked_as_deps() {
     let tmp = TempDir::new().unwrap();
     let site = tmp.path().join("index-dep-site");
 
-    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
     fs::create_dir_all(site.join("content/index")).unwrap();
-    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
     fs::create_dir_all(site.join("assets")).unwrap();
 
     fs::write(
-        site.join("schemas/article.md"),
+        site.join("schemas/article/item.md"),
         "# Article title {#title}\noccurs\n: exactly once\n",
     )
     .unwrap();
@@ -516,7 +517,7 @@ fn index_content_schema_and_content_tracked_as_deps() {
     .unwrap();
 
     fs::write(
-        site.join("templates/article.html"),
+        site.join("templates/article/item.html"),
         r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
     )
     .unwrap();
@@ -556,15 +557,15 @@ fn broken_link_reference_fails_build() {
     let tmp = TempDir::new().unwrap();
     let site = tmp.path().join("broken-ref-site");
 
-    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
     // Note: no content/author directory — the author page does NOT exist
-    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
     fs::create_dir_all(site.join("assets")).unwrap();
 
     // Article schema: title + author link
     fs::write(
-        site.join("schemas/article.md"),
+        site.join("schemas/article/item.md"),
         "# Article title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#author}\noccurs\n: exactly once\n",
     )
     .unwrap();
@@ -578,7 +579,7 @@ fn broken_link_reference_fails_build() {
 
     // Minimal templates
     fs::write(
-        site.join("templates/article.html"),
+        site.join("templates/article/item.html"),
         r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
     )
     .unwrap();
@@ -617,13 +618,13 @@ fn broken_link_reference_is_warning_in_serve_mode() {
     let tmp = TempDir::new().unwrap();
     let site = tmp.path().join("broken-ref-serve-site");
 
-    fs::create_dir_all(site.join("schemas")).unwrap();
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
-    fs::create_dir_all(site.join("templates")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
     fs::create_dir_all(site.join("assets")).unwrap();
 
     fs::write(
-        site.join("schemas/article.md"),
+        site.join("schemas/article/item.md"),
         "# Article title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#author}\noccurs\n: exactly once\n",
     )
     .unwrap();
@@ -633,7 +634,7 @@ fn broken_link_reference_is_warning_in_serve_mode() {
     )
     .unwrap();
     fs::write(
-        site.join("templates/article.html"),
+        site.join("templates/article/item.html"),
         r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
     )
     .unwrap();

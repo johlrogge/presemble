@@ -43,15 +43,24 @@ impl FileTemplateRegistry {
             }
         }
 
-        // Try .html then .hiccup
-        let html_path = self.templates_dir.join(format!("{file_stem}.html"));
-        let hiccup_path = self.templates_dir.join(format!("{file_stem}.hiccup"));
+        // Try new directory-based convention first: {stem}/item.html or {stem}/item.hiccup
+        // Then fall back to legacy flat convention: {stem}.html or {stem}.hiccup
+        let dir_html_path = self.templates_dir.join(file_stem).join("item.html");
+        let dir_hiccup_path = self.templates_dir.join(file_stem).join("item.hiccup");
+        let flat_html_path = self.templates_dir.join(format!("{file_stem}.html"));
+        let flat_hiccup_path = self.templates_dir.join(format!("{file_stem}.hiccup"));
 
-        let nodes = if html_path.exists() {
-            let src = std::fs::read_to_string(&html_path).ok()?;
+        let nodes = if dir_html_path.exists() {
+            let src = std::fs::read_to_string(&dir_html_path).ok()?;
             parse_template_xml(&src).ok()?
-        } else if hiccup_path.exists() {
-            let src = std::fs::read_to_string(&hiccup_path).ok()?;
+        } else if dir_hiccup_path.exists() {
+            let src = std::fs::read_to_string(&dir_hiccup_path).ok()?;
+            parse_template_hiccup(&src).ok()?
+        } else if flat_html_path.exists() {
+            let src = std::fs::read_to_string(&flat_html_path).ok()?;
+            parse_template_xml(&src).ok()?
+        } else if flat_hiccup_path.exists() {
+            let src = std::fs::read_to_string(&flat_hiccup_path).ok()?;
             parse_template_hiccup(&src).ok()?
         } else {
             return None;
