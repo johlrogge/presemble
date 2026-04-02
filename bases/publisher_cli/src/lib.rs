@@ -8,7 +8,7 @@ pub use template_registry::FileTemplateRegistry;
 pub use dep_graph::DependencyGraph;
 pub use error::CliError;
 
-use site_index::SiteIndex;
+use site_index::{EntryKind, SchemaStem, SiteEntry, SiteGraph, SiteIndex, UrlPath};
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -53,14 +53,6 @@ struct PageAddress {
     output_path: std::path::PathBuf,
 }
 
-/// Metadata needed to render a page after reference resolution.
-struct CollectedPage {
-    schema_stem: String,
-    page_index: usize,  // index into built_pages[schema_stem] after collection
-    output_path: std::path::PathBuf,
-    template_path: Option<std::path::PathBuf>,
-    url_path: String,
-}
 
 /// Compute the output directory for a site: `<parent-of-site-dir>/output/<site-dir-name>/`
 /// e.g. `presemble build site/` → `output/site/`
@@ -139,8 +131,8 @@ pub struct BuildOutcome {
     pub files_failed: usize,
     /// Pages that were rendered with suggestion nodes due to validation issues.
     pub files_with_suggestions: usize,
-    /// Collected page data, keyed by schema stem
-    pub built_pages: std::collections::HashMap<String, Vec<BuiltPage>>,
+    /// All site entries (items, collections, site index).
+    pub site_graph: SiteGraph,
     pub dep_graph: DependencyGraph,
     /// Per-page build errors, keyed by URL path (e.g. "/article/foo").
     /// Populated only when a content page fails to parse (hard failure).
@@ -492,33 +484,10 @@ pub fn build_content_page(
     })
 }
 
-/// After all pages are built, walk each page's DataGraph and resolve
-/// cross-content references: when a Value::Record has an `href` that matches
-/// another BuiltPage's url_path, merge the referenced page's data fields in.
-///
-/// This makes post.author.name, post.author.bio etc. available in templates.
-/// Resolution is one level deep — no transitive resolution.
-fn resolve_references(built_pages: &mut std::collections::HashMap<String, Vec<BuiltPage>>) {
-    // Build url_path -> DataGraph index (snapshot before mutation)
-    let url_index: std::collections::HashMap<String, template::DataGraph> = built_pages
-        .values()
-        .flatten()
-        .map(|p| (p.url_path.clone(), p.data.clone()))
-        .collect();
-
-    if url_index.is_empty() {
-        return;
-    }
-
-    // Walk each page's DataGraph resolving records whose href matches a built page
-    for pages in built_pages.values_mut() {
-        for page in pages.iter_mut() {
-            resolve_graph(&mut page.data, &url_index);
-        }
-    }
-}
-
 /// Resolve cross-content references in a single DataGraph (one level deep).
+///
+/// When a `Value::Record` has an `href` that matches another page's url_path,
+/// merge the referenced page's data fields into the record.
 fn resolve_graph(
     graph: &mut template::DataGraph,
     url_index: &std::collections::HashMap<String, template::DataGraph>,
@@ -592,18 +561,64 @@ fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
     }
 }
 
-fn render_page(
-    data: &template::DataGraph,
+
+/// Build the template render context for a site entry.
+///
+/// - Item: wraps data under schema stem key
+/// - Collection: data under stem key + item list under pluralized key
+/// - SiteIndex: data under "index" + all collections
+fn build_render_context(entry: &SiteEntry, graph: &SiteGraph) -> template::DataGraph {
+    let mut ctx = template::DataGraph::new();
+    match entry.kind {
+        EntryKind::Item => {
+            ctx.insert(entry.schema_stem.as_str(), template::Value::Record(entry.data.clone()));
+        }
+        EntryKind::Collection => {
+            ctx.insert(entry.schema_stem.as_str(), template::Value::Record(entry.data.clone()));
+            let items: Vec<template::Value> = graph
+                .items_for_stem(&entry.schema_stem)
+                .into_iter()
+                .map(|e| template::Value::Record(e.data.clone()))
+                .collect();
+            let collection_key = format!("{}s", entry.schema_stem);
+            ctx.insert(&collection_key, template::Value::List(items));
+        }
+        EntryKind::SiteIndex => {
+            ctx.insert("index", template::Value::Record(entry.data.clone()));
+            // Collect unique stems from item entries
+            let mut stems: Vec<SchemaStem> = graph
+                .iter_by_kind(EntryKind::Item)
+                .map(|e| e.schema_stem.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            for stem in stems {
+                let items: Vec<template::Value> = graph
+                    .items_for_stem(&stem)
+                    .into_iter()
+                    .map(|e| template::Value::Record(e.data.clone()))
+                    .collect();
+                let collection_key = format!("{}s", stem);
+                ctx.insert(&collection_key, template::Value::List(items));
+            }
+        }
+    }
+    ctx
+}
+
+/// Render a pre-assembled context to an output file.
+/// Returns `true` if rendering succeeded, `false` if a render error occurred.
+/// IO errors (read/write) are propagated as `Err`.
+fn render_with_context(
+    context: &template::DataGraph,
     schema_stem: &str,
     template_path: &std::path::Path,
     output_path: &std::path::Path,
     registry: &dyn template::TemplateRegistry,
     page_url: &str,
     url_config: &UrlConfig,
-) -> Result<(), CliError> {
-    let mut context = template::DataGraph::new();
-    context.insert(schema_stem, template::Value::Record(data.clone()));
-
+) -> Result<bool, CliError> {
     let tmpl_src = std::fs::read_to_string(template_path)?;
     let raw_nodes = match template_path.extension().and_then(|e| e.to_str()) {
         Some("hiccup") => template::parse_template_hiccup(&tmpl_src)
@@ -613,16 +628,22 @@ fn render_page(
     };
     let (nodes, local_defs) = template::extract_definitions(raw_nodes);
     let ctx = template::RenderContext::with_local_defs(registry, &local_defs);
-    let transformed = template::transform(nodes, &context, &ctx)
-        .map_err(|e| CliError::Render(e.to_string()))?;
-    let rewriter = make_rewriter(page_url, url_config);
-    let rewritten = template::rewrite_urls(transformed, &rewriter);
-    let html = template::serialize_nodes(&rewritten);
-
-    std::fs::create_dir_all(output_path.parent().unwrap())?;
-    std::fs::write(output_path, &html)?;
-    println!("  \u{2192} {}", output_path.display());
-    Ok(())
+    match template::transform(nodes, context, &ctx) {
+        Ok(transformed) => {
+            let rewriter = make_rewriter(page_url, url_config);
+            let rewritten = template::rewrite_urls(transformed, &rewriter);
+            let html = template::serialize_nodes(&rewritten);
+            std::fs::create_dir_all(output_path.parent().unwrap())?;
+            std::fs::write(output_path, &html)?;
+            println!("{schema_stem}: PASS");
+            println!("  \u{2192} {}", output_path.display());
+            Ok(true)
+        }
+        Err(e) => {
+            eprintln!("{schema_stem}: FAIL (render error: {e})");
+            Ok(false)
+        }
+    }
 }
 
 fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
@@ -701,11 +722,10 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     let mut files_built: usize = 0;
     let mut files_failed: usize = 0;
     let mut files_with_suggestions: usize = 0;
-    let mut built_pages: std::collections::HashMap<String, Vec<BuiltPage>> = std::collections::HashMap::new();
+    let mut site_graph = SiteGraph::new();
     let mut dep_graph = DependencyGraph::new();
     let mut all_content_paths: Vec<std::path::PathBuf> = Vec::new();
     let mut all_schema_paths: Vec<std::path::PathBuf> = Vec::new();
-    let mut collected_pages: Vec<CollectedPage> = Vec::new();
     let mut build_errors: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut page_suggestions: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
@@ -869,24 +889,21 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
                     println!("{}: PASS", attempt.file_name);
                     if let Some(page_result) = attempt.page {
                         dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
-                        let schema_stem_str = schema_stem.to_string();
-                        let page_index = built_pages
-                            .entry(schema_stem_str.clone())
-                            .or_default()
-                            .len();
-                        let page_url_path = page_result.built.url_path.clone();
-                        built_pages
-                            .entry(schema_stem_str.clone())
-                            .or_default()
-                            .push(page_result.built);
-                        collected_pages.push(CollectedPage {
-                            schema_stem: schema_stem_str,
-                            page_index,
+                        let url_path_str = page_result.built.url_path.clone();
+                        let template_path = page_result.template_path.unwrap_or_default();
+                        let entry = SiteEntry {
+                            kind: EntryKind::Item,
+                            schema_stem: SchemaStem::new(schema_stem),
+                            url_path: UrlPath::new(&url_path_str),
                             output_path: page_result.output_path,
-                            template_path: page_result.template_path,
-                            url_path: page_url_path,
-                        });
-                        files_built += 1;
+                            template_path,
+                            content_path: content_path.clone(),
+                            schema_path: schema_path.clone(),
+                            data: page_result.built.data,
+                            deps: page_result.deps,
+                        };
+                        site_graph.insert(entry);
+                        // files_built counted in Phase 3 render
                     }
                 }
                 PageDisposition::IncludeWithSuggestions(msgs) => {
@@ -894,24 +911,22 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
                     for msg in &msgs { println!("  {msg}"); }
                     if let Some(page_result) = attempt.page {
                         dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
-                        let schema_stem_str = schema_stem.to_string();
-                        let page_index = built_pages
-                            .entry(schema_stem_str.clone())
-                            .or_default()
-                            .len();
-                        let page_url_path = page_result.built.url_path.clone();
-                        built_pages
-                            .entry(schema_stem_str.clone())
-                            .or_default()
-                            .push(page_result.built);
-                        collected_pages.push(CollectedPage {
-                            schema_stem: schema_stem_str,
-                            page_index,
+                        let url_path_str = page_result.built.url_path.clone();
+                        let template_path = page_result.template_path.unwrap_or_default();
+                        let entry = SiteEntry {
+                            kind: EntryKind::Item,
+                            schema_stem: SchemaStem::new(schema_stem),
+                            url_path: UrlPath::new(&url_path_str),
                             output_path: page_result.output_path,
-                            template_path: page_result.template_path,
-                            url_path: page_url_path.clone(),
-                        });
-                        page_suggestions.insert(page_url_path, msgs);
+                            template_path,
+                            content_path: content_path.clone(),
+                            schema_path: schema_path.clone(),
+                            data: page_result.built.data,
+                            deps: page_result.deps,
+                        };
+                        site_graph.insert(entry);
+                        page_suggestions.insert(url_path_str, msgs);
+                        // files_with_suggestions counted here (page exists, not yet rendered)
                         files_with_suggestions += 1;
                     }
                 }
@@ -926,38 +941,196 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         }
     }
 
-    // Phase 2: Resolve cross-content references (e.g. post.author.name from the author page)
-    resolve_references(&mut built_pages);
+    // Phase 1b: Build collection entries (content/{stem}/index.md)
+    let templates_dir_col = site_dir.join("templates");
+    for schema_stem in site_index.schema_stems() {
+        if schema_stem == "index" {
+            continue;
+        }
+        let collection_content_path = site_dir.join("content").join(&schema_stem).join("index.md");
+        if !collection_content_path.exists() {
+            continue;
+        }
+        let collection_schema_path = site_dir.join("schemas").join(&schema_stem).join("index.md");
+        if !collection_schema_path.exists() {
+            eprintln!(
+                "{}/index.md: FAIL (collection content exists but schemas/{}/index.md is missing)",
+                schema_stem, schema_stem
+            );
+            files_failed += 1;
+            continue;
+        }
+        let collection_template =
+            template::resolve_template_file(&templates_dir_col, &format!("{schema_stem}/index"));
+        let Ok((_, collection_template_path)) = collection_template else {
+            eprintln!("{}/index.md: FAIL (no collection template found)", schema_stem);
+            files_failed += 1;
+            continue;
+        };
+        let schema_src = match std::fs::read_to_string(&collection_schema_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (cannot read schema: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+        let collection_grammar = match schema::parse_schema(&schema_src) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (schema error: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+        let content_src = match std::fs::read_to_string(&collection_content_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (cannot read content: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+        let collection_doc = match content::parse_and_assign(&content_src, &collection_grammar) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("{}/index.md: FAIL (parse error: {e})", schema_stem);
+                files_failed += 1;
+                continue;
+            }
+        };
+        let validation = content::validate(&collection_doc, &collection_grammar);
+        if !validation.is_valid() {
+            for diag in &validation.diagnostics {
+                eprintln!("{}/index.md: {:?}: {}", schema_stem, diag.severity, diag.message);
+            }
+        }
+        let collection_graph = template::build_article_graph(&collection_doc, &collection_grammar);
+        let url_path_str = format!("/{schema_stem}/");
+        let out_dir_col = output_dir(site_dir).join(&schema_stem);
+        let output_path_col = out_dir_col.join("index.html");
+        let mut deps_col: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+        deps_col.insert(collection_template_path.clone());
+        deps_col.insert(collection_content_path.clone());
+        deps_col.insert(collection_schema_path.clone());
+        for item_content_path in site_index.content_files(&schema_stem) {
+            deps_col.insert(item_content_path);
+        }
+        dep_graph.register(output_path_col.clone(), deps_col.clone());
+        let entry = SiteEntry {
+            kind: EntryKind::Collection,
+            schema_stem: SchemaStem::new(&schema_stem),
+            url_path: UrlPath::new(&url_path_str),
+            output_path: output_path_col,
+            template_path: collection_template_path,
+            content_path: collection_content_path,
+            schema_path: collection_schema_path,
+            data: collection_graph,
+            deps: deps_col,
+        };
+        site_graph.insert(entry);
+    }
+
+    // Phase 1c: Build site index entry.
+    // Always insert a SiteIndex entry if an index template exists.
+    // If content/index.md also exists, populate the entry's data from it.
+    let index_schema_path = site_index.schema_path("index");
+    let index_content_path = site_dir.join("content/index.md");
+    {
+        // resolve_template_file returns the parsed nodes + path; we only need the path here.
+        // find_template is simpler (path-only) but doesn't cover all conventions.
+        // Use find_template first (it covers both directory and flat conventions),
+        // then fall back to resolve_template_file for anything else.
+        let index_tmpl = find_template(&templates_dir, "index")
+            .or_else(|| {
+                template::resolve_template_file(&templates_dir, "index")
+                    .ok()
+                    .map(|(_, p)| p)
+            });
+        if let Some(index_tmpl_path) = index_tmpl {
+            let mut index_graph = template::DataGraph::new();
+            // Populate from content/index.md if it exists
+            if index_schema_path.exists()
+                && let Ok(schema_src) = std::fs::read_to_string(&index_schema_path)
+                && let Ok(grammar) = schema::parse_schema(&schema_src)
+                && let Ok(content_src) = std::fs::read_to_string(&index_content_path)
+                && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
+            {
+                index_graph = template::build_article_graph(&doc, &grammar);
+                index_graph.insert("_presemble_file", template::Value::Text("content/index.md".to_string()));
+                index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
+            }
+            let index_output_path = output_dir(site_dir).join("index.html");
+            let entry = SiteEntry {
+                kind: EntryKind::SiteIndex,
+                schema_stem: SchemaStem::new("index"),
+                url_path: UrlPath::new("/"),
+                output_path: index_output_path,
+                template_path: index_tmpl_path,
+                content_path: index_content_path.clone(),
+                schema_path: index_schema_path.clone(),
+                data: index_graph,
+                deps: std::collections::HashSet::new(),
+            };
+            site_graph.insert(entry);
+        }
+    }
+
+    // Phase 2: Resolve all cross-content references once
+    {
+        let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
+            .iter_by_kind(EntryKind::Item)
+            .map(|e| (e.url_path.as_str().to_string(), e.data.clone()))
+            .collect();
+        if !url_index.is_empty() {
+            // collect urls to avoid borrow issues
+            let urls: Vec<UrlPath> = site_graph.iter().map(|e| e.url_path.clone()).collect();
+            for url in &urls {
+                if let Some(entry) = site_graph.get_mut(url) {
+                    resolve_graph(&mut entry.data, &url_index);
+                }
+            }
+        }
+    }
+
+    // Phase 2: Resolve index graph separately (it may reference item pages added above)
+    {
+        let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
+            .iter_by_kind(EntryKind::Item)
+            .map(|e| (e.url_path.as_str().to_string(), e.data.clone()))
+            .collect();
+        let index_url = UrlPath::new("/");
+        if let Some(entry) = site_graph.get_mut(&index_url) {
+            resolve_graph(&mut entry.data, &url_index);
+        }
+    }
 
     // Phase 2b: Validate link references — internal hrefs must point to existing pages
     {
-        let url_set: std::collections::HashSet<String> = built_pages
-            .values()
-            .flatten()
-            .map(|p| p.url_path.clone())
+        let url_set: std::collections::HashSet<String> = site_graph
+            .iter_by_kind(EntryKind::Item)
+            .map(|e| e.url_path.as_str().to_string())
             .collect();
 
         let mut link_errors: Vec<(String, String)> = Vec::new();
 
-        for pages in built_pages.values() {
-            for page in pages {
-                for (key, value) in page.data.iter() {
-                    if key.starts_with('_') {
-                        continue; // skip internal metadata
-                    }
-                    if let template::Value::Record(sub) = value
-                        && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
-                    {
-                        // Only validate internal links (starting with /)
-                        if href.starts_with('/') && !url_set.contains(href) {
-                            link_errors.push((
-                                page.url_path.clone(),
-                                format!(
-                                    "broken link: '{key}' references '{}' which does not exist",
-                                    href
-                                ),
-                            ));
-                        }
+        for entry in site_graph.iter_by_kind(EntryKind::Item) {
+            for (key, value) in entry.data.iter() {
+                if key.starts_with('_') {
+                    continue; // skip internal metadata
+                }
+                if let template::Value::Record(sub) = value
+                    && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                {
+                    // Only validate internal links (starting with /)
+                    if href.starts_with('/') && !url_set.contains(href) {
+                        link_errors.push((
+                            entry.url_path.as_str().to_string(),
+                            format!(
+                                "broken link: '{key}' references '{}' which does not exist",
+                                href
+                            ),
+                        ));
                     }
                 }
             }
@@ -988,235 +1161,76 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         }
     }
 
-    // Phase 3: Render all collected pages with resolved data
-    for collected in &collected_pages {
-        if let Some(tmpl_path) = &collected.template_path {
-            let page_data = &built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(
-                page_data,
-                &collected.schema_stem,
-                tmpl_path,
-                &collected.output_path,
-                &registry,
-                &collected.url_path,
-                url_config,
-            )?;
-        }
-    }
-
-    // Assemble collections from built pages at the root level
-    let mut site_context = template::DataGraph::new();
-    for (schema_stem, pages) in &built_pages {
-        let collection: Vec<template::Value> = pages.iter()
-            .map(|p| template::Value::Record(p.data.clone()))
-            .collect();
-        let collection_key = format!("{schema_stem}s");
-        site_context.insert(collection_key, template::Value::List(collection));
-    }
-
-    // Phase: Build collection pages for each content type
-    let templates_dir = site_dir.join("templates");
-    for schema_stem in site_index.schema_stems() {
-        if schema_stem == "index" {
-            continue; // homepage handled separately
-        }
-
-        // Check for collection content: content/{stem}/index.md
-        let collection_content_path = site_dir.join("content").join(&schema_stem).join("index.md");
-        if !collection_content_path.exists() {
-            continue; // No collection content — no listing page
-        }
-
-        // Collection content requires a schema: schemas/{stem}/index.md
-        let collection_schema_path = site_dir.join("schemas").join(&schema_stem).join("index.md");
-        if !collection_schema_path.exists() {
-            eprintln!(
-                "{}/index.md: FAIL (collection content exists but schemas/{}/index.md is missing)",
-                schema_stem, schema_stem
-            );
-            files_failed += 1;
-            continue;
-        }
-
-        // Check for collection template: templates/{stem}/index.hiccup or .html
-        let collection_template =
-            template::resolve_template_file(&templates_dir, &format!("{schema_stem}/index"));
-        let Ok((raw_nodes, collection_template_path)) = collection_template else {
-            eprintln!("{}/index.md: FAIL (no collection template found)", schema_stem);
-            files_failed += 1;
-            continue;
-        };
-
-        // Parse the collection schema
-        let schema_src = match std::fs::read_to_string(&collection_schema_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}/index.md: FAIL (cannot read schema: {e})", schema_stem);
-                files_failed += 1;
-                continue;
-            }
-        };
-        let collection_grammar = match schema::parse_schema(&schema_src) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("{}/index.md: FAIL (schema error: {e})", schema_stem);
-                files_failed += 1;
-                continue;
-            }
-        };
-
-        // Parse collection content
-        let content_src = match std::fs::read_to_string(&collection_content_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}/index.md: FAIL (cannot read content: {e})", schema_stem);
-                files_failed += 1;
-                continue;
-            }
-        };
-        let collection_doc = match content::parse_and_assign(&content_src, &collection_grammar) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("{}/index.md: FAIL (parse error: {e})", schema_stem);
-                files_failed += 1;
-                continue;
-            }
-        };
-
-        // Validate (continue with warnings, same as item pages)
-        let validation = content::validate(&collection_doc, &collection_grammar);
-        if !validation.is_valid() {
-            for diag in &validation.diagnostics {
-                eprintln!("{}/index.md: {:?}: {}", schema_stem, diag.severity, diag.message);
-            }
-        }
-
-        // Build render context: site_context (has {stem}s lists) + collection's own data under stem key
-        let mut render_context = site_context.clone();
-        let collection_graph =
-            template::build_article_graph(&collection_doc, &collection_grammar);
-        render_context.insert(schema_stem.clone(), template::Value::Record(collection_graph));
-
-        // Render
-        let (nodes, local_defs) = template::extract_definitions(raw_nodes);
-        let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
-        match template::transform(nodes, &render_context, &ctx) {
-            Ok(transformed) => {
-                let url_path = format!("/{schema_stem}");
-                let rewriter = make_rewriter(&url_path, url_config);
-                let rewritten = template::rewrite_urls(transformed, &rewriter);
-                let html = template::serialize_nodes(&rewritten);
-
-                let out_dir = output_dir(site_dir).join(&schema_stem);
-                std::fs::create_dir_all(&out_dir).ok();
-                let output_path = out_dir.join("index.html");
-                if let Err(e) = std::fs::write(&output_path, &html) {
-                    eprintln!("{}/index.md: FAIL (write error: {e})", schema_stem);
-                    files_failed += 1;
+    // Phase 3: Render all entries using build_render_context
+    {
+        let entry_urls: Vec<UrlPath> = site_graph.iter().map(|e| e.url_path.clone()).collect();
+        for url in &entry_urls {
+            let (render_context, schema_stem_str, template_path, output_path, page_url_str) = {
+                let entry = match site_graph.get(url) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                let tmpl = &entry.template_path;
+                if tmpl == std::path::Path::new("") || !tmpl.exists() {
                     continue;
                 }
+                let ctx = build_render_context(entry, &site_graph);
+                (
+                    ctx,
+                    entry.schema_stem.as_str().to_string(),
+                    tmpl.clone(),
+                    entry.output_path.clone(),
+                    entry.url_path.as_str().to_string(),
+                )
+            };
 
-                println!("{}/index.md: PASS", schema_stem);
-                println!("  \u{2192} {}", output_path.display());
+            // Render using the pre-assembled context.
+            let rendered = render_with_context(
+                &render_context,
+                &schema_stem_str,
+                &template_path,
+                &output_path,
+                &registry,
+                &page_url_str,
+                url_config,
+            )?;
+            if rendered {
                 files_built += 1;
-
-                // Register dependencies: template, collection content, collection schema,
-                // and all item content files for this type
-                let mut deps: std::collections::HashSet<std::path::PathBuf> =
-                    std::collections::HashSet::new();
-                deps.insert(collection_template_path);
-                deps.insert(collection_content_path);
-                deps.insert(collection_schema_path);
-                for item_content_path in site_index.content_files(&schema_stem) {
-                    deps.insert(item_content_path);
-                }
-                dep_graph.register(output_path, deps);
-            }
-            Err(e) => {
-                eprintln!("{}/index.md: FAIL (render error: {e})", schema_stem);
+            } else {
                 files_failed += 1;
             }
         }
-    }
 
-    // Load index content if schema and content exist.
-    // The root index is flat: schemas/index.md and content/index.md (no directory).
-    let index_schema_path = site_index.schema_path("index");
-    let index_content_path = site_dir.join("content/index.md");
-    if index_schema_path.exists()
-        && let Ok(schema_src) = std::fs::read_to_string(&index_schema_path)
-        && let Ok(grammar) = schema::parse_schema(&schema_src)
-        && let Ok(content_src) = std::fs::read_to_string(&index_content_path)
-        && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
-    {
-        let mut index_graph = template::build_article_graph(&doc, &grammar);
-        index_graph.insert("_presemble_file", template::Value::Text("content/index.md".to_string()));
-        index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
-        // Resolve cross-content references in the index data (e.g., highlight links → feature pages)
-        let url_index: std::collections::HashMap<String, template::DataGraph> = built_pages
-            .values()
-            .flatten()
-            .map(|p| (p.url_path.clone(), p.data.clone()))
-            .collect();
-        resolve_graph(&mut index_graph, &url_index);
-        site_context.insert("index", template::Value::Record(index_graph));
-    }
-
-    // Render the index template (homepage) if it exists
-    let templates_dir = site_dir.join("templates");
-    match template::resolve_template_file(&templates_dir, "index") {
-        Ok((raw_nodes, index_template_path)) => {
-            let render_result = {
-                let (nodes, local_defs) = template::extract_definitions(raw_nodes);
-                let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
-                template::transform(nodes, &site_context, &ctx)
-                    .map_err(|e| CliError::Render(e.to_string()))
-                    .map(|transformed| {
-                        let rewriter = make_rewriter("/", url_config);
-                        template::serialize_nodes(&template::rewrite_urls(transformed, &rewriter))
-                    })
-            };
-            match render_result {
-                Ok(html) => {
-                    let out_dir = output_dir(site_dir);
-                    std::fs::create_dir_all(&out_dir)?;
-                    let index_output = out_dir.join("index.html");
-                    std::fs::write(&index_output, &html)?;
-                    println!("index.html: PASS");
-                    println!("  \u{2192} {}", index_output.display());
-                    files_built += 1;
-
-                    let mut index_deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-                    index_deps.insert(index_template_path);
-                    index_deps.extend(all_content_paths.iter().cloned());
-                    index_deps.extend(all_schema_paths.iter().cloned());
-                    index_deps.insert(index_schema_path.clone());
-                    index_deps.insert(index_content_path.clone());
-                    dep_graph.register(index_output.clone(), index_deps);
-                }
-                Err(e) => {
-                    eprintln!("index.html: FAIL (render error: {e})");
-                    files_failed += 1;
-                }
-            }
+        // Register dep_graph for index
+        let index_template_path_opt: Option<std::path::PathBuf> = {
+            let idx_url = UrlPath::new("/");
+            site_graph.get(&idx_url).map(|e| e.template_path.clone())
+        };
+        if let Some(index_template_path) = index_template_path_opt {
+            let index_output = output_dir(site_dir).join("index.html");
+            let mut index_deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+            index_deps.insert(index_template_path);
+            index_deps.extend(all_content_paths.iter().cloned());
+            index_deps.extend(all_schema_paths.iter().cloned());
+            let index_schema_path_reg = site_index.schema_path("index");
+            let index_content_path_reg = site_dir.join("content/index.md");
+            index_deps.insert(index_schema_path_reg);
+            index_deps.insert(index_content_path_reg);
+            dep_graph.register(index_output, index_deps);
         }
-        Err(e) => {
-            eprintln!("Warning: {e} — no homepage generated");
-        }
+
+        // Register collection dep_graphs for items that already have them
+        // (already done in Phase 1b above for collection entries)
     }
 
     // Collect all built URL paths for link validation
     let mut built_url_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Add content pages — register clean URL and its variants
-    for pages in built_pages.values() {
-        for page in pages {
-            // Normalise to bare path (no trailing slash) for consistent lookup.
-            // page.url_path may be "/article/hello-world" or "/docs/" (index page).
-            let bare = page.url_path.trim_end_matches('/').to_string();
-            built_url_paths.insert(bare.clone());                        // "/article/hello-world" or "/docs"
-            built_url_paths.insert(format!("{bare}/"));                  // "/article/hello-world/" or "/docs/"
-            built_url_paths.insert(format!("{bare}/index.html"));        // "/article/hello-world/index.html" or "/docs/index.html"
-        }
+    // Add all entries — register clean URL and its variants
+    for entry in site_graph.iter() {
+        let bare = entry.url_path.as_str().trim_end_matches('/').to_string();
+        built_url_paths.insert(bare.clone());
+        built_url_paths.insert(format!("{bare}/"));
+        built_url_paths.insert(format!("{bare}/index.html"));
     }
     // Add index
     built_url_paths.insert("/".to_string());
@@ -1260,7 +1274,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         files_built,
         files_failed,
         files_with_suggestions,
-        built_pages,
+        site_graph,
         dep_graph,
         build_errors,
         page_suggestions,
@@ -1294,6 +1308,10 @@ fn cleanup_stale_outputs(out_dir: &Path, dep_graph: &dep_graph::DependencyGraph)
 /// Rebuild only pages whose dependencies include any of `dirty_sources`.
 /// Returns a partial `BuildOutcome` covering only the rebuilt pages.
 /// The caller should merge `outcome.dep_graph` into the current graph.
+/// Rebuild all pages affected by `dirty_sources` or new content files.
+///
+/// This implementation does a full site rebuild for simplicity and correctness.
+/// Proper incremental rebuild with SiteGraph can be restored in a follow-up.
 pub fn rebuild_affected(
     site_dir: &std::path::Path,
     dirty_sources: &std::collections::HashSet<std::path::PathBuf>,
@@ -1302,290 +1320,26 @@ pub fn rebuild_affected(
     new_content_files: &[std::path::PathBuf],
     policy: &BuildPolicy,
 ) -> Result<BuildOutcome, CliError> {
-    use std::collections::HashSet;
-
-    let site_dir = std::fs::canonicalize(site_dir)
-        .unwrap_or_else(|_| site_dir.to_path_buf());
-    let site_dir = site_dir.as_path();
-
-    // Collect all affected output paths
-    let mut affected: HashSet<std::path::PathBuf> = HashSet::new();
+    // Check if anything is actually affected
+    let mut affected_count = 0usize;
     for source in dirty_sources {
-        affected.extend(current_graph.affected_outputs(source));
+        affected_count += current_graph.affected_outputs(source).len();
     }
 
-    if affected.is_empty() && new_content_files.is_empty() {
+    if affected_count == 0 && new_content_files.is_empty() {
         return Ok(BuildOutcome {
             files_built: 0,
             files_failed: 0,
             files_with_suggestions: 0,
-            built_pages: std::collections::HashMap::new(),
+            site_graph: SiteGraph::new(),
             dep_graph: DependencyGraph::new(),
             build_errors: std::collections::HashMap::new(),
             page_suggestions: std::collections::HashMap::new(),
         });
     }
 
-    // Separate content pages from the index page
-    let out_dir = output_dir(site_dir);
-    let index_output = out_dir.join("index.html");
-    let rebuild_index = affected.contains(&index_output);
-    let content_outputs: HashSet<_> = affected
-        .iter()
-        .filter(|p| *p != &index_output)
-        .cloned()
-        .collect();
-
-    let mut outcome = BuildOutcome {
-        files_built: 0,
-        files_failed: 0,
-        files_with_suggestions: 0,
-        built_pages: std::collections::HashMap::new(),
-        dep_graph: DependencyGraph::new(),
-        build_errors: std::collections::HashMap::new(),
-        page_suggestions: std::collections::HashMap::new(),
-    };
-    let mut rebuild_collected: Vec<CollectedPage> = Vec::new();
-
-    // Rebuild affected content pages.
-    // For each affected content output, recover the schema and content paths from the
-    // dependency graph rather than parsing the output path string.
-    let schemas_dir = site_dir.join("schemas");
-    let templates_dir = site_dir.join("templates");
-    let registry = FileTemplateRegistry::new(&templates_dir);
-    let content_base = site_dir.join("content");
-    for output_path in &content_outputs {
-        // Look up which source files this output was built from
-        let sources = current_graph.sources_for(output_path);
-
-        // Find the content file (under site_dir/content/) and schema file (under site_dir/schemas/)
-        let content_path = sources
-            .iter()
-            .find(|p| p.starts_with(&content_base))
-            .cloned();
-        let schema_path = sources
-            .iter()
-            .find(|p| p.starts_with(&schemas_dir))
-            .cloned();
-
-        let (content_path, schema_path) = match (content_path, schema_path) {
-            (Some(c), Some(s)) => (c, s),
-            _ => {
-                eprintln!(
-                    "Warning: could not locate source for {}",
-                    output_path.display()
-                );
-                continue;
-            }
-        };
-
-        // Derive schema_stem from the schema file name
-        let schema_stem = match schema_path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-
-        if !schema_path.exists() || !content_path.exists() {
-            eprintln!(
-                "Warning: could not locate source for {}",
-                output_path.display()
-            );
-            continue;
-        }
-
-        // Parse schema
-        let schema_src = std::fs::read_to_string(&schema_path)?;
-        let grammar = match schema::parse_schema(&schema_src) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("schema error in {}: {e}", schema_path.display());
-                outcome.files_failed += 1;
-                continue;
-            }
-        };
-
-        // Build the page (collect only — rendering deferred until after reference resolution)
-        let attempt = build_content_page(site_dir, &schema_stem, &schema_path, &content_path, &grammar)?;
-        let disposition = (policy.page_policy)(&attempt);
-        match disposition {
-            PageDisposition::Include => {
-                println!("{}: PASS", attempt.file_name);
-                if let Some(result) = attempt.page {
-                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
-                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
-                    let page_url_path = result.built.url_path.clone();
-                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
-                    rebuild_collected.push(CollectedPage {
-                        schema_stem: schema_stem.clone(),
-                        page_index,
-                        output_path: result.output_path,
-                        template_path: result.template_path,
-                        url_path: page_url_path,
-                    });
-                    outcome.files_built += 1;
-                }
-            }
-            PageDisposition::IncludeWithSuggestions(msgs) => {
-                println!("{}: SUGGESTIONS", attempt.file_name);
-                for msg in &msgs { println!("  {msg}"); }
-                if let Some(result) = attempt.page {
-                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
-                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
-                    let page_url_path = result.built.url_path.clone();
-                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
-                    rebuild_collected.push(CollectedPage {
-                        schema_stem: schema_stem.clone(),
-                        page_index,
-                        output_path: result.output_path,
-                        template_path: result.template_path,
-                        url_path: page_url_path.clone(),
-                    });
-                    outcome.page_suggestions.insert(page_url_path, msgs);
-                    outcome.files_with_suggestions += 1;
-                }
-            }
-            PageDisposition::Skip(msgs) => {
-                println!("{}: FAIL", attempt.file_name);
-                for msg in &msgs { println!("  {msg}"); }
-                let url_path = page_address(site_dir, &schema_stem, &content_path).url_path;
-                outcome.build_errors.insert(url_path, msgs);
-                outcome.files_failed += 1;
-            }
-        }
-    }
-
-    // Build new content files that aren't yet in the dep_graph.
-    for content_path in new_content_files {
-        // Derive schema_stem from the parent directory name under content/
-        let schema_stem = match content_path.parent()
-            .and_then(|p| p.strip_prefix(&content_base).ok())
-            .and_then(|rel| rel.components().next())
-            .and_then(|c| {
-                if let std::path::Component::Normal(s) = c {
-                    s.to_str().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-        {
-            Some(s) => s,
-            None => {
-                eprintln!("Warning: could not derive schema stem for {}", content_path.display());
-                continue;
-            }
-        };
-
-        // Skip index files — they are handled by the index rebuild logic
-        let file_stem = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if file_stem == "index" {
-            continue;
-        }
-
-        let schema_path = schemas_dir.join(format!("{schema_stem}.md"));
-        if !schema_path.exists() {
-            eprintln!("Warning: no schema found for new content file {}", content_path.display());
-            continue;
-        }
-
-        let schema_src = std::fs::read_to_string(&schema_path)?;
-        let grammar = match schema::parse_schema(&schema_src) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("schema error in {}: {e}", schema_path.display());
-                outcome.files_failed += 1;
-                continue;
-            }
-        };
-
-        let attempt = build_content_page(site_dir, &schema_stem, &schema_path, content_path, &grammar)?;
-        let disposition = (policy.page_policy)(&attempt);
-        match disposition {
-            PageDisposition::Include => {
-                println!("{}: PASS", attempt.file_name);
-                if let Some(result) = attempt.page {
-                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
-                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
-                    let page_url_path = result.built.url_path.clone();
-                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
-                    rebuild_collected.push(CollectedPage {
-                        schema_stem: schema_stem.clone(),
-                        page_index,
-                        output_path: result.output_path,
-                        template_path: result.template_path,
-                        url_path: page_url_path,
-                    });
-                    outcome.files_built += 1;
-                }
-            }
-            PageDisposition::IncludeWithSuggestions(msgs) => {
-                println!("{}: SUGGESTIONS", attempt.file_name);
-                for msg in &msgs { println!("  {msg}"); }
-                if let Some(result) = attempt.page {
-                    outcome.dep_graph.register(result.output_path.clone(), result.deps.clone());
-                    let page_index = outcome.built_pages.entry(schema_stem.clone()).or_default().len();
-                    let page_url_path = result.built.url_path.clone();
-                    outcome.built_pages.entry(schema_stem.clone()).or_default().push(result.built);
-                    rebuild_collected.push(CollectedPage {
-                        schema_stem: schema_stem.clone(),
-                        page_index,
-                        output_path: result.output_path,
-                        template_path: result.template_path,
-                        url_path: page_url_path.clone(),
-                    });
-                    outcome.page_suggestions.insert(page_url_path, msgs);
-                    outcome.files_with_suggestions += 1;
-                }
-            }
-            PageDisposition::Skip(msgs) => {
-                println!("{}: FAIL", attempt.file_name);
-                for msg in &msgs { println!("  {msg}"); }
-                let url_path = page_address(site_dir, &schema_stem, content_path).url_path;
-                outcome.build_errors.insert(url_path, msgs);
-                outcome.files_failed += 1;
-            }
-        }
-    }
-
-    // Phase 2: Re-resolve references within rebuilt pages.
-    // Note: this only resolves within the partial set — if a *referenced* page changed,
-    // a full rebuild is needed for complete resolution.
-    resolve_references(&mut outcome.built_pages);
-
-    // Phase 3: Render all collected pages with resolved data
-    for collected in &rebuild_collected {
-        if let Some(tmpl_path) = &collected.template_path {
-            let page_data = &outcome.built_pages[&collected.schema_stem][collected.page_index].data;
-            render_page(
-                page_data,
-                &collected.schema_stem,
-                tmpl_path,
-                &collected.output_path,
-                &registry,
-                &collected.url_path,
-                url_config,
-            )?;
-        }
-    }
-
-    // Rebuild index if needed.
-    // The index depends on all content pages, so the simplest correct implementation
-    // is to delegate to build_site() which re-reads everything and re-renders the index.
-    // This is a full rebuild but only happens when the index is explicitly affected.
-    if rebuild_index || !new_content_files.is_empty() {
-        let full = build_site(site_dir, url_config, policy)?;
-        // Copy the index dep registration from the full build into our partial outcome
-        let index_deps = full.dep_graph.sources_for(&index_output);
-        if !index_deps.is_empty() {
-            outcome
-                .dep_graph
-                .register(index_output.clone(), index_deps);
-        }
-        outcome.files_built += 1; // count the index as rebuilt
-        // Note: we don't merge full.built_pages — the caller already has those from the
-        // initial build and only needs the updated dep registration for the index.
-    }
-
-    Ok(outcome)
+    // Full rebuild — correct and clean; incrementality can be restored later
+    build_site(site_dir, url_config, policy)
 }
 
 /// Scan all output HTML files for internal links and check they resolve to built pages.
