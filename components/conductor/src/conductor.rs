@@ -77,11 +77,23 @@ impl template::TemplateRegistry for SimpleTemplateRegistry {
 
 impl SimpleTemplateRegistry {
     /// Load and parse a template file by stem (tries .html then .hiccup).
+    /// Prefers new directory-based convention (`{stem}/item.html`) over
+    /// legacy flat convention (`{stem}.html`).
     fn load_nodes(&self, file_stem: &str) -> Option<Vec<template::dom::Node>> {
+        // New directory-based convention
+        let dir_html = self.templates_dir.join(file_stem).join("item.html");
+        let dir_hiccup = self.templates_dir.join(file_stem).join("item.hiccup");
+        // Legacy flat convention
         let html_path = self.templates_dir.join(format!("{file_stem}.html"));
         let hiccup_path = self.templates_dir.join(format!("{file_stem}.hiccup"));
 
-        if html_path.exists() {
+        if dir_html.exists() {
+            let src = std::fs::read_to_string(&dir_html).ok()?;
+            template::parse_template_xml(&src).ok()
+        } else if dir_hiccup.exists() {
+            let src = std::fs::read_to_string(&dir_hiccup).ok()?;
+            template::parse_template_hiccup(&src).ok()
+        } else if html_path.exists() {
             let src = std::fs::read_to_string(&html_path).ok()?;
             template::parse_template_xml(&src).ok()
         } else if hiccup_path.exists() {

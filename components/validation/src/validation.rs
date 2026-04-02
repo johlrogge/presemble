@@ -225,7 +225,7 @@ mod tests {
     use schema::parse_schema;
 
     fn article_grammar() -> Grammar {
-        let src = include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         parse_schema(src).expect("article schema should parse")
     }
 
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn validate_schema_valid_returns_empty() {
-        let src = include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         let diagnostics = validate_schema(src);
         assert!(
             diagnostics.is_empty(),
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn validate_template_valid_data_paths_returns_empty() {
-        let src = include_str!("../../../fixtures/blog-site/templates/article.html");
+        let src = include_str!("../../../fixtures/blog-site/templates/article/item.html");
         let grammar = article_grammar();
         let diagnostics = validate_template(src, &grammar, "article");
         assert!(

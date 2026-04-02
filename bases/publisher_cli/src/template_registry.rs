@@ -2,8 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use template::{
-    dom::{Node, parse_template_xml},
-    hiccup::parse_template_hiccup,
+    dom::Node,
     registry::extract_definitions,
 };
 
@@ -43,19 +42,11 @@ impl FileTemplateRegistry {
             }
         }
 
-        // Try .html then .hiccup
-        let html_path = self.templates_dir.join(format!("{file_stem}.html"));
-        let hiccup_path = self.templates_dir.join(format!("{file_stem}.hiccup"));
-
-        let nodes = if html_path.exists() {
-            let src = std::fs::read_to_string(&html_path).ok()?;
-            parse_template_xml(&src).ok()?
-        } else if hiccup_path.exists() {
-            let src = std::fs::read_to_string(&hiccup_path).ok()?;
-            parse_template_hiccup(&src).ok()?
-        } else {
-            return None;
-        };
+        // Try directory-based convention first ({stem}/item), then flat ({stem})
+        let nodes = template::resolve_template_file(&self.templates_dir, &format!("{file_stem}/item"))
+            .or_else(|_| template::resolve_template_file(&self.templates_dir, file_stem))
+            .ok()
+            .map(|(nodes, _path)| nodes)?;
 
         let (main, defs) = extract_definitions(nodes);
         let result = (main, defs);

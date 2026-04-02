@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn affected_outputs_returns_both_for_shared_source() {
         let mut g = DependencyGraph::new();
-        let schema = PathBuf::from("schemas/article.md");
+        let schema = PathBuf::from("schemas/article/item.md");
         let out1 = PathBuf::from("output/article/a.html");
         let out2 = PathBuf::from("output/article/b.html");
         g.register(out1.clone(), HashSet::from([schema.clone()]));
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn remove_output_cleans_reverse_entries() {
         let mut g = DependencyGraph::new();
-        let schema = PathBuf::from("schemas/article.md");
+        let schema = PathBuf::from("schemas/article/item.md");
         let out = PathBuf::from("output/article/a.html");
         g.register(out.clone(), HashSet::from([schema.clone()]));
         g.remove_output(&out);

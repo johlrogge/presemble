@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn full_article_schema_parses() {
-        let input = include_str!("../../../fixtures/blog-site/schemas/article.md");
+        let input = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         let grammar = parse(input);
         assert_eq!(grammar.preamble.len(), 4, "expected 4 preamble slots");
         assert!(grammar.body.is_some(), "expected body section");

@@ -91,6 +91,21 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.14.0
+
+Template format unification and directory-based naming.
+
+**Bidirectional HTML/EDN template conversion**
+`presemble convert --to edn templates/post/item.html` converts any template between HTML and hiccup/EDN formats. The converter uses a chain-of-parsers pattern (`resolve_template_file`) that tries hiccup then HTML, returning a clear error listing all tried paths on failure. The presemble.io site now runs entirely on hiccup/EDN templates.
+
+**Hiccup parser fixes**
+Fixed attribute namespace separator: `:presemble/class` in hiccup now correctly produces `presemble:class` in the internal DOM (was producing `presemble/class`). Added `;` line comment support to the hiccup tokenizer (standard EDN convention).
+
+**Unified directory-based naming**
+Schemas and templates follow a consistent directory convention per content type. `schemas/{stem}/item.md` defines the item schema; `templates/{stem}/item.hiccup` renders each item. Flat files (`schemas/index.md`, `templates/index.hiccup`) are used for singular pages like the homepage. The rule: no directory should ever be named `index`.
+
+---
+
 ### v0.13.0
 
 M3.5 complete — code action transformation model and content authoring improvements.
