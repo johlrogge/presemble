@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use site_index::SchemaStem;
 
+#[derive(Clone)]
 pub struct SiteRepository {
     site_dir: PathBuf,
 }

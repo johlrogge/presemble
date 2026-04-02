@@ -734,7 +734,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
 
     // Discover and copy referenced assets from templates
     let templates_dir = site_dir.join("templates");
-    let registry = FileTemplateRegistry::new(&templates_dir);
+    let registry = FileTemplateRegistry::new(repo.clone());
     let mut all_asset_paths = std::collections::BTreeSet::new();
     let mut all_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut included_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -961,7 +961,6 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     }
 
     // Phase 1b: Build collection entries (content/{stem}/index.md)
-    let templates_dir_col = site_dir.join("templates");
     for stem in repo.schema_stems() {
         let schema_stem = stem.as_str();
         if schema_stem == "index" {
@@ -986,9 +985,19 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
             files_failed += 1;
             continue;
         }
-        let collection_template =
-            template::resolve_template_file(&templates_dir_col, &format!("{schema_stem}/index"));
-        let Ok((_, collection_template_path)) = collection_template else {
+        // Resolve the collection template path via repo. The repo tries
+        // `templates/{stem}/index.hiccup` then `templates/{stem}/index.html`.
+        let collection_template_path = {
+            let base = site_dir.join("templates").join(schema_stem).join("index");
+            if base.with_extension("hiccup").exists() {
+                Some(base.with_extension("hiccup"))
+            } else if base.with_extension("html").exists() {
+                Some(base.with_extension("html"))
+            } else {
+                None
+            }
+        };
+        let Some(collection_template_path) = collection_template_path else {
             eprintln!("{}/index.md: FAIL (no collection template found)", schema_stem);
             files_failed += 1;
             continue;
@@ -1064,16 +1073,18 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     let index_schema_path = repo.index_schema_path();
     let index_content_path = repo.index_content_path();
     {
-        // resolve_template_file returns the parsed nodes + path; we only need the path here.
-        // find_template is simpler (path-only) but doesn't cover all conventions.
-        // Use find_template first (it covers both directory and flat conventions),
-        // then fall back to resolve_template_file for anything else.
-        let index_tmpl = find_template(&templates_dir, "index")
-            .or_else(|| {
-                template::resolve_template_file(&templates_dir, "index")
-                    .ok()
-                    .map(|(_, p)| p)
-            });
+        // Resolve the index template path via repo. The repo tries
+        // `templates/index.hiccup` then `templates/index.html`.
+        let index_tmpl = {
+            let base = templates_dir.join("index");
+            if base.with_extension("hiccup").exists() {
+                Some(base.with_extension("hiccup"))
+            } else if base.with_extension("html").exists() {
+                Some(base.with_extension("html"))
+            } else {
+                None
+            }
+        };
         if let Some(index_tmpl_path) = index_tmpl {
             let mut index_graph = template::DataGraph::new();
             // Populate from content/index.md if it exists
