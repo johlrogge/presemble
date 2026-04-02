@@ -28,6 +28,7 @@ conductor = { path = "components/conductor" }
 content = { path = "components/content" }
 dep_graph = { path = "components/dep_graph" }
 editor_server = { path = "bases/editor_server" }
+fs_site_repository = { path = "components/fs_site_repository" }
 lsp_capabilities = { path = "components/lsp_capabilities" }
 lsp_service = { path = "components/lsp_service" }
 publisher_cli = { path = "bases/publisher_cli" }
