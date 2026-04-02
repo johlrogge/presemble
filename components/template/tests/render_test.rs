@@ -7,7 +7,7 @@ fn render_article_with_dom_transformer() {
     let template_src = include_str!("../../../fixtures/blog-site/templates/article.html");
 
     let grammar = schema::parse_schema(schema_src).expect("schema parses");
-    let doc = content::parse_document(content_src).expect("content parses");
+    let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
 
     let slot_graph = template::build_article_graph(&doc, &grammar);
     let mut context = template::DataGraph::new();

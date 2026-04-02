@@ -284,6 +284,17 @@ enum Command {
         /// Path to the site directory
         site_dir: String,
     },
+    /// Convert a template between HTML and EDN (hiccup) formats
+    Convert {
+        /// Path to the input template file
+        input: String,
+        /// Output format: "edn" or "html"
+        #[arg(long, value_name = "FORMAT")]
+        to: String,
+        /// Output file path (defaults to stdout)
+        #[arg(long, short)]
+        output: Option<String>,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -323,6 +334,9 @@ pub fn run() -> Result<(), CliError> {
         Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
         Some(Command::Conductor { site_dir }) => {
             editor_server::run_daemon(Path::new(&site_dir)).map_err(CliError::Render)
+        }
+        Some(Command::Convert { input, to, output }) => {
+            convert_template(Path::new(&input), &to, output.as_deref().map(Path::new))
         }
         None => {
             // backward compat: presemble <site-dir>
@@ -399,7 +413,7 @@ pub fn build_content_page(
 
     let content_source = std::fs::read_to_string(content_path)?;
 
-    let doc = match content::parse_document(&content_source) {
+    let doc = match content::parse_and_assign(&content_source, grammar) {
         Ok(d) => d,
         Err(e) => {
             let msg = format!("parse error: {e}");
@@ -937,7 +951,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     {
         let index_md = index_content_dir.join("index.md");
         if let Ok(content_src) = std::fs::read_to_string(&index_md)
-            && let Ok(doc) = content::parse_document(&content_src)
+            && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
         {
             let mut index_graph = template::build_article_graph(&doc, &grammar);
             index_graph.insert("_presemble_file", template::Value::Text("content/index/index.md".to_string()));
@@ -1588,6 +1602,42 @@ fn warn_unused_sources(
     }
 }
 
+fn convert_template(input: &Path, to: &str, output: Option<&Path>) -> Result<(), CliError> {
+    let src = std::fs::read_to_string(input)
+        .map_err(|e| CliError::Render(format!("cannot read {}: {e}", input.display())))?;
+
+    let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let nodes = match ext {
+        "html" | "xml" => template::parse_template_xml(&src)
+            .map_err(|e| CliError::Render(format!("parse error: {e}")))?,
+        "hiccup" | "edn" => template::parse_template_hiccup(&src)
+            .map_err(|e| CliError::Render(format!("parse error: {e}")))?,
+        _ => return Err(CliError::Render(format!("unknown template format: .{ext}"))),
+    };
+
+    let result = match to {
+        "edn" | "hiccup" => {
+            let cleaned = if ext == "html" || ext == "xml" {
+                template::strip_whitespace_text_nodes(nodes)
+            } else {
+                nodes
+            };
+            template::serialize_to_hiccup(&cleaned)
+        }
+        "html" => template::serialize_nodes(&nodes),
+        _ => return Err(CliError::Render(format!("unknown target format: {to}"))),
+    };
+
+    if let Some(out_path) = output {
+        std::fs::write(out_path, &result)
+            .map_err(|e| CliError::Render(format!("cannot write {}: {e}", out_path.display())))?;
+    } else {
+        print!("{result}");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1621,5 +1671,60 @@ mod tests {
             addr.output_path,
             Path::new("/output/site/docs/index.html")
         );
+    }
+
+    #[test]
+    fn convert_html_to_edn_roundtrip() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let html = r#"<article><h1>Hello</h1><p>World</p></article>"#;
+        let mut input_file = NamedTempFile::with_suffix(".html").unwrap();
+        input_file.write_all(html.as_bytes()).unwrap();
+
+        let result = convert_template(input_file.path(), "edn", None);
+        assert!(result.is_ok(), "convert html->edn failed: {result:?}");
+    }
+
+    #[test]
+    fn convert_unknown_extension_returns_error() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut input_file = NamedTempFile::with_suffix(".txt").unwrap();
+        input_file.write_all(b"anything").unwrap();
+
+        let result = convert_template(input_file.path(), "edn", None);
+        assert!(matches!(result, Err(CliError::Render(_))));
+    }
+
+    #[test]
+    fn convert_unknown_target_format_returns_error() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let html = r#"<article><p>test</p></article>"#;
+        let mut input_file = NamedTempFile::with_suffix(".html").unwrap();
+        input_file.write_all(html.as_bytes()).unwrap();
+
+        let result = convert_template(input_file.path(), "pdf", None);
+        assert!(matches!(result, Err(CliError::Render(_))));
+    }
+
+    #[test]
+    fn convert_html_to_edn_writes_output_file() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let html = r#"<article><h1>Hello</h1></article>"#;
+        let mut input_file = NamedTempFile::with_suffix(".html").unwrap();
+        input_file.write_all(html.as_bytes()).unwrap();
+
+        let output_file = NamedTempFile::with_suffix(".edn").unwrap();
+        let result = convert_template(input_file.path(), "edn", Some(output_file.path()));
+        assert!(result.is_ok(), "convert html->edn with output failed: {result:?}");
+
+        let written = std::fs::read_to_string(output_file.path()).unwrap();
+        assert!(!written.is_empty(), "output file should not be empty");
     }
 }

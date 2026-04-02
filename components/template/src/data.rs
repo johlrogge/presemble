@@ -1,5 +1,6 @@
 use content::{ContentElement, Document};
-use schema::{Element, Grammar};
+use schema::{Element, Grammar, Spanned};
+use pulldown_cmark;
 
 /// The kind of schema element a suggestion represents.
 #[derive(Debug, Clone)]
@@ -113,65 +114,45 @@ fn max_paragraphs(slot: &schema::Slot) -> usize {
     1 // default: consume exactly 1
 }
 
-/// Returns true if the paragraph text is a bare slot anchor annotation (e.g. `{#cover}`).
-fn is_annotation_paragraph(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with("{#") && t.ends_with('}') && !t[2..t.len() - 1].contains('}')
-}
-
-/// Build a DataGraph from a validated Document and its Grammar.
+/// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
 pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     let mut graph = DataGraph::new();
-    let elements = &doc.elements;
-    let mut cursor = 0usize;
-    let mut separator_found = false;
 
+    // Iterate grammar preamble slots and map each to its DocumentSlot.
     for slot in &grammar.preamble {
-        // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
-        while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor]
-                && is_annotation_paragraph(text)
-            {
-                cursor += 1;
-                continue;
-            }
-            break;
-        }
-
-        if cursor >= elements.len() {
-            break;
-        }
-
-        if matches!(elements[cursor], ContentElement::Separator) {
-            cursor += 1;
-            separator_found = true;
-            break;
-        }
-
         let slot_key = slot.name.as_str().to_string();
+
+        // Find the DocumentSlot for this grammar slot.
+        let doc_slot = doc.preamble.iter().find(|s| s.name == slot.name);
+        let elements = match doc_slot {
+            Some(s) if !s.elements.is_empty() => &s.elements,
+            _ => continue,
+        };
 
         match &slot.element {
             Element::Heading { .. } => {
-                if let ContentElement::Heading { text, .. } = &elements[cursor] {
+                if let Some(spanned) = elements.front()
+                    && let ContentElement::Heading { text, .. } = &spanned.node
+                {
                     graph.insert(slot_key, Value::Text(text.clone()));
-                    cursor += 1;
                 }
             }
 
             Element::Paragraph => {
                 let max = max_paragraphs(slot);
-                let mut paragraphs: Vec<Value> = Vec::new();
-                while cursor < elements.len() && paragraphs.len() < max {
-                    match &elements[cursor] {
-                        ContentElement::Paragraph { text } => {
-                            paragraphs.push(Value::Text(text.clone()));
-                            cursor += 1;
+                let paragraphs: Vec<Value> = elements
+                    .iter()
+                    .filter_map(|s| {
+                        if let ContentElement::Paragraph { text } = &s.node {
+                            Some(Value::Text(text.clone()))
+                        } else {
+                            None
                         }
-                        ContentElement::Separator => break,
-                        _ => break,
-                    }
-                }
+                    })
+                    .take(max)
+                    .collect();
+
                 // For single-value slots (exactly once), store as Text not List
                 // so templates don't need `as` to avoid span concatenation.
                 let value = if max == 1 {
@@ -183,17 +164,20 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             }
 
             Element::Link { .. } => {
-                if let ContentElement::Link { text, href } = &elements[cursor] {
+                if let Some(spanned) = elements.front()
+                    && let ContentElement::Link { text, href } = &spanned.node
+                {
                     let mut record = DataGraph::new();
                     record.insert("text", Value::Text(text.clone()));
                     record.insert("href", Value::Text(href.clone()));
                     graph.insert(slot_key, Value::Record(record));
-                    cursor += 1;
                 }
             }
 
             Element::Image { .. } => {
-                if let ContentElement::Image { path, alt } = &elements[cursor] {
+                if let Some(spanned) = elements.front()
+                    && let ContentElement::Image { path, alt } = &spanned.node
+                {
                     let mut record = DataGraph::new();
                     record.insert("path", Value::Text(path.clone()));
                     let alt_value = match alt {
@@ -202,31 +186,13 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
                     };
                     record.insert("alt", alt_value);
                     graph.insert(slot_key, Value::Record(record));
-                    cursor += 1;
                 }
             }
-        }
-
-        if cursor < elements.len() && matches!(elements[cursor], ContentElement::Separator) {
-            cursor += 1;
-            separator_found = true;
-            break;
-        }
-    }
-
-    // If separator was not yet consumed, scan forward to find it.
-    if !separator_found {
-        while cursor < elements.len() {
-            if matches!(elements[cursor], ContentElement::Separator) {
-                cursor += 1;
-                break;
-            }
-            cursor += 1;
         }
     }
 
     // Render body elements as HTML.
-    let body_html = render_body_html(&elements[cursor..]);
+    let body_html = render_body_html(&doc.body);
     if !body_html.is_empty() {
         graph.insert("body", Value::Html(body_html));
     }
@@ -283,16 +249,31 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
+/// Render a single paragraph's markdown text to inline HTML, stripping the outer `<p>` wrapper.
+fn render_inline_markdown(text: &str) -> String {
+    let parser = pulldown_cmark::Parser::new(text);
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, parser);
+    let html = html.trim();
+    // Strip outer <p>...</p> if present — we add our own wrapper element
+    html.strip_prefix("<p>")
+        .and_then(|s| s.strip_suffix("</p>"))
+        .unwrap_or(html)
+        .to_string()
+}
+
+pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for (idx, element) in elements.iter().enumerate() {
-        let html = match element {
+    for (idx, spanned) in elements.iter().enumerate() {
+        let html = match &spanned.node {
             ContentElement::Heading { level, text } => {
                 let l = level.value();
-                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{}</h{l}>", escape_html(text))
+                let inner = render_inline_markdown(text);
+                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</h{l}>")
             }
             ContentElement::Paragraph { text } => {
-                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{}</p>", escape_html(text))
+                let inner = render_inline_markdown(text);
+                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</p>")
             }
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
@@ -321,6 +302,20 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
                 }
             }
             ContentElement::Separator => continue,
+            ContentElement::RawHtml { html } => {
+                format!(
+                    "<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>"
+                )
+            }
+            ContentElement::Blockquote { text } => {
+                let inner = render_inline_markdown(text);
+                format!("<blockquote id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</blockquote>")
+            }
+            ContentElement::List { source } => {
+                // Render the raw markdown list source to HTML via pulldown-cmark.
+                let html = render_inline_markdown(source);
+                format!("<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>")
+            }
             ContentElement::Table { headers, rows } => {
                 let header_cells = headers
                     .iter()
@@ -357,8 +352,13 @@ pub(crate) fn render_body_html(elements: &[ContentElement]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use content::parse_document;
-    use schema::parse_schema;
+    use content::parse_and_assign;
+    use schema::{parse_schema, Span as SchemaSpan};
+
+    /// Wrap a plain `ContentElement` in a dummy `Spanned` for use in tests.
+    fn spanned(node: ContentElement) -> Spanned<ContentElement> {
+        Spanned { node, span: SchemaSpan { start: 0, end: 0 } }
+    }
 
     fn article_grammar() -> Grammar {
         let schema_input = include_str!("../../../fixtures/blog-site/schemas/article.md");
@@ -368,7 +368,8 @@ mod tests {
     fn hello_world_doc() -> Document {
         let doc_input =
             include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
-        parse_document(doc_input).expect("hello-world.md should parse")
+        let grammar = article_grammar();
+        parse_and_assign(doc_input, &grammar).expect("hello-world.md should parse")
     }
 
     #[test]
@@ -440,11 +441,11 @@ mod tests {
 
     #[test]
     fn body_code_block_renders_as_pre_code() {
-        let code_block = ContentElement::CodeBlock {
+        let code_block = spanned(ContentElement::CodeBlock {
             language: Some("rust".to_string()),
             code: "fn main() {}\n".to_string(),
-        };
-        let html = super::render_body_html(&[code_block]);
+        });
+        let html = super::render_body_html(&im::vector![code_block]);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
@@ -457,11 +458,11 @@ mod tests {
 
     #[test]
     fn body_code_block_without_language_renders_plain_pre_code() {
-        let code_block = ContentElement::CodeBlock {
+        let code_block = spanned(ContentElement::CodeBlock {
             language: None,
             code: "some code\n".to_string(),
-        };
-        let html = super::render_body_html(&[code_block]);
+        });
+        let html = super::render_body_html(&im::vector![code_block]);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code>"),
             "expected plain pre/code in output; got: {html}"
@@ -474,10 +475,10 @@ mod tests {
 
     #[test]
     fn render_body_html_elements_have_data_presemble_slot_body() {
-        let elements = vec![
-            ContentElement::Paragraph { text: "para".to_string() },
-            ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() },
-        ];
+        let elements: im::Vector<_> = vec![
+            spanned(ContentElement::Paragraph { text: "para".to_string() }),
+            spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() }),
+        ].into_iter().collect();
         let html = render_body_html(&elements);
         assert!(
             html.contains("data-presemble-slot=\"body\""),
@@ -490,11 +491,11 @@ mod tests {
 
     #[test]
     fn render_body_html_assigns_sequential_ids() {
-        let elements = vec![
-            ContentElement::Paragraph { text: "first".to_string() },
-            ContentElement::Separator,
-            ContentElement::Paragraph { text: "second".to_string() },
-        ];
+        let elements: im::Vector<_> = vec![
+            spanned(ContentElement::Paragraph { text: "first".to_string() }),
+            spanned(ContentElement::Separator),
+            spanned(ContentElement::Paragraph { text: "second".to_string() }),
+        ].into_iter().collect();
         let html = render_body_html(&elements);
         assert!(html.contains("id=\"presemble-body-0\""), "first paragraph gets id 0");
         assert!(html.contains("id=\"presemble-body-2\""), "element after separator gets id 2");
@@ -516,13 +517,11 @@ mod tests {
     #[test]
     fn body_html_is_parseable_xml_when_content_has_angle_brackets() {
         use crate::dom::parse_template_xml;
-        use content::parse_document;
-        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName};
+        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
 
         // Build a minimal document whose body paragraph contains angle brackets.
         // The separator (---) separates preamble from body.
         let doc_input = "# My Title\n\n---\n\nUse `<presemble:insert>` to insert values.\n";
-        let doc = parse_document(doc_input).expect("document should parse");
 
         // Construct a grammar directly with a single heading-1 slot called "title".
         let grammar = Grammar {
@@ -536,12 +535,14 @@ mod tests {
                 },
                 constraints: vec![],
                 hint_text: None,
+                span: Span { start: 0, end: 0 },
             }],
             body: Some(BodyRules {
                 heading_range: None,
             }),
         };
 
+        let doc = parse_and_assign(doc_input, &grammar).expect("document should parse");
         let graph = build_article_graph(&doc, &grammar);
         let body_html = match graph.resolve(&["body"]) {
             Some(Value::Html(html)) => html.clone(),
@@ -620,7 +621,7 @@ mod tests {
         let content_src = "# My Title\n\nMy tagline.\n\nMy description paragraph.\n";
 
         let grammar = parse_schema(schema_src).expect("schema parses");
-        let doc = parse_document(content_src).expect("content parses");
+        let doc = parse_and_assign(content_src, &grammar).expect("content parses");
         let graph = build_article_graph(&doc, &grammar);
 
         // tagline should be exactly one text value
@@ -647,8 +648,8 @@ mod tests {
     fn empty_doc_gets_suggestions_for_all_article_slots() {
         // A document with only the separator — all preamble slots should become suggestions.
         let doc_input = "----\n";
-        let doc = parse_document(doc_input).expect("empty doc should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("empty doc should parse");
         let graph = build_article_graph(&doc, &grammar);
 
         // title — Heading suggestion
@@ -713,8 +714,8 @@ mod tests {
     fn doc_missing_only_cover_gets_only_cover_suggestion() {
         // Document has title, summary, author, but no cover.
         let doc_input = "# My Title\n\nMy summary.\n\n[Jo Hlrogge](/author/jo)\n\n----\n\n### Body\n";
-        let doc = parse_document(doc_input).expect("partial doc should parse");
         let grammar = article_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("partial doc should parse");
         let graph = build_article_graph(&doc, &grammar);
 
         // title should be real
@@ -750,7 +751,7 @@ mod tests {
         let content_src = "# My Title\n\n----\n\n### Body\n";
 
         let grammar = parse_schema(schema_src).expect("schema parses");
-        let doc = parse_document(content_src).expect("content parses");
+        let doc = parse_and_assign(content_src, &grammar).expect("content parses");
         let graph = build_article_graph(&doc, &grammar);
 
         // Missing tagline now becomes a Suggestion placeholder rather than Absent.
@@ -760,5 +761,70 @@ mod tests {
             }
             other => panic!("expected Suggestion for missing tagline, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Inline markdown rendering tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn body_paragraph_with_bold_renders_as_strong() {
+        // **bold** in a paragraph stored with markdown syntax should render as <strong>
+        let para = spanned(ContentElement::Paragraph { text: "This has **bold** text.".to_string() });
+        let html = render_body_html(&im::vector![para]);
+        assert!(
+            html.contains("<strong>bold</strong>"),
+            "expected <strong>bold</strong> in body HTML; got: {html}"
+        );
+        // The HTML wrapper should be <p>, not a raw markdown string
+        assert!(
+            html.contains("<p "),
+            "expected paragraph element wrapper; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_paragraph_with_italic_renders_as_em() {
+        let para = spanned(ContentElement::Paragraph { text: "This has _italic_ text.".to_string() });
+        let html = render_body_html(&im::vector![para]);
+        assert!(
+            html.contains("<em>italic</em>"),
+            "expected <em>italic</em> in body HTML; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_blockquote_renders_as_blockquote_tag() {
+        let bq = spanned(ContentElement::Blockquote { text: "A wise quote.".to_string() });
+        let html = render_body_html(&im::vector![bq]);
+        assert!(
+            html.contains("<blockquote"),
+            "expected <blockquote tag in body HTML; got: {html}"
+        );
+        assert!(
+            html.contains("A wise quote."),
+            "expected quote text in body HTML; got: {html}"
+        );
+        assert!(
+            html.contains("data-presemble-slot=\"body\""),
+            "expected data-presemble-slot attribute on blockquote; got: {html}"
+        );
+    }
+
+    #[test]
+    fn body_heading_with_inline_markdown_renders_correctly() {
+        let heading = spanned(ContentElement::Heading {
+            level: schema::HeadingLevel::new(3).unwrap(),
+            text: "Section with *emphasis*".to_string(),
+        });
+        let html = render_body_html(&im::vector![heading]);
+        assert!(
+            html.contains("<h3"),
+            "expected h3 tag; got: {html}"
+        );
+        assert!(
+            html.contains("<em>emphasis</em>"),
+            "expected <em>emphasis</em> in heading; got: {html}"
+        );
     }
 }

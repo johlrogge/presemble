@@ -34,6 +34,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
             continue;
         }
 
+        // Line comment: skip from ';' to end of line
+        if ch == ';' {
+            i += 1;
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
         match ch {
             '[' => {
                 tokens.push(Token::LBracket);
@@ -178,12 +187,12 @@ fn keyword_to_tag_name(namespace: &Option<String>, name: &str) -> Result<String,
 }
 
 /// Convert a keyword to an attribute name: strip leading ':' (already done by
-/// tokenizer), keep the raw name. Namespaces are not translated for attributes —
-/// just concatenate with '/'.
+/// tokenizer), keep the raw name. Namespaces use ':' as separator to match
+/// `keyword_to_tag_name` and the transformer's expectations.
 fn keyword_to_attr_name(namespace: &Option<String>, name: &str) -> String {
     match namespace.as_deref() {
         None => name.to_string(),
-        Some(ns) => format!("{ns}/{name}"),
+        Some(ns) => format!("{ns}:{name}"),
     }
 }
 
@@ -480,5 +489,53 @@ mod tests {
     fn error_unclosed_bracket() {
         let err = parse_err("[:div ");
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn presemble_namespaced_attr_uses_colon() {
+        let nodes = parse("[:div {:presemble/class \"article.title\"} \"text\"]");
+        if let Node::Element(el) = &nodes[0] {
+            assert!(
+                el.attrs.iter().any(|(k, _)| k == "presemble:class"),
+                "expected presemble:class attr, got {:?}",
+                el.attrs
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn line_comment_before_form() {
+        let nodes = parse("; comment\n[:div \"text\"]");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(el.name, "div");
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn line_comment_inside_element() {
+        let nodes = parse("[:div\n  ; child comment\n  \"text\"]");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(el.children.len(), 1);
+            assert!(matches!(&el.children[0], Node::Text(t) if t == "text"));
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn line_comment_trailing() {
+        let nodes = parse("[:div \"text\"] ; trailing");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(el.name, "div");
+        } else {
+            panic!("expected element");
+        }
     }
 }

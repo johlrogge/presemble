@@ -12,6 +12,13 @@ impl ConductorClient {
     pub fn connect(url: &str) -> Result<Self, String> {
         let socket = nng::Socket::new(nng::Protocol::Req0)
             .map_err(|e| format!("failed to create REQ socket: {e}"))?;
+        // Set timeouts so blocking send/recv don't hang the LSP on shutdown.
+        socket
+            .set_opt::<nng::options::SendTimeout>(Some(std::time::Duration::from_secs(2)))
+            .map_err(|e| format!("failed to set send timeout: {e}"))?;
+        socket
+            .set_opt::<nng::options::RecvTimeout>(Some(std::time::Duration::from_secs(5)))
+            .map_err(|e| format!("failed to set recv timeout: {e}"))?;
         socket
             .dial(url)
             .map_err(|e| format!("failed to connect to conductor at {url}: {e}"))?;

@@ -10,3 +10,5 @@ interface = "template"
 schema = { workspace = true }
 content = { workspace = true }
 quick-xml = { version = "0.36", features = ["serialize"] }
+im = { workspace = true }
+pulldown-cmark = { workspace = true }

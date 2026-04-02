@@ -1,5 +1,9 @@
-use content::{byte_to_position, parse_document_with_offsets, ContentElement};
+use content::{
+    byte_to_position, parse_and_assign, parse_document, ContentElement,
+    Capitalize, InsertSlot, InsertSeparator, Transform,
+};
 use schema::{Element, Grammar};
+use std::sync::Arc;
 use template::Expr;
 
 /// A completion suggestion for a schema slot.
@@ -218,7 +222,7 @@ pub fn content_completions(
     site_dir: Option<&std::path::Path>,
 ) -> Vec<SlotCompletion> {
     // Parse current document to find which slots are filled
-    let doc = match content::parse_document(src) {
+    let doc = match parse_and_assign(src, grammar) {
         Ok(d) => d,
         Err(_) => return vec![],
     };
@@ -228,11 +232,11 @@ pub fn content_completions(
 
     // Walk grammar preamble in order, offer completions for missing slots
     for (idx, slot) in grammar.preamble.iter().enumerate() {
-        // Check if this slot type is present in the document
+        // Check if this slot is present in the document preamble
         let is_filled = doc
-            .elements
+            .preamble
             .iter()
-            .any(|e| element_matches_slot_type(e, &slot.element));
+            .any(|ds| ds.name == slot.name && !ds.elements.is_empty());
         if is_filled {
             continue;
         }
@@ -298,56 +302,37 @@ pub fn content_completions(
     }
 
     // Offer separator if missing and grammar has body rules
-    if grammar.body.is_some() {
-        let has_separator = doc
-            .elements
-            .iter()
-            .any(|e| matches!(e, content::ContentElement::Separator));
-        if !has_separator {
-            completions.push(
-                SlotCompletion::plain(
-                    "----",
-                    "Body separator",
-                    Some("Separates preamble slots from body content".to_string()),
-                    "----\n",
-                )
-                .with_sort_text("99"),
-            );
-        }
+    if grammar.body.is_some() && !doc.has_separator {
+        completions.push(
+            SlotCompletion::plain(
+                "----",
+                "Body separator",
+                Some("Separates preamble slots from body content".to_string()),
+                "----\n",
+            )
+            .with_sort_text("99"),
+        );
     }
 
-    // Offer body content completions when separator exists and grammar has body rules
-    if let Some(body_rules) = &grammar.body {
-        let has_separator = doc
-            .elements
-            .iter()
-            .any(|e| matches!(e, content::ContentElement::Separator));
-        if has_separator {
-            if let Some(heading_range) = &body_rules.heading_range {
-                let min_level = heading_range.min.value();
-                let hashes = "#".repeat(min_level as usize);
-                completions.push(
-                    SlotCompletion::snippet(
-                        format!("Body heading (H{})", min_level),
-                        format!("H{}-H{} heading", heading_range.min.value(), heading_range.max.value()),
-                        Some(format!(
-                            "Body section allows headings H{} through H{}",
-                            heading_range.min.value(),
-                            heading_range.max.value()
-                        )),
-                        format!("{hashes} ${{1:Heading}}"),
-                    )
-                    .with_sort_text("98"),
-                );
-            }
+    // Offer body heading completions for each allowed level
+    if let Some(body_rules) = &grammar.body
+        && doc.has_separator
+        && let Some(heading_range) = &body_rules.heading_range
+    {
+        for level in heading_range.min.value()..=heading_range.max.value() {
+            let hashes = "#".repeat(level as usize);
             completions.push(
                 SlotCompletion::snippet(
-                    "Body paragraph",
-                    "Body text",
-                    Some("A paragraph in the body section".to_string()),
-                    "${1:Body text.}",
+                    format!("H{level} heading"),
+                    format!("Body heading level {level}"),
+                    Some(format!(
+                        "Body section allows headings H{} through H{}",
+                        heading_range.min.value(),
+                        heading_range.max.value()
+                    )),
+                    format!("{hashes} ${{1:Heading}}"),
                 )
-                .with_sort_text("97"),
+                .with_sort_text(format!("{:02}", 98 - (level - heading_range.min.value()))),
             );
         }
     }
@@ -355,13 +340,75 @@ pub fn content_completions(
     completions
 }
 
+/// Offer inline link completions for all content pages in the site.
+///
+/// Returns one completion per content page, with the title as label
+/// and `[Title](/type/slug)` as insert text.
+pub fn link_completions(site_dir: &std::path::Path) -> Vec<SlotCompletion> {
+    let content_dir = site_dir.join("content");
+    let mut completions = Vec::new();
+
+    let Ok(types) = std::fs::read_dir(&content_dir) else {
+        return completions;
+    };
+
+    for type_entry in types.filter_map(|e| e.ok()) {
+        let type_path = type_entry.path();
+        if !type_path.is_dir() {
+            continue;
+        }
+        let type_stem = type_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let Ok(files) = std::fs::read_dir(&type_path) else {
+            continue;
+        };
+
+        for file_entry in files.filter_map(|e| e.ok()) {
+            let file_path = file_entry.path();
+            if file_path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let file_slug = file_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Skip index files — they represent the type listing, not a linkable page
+            if file_slug == "index" {
+                continue;
+            }
+
+            let title = read_title_from_md(&file_path).unwrap_or_else(|| file_slug.clone());
+            let url = format!("/{type_stem}/{file_slug}");
+            let link_text = format!("[{title}]({url})");
+
+            completions.push(SlotCompletion::plain(
+                format!("{type_stem} \u{2013} {title}"),
+                url.clone(),
+                None,
+                link_text,
+            ));
+        }
+    }
+
+    // Sort by type then slug for stable ordering
+    completions.sort_by(|a, b| a.detail.cmp(&b.detail));
+    completions
+}
+
 /// Generate a template string for a slot element type.
 fn template_for_slot(slot: &schema::Slot) -> String {
     let hint = slot.hint_text.as_deref().unwrap_or(slot.name.as_str());
     match &slot.element {
-        Element::Heading { level } => {
-            let hashes = "#".repeat(level.min.value() as usize);
-            format!("{hashes} {hint}")
+        Element::Heading { .. } => {
+            // No # prefix — build_element adds the heading level from the grammar,
+            // and serialize_element adds the # prefix when serializing.
+            hint.to_string()
         }
         Element::Paragraph => {
             format!("{hint}.")
@@ -522,14 +569,14 @@ pub fn definition_for_position(
     line: u32,
     site_dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let elements = parse_document_with_offsets(src).ok()?;
+    let doc = parse_document(src).ok()?;
     // Find a Link element at the given line
-    let target = elements.iter().find(|ewo| {
-        let start_line = byte_to_position(src, ewo.byte_range.start).0;
-        let end_line = byte_to_position(src, ewo.byte_range.end).0;
+    let target = doc.elements.iter().find(|spanned| {
+        let start_line = byte_to_position(src, spanned.span.start).0;
+        let end_line = byte_to_position(src, spanned.span.end).0;
         line >= start_line && line <= end_line
     })?;
-    let href = match &target.element {
+    let href = match &target.node {
         ContentElement::Link { href, .. } => href.clone(),
         _ => return None,
     };
@@ -550,30 +597,31 @@ pub fn definition_for_position(
 
 /// Hover text for the schema slot closest to the given line.
 pub fn hover_for_line(src: &str, grammar: &Grammar, line: u32) -> Option<String> {
-    let elements_with_offsets = parse_document_with_offsets(src).ok()?;
+    let doc = parse_and_assign(src, grammar).ok()?;
 
-    let target = elements_with_offsets.iter().find(|ewo| {
-        let start_line = byte_to_position(src, ewo.byte_range.start).0;
-        let end_line = byte_to_position(src, ewo.byte_range.end).0;
-        line >= start_line && line <= end_line
-    })?;
+    // Search preamble slots for an element whose span covers the target line
+    for slot in &doc.preamble {
+        for spanned in &slot.elements {
+            let start_line = byte_to_position(src, spanned.span.start).0;
+            let end_line = byte_to_position(src, spanned.span.end).0;
+            if line >= start_line && line <= end_line {
+                // Find the grammar slot by name to get its hint_text
+                let grammar_slot = grammar.preamble.iter().find(|s| s.name == slot.name)?;
+                return grammar_slot.hint_text.clone();
+            }
+        }
+    }
 
-    let slot = grammar
-        .preamble
-        .iter()
-        .find(|s| element_matches_slot_type(&target.element, &s.element))?;
+    // Search body elements
+    for spanned in &doc.body {
+        let start_line = byte_to_position(src, spanned.span.start).0;
+        let end_line = byte_to_position(src, spanned.span.end).0;
+        if line >= start_line && line <= end_line {
+            return None;
+        }
+    }
 
-    slot.hint_text.clone()
-}
-
-fn element_matches_slot_type(element: &ContentElement, slot_type: &Element) -> bool {
-    matches!(
-        (element, slot_type),
-        (ContentElement::Heading { .. }, Element::Heading { .. })
-            | (ContentElement::Paragraph { .. }, Element::Paragraph)
-            | (ContentElement::Link { .. }, Element::Link { .. })
-            | (ContentElement::Image { .. }, Element::Image { .. })
-    )
+    None
 }
 
 /// A data-path reference found in a template, with its source location.
@@ -896,10 +944,36 @@ pub fn write_slot_to_string(
     grammar: &Grammar,
     new_value: &str,
 ) -> Result<String, String> {
-    let mut doc = content::parse_document(src)
+    let doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
-    content::modify_slot(&mut doc, slot_name, grammar, new_value)?;
-    Ok(content::serialize_document(&doc))
+    let grammar_arc = Arc::new(grammar.clone());
+    let transform = InsertSlot::new(grammar_arc, slot_name, new_value.to_string())
+        .map_err(|e| e.to_string())?;
+    let result_doc = transform.apply(doc).map_err(|e| e.to_string())?;
+    Ok(content::serialize_document(&result_doc))
+}
+
+/// Build a [`content::Transform`] from a [`SlotAction`].
+///
+/// The grammar is cloned into an `Arc` so that the resulting transform can be
+/// used independently from its source.
+pub fn build_transform(grammar: &Grammar, action: &SlotAction) -> Result<Box<dyn content::Transform>, String> {
+    let grammar_arc = Arc::new(grammar.clone());
+    match action {
+        SlotAction::InsertSlot { slot_name, placeholder_value } => {
+            Ok(Box::new(
+                InsertSlot::new(Arc::clone(&grammar_arc), slot_name, placeholder_value.clone())
+                    .map_err(|e| e.to_string())?,
+            ))
+        }
+        SlotAction::Capitalize { slot_name } => {
+            Ok(Box::new(
+                Capitalize::new(Arc::clone(&grammar_arc), slot_name)
+                    .map_err(|e| e.to_string())?,
+            ))
+        }
+        SlotAction::InsertSeparator => Ok(Box::new(InsertSeparator)),
+    }
 }
 
 /// Apply a SlotAction to a source string, returning the new file content.
@@ -909,22 +983,11 @@ pub fn apply_action(
     grammar: &Grammar,
     action: &SlotAction,
 ) -> Result<String, String> {
-    let mut doc = content::parse_document(src)
+    let doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
-    match action {
-        SlotAction::InsertSlot { slot_name, placeholder_value } => {
-            content::modify_slot(&mut doc, slot_name, grammar, placeholder_value)?;
-        }
-        SlotAction::Capitalize { slot_name } => {
-            content::capitalize_slot(&mut doc, slot_name, grammar)?;
-        }
-        SlotAction::InsertSeparator => {
-            if !doc.elements.iter().any(|e| matches!(e, content::ContentElement::Separator)) {
-                doc.elements.push(content::ContentElement::Separator);
-            }
-        }
-    }
-    Ok(content::serialize_document(&doc))
+    let transform = build_transform(grammar, action)?;
+    let result_doc = transform.apply(doc).map_err(|e| e.to_string())?;
+    Ok(content::serialize_document(&result_doc))
 }
 
 #[cfg(test)]
@@ -1671,16 +1734,16 @@ mod tests {
         let src = "# Old Title\n\nSummary text.\n\n[Author Name](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n\n### Body\n";
         let result = write_slot_to_string(src, "title", &grammar, "New Title")
             .expect("write_slot_to_string should succeed");
-        let parsed = content::parse_document_with_offsets(&result);
+        let parsed = content::parse_document(&result);
         assert!(
             parsed.is_ok(),
             "result document should parse without errors: {parsed:?}"
         );
-        let elements = parsed.unwrap();
-        let has_new_title = elements.iter().any(|e| {
-            matches!(&e.element, content::ContentElement::Heading { text, .. } if text == "New Title")
+        let doc = parsed.unwrap();
+        let has_new_title = doc.elements.iter().any(|e| {
+            matches!(&e.node, content::ContentElement::Heading { text, .. } if text == "New Title")
         });
-        assert!(has_new_title, "parsed document should contain the new heading: {elements:#?}");
+        assert!(has_new_title, "parsed document should contain the new heading: {doc:#?}");
     }
 
     #[test]
@@ -1764,9 +1827,9 @@ mod tests {
         let src = "Summary text.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
         let result = apply_action(src, &grammar, &SlotAction::InsertSlot {
             slot_name: "title".to_string(),
-            placeholder_value: "# New Title".to_string(),
+            placeholder_value: "New Title".to_string(),
         }).unwrap();
-        assert!(result.contains("# New Title"), "should contain inserted title: {result}");
+        assert!(result.contains("# New Title"), "should contain heading with # prefix: {result}");
     }
 
     #[test]
@@ -1793,12 +1856,13 @@ mod tests {
         let grammar = article_grammar();
         let src = "# Hello World\n\nSummary text.\n\n[Author Name](/author/author-name)\n\n![cover](images/cover.jpg)\n\n----\n\n";
         let completions = content_completions(src, &grammar, None);
+        // Body paragraphs are free-form prose — no completion offered.
         assert!(
-            completions.iter().any(|c| c.label == "Body paragraph"),
-            "should offer body paragraph completion after separator: {completions:#?}"
+            !completions.iter().any(|c| c.label == "Body paragraph"),
+            "body paragraph should NOT be offered (free-form prose): {completions:#?}"
         );
         assert!(
-            completions.iter().any(|c| c.label.starts_with("Body heading")),
+            completions.iter().any(|c| c.label.starts_with("H") && c.label.ends_with("heading")),
             "should offer body heading completion after separator: {completions:#?}"
         );
         // Separator should NOT be offered since it's already present
@@ -1806,5 +1870,35 @@ mod tests {
             !completions.iter().any(|c| c.label == "----"),
             "separator should not be offered when already present: {completions:#?}"
         );
+    }
+
+    #[test]
+    fn link_completions_returns_content_pages() {
+        let site_dir = std::path::Path::new("../../fixtures/blog-site");
+        let completions = link_completions(site_dir);
+        assert!(!completions.is_empty(), "should find content pages");
+    }
+
+    #[test]
+    fn link_completions_insert_text_is_markdown_link() {
+        let site_dir = std::path::Path::new("../../fixtures/blog-site");
+        let completions = link_completions(site_dir);
+        for c in &completions {
+            assert!(
+                c.insert_text.starts_with('['),
+                "should start with [: {}",
+                c.insert_text
+            );
+            assert!(
+                c.insert_text.contains("]("),
+                "should contain ](: {}",
+                c.insert_text
+            );
+            assert!(
+                c.insert_text.ends_with(')'),
+                "should end with ): {}",
+                c.insert_text
+            );
+        }
     }
 }

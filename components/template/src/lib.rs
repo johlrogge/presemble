@@ -4,6 +4,7 @@ pub mod dom;
 mod error;
 pub mod expr;
 pub mod hiccup;
+mod hiccup_serializer;
 pub mod registry;
 pub mod transformer;
 
@@ -12,8 +13,9 @@ pub use data::{build_article_graph, DataGraph, SuggestionKind, Value};
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};
-pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter};
+pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes};
 pub use hiccup::parse_template_hiccup;
+pub use hiccup_serializer::serialize_to_hiccup;
 pub use registry::{extract_definitions, NullRegistry, RenderContext, TemplateRegistry};
 
 /// Parse, transform, and serialize an XML/XHTML template against a data graph.

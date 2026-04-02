@@ -17,12 +17,18 @@ diagnostics.
 
 Open a content file in `content/<schema>/`. The LSP offers completions for every slot
 name declared in the matching schema. For link slots, it enumerates the actual content
-directory and inserts `[Title](/type/slug)` directly. Hover over any element to see
-the schema's hint text. Go-to-definition on a link jumps to the linked content file.
+directory and inserts `[Title](/type/slug)` directly. In the body section, typing `[`
+triggers inline link completions: all content pages in the site appear as narrowable
+candidates. H3–H6 heading completions are offered at the start of a body line.
+
+Hover over any element to see the schema's hint text. Go-to-definition on a link jumps
+to the linked content file.
 
 Diagnostics mirror the build: missing required slots, wrong occurrence counts,
 capitalization violations, and broken link references all appear inline as you type.
-Capitalization violations include a quickfix action — one keypress to fix.
+Capitalization violations include a quickfix action — one keypress to fix. Missing
+slots include an insert-snippet quickfix; the inserted text is structurally correct and
+does not duplicate heading markers.
 
 ### Template files
 

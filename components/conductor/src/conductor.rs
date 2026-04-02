@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::protocol::{Command, ConductorEvent, Response};
 
@@ -27,6 +27,17 @@ impl CommandResult {
     fn with_response(response: Response) -> Self {
         Self { response, events: vec![] }
     }
+}
+
+/// Convert a 0-based line number to a byte offset in `src`.
+///
+/// The offset points to the first byte of that line. If `line` exceeds the
+/// number of lines in `src`, the offset of the last byte is returned.
+fn line_to_byte_offset(src: &str, line: u32) -> usize {
+    src.lines()
+        .take(line as usize)
+        .map(|l| l.len() + 1) // +1 for newline
+        .sum()
 }
 
 /// Derive a URL path from a content-relative file path.
@@ -160,7 +171,7 @@ impl Conductor {
             .map_err(|e| format!("schema error: {e:?}"))?;
 
         // Parse content from in-memory text
-        let doc = content::parse_document(text)
+        let doc = content::parse_and_assign(text, &grammar)
             .map_err(|e| format!("parse error: {e}"))?;
 
         // Build data graph (suggestion nodes fill missing slots)
@@ -243,6 +254,57 @@ impl Conductor {
         Ok(vec![url_path])
     }
 
+    /// Map a cursor line to the anchor of the nearest body element (or preamble slot).
+    ///
+    /// Returns `None` if the document cannot be parsed or has no relevant elements.
+    fn body_element_anchor_at_line(&self, src: &str, path: &str, line: u32) -> Option<String> {
+        // Derive schema stem from path (e.g., "content/post/my-post.md" → "post")
+        let stem = path
+            .strip_prefix("content/")
+            .and_then(|p| p.split('/').next())?;
+
+        // Load grammar from cache
+        let schema_src = self.schema_source(stem)?;
+        let grammar = schema::parse_schema(&schema_src).ok()?;
+
+        // Parse and assign slots
+        let doc = content::parse_and_assign(src, &grammar).ok()?;
+
+        let byte_offset = line_to_byte_offset(src, line);
+
+        // Skip preamble — preamble elements don't have id attributes in the
+        // rendered HTML yet, so scrolling to them would silently fail.
+        // TODO: add id="presemble-slot-{name}" to rendered preamble elements,
+        // then re-enable preamble scroll.
+
+        // Check body elements — exact match
+        for (idx, spanned) in doc.body.iter().enumerate() {
+            if spanned.span.start <= byte_offset && byte_offset < spanned.span.end {
+                return Some(format!("presemble-body-{idx}"));
+            }
+        }
+
+        // Cursor might be between elements — find the nearest body element
+        if doc.has_separator && !doc.body.is_empty() {
+            let mut closest_idx = 0;
+            let mut closest_dist = usize::MAX;
+            for (idx, spanned) in doc.body.iter().enumerate() {
+                let dist = if byte_offset < spanned.span.start {
+                    spanned.span.start - byte_offset
+                } else {
+                    byte_offset - spanned.span.end
+                };
+                if dist < closest_dist {
+                    closest_dist = dist;
+                    closest_idx = idx;
+                }
+            }
+            return Some(format!("presemble-body-{closest_idx}"));
+        }
+
+        None
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -299,6 +361,17 @@ impl Conductor {
                 }
                 CommandResult::ok()
             }
+            Command::CursorMoved { path, line } => {
+                let abs_path = self.site_dir.join(&path);
+                if let Some(src) = self.document_text(&abs_path)
+                    && let Some(anchor) = self.body_element_anchor_at_line(&src, &path, line)
+                {
+                    return CommandResult::ok_with_events(vec![
+                        ConductorEvent::CursorScrollTo { anchor },
+                    ]);
+                }
+                CommandResult::ok()
+            }
             Command::EditSlot { file, slot, value } => {
                 let abs_path = self.site_dir.join(&file);
 
@@ -339,14 +412,21 @@ impl Conductor {
                 };
 
                 // Parse, modify, serialize, and write
-                let mut doc = match content::parse_document(&content_src) {
+                let doc = match content::parse_and_assign(&content_src, &grammar) {
                     Ok(d) => d,
                     Err(e) => return CommandResult::error(format!("parse error: {e}")),
                 };
 
-                if let Err(e) = content::modify_slot(&mut doc, &slot, &grammar, &value) {
-                    return CommandResult::error(e);
-                }
+                let grammar_arc = Arc::new(grammar);
+                let transform = match content::InsertSlot::new(Arc::clone(&grammar_arc), &slot, value) {
+                    Ok(t) => t,
+                    Err(e) => return CommandResult::error(e.to_string()),
+                };
+                use content::Transform as _;
+                let doc = match transform.apply(doc) {
+                    Ok(d) => d,
+                    Err(e) => return CommandResult::error(e.to_string()),
+                };
 
                 let new_src = content::serialize_document(&doc);
                 if let Err(e) = std::fs::write(&abs_path, &new_src) {

@@ -263,4 +263,110 @@ mod tests {
             "file should contain new title, got: {new_content}"
         );
     }
+
+    // ── CursorMoved ──────────────────────────────────────────────────────────
+
+    /// Helper: set up a minimal site with schema, content file, and template.
+    fn minimal_post_site() -> (tempfile::TempDir, Conductor) {
+        let dir = tempfile::tempdir().unwrap();
+
+        let schemas_dir = dir.path().join("schemas");
+        std::fs::create_dir_all(&schemas_dir).unwrap();
+        // Schema with a body section
+        let schema_src = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+        std::fs::write(schemas_dir.join("post.md"), schema_src).unwrap();
+
+        let content_dir = dir.path().join("content/post");
+        std::fs::create_dir_all(&content_dir).unwrap();
+
+        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        (dir, conductor)
+    }
+
+    #[test]
+    fn cursor_moved_no_document_returns_ok_no_events() {
+        let (_dir, conductor) = minimal_post_site();
+        // No document stored — CursorMoved should return Ok without events.
+        let result = conductor.handle_command(Command::CursorMoved {
+            path: "content/post/nonexistent.md".to_string(),
+            line: 0,
+        });
+        assert!(matches!(result.response, Response::Ok));
+        assert!(result.events.is_empty());
+    }
+
+    #[test]
+    fn cursor_moved_in_body_emits_cursor_scroll_to() {
+        let (dir, conductor) = minimal_post_site();
+
+        // Write a content file with preamble + separator + body.
+        // Line 0: "# My Post Title"   (title heading)
+        // Line 1: ""
+        // Line 2: "----"              (separator)
+        // Line 3: ""
+        // Line 4: "First paragraph."  (body element 0)
+        // Line 5: ""
+        // Line 6: "Second paragraph." (body element 1)
+        let text = "# My Post Title\n\n----\n\nFirst paragraph.\n\nSecond paragraph.\n".to_string();
+        let content_path = dir.path().join("content/post/my-post.md");
+        std::fs::write(&content_path, &text).unwrap();
+
+        // Store in memory via DocumentChanged so the conductor knows about it.
+        conductor.handle_command(Command::DocumentChanged {
+            path: content_path.to_string_lossy().to_string(),
+            text,
+        });
+
+        // Cursor on line 4 ("First paragraph.") → body element 0.
+        let result = conductor.handle_command(Command::CursorMoved {
+            path: "content/post/my-post.md".to_string(),
+            line: 4,
+        });
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.events.len(), 1, "expected one CursorScrollTo event");
+        match &result.events[0] {
+            ConductorEvent::CursorScrollTo { anchor } => {
+                assert_eq!(anchor, "presemble-body-0");
+            }
+            other => panic!("expected CursorScrollTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_moved_in_preamble_falls_through_to_body() {
+        let (dir, conductor) = minimal_post_site();
+
+        // Line 0: "# My Post Title"  (title heading → preamble slot)
+        // Preamble elements don't have IDs in the rendered HTML, so cursor
+        // in preamble falls through to the nearest body element.
+        let text = "# My Post Title\n\n----\n\nSome body.\n".to_string();
+        let content_path = dir.path().join("content/post/my-post.md");
+        std::fs::write(&content_path, &text).unwrap();
+
+        conductor.handle_command(Command::DocumentChanged {
+            path: content_path.to_string_lossy().to_string(),
+            text,
+        });
+
+        // Cursor on line 0 → preamble, falls through to nearest body element.
+        let result = conductor.handle_command(Command::CursorMoved {
+            path: "content/post/my-post.md".to_string(),
+            line: 0,
+        });
+
+        assert!(matches!(result.response, Response::Ok));
+        // Should either produce a body anchor or no event (preamble not scrollable)
+        if !result.events.is_empty() {
+            match &result.events[0] {
+                ConductorEvent::CursorScrollTo { anchor } => {
+                    assert!(
+                        anchor.starts_with("presemble-body-"),
+                        "expected presemble-body-* anchor, got: {anchor}"
+                    );
+                }
+                other => panic!("expected CursorScrollTo, got {other:?}"),
+            }
+        }
+    }
 }

@@ -1,5 +1,6 @@
 use lsp_capabilities::{
-    apply_action, content_completions, definition_for_position, hover_for_line,
+    build_transform, content_completions, definition_for_position, hover_for_line,
+    link_completions,
     schema_completions, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
     DiagnosticSeverity, SlotAction, TemplateDefinitionTarget,
@@ -180,6 +181,64 @@ impl PresembleLsp {
 }
 
 
+/// Convert a `content::SourceEdit` to an LSP `TextEdit` using byte-to-position mapping.
+fn source_edit_to_text_edit(src: &str, edit: &content::SourceEdit) -> TextEdit {
+    let (start_line, start_char) = content::byte_to_position(src, edit.span.start);
+    let (end_line, end_char) = content::byte_to_position(src, edit.span.end);
+    TextEdit {
+        range: Range {
+            start: Position { line: start_line, character: start_char },
+            end: Position { line: end_line, character: end_char },
+        },
+        new_text: edit.new_text.clone(),
+    }
+}
+
+/// Build targeted LSP TextEdits for a SlotAction by running the full diff pipeline.
+///
+/// Falls back to a full-document replacement if the diff produces complex changes
+/// (SlotAdded, SlotRemoved, SeparatorAdded, SeparatorRemoved).
+fn build_targeted_edits(src: &str, grammar: &schema::Grammar, action: &SlotAction) -> Vec<TextEdit> {
+    let transform: Box<dyn content::Transform> = match build_transform(grammar, action) {
+        Ok(t) => t,
+        Err(_) => return full_doc_replacement(src, grammar, action),
+    };
+    let before = match content::parse_and_assign(src, grammar) {
+        Ok(d) => d,
+        Err(_) => return full_doc_replacement(src, grammar, action),
+    };
+    let after = match transform.apply(before.clone()) {
+        Ok(d) => d,
+        Err(_) => return full_doc_replacement(src, grammar, action),
+    };
+    let diff = content::diff(&before, &after);
+    let source_edits = content::diff_to_source_edits(src, &before, &after, &diff);
+    if source_edits.is_empty() && !diff.is_empty() {
+        // Diff was non-empty but produced no edits — fall back to full replacement.
+        return full_doc_replacement(src, grammar, action);
+    }
+    source_edits
+        .iter()
+        .map(|e| source_edit_to_text_edit(src, e))
+        .collect()
+}
+
+/// Fall back to a full-document replacement TextEdit.
+fn full_doc_replacement(src: &str, grammar: &schema::Grammar, action: &SlotAction) -> Vec<TextEdit> {
+    use lsp_capabilities::apply_action;
+    let new_content = match apply_action(src, grammar, action) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    vec![TextEdit {
+        range: Range {
+            start: Position { line: 0, character: 0 },
+            end: Position { line: u32::MAX, character: 0 },
+        },
+        new_text: new_content,
+    }]
+}
+
 #[async_trait]
 impl LanguageServer for PresembleLsp {
     async fn initialize(&self, _: InitializeParams) -> tower_lsp::jsonrpc::Result<InitializeResult> {
@@ -266,15 +325,14 @@ impl LanguageServer for PresembleLsp {
             match kind {
                 site_index::FileKind::Content { .. } => {
                     // Auto-format: parse and serialize to canonical form
-                    if let Ok(doc) = content::parse_document(&src) {
+                    if let Some((grammar, _)) = self.grammar_for_uri(&uri)
+                        && let Ok(doc) = content::parse_and_assign(&src, &grammar)
+                    {
                         let canonical = content::serialize_document(&doc);
                         if canonical != src {
-                            // Write canonical form to disk
-                            let _ = std::fs::write(
-                                uri.to_file_path().unwrap_or_default(),
-                                &canonical,
-                            );
-                            // Send the canonical form to the editor
+                            // Send the canonical form to the editor buffer via applyEdit.
+                            // Don't write to disk — Helix will write on the next save,
+                            // avoiding the "document modified on disk" warning.
                             let mut changes = std::collections::HashMap::new();
                             changes.insert(uri.clone(), vec![TextEdit {
                                 range: Range {
@@ -376,8 +434,66 @@ impl LanguageServer for PresembleLsp {
                     return Ok(None);
                 };
                 let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                let pos = p.text_document_position.position;
+
+                // When triggered by `[` and cursor is in the body section, offer link completions
+                let trigger = p
+                    .context
+                    .as_ref()
+                    .and_then(|c| c.trigger_character.as_deref());
+                if trigger == Some("[")
+                    && separator_line(&src).is_some_and(|sl| pos.line > sl)
+                {
+                    let link_items = link_completions(self.site_index.site_dir());
+                    let current_line = line_text(&src, pos.line);
+                    let bracket_col = current_line[..pos.character as usize]
+                        .rfind('[')
+                        .map(|i| i as u32)
+                        .unwrap_or(pos.character);
+
+                    let items: Vec<CompletionItem> = link_items
+                        .into_iter()
+                        .map(|c| CompletionItem {
+                            label: c.label.clone(),
+                            kind: Some(CompletionItemKind::REFERENCE),
+                            detail: Some(c.detail.clone()),
+                            filter_text: Some(format!("[{}", c.label)),
+                            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                                range: Range {
+                                    start: Position {
+                                        line: pos.line,
+                                        character: bracket_col,
+                                    },
+                                    end: Position {
+                                        line: pos.line,
+                                        character: pos.character,
+                                    },
+                                },
+                                new_text: c.insert_text,
+                            })),
+                            insert_text: None,
+                            insert_text_format: None,
+                            ..Default::default()
+                        })
+                        .collect();
+                    return Ok(Some(CompletionResponse::Array(items)));
+                }
+
+                let line_end_char = line_length(&src, pos.line);
+                let current_line = line_text(&src, pos.line);
+                let at_heading_start = current_line.trim().is_empty()
+                    || current_line.trim().chars().all(|c| c == '#')
+                    || current_line.trim().starts_with('#');
                 let items: Vec<CompletionItem> = content_completions(&src, &grammar, Some(self.site_index.site_dir()))
                     .into_iter()
+                    .filter(|c| {
+                        // Body heading completions only on lines that look like heading starts
+                        if c.label.starts_with('H') && c.label.ends_with("heading") {
+                            at_heading_start
+                        } else {
+                            true
+                        }
+                    })
                     .map(|c| CompletionItem {
                         label: c.label,
                         kind: Some(CompletionItemKind::FIELD),
@@ -386,7 +502,14 @@ impl LanguageServer for PresembleLsp {
                             kind: MarkupKind::Markdown,
                             value: d,
                         })),
-                        insert_text: Some(c.insert_text),
+                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                            range: Range {
+                                start: Position { line: pos.line, character: 0 },
+                                end: Position { line: pos.line, character: line_end_char },
+                            },
+                            new_text: c.insert_text,
+                        })),
+                        insert_text: None,
                         insert_text_format: if c.is_snippet {
                             Some(InsertTextFormat::SNIPPET)
                         } else {
@@ -409,6 +532,16 @@ impl LanguageServer for PresembleLsp {
         drop(sources);
         let line = p.text_document_position_params.position.line;
         let path = uri.to_file_path().unwrap_or_default();
+        // Notify conductor of cursor position for browser scroll-follow.
+        // Fire-and-forget: if conductor is unavailable, hover still works.
+        if let Some(ref cond) = self.conductor {
+            let rel = path
+                .strip_prefix(&self.site_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
+        }
         let kind = self.site_index.classify(&path);
         match kind {
             site_index::FileKind::Template { .. } => {
@@ -481,24 +614,21 @@ impl LanguageServer for PresembleLsp {
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
         for (_diag, maybe_action) in stored {
             let Some(slot_action) = maybe_action else { continue };
-            let new_content = match apply_action(&src, &grammar, &slot_action) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
             let title = match &slot_action {
                 SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
                 SlotAction::InsertSlot { slot_name, .. } => format!("Insert {slot_name}"),
                 SlotAction::InsertSeparator => "Insert body separator".to_string(),
             };
-            let edit = TextEdit {
-                range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: u32::MAX, character: 0 },
-                },
-                new_text: new_content,
-            };
+
+            // Build targeted source edits using the diff pipeline.
+            let text_edits = build_targeted_edits(&src, &grammar, &slot_action);
+            // If targeted edits returned nothing, skip this action (shouldn't happen).
+            if text_edits.is_empty() {
+                continue;
+            }
+
             let mut changes = std::collections::HashMap::new();
-            changes.insert(uri.clone(), vec![edit]);
+            changes.insert(uri.clone(), text_edits);
             let workspace_edit = WorkspaceEdit {
                 changes: Some(changes),
                 ..Default::default()
@@ -561,4 +691,25 @@ impl LanguageServer for PresembleLsp {
             }
         }
     }
+}
+
+fn line_length(src: &str, line: u32) -> u32 {
+    src.lines()
+        .nth(line as usize)
+        .map(|l| l.len() as u32)
+        .unwrap_or(0)
+}
+
+fn line_text(src: &str, line: u32) -> String {
+    src.lines()
+        .nth(line as usize)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn separator_line(src: &str) -> Option<u32> {
+    src.lines()
+        .enumerate()
+        .find(|(_, l)| l.trim() == "----")
+        .map(|(i, _)| i as u32)
 }
