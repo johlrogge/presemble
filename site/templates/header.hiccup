@@ -1,0 +1,7 @@
+[:header {:class "site-header"}
+  [:a {:class "site-header__logo" :href "/"} "Presemble"]
+  [:nav {:class "site-header__nav"}
+    [:a {:href "/"} "Home"]
+    [:a {:href "/docs"} "Docs"]
+  ]
+]

@@ -2,8 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use template::{
-    dom::{Node, parse_template_xml},
-    hiccup::parse_template_hiccup,
+    dom::Node,
     registry::extract_definitions,
 };
 
@@ -43,28 +42,11 @@ impl FileTemplateRegistry {
             }
         }
 
-        // Try new directory-based convention first: {stem}/item.html or {stem}/item.hiccup
-        // Then fall back to legacy flat convention: {stem}.html or {stem}.hiccup
-        let dir_html_path = self.templates_dir.join(file_stem).join("item.html");
-        let dir_hiccup_path = self.templates_dir.join(file_stem).join("item.hiccup");
-        let flat_html_path = self.templates_dir.join(format!("{file_stem}.html"));
-        let flat_hiccup_path = self.templates_dir.join(format!("{file_stem}.hiccup"));
-
-        let nodes = if dir_html_path.exists() {
-            let src = std::fs::read_to_string(&dir_html_path).ok()?;
-            parse_template_xml(&src).ok()?
-        } else if dir_hiccup_path.exists() {
-            let src = std::fs::read_to_string(&dir_hiccup_path).ok()?;
-            parse_template_hiccup(&src).ok()?
-        } else if flat_html_path.exists() {
-            let src = std::fs::read_to_string(&flat_html_path).ok()?;
-            parse_template_xml(&src).ok()?
-        } else if flat_hiccup_path.exists() {
-            let src = std::fs::read_to_string(&flat_hiccup_path).ok()?;
-            parse_template_hiccup(&src).ok()?
-        } else {
-            return None;
-        };
+        // Try directory-based convention first ({stem}/item), then flat ({stem})
+        let nodes = template::resolve_template_file(&self.templates_dir, &format!("{file_stem}/item"))
+            .or_else(|_| template::resolve_template_file(&self.templates_dir, file_stem))
+            .ok()
+            .map(|(nodes, _path)| nodes)?;
 
         let (main, defs) = extract_definitions(nodes);
         let result = (main, defs);
