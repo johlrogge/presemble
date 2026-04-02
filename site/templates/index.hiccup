@@ -1,0 +1,54 @@
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Presemble — Data Not Text"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]
+  ]
+  [:body
+    [:presemble/include {:src "header"}]
+    [:main {:class "home"}
+      [:section {:class "hero"}
+        [:h1 "Data Not Text"]
+        [:presemble/insert {:data "index.tagline" :as "p"}]
+      ]
+      [:template {:data-slot "index.pitch"}
+        [:section {:class "pitch"}
+          [:presemble/insert {:data "index.pitch" :as "p"}]
+        ]
+      ]
+      [:template {:data-slot "index.body"}
+        [:section {:class "why-presemble"}
+          [:h2 "Why Presemble"]
+          [:presemble/insert {:data "index.body"}]
+        ]
+      ]
+      [:section {:class "feature-grid"}
+        [:h2 "Core Principles"]
+        [:ul {:class "feature-grid__items"}
+          [:template {:data-each "features"}
+            [:li {:class "feature-card"}
+              [:presemble/insert {:data "title" :as "h3"}]
+              [:presemble/insert {:data "tagline"}]
+              [:presemble/insert {:data "description" :as "p"}]
+              [:presemble/insert {:data "link"}]
+            ]
+          ]
+        ]
+      ]
+      [:section {:class "latest-posts"}
+        [:h2 "From the Blog"]
+        [:ul {:class "latest-posts__items"}
+          [:template {:data-each "posts"}
+            [:li {:class "post-card"}
+              [:presemble/insert {:data "title" :as "h3"}]
+              [:presemble/insert {:data "summary"}]
+              [:presemble/insert {:data "link"}]
+            ]
+          ]
+        ]
+      ]
+    ]
+    [:presemble/include {:src "footer"}]
+  ]
+]

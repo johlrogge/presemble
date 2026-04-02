@@ -1,0 +1,34 @@
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Presemble"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]
+  ]
+  [:body
+    [:presemble/include {:src "header"}]
+    [:main {:class "post"}
+      [:article
+        [:header {:class "post__header"}
+          [:presemble/insert {:data "post.title" :as "h1"}]
+        ]
+        [:div {:class "post__summary"}
+          [:presemble/insert {:data "post.summary" :as "p"}]
+        ]
+        [:div {:class "post__author"}
+          [:p {:class "post__byline"}
+            "\n        By "
+            [:presemble/insert {:data "post.author" :as "a"}]
+          ]
+          [:div {:class "post__author-bio"}
+            [:presemble/insert {:data "post.author.bio" :as "p"}]
+          ]
+        ]
+        [:div {:class "post__body"}
+          [:presemble/insert {:data "post.body"}]
+        ]
+      ]
+    ]
+    [:presemble/include {:src "footer"}]
+  ]
+]

@@ -1,0 +1,25 @@
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Presemble"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]
+  ]
+  [:body
+    [:presemble/include {:src "header"}]
+    [:main {:class "guide"}
+      [:nav {:class "guide__toc" :id "guide-toc" :aria-label "Contents"}]
+      [:article {:class "guide__content"}
+        [:header {:class "guide__header"}
+          [:presemble/insert {:data "guide.title" :as "h1"}]
+          [:presemble/insert {:data "guide.summary" :as "p"}]
+        ]
+        [:div {:class "guide__body"}
+          [:presemble/insert {:data "guide.body"}]
+        ]
+      ]
+    ]
+    [:presemble/include {:src "footer"}]
+    [:script "\n(function () {\n  var body = document.querySelector('.guide__body');\n  var toc = document.getElementById('guide-toc');\n  if (!body || !toc) return;\n\n  var headings = body.querySelectorAll('h2, h3');\n  if (headings.length === 0) return;\n\n  var ol = document.createElement('ol');\n  var currentH2Li = null;\n  var currentH3Ol = null;\n\n  headings.forEach(function (h) {\n    if (!h.id) return;\n    var li = document.createElement('li');\n    var a = document.createElement('a');\n    a.href = '#' + h.id;\n    a.textContent = h.textContent;\n    li.appendChild(a);\n\n    if (h.tagName === 'H2') {\n      currentH3Ol = null;\n      currentH2Li = li;\n      ol.appendChild(li);\n    } else {\n      li.classList.add('toc-h3');\n      if (!currentH3Ol) {\n        currentH3Ol = document.createElement('ol');\n        if (currentH2Li) {\n          currentH2Li.appendChild(currentH3Ol);\n        } else {\n          ol.appendChild(currentH3Ol);\n        }\n      }\n      currentH3Ol.appendChild(li);\n    }\n  });\n\n  toc.appendChild(ol);\n}());\n"]
+  ]
+]

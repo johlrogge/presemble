@@ -1002,53 +1002,47 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         }
     }
 
-    // Render templates/index.html if it exists
-    let index_template_path = site_dir.join("templates").join("index.html");
-
-    if index_template_path.exists() {
-        match std::fs::read_to_string(&index_template_path) {
-            Ok(tmpl_src) => {
-                match template::parse_template_xml(&tmpl_src)
-                    .map_err(|e| CliError::Render(format!("index template parse error: {e}")))
-                    .and_then(|raw_nodes| {
-                        let (nodes, local_defs) = template::extract_definitions(raw_nodes);
-                        let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
-                        let transformed = template::transform(nodes, &site_context, &ctx)
-                            .map_err(|e| CliError::Render(e.to_string()))?;
+    // Render the index template (homepage) if it exists
+    let templates_dir = site_dir.join("templates");
+    match template::resolve_template_file(&templates_dir, "index") {
+        Ok((raw_nodes, index_template_path)) => {
+            let render_result = {
+                let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+                let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
+                template::transform(nodes, &site_context, &ctx)
+                    .map_err(|e| CliError::Render(e.to_string()))
+                    .map(|transformed| {
                         let rewriter = make_rewriter("/", url_config);
-                        let rewritten = template::rewrite_urls(transformed, &rewriter);
-                        Ok(template::serialize_nodes(&rewritten))
-                    }) {
-                    Ok(html) => {
-                        let out_dir = output_dir(site_dir);
-                        std::fs::create_dir_all(&out_dir)?;
-                        let index_output = out_dir.join("index.html");
-                        std::fs::write(&index_output, &html)?;
-                        println!("index.html: PASS");
-                        println!("  \u{2192} {}", index_output.display());
-                        files_built += 1;
+                        template::serialize_nodes(&template::rewrite_urls(transformed, &rewriter))
+                    })
+            };
+            match render_result {
+                Ok(html) => {
+                    let out_dir = output_dir(site_dir);
+                    std::fs::create_dir_all(&out_dir)?;
+                    let index_output = out_dir.join("index.html");
+                    std::fs::write(&index_output, &html)?;
+                    println!("index.html: PASS");
+                    println!("  \u{2192} {}", index_output.display());
+                    files_built += 1;
 
-                        let mut index_deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-                        index_deps.insert(index_template_path.clone());
-                        index_deps.extend(all_content_paths.iter().cloned());
-                        index_deps.extend(all_schema_paths.iter().cloned());
-                        // Track index-specific content and schema as dependencies
-                        index_deps.insert(index_schema_path.clone());
-                        index_deps.insert(index_content_dir.join("index.md"));
-                        dep_graph.register(index_output.clone(), index_deps);
-                    }
-                    Err(e) => {
-                        eprintln!("index.html: FAIL (render error: {e})");
-                        files_failed += 1;
-                    }
+                    let mut index_deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+                    index_deps.insert(index_template_path);
+                    index_deps.extend(all_content_paths.iter().cloned());
+                    index_deps.extend(all_schema_paths.iter().cloned());
+                    index_deps.insert(index_schema_path.clone());
+                    index_deps.insert(index_content_dir.join("index.md"));
+                    dep_graph.register(index_output.clone(), index_deps);
+                }
+                Err(e) => {
+                    eprintln!("index.html: FAIL (render error: {e})");
+                    files_failed += 1;
                 }
             }
-            Err(e) => {
-                eprintln!("Warning: could not read templates/index.html: {e}");
-            }
         }
-    } else {
-        eprintln!("Warning: templates/index.html not found — no index page generated");
+        Err(e) => {
+            eprintln!("Warning: {e} — no homepage generated");
+        }
     }
 
     // Collect all built URL paths for link validation
