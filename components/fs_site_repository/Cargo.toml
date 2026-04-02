@@ -1,0 +1,13 @@
+[package]
+name = "fs_site_repository"
+version = "0.16.1"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "site_repository"
+
+[dependencies]
+site_index = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

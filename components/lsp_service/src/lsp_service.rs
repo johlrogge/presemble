@@ -19,6 +19,7 @@ struct StoredDiagnostic {
 pub struct PresembleLsp {
     client: Client,
     site_index: site_index::SiteIndex,
+    repo: fs_site_repository::SiteRepository,
     pub site_dir: std::path::PathBuf,
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
@@ -29,9 +30,11 @@ impl PresembleLsp {
     pub fn new(client: Client, site_dir: std::path::PathBuf, conductor: Option<conductor::ConductorClient>) -> Self {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
+        let repo = fs_site_repository::SiteRepository::new(site_dir.clone());
         Self {
             client,
             site_index,
+            repo,
             site_dir,
             doc_sources: Arc::new(Mutex::new(HashMap::new())),
             doc_diagnostics: Arc::new(Mutex::new(HashMap::new())),
@@ -444,7 +447,7 @@ impl LanguageServer for PresembleLsp {
                 if trigger == Some("[")
                     && separator_line(&src).is_some_and(|sl| pos.line > sl)
                 {
-                    let link_items = link_completions(self.site_index.site_dir());
+                    let link_items = link_completions(&self.repo);
                     let current_line = line_text(&src, pos.line);
                     let bracket_col = current_line[..pos.character as usize]
                         .rfind('[')
@@ -484,7 +487,7 @@ impl LanguageServer for PresembleLsp {
                 let at_heading_start = current_line.trim().is_empty()
                     || current_line.trim().chars().all(|c| c == '#')
                     || current_line.trim().starts_with('#');
-                let items: Vec<CompletionItem> = content_completions(&src, &grammar, Some(self.site_index.site_dir()))
+                let items: Vec<CompletionItem> = content_completions(&src, &grammar, Some(&self.repo))
                     .into_iter()
                     .filter(|c| {
                         // Body heading completions only on lines that look like heading starts

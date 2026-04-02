@@ -11,3 +11,5 @@ schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 validation = { workspace = true }
+fs_site_repository = { workspace = true }
+site_index = { workspace = true }

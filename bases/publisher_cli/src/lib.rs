@@ -8,7 +8,7 @@ pub use template_registry::FileTemplateRegistry;
 pub use dep_graph::DependencyGraph;
 pub use error::CliError;
 
-use site_index::{EntryKind, SchemaStem, SiteEntry, SiteGraph, SiteIndex, UrlPath};
+use site_index::{EntryKind, SchemaStem, SiteEntry, SiteGraph, UrlPath};
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -396,7 +396,8 @@ fn load_url_config(
 ///
 /// Returns `Ok(PageBuildAttempt)` in all cases — the attempt records whether parsing
 /// succeeded, what the validation result was, and (if parsing succeeded) the page data.
-/// Returns `Err(CliError)` only for IO errors.
+/// Returns `Err(CliError)` only for IO errors (from callers; this function itself
+/// no longer performs IO — sources are pre-read by the caller via `SiteRepository`).
 ///
 /// Callers inspect the `PageBuildAttempt` and apply policy to decide what to do.
 pub fn build_content_page(
@@ -404,6 +405,7 @@ pub fn build_content_page(
     schema_stem: &str,
     schema_path: &std::path::Path,
     content_path: &std::path::Path,
+    content_src: &str,
     grammar: &schema::Grammar,
 ) -> Result<PageBuildAttempt, CliError> {
     let file_name = content_path
@@ -412,9 +414,7 @@ pub fn build_content_page(
         .unwrap_or("<unknown>")
         .to_string();
 
-    let content_source = std::fs::read_to_string(content_path)?;
-
-    let doc = match content::parse_and_assign(&content_source, grammar) {
+    let doc = match content::parse_and_assign(content_src, grammar) {
         Ok(d) => d,
         Err(e) => {
             let msg = format!("parse error: {e}");
@@ -717,7 +717,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
 
     println!("Building site: {}", site_dir.display());
 
-    let site_index = SiteIndex::new(site_dir.to_path_buf());
+    let repo = fs_site_repository::SiteRepository::new(site_dir);
 
     let mut files_built: usize = 0;
     let mut files_failed: usize = 0;
@@ -729,12 +729,12 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     let mut build_errors: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let mut page_suggestions: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 
-    // Discover all schema stems via site_index
-    let schema_stems_list = site_index.schema_stems();
+    // Discover all schema stems via repo
+    let schema_stems_list = repo.schema_stems();
 
     // Discover and copy referenced assets from templates
     let templates_dir = site_dir.join("templates");
-    let registry = FileTemplateRegistry::new(&templates_dir);
+    let registry = FileTemplateRegistry::new(repo.clone());
     let mut all_asset_paths = std::collections::BTreeSet::new();
     let mut all_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut included_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -833,8 +833,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
 
     let mut schema_stems: Vec<String> = Vec::new();
 
-    for schema_stem in &schema_stems_list {
-        let schema_stem: &str = schema_stem;
+    for stem in &schema_stems_list {
+        let schema_stem: &str = stem.as_str();
 
         // The "index" schema is reserved for feeding data into the index template.
         // It does not generate standalone content pages and is handled separately below.
@@ -842,7 +842,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
             continue;
         }
 
-        let schema_path = site_index.schema_path(schema_stem);
+        let schema_path = repo.schema_path(stem);
 
         // Track schema stem for unused-source warnings
         schema_stems.push(schema_stem.to_string());
@@ -850,8 +850,15 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         // Track schema path for index deps
         all_schema_paths.push(schema_path.clone());
 
-        // Read and parse the schema
-        let schema_source = std::fs::read_to_string(&schema_path)?;
+        // Read and parse the schema via repo
+        let schema_source = match repo.schema_source(stem) {
+            Some(s) => s,
+            None => {
+                eprintln!("schema error: could not read {}", schema_path.display());
+                files_failed += 1;
+                continue;
+            }
+        };
         let grammar = match schema::parse_schema(&schema_source) {
             Ok(g) => g,
             Err(e) => {
@@ -861,7 +868,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
             }
         };
 
-        // Discover content files for this schema via site_index
+        // Discover content slugs for this schema via repo
         let content_dir = site_dir.join("content").join(schema_stem);
         if !content_dir.exists() {
             eprintln!(
@@ -870,9 +877,20 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
             );
             continue;
         }
-        let content_paths = site_index.content_files(schema_stem);
+        let content_slugs = repo.content_slugs(stem);
 
-        for content_path in content_paths {
+        for slug in content_slugs {
+            let content_path = repo.content_path(stem, &slug);
+
+            // Read content source via repo
+            let content_source = match repo.content_source(stem, &slug) {
+                Some(s) => s,
+                None => {
+                    eprintln!("warning: could not read content/{schema_stem}/{slug}.md");
+                    continue;
+                }
+            };
+
             // Track content path for index deps
             all_content_paths.push(content_path.clone());
 
@@ -881,6 +899,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
                 schema_stem,
                 &schema_path,
                 &content_path,
+                &content_source,
                 &grammar,
             )?;
             let disposition = (policy.page_policy)(&attempt);
@@ -942,16 +961,22 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     }
 
     // Phase 1b: Build collection entries (content/{stem}/index.md)
-    let templates_dir_col = site_dir.join("templates");
-    for schema_stem in site_index.schema_stems() {
+    for stem in repo.schema_stems() {
+        let schema_stem = stem.as_str();
         if schema_stem == "index" {
             continue;
         }
-        let collection_content_path = site_dir.join("content").join(&schema_stem).join("index.md");
+        let collection_content_path = repo.collection_content_path(&stem);
         if !collection_content_path.exists() {
             continue;
         }
-        let collection_schema_path = site_dir.join("schemas").join(&schema_stem).join("index.md");
+        // Collection schema uses the `index.md` naming convention (not `collection.md`).
+        // The SiteRepository uses `collection.md`, so we use the direct path here until
+        // the repo naming is unified.
+        let collection_schema_path = site_dir
+            .join("schemas")
+            .join(schema_stem)
+            .join("index.md");
         if !collection_schema_path.exists() {
             eprintln!(
                 "{}/index.md: FAIL (collection content exists but schemas/{}/index.md is missing)",
@@ -960,9 +985,19 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
             files_failed += 1;
             continue;
         }
-        let collection_template =
-            template::resolve_template_file(&templates_dir_col, &format!("{schema_stem}/index"));
-        let Ok((_, collection_template_path)) = collection_template else {
+        // Resolve the collection template path via repo. The repo tries
+        // `templates/{stem}/index.hiccup` then `templates/{stem}/index.html`.
+        let collection_template_path = {
+            let base = site_dir.join("templates").join(schema_stem).join("index");
+            if base.with_extension("hiccup").exists() {
+                Some(base.with_extension("hiccup"))
+            } else if base.with_extension("html").exists() {
+                Some(base.with_extension("html"))
+            } else {
+                None
+            }
+        };
+        let Some(collection_template_path) = collection_template_path else {
             eprintln!("{}/index.md: FAIL (no collection template found)", schema_stem);
             files_failed += 1;
             continue;
@@ -983,10 +1018,10 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
                 continue;
             }
         };
-        let content_src = match std::fs::read_to_string(&collection_content_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}/index.md: FAIL (cannot read content: {e})", schema_stem);
+        let content_src = match repo.collection_content_source(&stem) {
+            Some(s) => s,
+            None => {
+                eprintln!("{}/index.md: FAIL (cannot read collection content)", schema_stem);
                 files_failed += 1;
                 continue;
             }
@@ -1007,19 +1042,19 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         }
         let collection_graph = template::build_article_graph(&collection_doc, &collection_grammar);
         let url_path_str = format!("/{schema_stem}/");
-        let out_dir_col = output_dir(site_dir).join(&schema_stem);
+        let out_dir_col = output_dir(site_dir).join(schema_stem);
         let output_path_col = out_dir_col.join("index.html");
         let mut deps_col: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
         deps_col.insert(collection_template_path.clone());
         deps_col.insert(collection_content_path.clone());
         deps_col.insert(collection_schema_path.clone());
-        for item_content_path in site_index.content_files(&schema_stem) {
-            deps_col.insert(item_content_path);
+        for slug in repo.content_slugs(&stem) {
+            deps_col.insert(repo.content_path(&stem, &slug));
         }
         dep_graph.register(output_path_col.clone(), deps_col.clone());
         let entry = SiteEntry {
             kind: EntryKind::Collection,
-            schema_stem: SchemaStem::new(&schema_stem),
+            schema_stem: SchemaStem::new(schema_stem),
             url_path: UrlPath::new(&url_path_str),
             output_path: output_path_col,
             template_path: collection_template_path,
@@ -1034,26 +1069,29 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
     // Phase 1c: Build site index entry.
     // Always insert a SiteIndex entry if an index template exists.
     // If content/index.md also exists, populate the entry's data from it.
-    let index_schema_path = site_index.schema_path("index");
-    let index_content_path = site_dir.join("content/index.md");
+    let index_stem = SchemaStem::new("index");
+    let index_schema_path = repo.index_schema_path();
+    let index_content_path = repo.index_content_path();
     {
-        // resolve_template_file returns the parsed nodes + path; we only need the path here.
-        // find_template is simpler (path-only) but doesn't cover all conventions.
-        // Use find_template first (it covers both directory and flat conventions),
-        // then fall back to resolve_template_file for anything else.
-        let index_tmpl = find_template(&templates_dir, "index")
-            .or_else(|| {
-                template::resolve_template_file(&templates_dir, "index")
-                    .ok()
-                    .map(|(_, p)| p)
-            });
+        // Resolve the index template path via repo. The repo tries
+        // `templates/index.hiccup` then `templates/index.html`.
+        let index_tmpl = {
+            let base = templates_dir.join("index");
+            if base.with_extension("hiccup").exists() {
+                Some(base.with_extension("hiccup"))
+            } else if base.with_extension("html").exists() {
+                Some(base.with_extension("html"))
+            } else {
+                None
+            }
+        };
         if let Some(index_tmpl_path) = index_tmpl {
             let mut index_graph = template::DataGraph::new();
             // Populate from content/index.md if it exists
             if index_schema_path.exists()
-                && let Ok(schema_src) = std::fs::read_to_string(&index_schema_path)
+                && let Some(schema_src) = repo.index_schema_source()
                 && let Ok(grammar) = schema::parse_schema(&schema_src)
-                && let Ok(content_src) = std::fs::read_to_string(&index_content_path)
+                && let Some(content_src) = repo.index_content_source()
                 && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
             {
                 index_graph = template::build_article_graph(&doc, &grammar);
@@ -1063,7 +1101,7 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
             let index_output_path = output_dir(site_dir).join("index.html");
             let entry = SiteEntry {
                 kind: EntryKind::SiteIndex,
-                schema_stem: SchemaStem::new("index"),
+                schema_stem: index_stem,
                 url_path: UrlPath::new("/"),
                 output_path: index_output_path,
                 template_path: index_tmpl_path,
@@ -1212,8 +1250,8 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
             index_deps.insert(index_template_path);
             index_deps.extend(all_content_paths.iter().cloned());
             index_deps.extend(all_schema_paths.iter().cloned());
-            let index_schema_path_reg = site_index.schema_path("index");
-            let index_content_path_reg = site_dir.join("content/index.md");
+            let index_schema_path_reg = repo.index_schema_path();
+            let index_content_path_reg = repo.index_content_path();
             index_deps.insert(index_schema_path_reg);
             index_deps.insert(index_content_path_reg);
             dep_graph.register(index_output, index_deps);
