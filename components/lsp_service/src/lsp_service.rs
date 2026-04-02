@@ -43,7 +43,7 @@ impl PresembleLsp {
         let path = uri.to_file_path().ok()?;
         let kind = self.site_index.classify(&path);
         let stem = match kind {
-            site_index::FileKind::Content { schema_stem } => schema_stem,
+            site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
             _ => return None,
         };
         let grammar = self.site_index.load_grammar(&stem)?;
@@ -54,7 +54,7 @@ impl PresembleLsp {
         let path = uri.to_file_path().ok()?;
         let kind = self.site_index.classify(&path);
         let stem = match kind {
-            site_index::FileKind::Template { schema_stem } => schema_stem,
+            site_index::FileKind::Template { schema_stem } => schema_stem.to_string(),
             _ => return None,
         };
         let grammar = self.site_index.load_grammar(&stem)?;
@@ -64,7 +64,7 @@ impl PresembleLsp {
     fn schema_stem(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
         match self.site_index.classify(&path) {
-            site_index::FileKind::Schema { stem } => Some(stem),
+            site_index::FileKind::Schema { stem } => Some(stem.to_string()),
             _ => None,
         }
     }

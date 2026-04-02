@@ -1,10 +1,56 @@
 use std::path::{Path, PathBuf};
 
+/// A content type identifier derived from the directory name (e.g., "post", "feature", "author").
+///
+/// Used as HashMap keys, path segments, and data graph keys. A newtype prevents
+/// accidentally passing a URL path or slug where a schema stem is expected.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SchemaStem(String);
+
+impl SchemaStem {
+    pub fn new(stem: impl Into<String>) -> Self {
+        Self(stem.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SchemaStem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A root-relative clean URL path (e.g., "/post/hello-world", "/feature/").
+///
+/// Always starts with `/`. Never contains `.html` (per ADR-009).
+/// Used as the primary key for page lookup and reference resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UrlPath(String);
+
+impl UrlPath {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self(path.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UrlPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug)]
 pub enum FileKind {
-    Content { schema_stem: String },
-    Template { schema_stem: String },
-    Schema { stem: String },
+    Content { schema_stem: SchemaStem },
+    Template { schema_stem: SchemaStem },
+    Schema { stem: SchemaStem },
     Unknown,
 }
 
@@ -44,7 +90,7 @@ impl SiteIndex {
                 // content/{stem}/file.md
                 if let Some(stem_component) = components.next() {
                     let stem = stem_component.as_os_str().to_str().unwrap_or("").to_string();
-                    FileKind::Content { schema_stem: stem }
+                    FileKind::Content { schema_stem: SchemaStem::new(stem) }
                 } else {
                     FileKind::Unknown
                 }
@@ -59,7 +105,7 @@ impl SiteIndex {
                         let file_path = Path::new(second_component.as_os_str());
                         let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                         if file_stem == "item" {
-                            FileKind::Template { schema_stem: first_str.to_string() }
+                            FileKind::Template { schema_stem: SchemaStem::new(first_str) }
                         } else {
                             // Partial template inside a type directory — not a type template
                             FileKind::Unknown
@@ -72,7 +118,7 @@ impl SiteIndex {
                             .and_then(|s| s.to_str())
                             .unwrap_or("")
                             .to_string();
-                        FileKind::Template { schema_stem: stem }
+                        FileKind::Template { schema_stem: SchemaStem::new(stem) }
                     }
                 } else {
                     FileKind::Unknown
@@ -88,7 +134,7 @@ impl SiteIndex {
                         let file_path = Path::new(second_component.as_os_str());
                         let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                         if file_stem == "item" {
-                            FileKind::Schema { stem: first_str.to_string() }
+                            FileKind::Schema { stem: SchemaStem::new(first_str) }
                         } else {
                             FileKind::Unknown
                         }
@@ -100,7 +146,7 @@ impl SiteIndex {
                             .and_then(|s| s.to_str())
                             .unwrap_or("")
                             .to_string();
-                        FileKind::Schema { stem }
+                        FileKind::Schema { stem: SchemaStem::new(stem) }
                     }
                 } else {
                     FileKind::Unknown
@@ -206,7 +252,7 @@ impl SiteIndex {
             files.push(SiteFile {
                 path: schema_path,
                 kind: FileKind::Schema {
-                    stem: stem.to_string(),
+                    stem: SchemaStem::new(stem),
                 },
             });
         }
@@ -216,7 +262,7 @@ impl SiteIndex {
             files.push(SiteFile {
                 path,
                 kind: FileKind::Content {
-                    schema_stem: stem.to_string(),
+                    schema_stem: SchemaStem::new(stem),
                 },
             });
         }
@@ -226,7 +272,7 @@ impl SiteIndex {
             files.push(SiteFile {
                 path,
                 kind: FileKind::Template {
-                    schema_stem: stem.to_string(),
+                    schema_stem: SchemaStem::new(stem),
                 },
             });
         }
@@ -261,7 +307,7 @@ mod tests {
         let idx = index();
         let path = idx.site_dir().join("content/article/hello-world.md");
         match idx.classify(&path) {
-            FileKind::Content { schema_stem } => assert_eq!(schema_stem, "article"),
+            FileKind::Content { schema_stem } => assert_eq!(schema_stem.as_str(), "article"),
             other => panic!("expected Content, got {:?}", other),
         }
     }
@@ -272,7 +318,7 @@ mod tests {
         // New directory-based convention: templates/{stem}/item.html
         let path = idx.site_dir().join("templates/article/item.html");
         match idx.classify(&path) {
-            FileKind::Template { schema_stem } => assert_eq!(schema_stem, "article"),
+            FileKind::Template { schema_stem } => assert_eq!(schema_stem.as_str(), "article"),
             other => panic!("expected Template, got {:?}", other),
         }
     }
@@ -283,7 +329,7 @@ mod tests {
         // Legacy flat convention: templates/{stem}.html — still supported (e.g. index.html, partials)
         let path = idx.site_dir().join("templates/index.html");
         match idx.classify(&path) {
-            FileKind::Template { schema_stem } => assert_eq!(schema_stem, "index"),
+            FileKind::Template { schema_stem } => assert_eq!(schema_stem.as_str(), "index"),
             other => panic!("expected Template, got {:?}", other),
         }
     }
@@ -294,7 +340,7 @@ mod tests {
         // New directory-based convention: schemas/{stem}/item.md
         let path = idx.site_dir().join("schemas/article/item.md");
         match idx.classify(&path) {
-            FileKind::Schema { stem } => assert_eq!(stem, "article"),
+            FileKind::Schema { stem } => assert_eq!(stem.as_str(), "article"),
             other => panic!("expected Schema, got {:?}", other),
         }
     }
@@ -305,7 +351,7 @@ mod tests {
         // Legacy flat convention: schemas/{stem}.md — still supported for backward compat
         let path = idx.site_dir().join("schemas/author.md");
         match idx.classify(&path) {
-            FileKind::Schema { stem } => assert_eq!(stem, "author"),
+            FileKind::Schema { stem } => assert_eq!(stem.as_str(), "author"),
             other => panic!("expected Schema, got {:?}", other),
         }
     }
@@ -371,9 +417,9 @@ mod tests {
     fn dependents_of_schema_returns_schema_content_and_template() {
         let idx = index();
         let deps = idx.dependents_of_schema("article");
-        let has_schema = deps.iter().any(|f| matches!(&f.kind, FileKind::Schema { stem } if stem == "article"));
-        let has_content = deps.iter().any(|f| matches!(&f.kind, FileKind::Content { schema_stem } if schema_stem == "article"));
-        let has_template = deps.iter().any(|f| matches!(&f.kind, FileKind::Template { schema_stem } if schema_stem == "article"));
+        let has_schema = deps.iter().any(|f| matches!(&f.kind, FileKind::Schema { stem } if stem.as_str() == "article"));
+        let has_content = deps.iter().any(|f| matches!(&f.kind, FileKind::Content { schema_stem } if schema_stem.as_str() == "article"));
+        let has_template = deps.iter().any(|f| matches!(&f.kind, FileKind::Template { schema_stem } if schema_stem.as_str() == "article"));
         assert!(has_schema, "should include schema file");
         assert!(has_content, "should include content files");
         assert!(has_template, "should include template file");
@@ -426,7 +472,7 @@ mod tests {
         let idx = SiteIndex::new(tmp.path().to_path_buf());
         let path = idx.site_dir().join("templates/post/item.html");
         match idx.classify(&path) {
-            FileKind::Template { schema_stem } => assert_eq!(schema_stem, "post"),
+            FileKind::Template { schema_stem } => assert_eq!(schema_stem.as_str(), "post"),
             other => panic!("expected Template, got {:?}", other),
         }
     }
@@ -438,7 +484,7 @@ mod tests {
         let idx = SiteIndex::new(tmp.path().to_path_buf());
         let path = idx.site_dir().join("schemas/post/item.md");
         match idx.classify(&path) {
-            FileKind::Schema { stem } => assert_eq!(stem, "post"),
+            FileKind::Schema { stem } => assert_eq!(stem.as_str(), "post"),
             other => panic!("expected Schema, got {:?}", other),
         }
     }
