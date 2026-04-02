@@ -1,4 +1,5 @@
 use site_index::EntryKind;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -899,4 +900,130 @@ fn collection_page_dep_graph_tracks_template_and_content() {
         affected.contains(&collection_output),
         "item content change should affect collection page; affected: {affected:?}"
     );
+}
+
+#[test]
+fn rebuild_affected_only_returns_affected_entries_in_site_graph() {
+    // Build a site with two article pages.  Then call rebuild_affected with
+    // only one content file as the dirty source and verify that site_graph in
+    // the returned outcome contains only that one article — not both.
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("incremental-site");
+
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(site.join("content/article/alpha.md"), "# Alpha\n").unwrap();
+    fs::write(site.join("content/article/beta.md"), "# Beta\n").unwrap();
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Home</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let site = fs::canonicalize(&site).unwrap();
+
+    // Initial full build to get the dep_graph
+    let initial = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("initial build should succeed");
+    assert_eq!(initial.files_failed, 0);
+
+    // Dirty only content/article/alpha.md
+    let alpha_content = site.join("content/article/alpha.md");
+    let mut dirty: HashSet<PathBuf> = HashSet::new();
+    dirty.insert(alpha_content.clone());
+
+    let rebuild = publisher_cli::rebuild_affected(
+        &site,
+        &dirty,
+        &initial.dep_graph,
+        &publisher_cli::UrlConfig::default(),
+        &[],
+        &publisher_cli::BuildPolicy::lenient(),
+    )
+    .expect("rebuild_affected should succeed");
+
+    // site_graph should contain only the entry for alpha, not beta
+    let url_paths: Vec<_> = rebuild.site_graph
+        .iter()
+        .map(|e| e.url_path.as_str().to_string())
+        .collect();
+
+    assert!(
+        url_paths.iter().any(|u| u.contains("alpha")),
+        "alpha should be in rebuilt site_graph; url_paths: {url_paths:?}"
+    );
+    assert!(
+        !url_paths.iter().any(|u| u.contains("beta")),
+        "beta should NOT be in rebuilt site_graph (not dirty); url_paths: {url_paths:?}"
+    );
+}
+
+#[test]
+fn rebuild_affected_returns_empty_when_nothing_affected() {
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("empty-rebuild-site");
+
+    fs::create_dir_all(site.join("schemas/article")).unwrap();
+    fs::create_dir_all(site.join("content/article")).unwrap();
+    fs::create_dir_all(site.join("templates/article")).unwrap();
+    fs::create_dir_all(site.join("assets")).unwrap();
+
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(site.join("content/article/sample.md"), "# Sample\n").unwrap();
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        r#"<!DOCTYPE html><html><body><h1>Home</h1></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+
+    let site = fs::canonicalize(&site).unwrap();
+
+    let initial = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("initial build should succeed");
+
+    // Dirty an untracked file — not a dep of any output
+    let unrelated = site.join("content/article/does-not-exist.md");
+    let mut dirty: HashSet<PathBuf> = HashSet::new();
+    dirty.insert(unrelated);
+
+    let rebuild = publisher_cli::rebuild_affected(
+        &site,
+        &dirty,
+        &initial.dep_graph,
+        &publisher_cli::UrlConfig::default(),
+        &[],
+        &publisher_cli::BuildPolicy::lenient(),
+    )
+    .expect("rebuild_affected should succeed");
+
+    assert!(
+        rebuild.site_graph.is_empty(),
+        "site_graph should be empty when no outputs are affected"
+    );
+    assert_eq!(rebuild.files_built, 0);
+    assert_eq!(rebuild.files_failed, 0);
 }

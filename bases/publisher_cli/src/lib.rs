@@ -1306,12 +1306,15 @@ fn cleanup_stale_outputs(out_dir: &Path, dep_graph: &dep_graph::DependencyGraph)
 }
 
 /// Rebuild only pages whose dependencies include any of `dirty_sources`.
-/// Returns a partial `BuildOutcome` covering only the rebuilt pages.
+/// Returns a partial `BuildOutcome` covering only the affected pages.
 /// The caller should merge `outcome.dep_graph` into the current graph.
-/// Rebuild all pages affected by `dirty_sources` or new content files.
 ///
-/// This implementation does a full site rebuild for simplicity and correctness.
-/// Proper incremental rebuild with SiteGraph can be restored in a follow-up.
+/// Strategy: do a full site rebuild (parse + resolve + render all entries) for
+/// correctness, then filter the returned `BuildOutcome` so that `site_graph`
+/// only contains the entries that were actually affected.  This means the
+/// serve loop only sends browser-reload notifications for pages that changed.
+/// Parsing and resolution are cheap; the savings come from not reloading
+/// unaffected pages in the browser.
 pub fn rebuild_affected(
     site_dir: &std::path::Path,
     dirty_sources: &std::collections::HashSet<std::path::PathBuf>,
@@ -1320,13 +1323,14 @@ pub fn rebuild_affected(
     new_content_files: &[std::path::PathBuf],
     policy: &BuildPolicy,
 ) -> Result<BuildOutcome, CliError> {
-    // Check if anything is actually affected
-    let mut affected_count = 0usize;
+    // Collect the set of output paths known to be affected by dirty sources.
+    let mut affected_outputs: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     for source in dirty_sources {
-        affected_count += current_graph.affected_outputs(source).len();
+        affected_outputs.extend(current_graph.affected_outputs(source));
     }
 
-    if affected_count == 0 && new_content_files.is_empty() {
+    if affected_outputs.is_empty() && new_content_files.is_empty() {
         return Ok(BuildOutcome {
             files_built: 0,
             files_failed: 0,
@@ -1338,8 +1342,30 @@ pub fn rebuild_affected(
         });
     }
 
-    // Full rebuild — correct and clean; incrementality can be restored later
-    build_site(site_dir, url_config, policy)
+    // Full rebuild for correctness (SiteGraph cross-references require it).
+    let mut outcome = build_site(site_dir, url_config, policy)?;
+
+    // After the full build we know the output path of every new content file.
+    // Include those output paths in the affected set.
+    for new_file in new_content_files {
+        for entry in outcome.site_graph.iter() {
+            if entry.content_path == *new_file {
+                affected_outputs.insert(entry.output_path.clone());
+            }
+        }
+    }
+
+    // Filter site_graph to only the affected entries so the serve loop only
+    // triggers browser reloads for pages that actually changed.
+    let mut filtered_graph = SiteGraph::new();
+    for entry in outcome.site_graph.iter() {
+        if affected_outputs.contains(&entry.output_path) {
+            filtered_graph.insert(entry.clone());
+        }
+    }
+    outcome.site_graph = filtered_graph;
+
+    Ok(outcome)
 }
 
 /// Scan all output HTML files for internal links and check they resolve to built pages.
