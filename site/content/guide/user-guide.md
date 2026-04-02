@@ -6,7 +6,13 @@ The complete reference for Presemble — schemas, content, templates, the data g
 
 ## Schemas
 
-A schema is a markdown file that defines the grammar of a content type. It lives in `schemas/<name>.md`. The file stem (`post`, `feature`, `note`) becomes the collection name in the data graph and determines which content directory and template are used.
+A schema is a markdown file that defines the grammar of a content type. It lives in `schemas/<type>/item.md`. The directory name (`post`, `feature`, `note`) becomes the collection name in the data graph and determines which content directory and template are used.
+
+```
+schemas/post/item.md       ← schema for the "post" type
+content/post/my-post.md    ← a post content file
+templates/post/item.html   ← template for individual posts
+```
 
 ### Slots
 
@@ -119,6 +125,29 @@ headings
 
 The body section is optional. Schemas without `----` have no free-form body.
 
+### Body content types
+
+The body section supports the full range of markdown block and inline content:
+
+**Block elements:**
+
+| Element | Syntax |
+|---|---|
+| Paragraph | Plain text |
+| Heading | `##`, `###`, … (within the schema's `headings` constraint) |
+| Blockquote | `> quoted text` |
+| Unordered list | `- item` |
+| Ordered list | `1. item` |
+| Code block | Triple-backtick fence |
+
+**Inline formatting within paragraphs:**
+
+| Format | Syntax |
+|---|---|
+| Bold | `**text**` or `__text__` |
+| Italic | `*text*` or `_text_` |
+| Inline code | `` `code` `` |
+
 ### Full schema example
 
 ```markdown
@@ -183,7 +212,9 @@ These are informational — the build still succeeds.
 
 ## Templates
 
-Templates are HTML files in `templates/`. The file stem must match a schema name (`post.html` for `post.md`) or be `index.html` for the home page. Included partials can have any name.
+Templates live in `templates/`. Each content type uses a directory: `templates/<type>/item.html` (or `.hiccup`) matches `schemas/<type>/item.md`. The home page template is `templates/index.html`. Shared partials such as `templates/header.html` can have any name and any depth.
+
+Use `presemble convert` to translate any template between HTML and Hiccup syntax: `presemble convert templates/post/item.html` produces `templates/post/item.hiccup` and vice versa. Both formats are first-class — the publisher accepts either without configuration.
 
 ### `presemble:insert`
 
@@ -249,6 +280,15 @@ Conditionally apply a CSS class:
 ```
 
 Syntax: `data-path:class-name`. If the path resolves to a truthy value, the class is added.
+
+### Hiccup syntax
+
+Templates can be written in Hiccup (EDN) format instead of HTML. Use `presemble convert` to translate between the two. Hiccup templates support `;` line comments, which are stripped at parse time:
+
+```clojure
+; Render title as h1
+[:presemble/insert {:data "post.title" :as "h1"}]
+```
 
 ### URL paths in templates
 
@@ -334,6 +374,10 @@ Starts a local server on port 3000. The server watches `schemas/`, `content/`, a
 ### Live reload
 
 When a file changes and the rebuild completes, the browser reloads automatically — no manual refresh needed. If the changed page is different from the one currently open, the browser navigates directly to the changed page. If multiple pages changed, the browser navigates to the first one.
+
+### Suggestion nodes
+
+In serve mode, missing or invalid content slots render as inline suggestion nodes instead of error pages. Each suggestion node is derived from the schema: it shows the slot's hint text and indicates what is expected. The page is always browsable — a content file with no fields renders as a fully scaffolded guide. Suggestion nodes never appear in a published build; `presemble build` still fails on missing required slots.
 
 ## URL rewriting
 

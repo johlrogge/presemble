@@ -24,10 +24,10 @@ presemble init my-site/
 
 This creates the following files:
 
-- `schemas/note.md` — defines the "note" content type with a title and body. See [schemas](/feature/schemas-as-contracts) for details.
+- `schemas/note/item.md` — defines the "note" content type with a title and body. See [schemas](/feature/schemas-as-contracts) for details.
 - `content/note/hello-world.md` — your first note, validated against the schema at build time.
 - `templates/index.html` — home page, iterates over all notes. See [templates](/feature/templates-are-data) for details.
-- `templates/note.html` — renders an individual note.
+- `templates/note/item.html` — renders an individual note.
 - `assets/style.css` — only files *referenced by templates* are copied to output.
 
 ## Build
