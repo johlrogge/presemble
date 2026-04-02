@@ -1,0 +1,18 @@
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Presemble — Documentation"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]]
+  [:body
+    [:presemble/include {:src "header"}]
+    [:main {:class "docs"}
+      [:presemble/insert {:data "docs.title" :as "h1"}]
+      [:presemble/insert {:data "docs.description" :as "p"}]
+      [:ul {:class "docs__cards"}
+        [:template {:data-each "guides"}
+          [:li
+            [:presemble/insert {:data "title" :as "h2"}]
+            [:presemble/insert {:data "summary" :as "p"}]
+            [:presemble/insert {:data "link"}]]]]]
+    [:presemble/include {:src "footer"}]]]
