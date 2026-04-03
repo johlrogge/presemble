@@ -91,6 +91,27 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.18.0
+
+Polylith interface wiring and in-memory test repository.
+
+**Polylith interface indirection**
+Consumers depend on `site_repository` (the interface name). The profile selects which implementation backs it: `live` uses `fs_site_repository` (filesystem), `dev` uses `mem_site_repository` (in-memory for tests). Both implementations are named distinctly — the interface handles the mapping.
+
+**`mem_site_repository` component**
+In-memory `SiteRepository` with a builder pattern for programmatic construction and a `from_dir()` method for loading fixtures. Conductor, LSP, template registry, and build tests all migrated to use the builder — no more TempDir fixtures for unit tests.
+
+**`build_site` accepts `&SiteRepository`**
+The build pipeline function now takes an explicit repository parameter instead of creating one internally. CLI entry points construct the repo from the site directory; tests pass builder-constructed repos.
+
+**Production build with `--release`**
+The devenv binary and CI deploy now build with `--profile live --release`. The presemble binary on PATH is release-optimized.
+
+**Profile cleanup**
+Removed redundant `development` profile. `live` profile brought up to date with all components.
+
+---
+
 ### v0.17.0
 
 SiteRepository abstraction — filesystem access decoupled from build pipeline.
