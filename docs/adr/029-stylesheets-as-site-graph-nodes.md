@@ -1,6 +1,6 @@
 # ADR-029: Stylesheets as first-class SiteGraph nodes
 ## Status
-Proposed
+Accepted
 ## Context
 Presemble tracks what it references and publishes only what is needed. Templates, content, and schemas are all nodes in the SiteGraph with typed identities and explicit dependency edges.
 

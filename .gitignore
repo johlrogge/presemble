@@ -9,4 +9,5 @@ fixtures/*/output/
 site/output/
 site/.devenv/
 /output/
+profiles/*/
 .pre-commit-config.yaml

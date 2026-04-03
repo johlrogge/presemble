@@ -250,27 +250,26 @@ sees browser suggestions as diagnostics with quickfixes.
 
 ---
 
-## M6 — "CSS asset tracking"
+## Done — M6: "CSS asset tracking"
 
-**Goal:** Close the asset-discovery gap for CSS. Today, Presemble only copies assets referenced
-from template DOM trees (ADR-010). Assets referenced via CSS `url()` — fonts, background images,
-cursors — are invisible to the build. This breaks the "clean output + complete site" guarantee.
+Shipped in v0.18.3+ (ADR-029).
 
-**Why now:** This is a correctness gap in shipped functionality (M1 asset discovery). A site
-with CSS-referenced fonts or images produces either broken output or requires workarounds.
-The fix is small, self-contained, and load-bearing.
+**Goal:** Close the asset-discovery gap for CSS. Stylesheets become first-class nodes in the
+SiteGraph with typed `@import` and `url()` dependency edges, symmetric with content nodes.
 
 **Deliverables:**
-- [ ] New `css` polylith component — CSS parsing is its own concern
-- [ ] Parse CSS files and discover `url()` references (fonts, images, cursors)
-- [ ] Recursive `@import` walking — follow import chains to discover all referenced assets
-- [ ] Feed discovered CSS assets into dep_graph alongside template-discovered assets
-- [ ] Error on missing assets referenced from CSS (same behavior as template asset references)
-- [ ] Copy only what is used — no blind copying of the asset directory
+- [x] New `stylesheet` polylith component — CSS parsing with `cssparser` crate
+- [x] Parse CSS files and discover `url()` references (fonts, images, cursors)
+- [x] Recursive `@import` walking — follow import chains to discover all referenced assets
+- [x] Feed discovered CSS assets into dep_graph alongside template-discovered assets
+- [x] Error on missing assets referenced from CSS (same behavior as template asset references)
+- [x] Copy only what is used — no blind copying of the asset directory
+- [x] `FileKind::Stylesheet` and `FileKind::Asset` classification in site_index
+- [x] Incremental rebuild: changing an imported CSS file triggers rebuild of all importing stylesheets
 
 **Success gate:** A site with fonts or images referenced only from CSS `url()` builds correctly.
 Missing CSS-referenced assets produce clear build errors. No assets are copied that are not
-referenced.
+referenced. ✓
 
 ---
 
