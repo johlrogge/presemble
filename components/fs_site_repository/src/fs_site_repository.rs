@@ -7,11 +7,34 @@ pub struct SiteRepository {
     site_dir: PathBuf,
 }
 
+/// Builder for filesystem `SiteRepository`.
+///
+/// On the filesystem implementation, the builder simply stores the site directory.
+/// `from_dir` is the primary construction method.
+pub struct SiteRepositoryBuilder {
+    site_dir: Option<PathBuf>,
+}
+
+impl SiteRepositoryBuilder {
+    pub fn from_dir(mut self, site_dir: &Path) -> Self {
+        self.site_dir = Some(site_dir.to_path_buf());
+        self
+    }
+
+    pub fn build(self) -> SiteRepository {
+        SiteRepository::new(self.site_dir.expect("from_dir must be called before build"))
+    }
+}
+
 impl SiteRepository {
     pub fn new(site_dir: impl Into<PathBuf>) -> Self {
         let site_dir: PathBuf = site_dir.into();
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         Self { site_dir }
+    }
+
+    pub fn builder() -> SiteRepositoryBuilder {
+        SiteRepositoryBuilder { site_dir: None }
     }
 
     pub fn site_dir(&self) -> &Path {
