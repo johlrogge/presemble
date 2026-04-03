@@ -224,17 +224,13 @@ impl BuildPolicy {
 
 /// Top-level entry point for production builds (strict policy).
 pub fn build_for_publish(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
-    let repo = site_repository::SiteRepository::builder()
-        .from_dir(site_dir)
-        .build();
+    let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
     build_site(site_dir, &repo, url_config, &BuildPolicy::strict())
 }
 
 /// Top-level entry point for development serve (lenient policy).
 pub fn build_for_serve(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
-    let repo = site_repository::SiteRepository::builder()
-        .from_dir(site_dir)
-        .build();
+    let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
     build_site(site_dir, &repo, url_config, &BuildPolicy::lenient())
 }
 
@@ -1377,9 +1373,7 @@ pub fn rebuild_affected(
     }
 
     // Full rebuild for correctness (SiteGraph cross-references require it).
-    let repo = site_repository::SiteRepository::builder()
-        .from_dir(site_dir)
-        .build();
+    let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
     let mut outcome = build_site(site_dir, &repo, url_config, policy)?;
 
     // After the full build we know the output path of every new content file.
