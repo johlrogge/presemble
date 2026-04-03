@@ -164,14 +164,28 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             }
 
             Element::Link { .. } => {
-                if let Some(spanned) = elements.front()
-                    && let ContentElement::Link { text, href } = &spanned.node
-                {
-                    let mut record = DataGraph::new();
-                    record.insert("text", Value::Text(text.clone()));
-                    record.insert("href", Value::Text(href.clone()));
-                    graph.insert(slot_key, Value::Record(record));
-                }
+                let max = max_paragraphs(slot); // reuse count logic
+                let links: Vec<Value> = elements
+                    .iter()
+                    .filter_map(|s| {
+                        if let ContentElement::Link { text, href } = &s.node {
+                            let mut record = DataGraph::new();
+                            record.insert("text", Value::Text(text.clone()));
+                            record.insert("href", Value::Text(href.clone()));
+                            Some(Value::Record(record))
+                        } else {
+                            None
+                        }
+                    })
+                    .take(max)
+                    .collect();
+
+                let value = if max == 1 {
+                    links.into_iter().next().unwrap_or(Value::Absent)
+                } else {
+                    Value::List(links)
+                };
+                graph.insert(slot_key, value);
             }
 
             Element::Image { .. } => {
