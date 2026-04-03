@@ -8,7 +8,7 @@ interface = "conductor"
 
 [dependencies]
 dep_graph = { workspace = true }
-fs_site_repository = { workspace = true }
+site_repository = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }

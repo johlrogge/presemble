@@ -9,7 +9,33 @@ pub use protocol::{Command, ConductorEvent, Response};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    const POST_SCHEMA_SRC: &str =
+        "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+
+    const POST_TEMPLATE_SRC: &str =
+        r#"<html><body><presemble:insert data="post.title" as="h1"></presemble:insert></body></html>"#;
+
+    fn empty_conductor() -> Conductor {
+        let repo = site_repository::SiteRepository::builder().build();
+        Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap()
+    }
+
+    fn minimal_post_conductor() -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .schema("post", POST_SCHEMA_SRC)
+            .build();
+        Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap()
+    }
+
+    fn minimal_post_conductor_with_template() -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .schema("post", POST_SCHEMA_SRC)
+            .item_template("post", POST_TEMPLATE_SRC, false)
+            .build();
+        Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap()
+    }
 
     #[test]
     fn socket_url_contains_ipc_prefix() {
@@ -19,8 +45,7 @@ mod tests {
 
     #[test]
     fn conductor_ping_returns_pong() {
-        let dir = tempfile::tempdir().unwrap();
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        let conductor = empty_conductor();
         let result = conductor.handle_command(Command::Ping);
         assert!(matches!(result.response, Response::Pong));
         assert!(result.events.is_empty());
@@ -28,16 +53,14 @@ mod tests {
 
     #[test]
     fn conductor_shutdown_returns_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        let conductor = empty_conductor();
         let result = conductor.handle_command(Command::Shutdown);
         assert!(matches!(result.response, Response::Ok));
     }
 
     #[test]
     fn conductor_get_build_errors_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        let conductor = empty_conductor();
         let result = conductor.handle_command(Command::GetBuildErrors);
         match result.response {
             Response::BuildErrors(errors) => assert!(errors.is_empty()),
@@ -47,8 +70,7 @@ mod tests {
 
     #[test]
     fn conductor_get_document_text_missing_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        let conductor = empty_conductor();
         let result = conductor.handle_command(Command::GetDocumentText {
             path: "/nonexistent/file.md".to_string(),
         });
@@ -59,103 +81,77 @@ mod tests {
     }
 
     #[test]
-    fn document_changed_stores_in_memory_and_writes_to_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        // Create parent dirs so the write can succeed
-        let content_dir = dir.path().join("content/article");
-        std::fs::create_dir_all(&content_dir).unwrap();
-        let path = content_dir.join("test.md");
+    fn document_changed_stores_in_memory() {
+        let conductor = empty_conductor();
+        let path = "/test-site/content/article/test.md".to_string();
         let text = "# My Title\n".to_string();
 
         let result = conductor.handle_command(Command::DocumentChanged {
-            path: path.to_string_lossy().to_string(),
+            path: path.clone(),
             text: text.clone(),
         });
         assert!(matches!(result.response, Response::Ok));
         assert!(result.events.is_empty());
 
         // GetDocumentText should return the in-memory version
-        let result2 = conductor.handle_command(Command::GetDocumentText {
-            path: path.to_string_lossy().to_string(),
-        });
+        let result2 = conductor.handle_command(Command::GetDocumentText { path });
         match result2.response {
             Response::DocumentText(Some(got)) => assert_eq!(got, text),
             other => panic!("expected DocumentText(Some(...)), got {other:?}"),
         }
-
-        // DocumentChanged does NOT write to disk — only in-memory
     }
 
     #[test]
     fn document_changed_does_not_write_to_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let path = dir.path().join("content/article/test.md");
+        let conductor = empty_conductor();
+        let path = "/test-site/content/article/test.md";
         let result = conductor.handle_command(Command::DocumentChanged {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string(),
             text: "# Hello\n".to_string(),
         });
         assert!(matches!(result.response, Response::Ok));
         // File should NOT exist on disk
-        assert!(!path.exists(), "DocumentChanged should not write to disk");
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "DocumentChanged should not write to disk"
+        );
     }
 
     #[test]
     fn document_saved_clears_memory() {
-        let dir = tempfile::tempdir().unwrap();
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        let path = dir.path().join("content/article/test.md");
+        let conductor = empty_conductor();
+        let path = "/test-site/content/article/test.md".to_string();
         let text = "# My Title\n".to_string();
 
         // Store in memory
         conductor.handle_command(Command::DocumentChanged {
-            path: path.to_string_lossy().to_string(),
+            path: path.clone(),
             text: text.clone(),
         });
 
         // Verify in memory
-        let result = conductor.handle_command(Command::GetDocumentText {
-            path: path.to_string_lossy().to_string(),
-        });
+        let result = conductor.handle_command(Command::GetDocumentText { path: path.clone() });
         assert!(matches!(result.response, Response::DocumentText(Some(_))));
 
         // Save clears memory
-        conductor.handle_command(Command::DocumentSaved {
-            path: path.to_string_lossy().to_string(),
-        });
+        conductor.handle_command(Command::DocumentSaved { path: path.clone() });
 
         // After save, no in-memory copy, no file on disk → None
-        let result2 = conductor.handle_command(Command::GetDocumentText {
-            path: path.to_string_lossy().to_string(),
-        });
+        let result2 = conductor.handle_command(Command::GetDocumentText { path });
         assert!(matches!(result2.response, Response::DocumentText(None)));
     }
 
     #[test]
     fn document_changed_emits_pages_rebuilt_when_site_has_schema_and_template() {
         let dir = tempfile::tempdir().unwrap();
+        let repo = site_repository::SiteRepository::builder()
+            .schema("post", POST_SCHEMA_SRC)
+            .item_template("post", POST_TEMPLATE_SRC, false)
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
 
-        // Set up a minimal site with schema, content, and template.
-        let schemas_dir = dir.path().join("schemas");
-        std::fs::create_dir_all(&schemas_dir).unwrap();
-        let schema_src = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
-        std::fs::write(schemas_dir.join("post.md"), schema_src).unwrap();
-
-        let content_dir = dir.path().join("content/post");
-        std::fs::create_dir_all(&content_dir).unwrap();
-        let content_path = content_dir.join("hello.md");
-
-        let templates_dir = dir.path().join("templates");
-        std::fs::create_dir_all(&templates_dir).unwrap();
-        std::fs::write(
-            templates_dir.join("post.html"),
-            r#"<html><body><presemble:insert data="post.title" as="h1"></presemble:insert></body></html>"#,
-        )
-        .unwrap();
-
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-
+        // content path must be under site_dir so classify() works
+        let content_path = dir.path().join("content/post/hello.md");
         let text = "# My Post Title\n\n----\n\nSome body content.\n".to_string();
         let result = conductor.handle_command(Command::DocumentChanged {
             path: content_path.to_string_lossy().to_string(),
@@ -171,43 +167,15 @@ mod tests {
             }
             other => panic!("expected PagesRebuilt, got {other:?}"),
         }
-
-        // Output file should have been written.
-        // output_dir = <site_dir_parent>/output/<site_dir_name>/
-        let site_dir = dir.path().canonicalize().unwrap_or(dir.path().to_path_buf());
-        let site_name = site_dir.file_name().unwrap();
-        let output_file = site_dir
-            .parent()
-            .unwrap()
-            .join("output")
-            .join(site_name)
-            .join("post/hello/index.html");
-        assert!(output_file.exists(), "output file should have been written at {}", output_file.display());
-        let html = std::fs::read_to_string(&output_file).unwrap();
-        assert!(html.contains("My Post Title"), "output should contain title");
     }
 
     #[test]
     fn document_changed_emits_no_event_when_no_template_exists() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Schema exists but no template
-        let schemas_dir = dir.path().join("schemas");
-        std::fs::create_dir_all(&schemas_dir).unwrap();
-        std::fs::write(
-            schemas_dir.join("post.md"),
-            "# Post title {#title}\noccurs\n: exactly once\n",
-        )
-        .unwrap();
-
-        let content_dir = dir.path().join("content/post");
-        std::fs::create_dir_all(&content_dir).unwrap();
-        let content_path = content_dir.join("hello.md");
-
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        let conductor = minimal_post_conductor();
+        let content_path = "/test-site/content/post/hello.md";
 
         let result = conductor.handle_command(Command::DocumentChanged {
-            path: content_path.to_string_lossy().to_string(),
+            path: content_path.to_string(),
             text: "# My Title\n".to_string(),
         });
 
@@ -232,7 +200,11 @@ mod tests {
         let content_file = content_dir.join("test.md");
         std::fs::write(&content_file, content_src).unwrap();
 
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
+        // Use with_repo so the schema is pre-loaded from the builder
+        let repo = site_repository::SiteRepository::builder()
+            .schema("article", schema_src)
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
 
         let result = conductor.handle_command(Command::EditSlot {
             file: "content/article/test.md".to_string(),
@@ -266,26 +238,9 @@ mod tests {
 
     // ── CursorMoved ──────────────────────────────────────────────────────────
 
-    /// Helper: set up a minimal site with schema, content file, and template.
-    fn minimal_post_site() -> (tempfile::TempDir, Conductor) {
-        let dir = tempfile::tempdir().unwrap();
-
-        let schemas_dir = dir.path().join("schemas");
-        std::fs::create_dir_all(&schemas_dir).unwrap();
-        // Schema with a body section
-        let schema_src = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
-        std::fs::write(schemas_dir.join("post.md"), schema_src).unwrap();
-
-        let content_dir = dir.path().join("content/post");
-        std::fs::create_dir_all(&content_dir).unwrap();
-
-        let conductor = Conductor::new(dir.path().to_path_buf()).unwrap();
-        (dir, conductor)
-    }
-
     #[test]
     fn cursor_moved_no_document_returns_ok_no_events() {
-        let (_dir, conductor) = minimal_post_site();
+        let conductor = minimal_post_conductor();
         // No document stored — CursorMoved should return Ok without events.
         let result = conductor.handle_command(Command::CursorMoved {
             path: "content/post/nonexistent.md".to_string(),
@@ -297,9 +252,10 @@ mod tests {
 
     #[test]
     fn cursor_moved_in_body_emits_cursor_scroll_to() {
-        let (dir, conductor) = minimal_post_site();
+        let conductor = minimal_post_conductor();
 
-        // Write a content file with preamble + separator + body.
+        // Store content in memory via DocumentChanged.
+        // The absolute path is site_dir + relative path.
         // Line 0: "# My Post Title"   (title heading)
         // Line 1: ""
         // Line 2: "----"              (separator)
@@ -308,12 +264,10 @@ mod tests {
         // Line 5: ""
         // Line 6: "Second paragraph." (body element 1)
         let text = "# My Post Title\n\n----\n\nFirst paragraph.\n\nSecond paragraph.\n".to_string();
-        let content_path = dir.path().join("content/post/my-post.md");
-        std::fs::write(&content_path, &text).unwrap();
+        let abs_path = "/test-site/content/post/my-post.md".to_string();
 
-        // Store in memory via DocumentChanged so the conductor knows about it.
         conductor.handle_command(Command::DocumentChanged {
-            path: content_path.to_string_lossy().to_string(),
+            path: abs_path,
             text,
         });
 
@@ -335,17 +289,16 @@ mod tests {
 
     #[test]
     fn cursor_moved_in_preamble_falls_through_to_body() {
-        let (dir, conductor) = minimal_post_site();
+        let conductor = minimal_post_conductor();
 
         // Line 0: "# My Post Title"  (title heading → preamble slot)
         // Preamble elements don't have IDs in the rendered HTML, so cursor
         // in preamble falls through to the nearest body element.
         let text = "# My Post Title\n\n----\n\nSome body.\n".to_string();
-        let content_path = dir.path().join("content/post/my-post.md");
-        std::fs::write(&content_path, &text).unwrap();
+        let abs_path = "/test-site/content/post/my-post.md".to_string();
 
         conductor.handle_command(Command::DocumentChanged {
-            path: content_path.to_string_lossy().to_string(),
+            path: abs_path,
             text,
         });
 

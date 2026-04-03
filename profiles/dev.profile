@@ -1,9 +1,10 @@
 [implementations]
+site_repository = "components/mem_site_repository"
+mem_site_repository = "components/mem_site_repository"
 conductor = "components/conductor"
 content = "components/content"
 dep_graph = "components/dep_graph"
 editor_server = "bases/editor_server"
-fs_site_repository = "components/fs_site_repository"
 lsp_capabilities = "components/lsp_capabilities"
 lsp_service = "components/lsp_service"
 publisher_cli = "bases/publisher_cli"

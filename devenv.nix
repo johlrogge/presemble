@@ -23,8 +23,8 @@ in
 
   enterShell = ''
     if [ -z "''${CI:-}" ]; then
-      cargo polylith cargo --profile dev build -q --bin presemble 2>/dev/null \
-        && export PATH="$PWD/target/debug:$PATH" \
+      cargo polylith cargo --profile live build -q --release --bin presemble 2>/dev/null \
+        && export PATH="$PWD/target/release:$PATH" \
         && echo "presemble ready (target/debug/presemble)" \
         || echo "presemble not built — run: cargo polylith cargo build --bin presemble"
     fi

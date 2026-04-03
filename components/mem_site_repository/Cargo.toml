@@ -1,5 +1,5 @@
 [package]
-name = "fs_site_repository"
+name = "mem_site_repository"
 version = "0.17.0"
 edition = "2024"
 
@@ -8,6 +8,3 @@ interface = "site_repository"
 
 [dependencies]
 site_index = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

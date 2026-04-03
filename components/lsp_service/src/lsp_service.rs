@@ -19,7 +19,7 @@ struct StoredDiagnostic {
 pub struct PresembleLsp {
     client: Client,
     site_index: site_index::SiteIndex,
-    repo: fs_site_repository::SiteRepository,
+    repo: site_repository::SiteRepository,
     pub site_dir: std::path::PathBuf,
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
@@ -30,7 +30,7 @@ impl PresembleLsp {
     pub fn new(client: Client, site_dir: std::path::PathBuf, conductor: Option<conductor::ConductorClient>) -> Self {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
-        let repo = fs_site_repository::SiteRepository::new(site_dir.clone());
+        let repo = site_repository::SiteRepository::new(site_dir.clone());
         Self {
             client,
             site_index,

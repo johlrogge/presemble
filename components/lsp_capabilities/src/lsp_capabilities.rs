@@ -119,7 +119,7 @@ fn url_from_pattern(pattern: &str, slug: &str) -> String {
 pub fn completions_for_schema(
     grammar: &Grammar,
     stem: &str,
-    repo: Option<&fs_site_repository::SiteRepository>,
+    repo: Option<&site_repository::SiteRepository>,
 ) -> Vec<SlotCompletion> {
     grammar
         .preamble
@@ -209,7 +209,7 @@ fn snippet_for_slot(slot: &schema::Slot) -> String {
 pub fn content_completions(
     src: &str,
     grammar: &Grammar,
-    repo: Option<&fs_site_repository::SiteRepository>,
+    repo: Option<&site_repository::SiteRepository>,
 ) -> Vec<SlotCompletion> {
     // Parse current document to find which slots are filled
     let doc = match parse_and_assign(src, grammar) {
@@ -335,7 +335,7 @@ pub fn content_completions(
 ///
 /// Returns one completion per content page, with the title as label
 /// and `[Title](/type/slug)` as insert text.
-pub fn link_completions(repo: &fs_site_repository::SiteRepository) -> Vec<SlotCompletion> {
+pub fn link_completions(repo: &site_repository::SiteRepository) -> Vec<SlotCompletion> {
     let mut completions = Vec::new();
 
     for schema_stem in repo.schema_stems() {
@@ -992,10 +992,10 @@ mod tests {
     #[test]
     fn completions_for_link_slot_returns_content_items() {
         let grammar = article_grammar();
-        // fixtures/blog-site/content/author/ has johlrogge.md
-        let repo = fs_site_repository::SiteRepository::new("../../fixtures/blog-site");
+        let repo = site_repository::SiteRepository::builder()
+            .content("author", "johlrogge", "# Joakim Ohlrogge\n")
+            .build();
         let completions = completions_for_schema(&grammar, "article", Some(&repo));
-        // should include an author completion with href containing "johlrogge"
         assert!(
             completions.iter().any(|c| c.detail.contains("johlrogge")),
             "should include johlrogge author: {completions:#?}"
@@ -1839,14 +1839,22 @@ mod tests {
 
     #[test]
     fn link_completions_returns_content_pages() {
-        let repo = fs_site_repository::SiteRepository::new("../../fixtures/blog-site");
+        let repo = site_repository::SiteRepository::builder()
+            .schema("feature", "# Title {#title}\n")
+            .schema("post", "# Title {#title}\n")
+            .content("feature", "instant-feedback", "# Instant Feedback\n")
+            .content("post", "hello", "# Hello\n")
+            .build();
         let completions = link_completions(&repo);
         assert!(!completions.is_empty(), "should find content pages");
     }
 
     #[test]
     fn link_completions_insert_text_is_markdown_link() {
-        let repo = fs_site_repository::SiteRepository::new("../../fixtures/blog-site");
+        let repo = site_repository::SiteRepository::builder()
+            .schema("feature", "# Title {#title}\n")
+            .content("feature", "instant-feedback", "# Instant Feedback\n")
+            .build();
         let completions = link_completions(&repo);
         for c in &completions {
             assert!(
