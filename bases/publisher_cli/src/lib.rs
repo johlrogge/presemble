@@ -832,6 +832,10 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     // Copy all stylesheet and leaf asset nodes to output
     copy_graph_assets(site_dir, &site_graph)?;
 
+    // Register asset node dependencies in the dep_graph so that incremental
+    // rebuilds triggered by changed stylesheets or assets work correctly.
+    register_asset_deps(&site_graph, &mut dep_graph);
+
     let mut schema_stems: Vec<String> = Vec::new();
 
     for stem in &schema_stems_list {
@@ -1597,6 +1601,63 @@ fn copy_graph_assets(
     Ok(())
 }
 
+/// Register stylesheet and leaf asset node dependencies in the DependencyGraph.
+///
+/// For each LeafAsset: output depends on its own source file (1:1).
+/// For each Stylesheet: output depends on its own source file plus the source
+/// files of all transitively @import-ed stylesheets, so changing any imported
+/// CSS triggers a re-copy of the importer.
+fn register_asset_deps(
+    site_graph: &site_index::SiteGraph,
+    dep_graph: &mut DependencyGraph,
+) {
+    // Leaf assets: simple 1:1 mapping
+    for node in site_graph.iter_leaf_assets() {
+        let mut sources = std::collections::HashSet::new();
+        sources.insert(node.source_path.clone());
+        dep_graph.register(node.output_path.clone(), sources);
+    }
+
+    // Stylesheets: own source + all transitive @import sources
+    for node in site_graph.iter_stylesheets() {
+        let sources = collect_stylesheet_sources(node, site_graph);
+        dep_graph.register(node.output_path.clone(), sources);
+    }
+}
+
+/// Collect the set of source paths that a stylesheet node transitively depends on.
+/// Includes the stylesheet's own source plus every @import-ed stylesheet's sources.
+fn collect_stylesheet_sources(
+    node: &site_index::SiteNode,
+    site_graph: &site_index::SiteGraph,
+) -> std::collections::HashSet<std::path::PathBuf> {
+    let mut sources = std::collections::HashSet::new();
+    let mut visited = std::collections::HashSet::new();
+    collect_stylesheet_sources_rec(node, site_graph, &mut sources, &mut visited);
+    sources
+}
+
+fn collect_stylesheet_sources_rec(
+    node: &site_index::SiteNode,
+    site_graph: &site_index::SiteGraph,
+    sources: &mut std::collections::HashSet<std::path::PathBuf>,
+    visited: &mut std::collections::HashSet<site_index::UrlPath>,
+) {
+    if visited.contains(&node.url_path) {
+        return;
+    }
+    visited.insert(node.url_path.clone());
+    sources.insert(node.source_path.clone());
+
+    if let site_index::NodeRole::Stylesheet(data) = &node.role {
+        for import_url in &data.imports {
+            if let Some(imported_node) = site_graph.get(import_url) {
+                collect_stylesheet_sources_rec(imported_node, site_graph, sources, visited);
+            }
+        }
+    }
+}
+
 fn copy_asset_file(
     site_dir: &std::path::Path,
     url_path: &site_index::UrlPath,
@@ -1852,6 +1913,102 @@ mod tests {
 
         let written = std::fs::read_to_string(output_file.path()).unwrap();
         assert!(!written.is_empty(), "output file should not be empty");
+    }
+
+    #[test]
+    fn register_asset_deps_registers_leaf_asset() {
+        use site_index::{NodeRole, SiteGraph, SiteNode, UrlPath};
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut graph = SiteGraph::new();
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/logo.png"),
+            output_path: PathBuf::from("/out/assets/logo.png"),
+            source_path: PathBuf::from("/site/assets/logo.png"),
+            deps: HashSet::new(),
+            role: NodeRole::LeafAsset,
+        });
+
+        let mut dep_graph = DependencyGraph::new();
+        register_asset_deps(&graph, &mut dep_graph);
+
+        let sources = dep_graph.sources_for(std::path::Path::new("/out/assets/logo.png"));
+        assert!(sources.contains(&PathBuf::from("/site/assets/logo.png")));
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn register_asset_deps_registers_stylesheet() {
+        use site_index::{NodeRole, StylesheetData, SiteGraph, SiteNode, UrlPath};
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut graph = SiteGraph::new();
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/style.css"),
+            output_path: PathBuf::from("/out/assets/style.css"),
+            source_path: PathBuf::from("/site/assets/style.css"),
+            deps: HashSet::new(),
+            role: NodeRole::Stylesheet(StylesheetData {
+                imports: vec![],
+                asset_refs: vec![],
+            }),
+        });
+
+        let mut dep_graph = DependencyGraph::new();
+        register_asset_deps(&graph, &mut dep_graph);
+
+        let sources = dep_graph.sources_for(std::path::Path::new("/out/assets/style.css"));
+        assert!(sources.contains(&PathBuf::from("/site/assets/style.css")));
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn register_asset_deps_stylesheet_includes_imported_sources() {
+        use site_index::{NodeRole, StylesheetData, SiteGraph, SiteNode, UrlPath};
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut graph = SiteGraph::new();
+        // An imported stylesheet
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/base.css"),
+            output_path: PathBuf::from("/out/assets/base.css"),
+            source_path: PathBuf::from("/site/assets/base.css"),
+            deps: HashSet::new(),
+            role: NodeRole::Stylesheet(StylesheetData {
+                imports: vec![],
+                asset_refs: vec![],
+            }),
+        });
+        // A stylesheet that @imports base.css
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/style.css"),
+            output_path: PathBuf::from("/out/assets/style.css"),
+            source_path: PathBuf::from("/site/assets/style.css"),
+            deps: HashSet::new(),
+            role: NodeRole::Stylesheet(StylesheetData {
+                imports: vec![UrlPath::new("/assets/base.css")],
+                asset_refs: vec![],
+            }),
+        });
+
+        let mut dep_graph = DependencyGraph::new();
+        register_asset_deps(&graph, &mut dep_graph);
+
+        // style.css output should depend on both source files
+        let sources = dep_graph.sources_for(std::path::Path::new("/out/assets/style.css"));
+        assert!(sources.contains(&PathBuf::from("/site/assets/style.css")),
+            "should contain own source");
+        assert!(sources.contains(&PathBuf::from("/site/assets/base.css")),
+            "should contain @imported source");
+        assert_eq!(sources.len(), 2);
+
+        // Changing base.css should trigger rebuild of both outputs
+        let affected = dep_graph.affected_outputs(std::path::Path::new("/site/assets/base.css"));
+        assert!(affected.contains(&PathBuf::from("/out/assets/base.css")));
+        assert!(affected.contains(&PathBuf::from("/out/assets/style.css")));
     }
 
 }

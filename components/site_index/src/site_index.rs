@@ -51,6 +51,10 @@ pub enum FileKind {
     Content { schema_stem: SchemaStem },
     Template { schema_stem: SchemaStem },
     Schema { stem: SchemaStem },
+    /// A CSS (or future SCSS) stylesheet under `assets/`
+    Stylesheet,
+    /// A non-stylesheet asset under `assets/` (image, font, video, etc.)
+    Asset,
     Unknown,
 }
 
@@ -150,6 +154,19 @@ impl SiteIndex {
                     }
                 } else {
                     FileKind::Unknown
+                }
+            }
+            "assets" => {
+                // Classify by extension: .css → Stylesheet, everything else → Asset
+                let is_css = rel
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("css"))
+                    .unwrap_or(false);
+                if is_css {
+                    FileKind::Stylesheet
+                } else {
+                    FileKind::Asset
                 }
             }
             _ => FileKind::Unknown,
@@ -357,9 +374,23 @@ mod tests {
     }
 
     #[test]
-    fn classify_unknown_file() {
+    fn classify_stylesheet_file() {
         let idx = index();
         let path = idx.site_dir().join("assets/style.css");
+        assert!(matches!(idx.classify(&path), FileKind::Stylesheet));
+    }
+
+    #[test]
+    fn classify_asset_file() {
+        let idx = index();
+        let path = idx.site_dir().join("assets/logo.png");
+        assert!(matches!(idx.classify(&path), FileKind::Asset));
+    }
+
+    #[test]
+    fn classify_unknown_file() {
+        let idx = index();
+        let path = idx.site_dir().join("random/thing.txt");
         assert!(matches!(idx.classify(&path), FileKind::Unknown));
     }
 
