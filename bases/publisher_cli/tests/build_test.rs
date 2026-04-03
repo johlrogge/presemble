@@ -1,4 +1,4 @@
-use site_index::EntryKind;
+use site_index::PageKind;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -100,7 +100,7 @@ fn build_produces_index_html() {
         "index should contain article title: {content}"
     );
     assert!(
-        outcome.site_graph.iter_by_kind(EntryKind::Item).any(|e| e.schema_stem.as_str() == "article"),
+        outcome.site_graph.iter_pages_by_kind(PageKind::Item).any(|n| n.page_data().map_or(false, |pd| pd.schema_stem.as_str() == "article")),
         "article pages should be collected"
     );
 }
@@ -167,8 +167,8 @@ fn build_site_articles_collection_has_url_field() {
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
     let articles: Vec<_> = outcome.site_graph
-        .iter_by_kind(EntryKind::Item)
-        .filter(|e| e.schema_stem.as_str() == "article")
+        .iter_pages_by_kind(PageKind::Item)
+        .filter(|n| n.page_data().map_or(false, |pd| pd.schema_stem.as_str() == "article"))
         .collect();
     assert!(!articles.is_empty(), "should have at least one article");
 
@@ -180,7 +180,8 @@ fn build_site_articles_collection_has_url_field() {
         article.url_path.as_str()
     );
 
-    match article.data.resolve(&["url"]) {
+    let pd = article.page_data().expect("article should be a Page node");
+    match pd.data.resolve(&["url"]) {
         Some(template::Value::Text(url)) => {
             assert!(
                 url.starts_with("/article/"),
@@ -317,12 +318,14 @@ fn cross_content_reference_resolves_author_data() {
 
     // The post should have its author resolved with data from the author page
     let post = outcome.site_graph
-        .iter_by_kind(EntryKind::Item)
-        .find(|e| e.schema_stem.as_str() == "article" && e.url_path.as_str() == "/article/hello-world")
+        .iter_pages_by_kind(PageKind::Item)
+        .find(|n| n.page_data().map_or(false, |pd| pd.schema_stem.as_str() == "article") && n.url_path.as_str() == "/article/hello-world")
         .expect("hello-world article should exist");
 
+    let post_pd = post.page_data().expect("post should be a Page node");
+
     // author.href should still be the original link href
-    match post.data.resolve(&["author", "href"]) {
+    match post_pd.data.resolve(&["author", "href"]) {
         Some(template::Value::Text(href)) => {
             assert!(href.starts_with("/author/"), "author href should be a path: {href}");
         }
@@ -330,7 +333,7 @@ fn cross_content_reference_resolves_author_data() {
     }
 
     // author.name should be resolved from the author page
-    match post.data.resolve(&["author", "name"]) {
+    match post_pd.data.resolve(&["author", "name"]) {
         Some(template::Value::Text(name)) => {
             assert!(!name.is_empty(), "author name should be non-empty after resolution");
         }
@@ -347,16 +350,16 @@ fn invalid_post_is_rendered_with_suggestions_not_skipped() {
 
     // The invalid-post should appear in site_graph (rendered with suggestion nodes)
     let articles: Vec<_> = outcome.site_graph
-        .iter_by_kind(EntryKind::Item)
-        .filter(|e| e.schema_stem.as_str() == "article")
+        .iter_pages_by_kind(PageKind::Item)
+        .filter(|n| n.page_data().map_or(false, |pd| pd.schema_stem.as_str() == "article"))
         .collect();
     let invalid_page = articles
         .iter()
-        .find(|e| e.url_path.as_str().contains("invalid-post"));
+        .find(|n| n.url_path.as_str().contains("invalid-post"));
     assert!(
         invalid_page.is_some(),
         "invalid-post should be in site_graph (rendered with suggestions), got url_paths: {:?}",
-        articles.iter().map(|e| e.url_path.as_str()).collect::<Vec<_>>()
+        articles.iter().map(|n| n.url_path.as_str()).collect::<Vec<_>>()
     );
 
     // It should NOT be in build_errors (those are parse failures only)

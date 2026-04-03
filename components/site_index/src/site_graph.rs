@@ -5,9 +5,9 @@ use template::DataGraph;
 
 use crate::site_index::{SchemaStem, UrlPath};
 
-/// The kind of entry in the site graph.
+/// The kind of page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryKind {
+pub enum PageKind {
     /// A content item: content/post/hello-world.md → /post/hello-world
     Item,
     /// A collection index: content/post/index.md → /post/
@@ -16,18 +16,61 @@ pub enum EntryKind {
     SiteIndex,
 }
 
-/// A single entry in the site graph, regardless of kind.
+/// Data specific to page nodes.
 #[derive(Debug, Clone)]
-pub struct SiteEntry {
-    pub kind: EntryKind,
+pub struct PageData {
+    pub page_kind: PageKind,
     pub schema_stem: SchemaStem,
-    pub url_path: UrlPath,
-    pub output_path: PathBuf,
     pub template_path: PathBuf,
     pub content_path: PathBuf,
     pub schema_path: PathBuf,
     pub data: DataGraph,
+}
+
+/// Data specific to stylesheet nodes.
+#[derive(Debug, Clone)]
+pub struct StylesheetData {
+    /// @import edges to other stylesheet nodes
+    pub imports: Vec<UrlPath>,
+    /// url() edges to leaf asset nodes
+    pub asset_refs: Vec<UrlPath>,
+}
+
+/// The role of a node determines what it produces and what data it carries.
+#[derive(Debug, Clone)]
+pub enum NodeRole {
+    /// A content page (item, collection index, or site index)
+    Page(PageData),
+    /// A stylesheet that produces a CSS DOM
+    Stylesheet(StylesheetData),
+    /// A leaf asset with no dependencies (image, font, video, etc.)
+    LeafAsset,
+}
+
+/// A node in the site graph. Every publishable entity is a node with a role.
+#[derive(Debug, Clone)]
+pub struct SiteNode {
+    pub url_path: UrlPath,
+    pub output_path: PathBuf,
+    pub source_path: PathBuf,
     pub deps: HashSet<PathBuf>,
+    pub role: NodeRole,
+}
+
+impl SiteNode {
+    pub fn page_data(&self) -> Option<&PageData> {
+        match &self.role {
+            NodeRole::Page(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    pub fn page_data_mut(&mut self) -> Option<&mut PageData> {
+        match &mut self.role {
+            NodeRole::Page(data) => Some(data),
+            _ => None,
+        }
+    }
 }
 
 /// Single source of truth for all site data.
@@ -37,7 +80,7 @@ pub struct SiteEntry {
 /// to rendering.
 #[derive(Debug, Default)]
 pub struct SiteGraph {
-    entries: HashMap<UrlPath, SiteEntry>,
+    entries: HashMap<UrlPath, SiteNode>,
 }
 
 impl SiteGraph {
@@ -45,36 +88,56 @@ impl SiteGraph {
         Self::default()
     }
 
-    pub fn insert(&mut self, entry: SiteEntry) {
-        self.entries.insert(entry.url_path.clone(), entry);
+    pub fn insert(&mut self, node: SiteNode) {
+        self.entries.insert(node.url_path.clone(), node);
     }
 
-    pub fn get(&self, url_path: &UrlPath) -> Option<&SiteEntry> {
+    pub fn get(&self, url_path: &UrlPath) -> Option<&SiteNode> {
         self.entries.get(url_path)
     }
 
-    pub fn get_mut(&mut self, url_path: &UrlPath) -> Option<&mut SiteEntry> {
+    pub fn get_mut(&mut self, url_path: &UrlPath) -> Option<&mut SiteNode> {
         self.entries.get_mut(url_path)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &SiteEntry> {
+    pub fn iter(&self) -> impl Iterator<Item = &SiteNode> {
         self.entries.values()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut SiteEntry> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut SiteNode> {
         self.entries.values_mut()
     }
 
-    /// All entries with a given kind.
-    pub fn iter_by_kind(&self, kind: EntryKind) -> impl Iterator<Item = &SiteEntry> + '_ {
-        self.entries.values().filter(move |e| e.kind == kind)
+    /// All page nodes.
+    pub fn iter_pages(&self) -> impl Iterator<Item = &SiteNode> + '_ {
+        self.entries.values().filter(|n| matches!(n.role, NodeRole::Page(_)))
     }
 
-    /// All item entries for a given schema stem.
-    pub fn items_for_stem(&self, stem: &SchemaStem) -> Vec<&SiteEntry> {
+    /// All page nodes with a given page kind.
+    pub fn iter_pages_by_kind(&self, kind: PageKind) -> impl Iterator<Item = &SiteNode> + '_ {
+        self.entries.values().filter(move |n| {
+            matches!(&n.role, NodeRole::Page(pd) if pd.page_kind == kind)
+        })
+    }
+
+    /// All stylesheet nodes.
+    pub fn iter_stylesheets(&self) -> impl Iterator<Item = &SiteNode> + '_ {
+        self.entries.values().filter(|n| matches!(n.role, NodeRole::Stylesheet(_)))
+    }
+
+    /// All leaf asset nodes.
+    pub fn iter_leaf_assets(&self) -> impl Iterator<Item = &SiteNode> + '_ {
+        self.entries.values().filter(|n| matches!(n.role, NodeRole::LeafAsset))
+    }
+
+    /// All item nodes for a given schema stem.
+    pub fn items_for_stem(&self, stem: &SchemaStem) -> Vec<&SiteNode> {
         self.entries
             .values()
-            .filter(|e| e.kind == EntryKind::Item && e.schema_stem == *stem)
+            .filter(|n| {
+                matches!(&n.role, NodeRole::Page(pd)
+                    if pd.page_kind == PageKind::Item && pd.schema_stem == *stem)
+            })
             .collect()
     }
 
@@ -83,7 +146,7 @@ impl SiteGraph {
         self.entries.keys().collect()
     }
 
-    /// Number of entries.
+    /// Number of nodes.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -97,71 +160,78 @@ impl SiteGraph {
 mod tests {
     use super::*;
 
-    fn make_entry(kind: EntryKind, stem: &str, url: &str) -> SiteEntry {
-        SiteEntry {
-            kind,
-            schema_stem: SchemaStem::new(stem),
+    fn make_page_node(kind: PageKind, stem: &str, url: &str) -> SiteNode {
+        SiteNode {
             url_path: UrlPath::new(url),
             output_path: PathBuf::from(format!("output{url}/index.html")),
-            template_path: PathBuf::from(format!("templates/{stem}/item.html")),
-            content_path: PathBuf::from(format!("content/{stem}/hello.md")),
-            schema_path: PathBuf::from(format!("schemas/{stem}/item.md")),
-            data: DataGraph::new(),
+            source_path: PathBuf::from(format!("content/{stem}/hello.md")),
             deps: HashSet::new(),
+            role: NodeRole::Page(PageData {
+                page_kind: kind,
+                schema_stem: SchemaStem::new(stem),
+                template_path: PathBuf::from(format!("templates/{stem}/item.html")),
+                content_path: PathBuf::from(format!("content/{stem}/hello.md")),
+                schema_path: PathBuf::from(format!("schemas/{stem}/item.md")),
+                data: DataGraph::new(),
+            }),
         }
     }
 
     #[test]
-    fn insert_and_get_entry() {
+    fn insert_and_get_node() {
         let mut graph = SiteGraph::new();
         let url = UrlPath::new("/post/hello-world");
-        let entry = make_entry(EntryKind::Item, "post", "/post/hello-world");
-        graph.insert(entry);
+        let node = make_page_node(PageKind::Item, "post", "/post/hello-world");
+        graph.insert(node);
 
-        let got = graph.get(&url).expect("entry should be present");
+        let got = graph.get(&url).expect("node should be present");
         assert_eq!(got.url_path.as_str(), "/post/hello-world");
-        assert_eq!(got.kind, EntryKind::Item);
+        assert!(matches!(got.role, NodeRole::Page(ref pd) if pd.page_kind == PageKind::Item));
     }
 
     #[test]
-    fn iter_by_kind_filters_correctly() {
+    fn iter_pages_by_kind_filters_correctly() {
         let mut graph = SiteGraph::new();
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/a"));
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/b"));
-        graph.insert(make_entry(EntryKind::Collection, "post", "/post/"));
-        graph.insert(make_entry(EntryKind::SiteIndex, "index", "/"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/a"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/b"));
+        graph.insert(make_page_node(PageKind::Collection, "post", "/post/"));
+        graph.insert(make_page_node(PageKind::SiteIndex, "index", "/"));
 
-        let items: Vec<_> = graph.iter_by_kind(EntryKind::Item).collect();
+        let items: Vec<_> = graph.iter_pages_by_kind(PageKind::Item).collect();
         assert_eq!(items.len(), 2, "should return 2 items");
 
-        let collections: Vec<_> = graph.iter_by_kind(EntryKind::Collection).collect();
+        let collections: Vec<_> = graph.iter_pages_by_kind(PageKind::Collection).collect();
         assert_eq!(collections.len(), 1, "should return 1 collection");
 
-        let site_indices: Vec<_> = graph.iter_by_kind(EntryKind::SiteIndex).collect();
+        let site_indices: Vec<_> = graph.iter_pages_by_kind(PageKind::SiteIndex).collect();
         assert_eq!(site_indices.len(), 1, "should return 1 site index");
     }
 
     #[test]
-    fn items_for_stem_returns_correct_entries() {
+    fn items_for_stem_returns_correct_nodes() {
         let mut graph = SiteGraph::new();
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/a"));
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/b"));
-        graph.insert(make_entry(EntryKind::Item, "feature", "/feature/x"));
-        graph.insert(make_entry(EntryKind::Collection, "post", "/post/"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/a"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/b"));
+        graph.insert(make_page_node(PageKind::Item, "feature", "/feature/x"));
+        graph.insert(make_page_node(PageKind::Collection, "post", "/post/"));
 
         let post_stem = SchemaStem::new("post");
         let items = graph.items_for_stem(&post_stem);
         assert_eq!(items.len(), 2, "should return 2 post items (not the collection)");
-        assert!(items.iter().all(|e| e.schema_stem.as_str() == "post"));
-        assert!(items.iter().all(|e| e.kind == EntryKind::Item));
+        assert!(items.iter().all(|n| {
+            matches!(&n.role, NodeRole::Page(pd) if pd.schema_stem.as_str() == "post")
+        }));
+        assert!(items.iter().all(|n| {
+            matches!(&n.role, NodeRole::Page(pd) if pd.page_kind == PageKind::Item)
+        }));
     }
 
     #[test]
     fn url_set_contains_all_urls() {
         let mut graph = SiteGraph::new();
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/a"));
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/b"));
-        graph.insert(make_entry(EntryKind::Collection, "post", "/post/"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/a"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/b"));
+        graph.insert(make_page_node(PageKind::Collection, "post", "/post/"));
 
         let urls = graph.url_set();
         assert_eq!(urls.len(), 3);
@@ -176,7 +246,7 @@ mod tests {
         assert!(graph.is_empty());
         assert_eq!(graph.len(), 0);
 
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/a"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/a"));
         assert!(!graph.is_empty());
         assert_eq!(graph.len(), 1);
     }
@@ -184,13 +254,48 @@ mod tests {
     #[test]
     fn get_mut_allows_mutation() {
         let mut graph = SiteGraph::new();
-        graph.insert(make_entry(EntryKind::Item, "post", "/post/a"));
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/a"));
 
         let url = UrlPath::new("/post/a");
-        let entry = graph.get_mut(&url).expect("entry should exist");
-        entry.deps.insert(PathBuf::from("some/dep.md"));
+        let node = graph.get_mut(&url).expect("node should exist");
+        node.deps.insert(PathBuf::from("some/dep.md"));
 
-        let entry = graph.get(&url).expect("entry should exist");
-        assert!(entry.deps.contains(&PathBuf::from("some/dep.md")));
+        let node = graph.get(&url).expect("node should exist");
+        assert!(node.deps.contains(&PathBuf::from("some/dep.md")));
+    }
+
+    #[test]
+    fn page_data_accessor_works() {
+        let node = make_page_node(PageKind::Item, "post", "/post/a");
+        let pd = node.page_data().expect("page_data should be Some for Page node");
+        assert_eq!(pd.schema_stem.as_str(), "post");
+        assert_eq!(pd.page_kind, PageKind::Item);
+    }
+
+    #[test]
+    fn iter_stylesheets_and_leaf_assets() {
+        let mut graph = SiteGraph::new();
+        graph.insert(make_page_node(PageKind::Item, "post", "/post/a"));
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/style.css"),
+            output_path: PathBuf::from("output/assets/style.css"),
+            source_path: PathBuf::from("assets/style.css"),
+            deps: HashSet::new(),
+            role: NodeRole::Stylesheet(StylesheetData {
+                imports: vec![],
+                asset_refs: vec![],
+            }),
+        });
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/logo.png"),
+            output_path: PathBuf::from("output/assets/logo.png"),
+            source_path: PathBuf::from("assets/logo.png"),
+            deps: HashSet::new(),
+            role: NodeRole::LeafAsset,
+        });
+
+        assert_eq!(graph.iter_pages().count(), 1);
+        assert_eq!(graph.iter_stylesheets().count(), 1);
+        assert_eq!(graph.iter_leaf_assets().count(), 1);
     }
 }

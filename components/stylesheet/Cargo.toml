@@ -1,0 +1,10 @@
+[package]
+name = "stylesheet"
+version = "0.12.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "stylesheet"
+
+[dependencies]
+cssparser = "0.34"
