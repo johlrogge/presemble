@@ -162,6 +162,42 @@ adapter interface exists as a stub ready for M5 to implement.
 
 ---
 
+## Done — "Template unification, SiteGraph, and SiteRepository"
+
+Shipped in v0.14.0 through v0.18.3.
+
+**Template format unification (v0.14.0)**
+- [x] Bidirectional HTML↔EDN template conversion (`presemble convert --to edn/html`)
+- [x] Hiccup parser fix: attribute namespace separator uses `:` (was `/`)
+- [x] Hiccup line comment support (`;`)
+- [x] presemble.io site dogfoods EDN templates exclusively
+
+**Unified directory-based naming (v0.14.0)**
+- [x] `schemas/{stem}/item.md` for item schemas, `templates/{stem}/item.hiccup` for item templates
+- [x] `schemas/{stem}/index.md` for collection schemas, `templates/{stem}/index.hiccup` for collection templates
+- [x] `content/index.md` flat at root (no directory named `index`)
+- [x] `resolve_template_file` chain-of-parsers (tries hiccup then HTML)
+
+**Collection pages (v0.15.0)**
+- [x] Per-type collection page building: `content/{stem}/index.md` + schema + template → `/{stem}/index.html`
+- [x] Collection content requires a schema (consistent with items)
+- [x] Curated homepage features via multi-occurrence resolved link slots
+
+**SiteGraph (v0.16.0, ADR-026)**
+- [x] Unified `SiteGraph` as single source of truth for all site data
+- [x] Three-phase build: build all entries → resolve all references once → render all entries
+- [x] `SchemaStem` and `UrlPath` newtypes eliminate stringly-typed HashMap keys
+- [x] Reference resolution covers items, collections, and site index uniformly
+
+**SiteRepository abstraction (v0.17.0–v0.18.x)**
+- [x] `fs_site_repository` component: filesystem-backed SiteRepository
+- [x] `mem_site_repository` component: in-memory builder for tests
+- [x] Polylith interface wiring: `live` profile uses fs, `dev` profile uses mem for tests
+- [x] `build_site` accepts `&SiteRepository` — testable without filesystem
+- [x] Production binary built with `--profile live --release`
+
+---
+
 ## M5: "Browser editing"
 
 **Goal:** The served page IS the editor. Content authors who never touch a terminal can create
@@ -307,22 +343,41 @@ Editing a file in Helix updates the browser preview before save.
 
 ---
 
-## M7 — "Asset discovery"
+## M7 — "Asset store and content browsers"
 
-**Goal:** Authors discover and insert images from the browser without leaving the page. Unsplash
-integration surfaces relevant images directly from image content slots.
+**Goal:** Decouple asset storage from the filesystem. Authors discover and insert media from
+the browser without leaving the page. Support large sites with remote assets.
 
-**Why now:** Must be ready before demo videos. Browser editing (M5) is the natural insertion
-surface — asset discovery extends it without requiring new infrastructure.
+**Two separate concerns:**
+
+*Asset Store* — where assets live (storage + URL resolution):
+- `fs_asset_store` — local filesystem (default, bundled)
+- `s3_asset_store` — S3/compatible object storage
+- `cdn_asset_store` — upload to CDN, return CDN URL
+- Interface: `store(bytes, path) → url`, `resolve(path) → url`, `list(prefix) → paths`
+
+*Content Browser* — where assets come from (discovery + search):
+- `local_browser` — browse what's already in the store
+- `unsplash_browser` — search Unsplash photos
+- `youtube_browser` — search/embed YouTube videos
+- Interface: `search(query, constraints) → previews`, `fetch(selection) → bytes`
+
+**The flow:** browser finds → store saves → template gets URL.
+
+Directory-governed configuration: schemas or site config declare which store handles which
+asset path. `presemble serve` resolves asset URLs through the store — local serves directly,
+remote stores return CDN URLs.
 
 **Deliverables:**
-- [ ] Unsplash API integration — search by keyword, browse results in browser
-- [ ] Schema-aware insertion — respects orientation, alt text requirements, and other schema constraints on image slots
-- [ ] Browser editing integration — clicking an image slot opens the asset search UI
-- [ ] Downloaded images stored under site assets with schema-correct metadata
+- [ ] Asset store interface with `fs_asset_store` default implementation
+- [ ] Unsplash content browser with server-side API proxy (API key stays server-side)
+- [ ] Browser editing integration: click image slot → search panel → select → insert
+- [ ] Schema-aware constraints: orientation, alt text, format validation
+- [ ] Directory-governed store configuration in site config
 
 **Success gate:** Author clicks an image slot in edit mode, searches Unsplash, selects an image,
-and it is inserted with correct metadata — without leaving the browser.
+and it is inserted with correct metadata and attribution. The store handles placement; the
+template gets a URL.
 
 ---
 
