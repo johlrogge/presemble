@@ -224,12 +224,18 @@ impl BuildPolicy {
 
 /// Top-level entry point for production builds (strict policy).
 pub fn build_for_publish(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
-    build_site(site_dir, url_config, &BuildPolicy::strict())
+    let repo = site_repository::SiteRepository::builder()
+        .from_dir(site_dir)
+        .build();
+    build_site(site_dir, &repo, url_config, &BuildPolicy::strict())
 }
 
 /// Top-level entry point for development serve (lenient policy).
 pub fn build_for_serve(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
-    build_site(site_dir, url_config, &BuildPolicy::lenient())
+    let repo = site_repository::SiteRepository::builder()
+        .from_dir(site_dir)
+        .build();
+    build_site(site_dir, &repo, url_config, &BuildPolicy::lenient())
 }
 
 #[derive(Parser)]
@@ -710,14 +716,12 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy) -> Result<BuildOutcome, CliError> {
+pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_config: &UrlConfig, policy: &BuildPolicy) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir)
         .unwrap_or_else(|_| site_dir.to_path_buf());
     let site_dir = site_dir.as_path();
 
     println!("Building site: {}", site_dir.display());
-
-    let repo = site_repository::SiteRepository::new(site_dir);
 
     let mut files_built: usize = 0;
     let mut files_failed: usize = 0;
@@ -869,14 +873,6 @@ pub fn build_site(site_dir: &Path, url_config: &UrlConfig, policy: &BuildPolicy)
         };
 
         // Discover content slugs for this schema via repo
-        let content_dir = site_dir.join("content").join(schema_stem);
-        if !content_dir.exists() {
-            eprintln!(
-                "warning: could not read content dir {}: directory not found",
-                content_dir.display()
-            );
-            continue;
-        }
         let content_slugs = repo.content_slugs(stem);
 
         for slug in content_slugs {
@@ -1381,7 +1377,10 @@ pub fn rebuild_affected(
     }
 
     // Full rebuild for correctness (SiteGraph cross-references require it).
-    let mut outcome = build_site(site_dir, url_config, policy)?;
+    let repo = site_repository::SiteRepository::builder()
+        .from_dir(site_dir)
+        .build();
+    let mut outcome = build_site(site_dir, &repo, url_config, policy)?;
 
     // After the full build we know the output path of every new content file.
     // Include those output paths in the affected set.

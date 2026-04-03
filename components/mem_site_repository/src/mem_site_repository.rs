@@ -20,6 +20,9 @@ pub struct SiteRepository {
     collection_schemas: HashMap<String, String>,          // stem → source
     collection_templates: HashMap<String, (String, bool)>,
     partial_templates: HashMap<String, (String, bool)>,
+    /// When set, path accessors return real filesystem paths under this directory.
+    /// Used by `SiteRepositoryBuilder::from_dir` so dep_graph entries match the filesystem.
+    real_dir: Option<PathBuf>,
 }
 
 impl SiteRepository {
@@ -34,9 +37,9 @@ impl SiteRepository {
         SiteRepositoryBuilder { repo: SiteRepository::default() }
     }
 
-    /// Returns a dummy path (this is an in-memory repository).
+    /// Returns the real site directory when set via `from_dir`, otherwise a dummy path.
     pub fn site_dir(&self) -> &Path {
-        Path::new("memory://")
+        self.real_dir.as_deref().unwrap_or(Path::new("memory://"))
     }
 
     // ---------------------------------------------------------------------------
@@ -125,27 +128,51 @@ impl SiteRepository {
     // ---------------------------------------------------------------------------
 
     pub fn content_path(&self, stem: &SchemaStem, slug: &str) -> PathBuf {
-        PathBuf::from(format!("memory://content/{}/{}.md", stem.as_str(), slug))
+        if let Some(dir) = &self.real_dir {
+            dir.join("content").join(stem.as_str()).join(format!("{slug}.md"))
+        } else {
+            PathBuf::from(format!("memory://content/{}/{}.md", stem.as_str(), slug))
+        }
     }
 
     pub fn schema_path(&self, stem: &SchemaStem) -> PathBuf {
-        PathBuf::from(format!("memory://schemas/{}/item.md", stem.as_str()))
+        if let Some(dir) = &self.real_dir {
+            dir.join("schemas").join(stem.as_str()).join("item.md")
+        } else {
+            PathBuf::from(format!("memory://schemas/{}/item.md", stem.as_str()))
+        }
     }
 
     pub fn collection_content_path(&self, stem: &SchemaStem) -> PathBuf {
-        PathBuf::from(format!("memory://content/{}/index.md", stem.as_str()))
+        if let Some(dir) = &self.real_dir {
+            dir.join("content").join(stem.as_str()).join("index.md")
+        } else {
+            PathBuf::from(format!("memory://content/{}/index.md", stem.as_str()))
+        }
     }
 
     pub fn collection_schema_path(&self, stem: &SchemaStem) -> PathBuf {
-        PathBuf::from(format!("memory://schemas/{}/index.md", stem.as_str()))
+        if let Some(dir) = &self.real_dir {
+            dir.join("schemas").join(stem.as_str()).join("index.md")
+        } else {
+            PathBuf::from(format!("memory://schemas/{}/index.md", stem.as_str()))
+        }
     }
 
     pub fn index_content_path(&self) -> PathBuf {
-        PathBuf::from("memory://content/index.md")
+        if let Some(dir) = &self.real_dir {
+            dir.join("content").join("index.md")
+        } else {
+            PathBuf::from("memory://content/index.md")
+        }
     }
 
     pub fn index_schema_path(&self) -> PathBuf {
-        PathBuf::from("memory://schemas/index.md")
+        if let Some(dir) = &self.real_dir {
+            dir.join("schemas").join("index.md")
+        } else {
+            PathBuf::from("memory://schemas/index.md")
+        }
     }
 }
 
@@ -154,6 +181,149 @@ pub struct SiteRepositoryBuilder {
 }
 
 impl SiteRepositoryBuilder {
+    /// Populate the repository by reading all conventional files from a directory.
+    ///
+    /// Reads schemas, content, and templates using the standard directory layout:
+    /// - `schemas/{stem}/item.md` (directory-based) or `schemas/{stem}.md` (flat)
+    /// - `content/{stem}/{slug}.md` for each stem
+    /// - `content/index.md` for index content
+    /// - `schemas/index.md` for index schema
+    /// - `templates/{stem}/item.html|hiccup` for item templates
+    /// - `templates/{stem}.html|hiccup` for partial templates
+    /// - `templates/index.html|hiccup` for index template
+    /// - `content/{stem}/index.md` for collection content
+    ///
+    /// Path accessors on the resulting repo return real filesystem paths under `dir`.
+    /// This allows dep_graph entries to match filesystem paths in tests.
+    pub fn from_dir(mut self, dir: &Path) -> Self {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        self.repo.real_dir = Some(dir.clone());
+
+        // Read schemas
+        let schemas_dir = dir.join("schemas");
+        if let Ok(entries) = std::fs::read_dir(&schemas_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    if stem == "index" {
+                        continue;
+                    }
+                    // Directory-based: schemas/{stem}/item.md
+                    let item_path = path.join("item.md");
+                    if let Ok(src) = std::fs::read_to_string(&item_path) {
+                        self.repo.schemas.entry(stem).or_default().item_source = Some(src);
+                    }
+                    // Collection schema: schemas/{stem}/index.md
+                    let index_path = path.join("index.md");
+                    if let Ok(src) = std::fs::read_to_string(&index_path) {
+                        self.repo.collection_schemas.insert(
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                            src,
+                        );
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    if let Ok(src) = std::fs::read_to_string(&path) {
+                        if stem == "index" {
+                            self.repo.index_schema = Some(src);
+                        } else {
+                            self.repo.schemas.entry(stem).or_default().item_source = Some(src);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Read content
+        let content_dir = dir.join("content");
+        if let Ok(entries) = std::fs::read_dir(&content_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    if let Ok(slugs) = std::fs::read_dir(&path) {
+                        for slug_entry in slugs.flatten() {
+                            let slug_path = slug_entry.path();
+                            if slug_path.extension().and_then(|e| e.to_str()) != Some("md") {
+                                continue;
+                            }
+                            let slug = slug_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                            if slug == "index" {
+                                // Collection content
+                                if let Ok(src) = std::fs::read_to_string(&slug_path) {
+                                    self.repo.collection_content.insert(stem.clone(), src);
+                                }
+                            } else if let Ok(src) = std::fs::read_to_string(&slug_path) {
+                                self.repo.content
+                                    .entry(stem.clone())
+                                    .or_default()
+                                    .insert(slug, src);
+                            }
+                        }
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    if stem == "index" {
+                        // Index content
+                        if let Ok(src) = std::fs::read_to_string(&path) {
+                            self.repo.index_content = Some(src);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Read templates
+        let templates_dir = dir.join("templates");
+        if let Ok(entries) = std::fs::read_dir(&templates_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    if stem == "index" {
+                        continue;
+                    }
+                    // Item template: templates/{stem}/item.html|hiccup
+                    for (ext, is_hiccup) in &[("html", false), ("hiccup", true)] {
+                        let item_path = path.join(format!("item.{ext}"));
+                        if let Ok(src) = std::fs::read_to_string(&item_path) {
+                            self.repo.templates.insert(stem.clone(), (src, *is_hiccup));
+                            break;
+                        }
+                    }
+                    // Collection template: templates/{stem}/index.html|hiccup
+                    for (ext, is_hiccup) in &[("html", false), ("hiccup", true)] {
+                        let idx_path = path.join(format!("index.{ext}"));
+                        if let Ok(src) = std::fs::read_to_string(&idx_path) {
+                            self.repo.collection_templates.insert(stem.clone(), (src, *is_hiccup));
+                            break;
+                        }
+                    }
+                } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let is_hiccup = ext == "hiccup";
+                    if ext != "html" && ext != "hiccup" {
+                        continue;
+                    }
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    if stem == "index" {
+                        // Index template
+                        if let Ok(src) = std::fs::read_to_string(&path) {
+                            self.repo.index_template = Some((src, is_hiccup));
+                        }
+                    } else {
+                        // Partial template
+                        if let Ok(src) = std::fs::read_to_string(&path) {
+                            self.repo.partial_templates.insert(stem, (src, is_hiccup));
+                        }
+                    }
+                }
+            }
+        }
+
+        self
+    }
+
     pub fn schema(mut self, stem: &str, source: &str) -> Self {
         self.repo
             .schemas

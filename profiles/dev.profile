@@ -1,5 +1,5 @@
 [implementations]
-site_repository = "components/fs_site_repository"
+site_repository = "components/mem_site_repository"
 mem_site_repository = "components/mem_site_repository"
 conductor = "components/conductor"
 content = "components/content"

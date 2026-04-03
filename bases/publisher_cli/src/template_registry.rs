@@ -90,38 +90,32 @@ impl template::TemplateRegistry for FileTemplateRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
     use template::TemplateRegistry;
 
-    /// Build a `FileTemplateRegistry` rooted at `dir`. The directory is treated as
-    /// the site root — templates go under `dir/templates/`.
-    fn registry_for(dir: &TempDir) -> FileTemplateRegistry {
-        let repo = site_repository::SiteRepository::new(dir.path());
+    fn registry_with_partial(name: &str, content: &str, is_hiccup: bool) -> FileTemplateRegistry {
+        let repo = site_repository::SiteRepository::builder()
+            .partial_template(name, content, is_hiccup)
+            .build();
         FileTemplateRegistry::new(repo)
     }
 
-    /// Write a file under the `templates/` sub-directory of `dir`.
-    fn write_template(dir: &TempDir, name: &str, content: &str) {
-        let path = dir.path().join("templates").join(name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(path, content).unwrap();
+    fn registry_with_item(stem: &str, content: &str, is_hiccup: bool) -> FileTemplateRegistry {
+        let repo = site_repository::SiteRepository::builder()
+            .item_template(stem, content, is_hiccup)
+            .build();
+        FileTemplateRegistry::new(repo)
     }
 
     #[test]
     fn returns_none_for_missing_file() {
-        let dir = TempDir::new().unwrap();
-        let registry = registry_for(&dir);
+        let repo = site_repository::SiteRepository::builder().build();
+        let registry = FileTemplateRegistry::new(repo);
         assert!(registry.resolve("nonexistent").is_none());
     }
 
     #[test]
     fn resolves_bare_name_from_html_partial() {
-        let dir = TempDir::new().unwrap();
-        write_template(&dir, "header.html", "<header><h1>Title</h1></header>");
-        let registry = registry_for(&dir);
+        let registry = registry_with_partial("header", "<header><h1>Title</h1></header>", false);
         let nodes = registry.resolve("header");
         assert!(nodes.is_some());
         let nodes = nodes.unwrap();
@@ -130,29 +124,26 @@ mod tests {
 
     #[test]
     fn resolves_bare_name_from_hiccup_partial() {
-        let dir = TempDir::new().unwrap();
-        write_template(&dir, "footer.hiccup", "[:footer [:p \"Footer\"]]");
-        let registry = registry_for(&dir);
+        let registry = registry_with_partial("footer", "[:footer [:p \"Footer\"]]", true);
         let nodes = registry.resolve("footer");
         assert!(nodes.is_some());
     }
 
     #[test]
     fn resolves_bare_name_from_item_hiccup() {
-        let dir = TempDir::new().unwrap();
-        write_template(&dir, "post/item.hiccup", "[:div [:h1 \"Post\"]]");
-        let registry = registry_for(&dir);
+        let registry = registry_with_item("post", "[:div [:h1 \"Post\"]]", true);
         let nodes = registry.resolve("post");
         assert!(nodes.is_some());
     }
 
     #[test]
     fn item_template_preferred_over_partial() {
-        // When both post/item.html and post.html exist, item template wins.
-        let dir = TempDir::new().unwrap();
-        write_template(&dir, "post/item.html", "<article>Item</article>");
-        write_template(&dir, "post.html", "<div>Partial</div>");
-        let registry = registry_for(&dir);
+        // When both item and partial templates exist, item template wins.
+        let repo = site_repository::SiteRepository::builder()
+            .item_template("post", "<article>Item</article>", false)
+            .partial_template("post", "<div>Partial</div>", false)
+            .build();
+        let registry = FileTemplateRegistry::new(repo);
         let nodes = registry.resolve("post");
         assert!(nodes.is_some());
         // Both resolve — we just check the item wins (no crash, non-empty result).
@@ -161,14 +152,12 @@ mod tests {
 
     #[test]
     fn resolves_file_qualified_definition() {
-        let dir = TempDir::new().unwrap();
         // A partial with a named definition block
-        write_template(
-            &dir,
-            "common.html",
+        let registry = registry_with_partial(
+            "common",
             r#"<template name="card"><div class="card">Card</div></template>"#,
+            false,
         );
-        let registry = registry_for(&dir);
         let nodes = registry.resolve("common::card");
         assert!(nodes.is_some());
         let nodes = nodes.unwrap();
@@ -177,26 +166,22 @@ mod tests {
 
     #[test]
     fn file_qualified_missing_definition_returns_none() {
-        let dir = TempDir::new().unwrap();
-        write_template(
-            &dir,
-            "common.html",
+        let registry = registry_with_partial(
+            "common",
             r#"<template name="card"><div>Card</div></template>"#,
+            false,
         );
-        let registry = registry_for(&dir);
-        // "button" definition does not exist in common.html
+        // "button" definition does not exist in common
         assert!(registry.resolve("common::button").is_none());
     }
 
     #[test]
     fn strips_templates_prefix_in_file_qualified_name() {
-        let dir = TempDir::new().unwrap();
-        write_template(
-            &dir,
-            "common.html",
+        let registry = registry_with_partial(
+            "common",
             r#"<template name="hero"><section>Hero</section></template>"#,
+            false,
         );
-        let registry = registry_for(&dir);
         // "templates/common::hero" should strip "templates/" and use "common"
         let nodes = registry.resolve("templates/common::hero");
         assert!(nodes.is_some());
@@ -204,9 +189,7 @@ mod tests {
 
     #[test]
     fn caches_loaded_files() {
-        let dir = TempDir::new().unwrap();
-        write_template(&dir, "header.html", "<header>Cached</header>");
-        let registry = registry_for(&dir);
+        let registry = registry_with_partial("header", "<header>Cached</header>", false);
         // Load twice — second call should use cache
         let first = registry.resolve("header");
         let second = registry.resolve("header");
@@ -218,14 +201,12 @@ mod tests {
 
     #[test]
     fn bare_name_with_empty_main_nodes_returns_none() {
-        let dir = TempDir::new().unwrap();
         // File that only contains a definition — no main content
-        write_template(
-            &dir,
-            "defs.html",
+        let registry = registry_with_partial(
+            "defs",
             r#"<template name="thing"><span>Thing</span></template>"#,
+            false,
         );
-        let registry = registry_for(&dir);
         // Bare name "defs" should return None since main nodes are empty
         assert!(registry.resolve("defs").is_none());
     }

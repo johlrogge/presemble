@@ -260,13 +260,13 @@ version = "0.12.0"
 dependencies = [
  "content",
  "dep_graph",
+ "mem_site_repository",
  "nng",
  "notify",
  "schema",
  "serde",
  "serde_json",
  "site_index",
- "site_repository",
  "tempfile",
  "template",
  "tokio",
@@ -917,9 +917,9 @@ name = "lsp_capabilities"
 version = "0.12.0"
 dependencies = [
  "content",
+ "mem_site_repository",
  "schema",
  "site_index",
- "site_repository",
  "template",
  "validation",
 ]
@@ -931,9 +931,9 @@ dependencies = [
  "conductor",
  "content",
  "lsp_capabilities",
+ "mem_site_repository",
  "schema",
  "site_index",
- "site_repository",
  "tokio",
  "tower-lsp",
 ]
@@ -943,6 +943,13 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "mem_site_repository"
+version = "0.17.0"
+dependencies = [
+ "site_index",
+]
 
 [[package]]
 name = "memchr"
@@ -1141,12 +1148,12 @@ dependencies = [
  "editor_server",
  "lsp_capabilities",
  "lsp_service",
+ "mem_site_repository",
  "notify",
  "schema",
  "serde",
  "serde_json",
  "site_index",
- "site_repository",
  "tempfile",
  "template",
  "tokio",
@@ -1410,14 +1417,6 @@ dependencies = [
  "schema",
  "tempfile",
  "template",
-]
-
-[[package]]
-name = "site_repository"
-version = "0.17.0"
-dependencies = [
- "site_index",
- "tempfile",
 ]
 
 [[package]]

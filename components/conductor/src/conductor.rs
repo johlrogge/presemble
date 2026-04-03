@@ -106,14 +106,19 @@ pub struct Conductor {
 impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
+        let repo = site_repository::SiteRepository::new(&site_dir);
+        Self::with_repo(site_dir, repo)
+    }
+
+    /// Create a conductor with a pre-built repository. Used in tests.
+    pub fn with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
+        let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
 
         let output_dir = {
             let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
             site_dir.parent().unwrap_or(&site_dir).join("output").join(name)
         };
-
-        let repo = site_repository::SiteRepository::new(&site_dir);
 
         // Populate schema cache via repo
         let mut schema_cache = HashMap::new();
