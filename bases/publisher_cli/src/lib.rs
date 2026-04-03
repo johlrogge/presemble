@@ -738,92 +738,83 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     let mut all_asset_paths = std::collections::BTreeSet::new();
     let mut all_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut included_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    if templates_dir.exists() {
-        // Collect template files to scan: both flat top-level files and
-        // directory-based item files (new convention: {stem}/item.html).
-        let mut template_files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    {
+        // Collect template sources to scan for asset references and include names.
+        // Item, collection, and index templates are read through the repo (works for both
+        // filesystem and in-memory repos). Flat partial templates are discovered from the
+        // filesystem when the templates directory is present.
+        let mut template_sources: Vec<(String, String, bool)> = Vec::new(); // (stem, src, is_hiccup)
 
+        // Item and collection templates from repo
+        for stem in &schema_stems_list {
+            if stem.as_str() == "index" {
+                continue;
+            }
+            if let Some((src, is_hiccup)) = repo.item_template_source(stem) {
+                template_sources.push((stem.as_str().to_string(), src, is_hiccup));
+            }
+            if let Some((src, is_hiccup)) = repo.collection_template_source(stem) {
+                template_sources.push((stem.as_str().to_string(), src, is_hiccup));
+            }
+        }
+        // Index template from repo
+        if let Some((src, is_hiccup)) = repo.index_template_source() {
+            template_sources.push(("index".to_string(), src, is_hiccup));
+        }
+        // Flat partial templates from filesystem (not discoverable through the repo API)
         if let Ok(entries) = std::fs::read_dir(&templates_dir) {
             let mut sorted: Vec<_> = entries.flatten().collect();
             sorted.sort_by_key(|e| e.file_name());
             for entry in sorted {
                 let path = entry.path();
-                if path.is_dir() {
-                    // New convention: {stem}/item.html or {stem}/item.hiccup
-                    let dir_stem = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string();
-                    for ext in &["html", "hiccup"] {
-                        let item_path = path.join(format!("item.{ext}"));
-                        if item_path.exists() {
-                            template_files.push((dir_stem.clone(), item_path));
-                            break; // prefer html over hiccup
-                        }
-                    }
-                } else if matches!(
-                    path.extension().and_then(|x| x.to_str()),
-                    Some("html" | "hiccup")
-                ) {
-                    // Flat convention: {stem}.html or {stem}.hiccup
+                if path.is_file()
+                    && let Some(ext) = path.extension().and_then(|e| e.to_str())
+                    && (ext == "html" || ext == "hiccup")
+                {
                     let stem = path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("")
                         .to_string();
-                    template_files.push((stem, path));
+                    // index template is already covered via repo above
+                    if stem != "index"
+                        && let Ok(src) = std::fs::read_to_string(&path)
+                    {
+                        let is_hiccup = ext == "hiccup";
+                        template_sources.push((stem, src, is_hiccup));
+                    }
                 }
             }
         }
 
-        for (stem, template_path) in template_files {
-            all_template_stems.insert(stem);
-            let tmpl_src = match std::fs::read_to_string(&template_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!(
-                        "warning: skipping asset scan for {} (read error: {e})",
-                        template_path.display()
-                    );
-                    continue;
-                }
-            };
-            match template_path.extension().and_then(|e| e.to_str()) {
-                Some("hiccup") => {
-                    match template::parse_template_hiccup(&tmpl_src) {
-                        Ok(nodes) => {
-                            let assets = template::extract_asset_paths(&nodes);
-                            all_asset_paths.extend(assets);
-                            let includes = template::extract_include_names(&nodes);
-                            included_template_stems.extend(includes);
-                            let apply_names = template::extract_apply_template_names(&nodes);
-                            included_template_stems.extend(apply_names);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "warning: skipping asset scan for {} (parse error: {e})",
-                                template_path.display()
-                            );
-                        }
+        for (stem, tmpl_src, is_hiccup) in template_sources {
+            all_template_stems.insert(stem.clone());
+            if is_hiccup {
+                match template::parse_template_hiccup(&tmpl_src) {
+                    Ok(nodes) => {
+                        let assets = template::extract_asset_paths(&nodes);
+                        all_asset_paths.extend(assets);
+                        let includes = template::extract_include_names(&nodes);
+                        included_template_stems.extend(includes);
+                        let apply_names = template::extract_apply_template_names(&nodes);
+                        included_template_stems.extend(apply_names);
+                    }
+                    Err(e) => {
+                        eprintln!("warning: skipping asset scan for {stem} (parse error: {e})");
                     }
                 }
-                _ => {
-                    match template::parse_template_xml(&tmpl_src) {
-                        Ok(nodes) => {
-                            let assets = template::extract_asset_paths(&nodes);
-                            all_asset_paths.extend(assets);
-                            let includes = template::extract_include_names(&nodes);
-                            included_template_stems.extend(includes);
-                            let apply_names = template::extract_apply_template_names(&nodes);
-                            included_template_stems.extend(apply_names);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "warning: skipping asset scan for {} (parse error: {e})",
-                                template_path.display()
-                            );
-                        }
+            } else {
+                match template::parse_template_xml(&tmpl_src) {
+                    Ok(nodes) => {
+                        let assets = template::extract_asset_paths(&nodes);
+                        all_asset_paths.extend(assets);
+                        let includes = template::extract_include_names(&nodes);
+                        included_template_stems.extend(includes);
+                        let apply_names = template::extract_apply_template_names(&nodes);
+                        included_template_stems.extend(apply_names);
+                    }
+                    Err(e) => {
+                        eprintln!("warning: skipping asset scan for {stem} (parse error: {e})");
                     }
                 }
             }
@@ -959,48 +950,37 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             continue;
         }
         let collection_content_path = repo.collection_content_path(&stem);
-        if !collection_content_path.exists() {
+        if repo.collection_content_source(&stem).is_none() {
             continue;
         }
-        // Collection schema uses the `index.md` naming convention (not `collection.md`).
-        // The SiteRepository uses `collection.md`, so we use the direct path here until
-        // the repo naming is unified.
-        let collection_schema_path = site_dir
-            .join("schemas")
-            .join(schema_stem)
-            .join("index.md");
-        if !collection_schema_path.exists() {
-            eprintln!(
-                "{}/index.md: FAIL (collection content exists but schemas/{}/index.md is missing)",
-                schema_stem, schema_stem
-            );
-            files_failed += 1;
-            continue;
-        }
-        // Resolve the collection template path via repo. The repo tries
+        let collection_schema_path = repo.collection_schema_path(&stem);
+        let schema_src = match repo.collection_schema_source(&stem) {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "{}/index.md: FAIL (collection content exists but schemas/{}/index.md is missing)",
+                    schema_stem, schema_stem
+                );
+                files_failed += 1;
+                continue;
+            }
+        };
+        // Resolve the collection template via repo. The repo tries
         // `templates/{stem}/index.hiccup` then `templates/{stem}/index.html`.
         let collection_template_path = {
-            let base = site_dir.join("templates").join(schema_stem).join("index");
-            if base.with_extension("hiccup").exists() {
-                Some(base.with_extension("hiccup"))
-            } else if base.with_extension("html").exists() {
-                Some(base.with_extension("html"))
-            } else {
-                None
-            }
+            let base = repo.site_dir().join("templates").join(schema_stem).join("index");
+            repo.collection_template_source(&stem).map(|(_, is_hiccup)| {
+                if is_hiccup {
+                    base.with_extension("hiccup")
+                } else {
+                    base.with_extension("html")
+                }
+            })
         };
         let Some(collection_template_path) = collection_template_path else {
             eprintln!("{}/index.md: FAIL (no collection template found)", schema_stem);
             files_failed += 1;
             continue;
-        };
-        let schema_src = match std::fs::read_to_string(&collection_schema_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}/index.md: FAIL (cannot read schema: {e})", schema_stem);
-                files_failed += 1;
-                continue;
-            }
         };
         let collection_grammar = match schema::parse_schema(&schema_src) {
             Ok(g) => g,
@@ -1068,20 +1048,19 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         // Resolve the index template path via repo. The repo tries
         // `templates/index.hiccup` then `templates/index.html`.
         let index_tmpl = {
-            let base = templates_dir.join("index");
-            if base.with_extension("hiccup").exists() {
-                Some(base.with_extension("hiccup"))
-            } else if base.with_extension("html").exists() {
-                Some(base.with_extension("html"))
-            } else {
-                None
-            }
+            let base = repo.site_dir().join("templates").join("index");
+            repo.index_template_source().map(|(_, is_hiccup)| {
+                if is_hiccup {
+                    base.with_extension("hiccup")
+                } else {
+                    base.with_extension("html")
+                }
+            })
         };
         if let Some(index_tmpl_path) = index_tmpl {
             let mut index_graph = template::DataGraph::new();
-            // Populate from content/index.md if it exists
-            if index_schema_path.exists()
-                && let Some(schema_src) = repo.index_schema_source()
+            // Populate from content/index.md if schema and content exist in repo
+            if let Some(schema_src) = repo.index_schema_source()
                 && let Ok(grammar) = schema::parse_schema(&schema_src)
                 && let Some(content_src) = repo.index_content_source()
                 && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
