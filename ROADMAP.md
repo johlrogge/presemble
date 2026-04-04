@@ -231,6 +231,30 @@ Shipped in v0.19.0.
 
 ---
 
+## Done — v0.20.0: "List fields and pipe expressions"
+
+Shipped in v0.20.0.
+
+**List/set fields in schemas**
+- [x] `Element::List` — new schema element type for multi-value fields
+- [x] Schema syntax: `- hint text {#name}` with `occurs: *` for unbounded lists
+- [x] Content syntax: standard markdown lists (`- item`)
+- [x] Validation: item count checked against `occurs` constraint
+- [x] Data graph: list items wrapped as Records for `data-each` compatibility
+- [x] LSP completions and snippets for list slots
+
+**Pipe expression evaluation (Layer 2)**
+- [x] `(-> text to_lower capitalize)` — threading macro for transform chains
+- [x] String functions: `text`, `to_lower`, `to_upper`, `capitalize`, `truncate`
+- [x] Build-time error on unknown functions
+- [x] Works in both hiccup (`:apply (-> text to_lower)`) and HTML (`apply="(-> text to_lower)"`)
+
+**Documentation**
+- [x] User guide updated with :apply expressions, list fields, and all v0.19.0 features
+- [x] Component README files updated
+
+---
+
 ## M5: "Browser editing"
 
 **Goal:** The served page IS the editor. Content authors who never touch a terminal can create
