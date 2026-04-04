@@ -198,6 +198,39 @@ Shipped in v0.14.0 through v0.18.3.
 
 ---
 
+## Done — v0.19.0: "M5 Phase A and Form type system"
+
+Shipped in v0.19.0.
+
+**M5 Phase A: Interactive suggestion nodes**
+- [x] Suggestion nodes interactive in edit mode — click, type, save
+- [x] CSS polish: hint pseudo-elements hidden during editing, suggestion styling overrides
+- [x] Empty element cursor placement fix
+- [x] Synthesized record editing — `_source_slot` provenance maps browser edits to real grammar slots
+- [x] `synthesize_link()` shared function eliminates duplication between publisher and conductor
+- [x] Anchor wrapping — link records with `as` override produce proper `<a><inner>` HTML
+
+**Form type system (EDN reader)**
+- [x] `Form` enum replaces `String` in `Element.attrs` — typed attribute values
+- [x] Backwards-compatible `attr()` bridge — zero disruption to existing code
+- [x] Extended hiccup parser reads symbols, lists, sets, integers, keywords in attribute values
+- [x] `parse_edn_form()` for re-parsing HTML string attributes as EDN
+- [x] Hiccup serializer round-trips all Form variants
+
+**`:apply text` (Display rendering)**
+- [x] `Value::display_text()` — universal text representation for all value types
+- [x] `presemble:insert` accepts `:apply text` to render Display instead of structural form
+- [x] Works in both hiccup (`:apply text`) and HTML (`apply="text"`) templates
+- [x] Preserves `_source_slot` for browser editing
+
+**Bug fixes**
+- [x] File watcher now triggers rebuild for `.hiccup` and `.css` files
+- [x] ADR-029 (stylesheets) and ADR-005 (templates are data) promoted to Accepted
+- [x] M6 (CSS asset tracking) marked as shipped in roadmap
+- [x] Generated polylith profile directories added to .gitignore
+
+---
+
 ## M5: "Browser editing"
 
 **Goal:** The served page IS the editor. Content authors who never touch a terminal can create
@@ -239,7 +272,7 @@ structural diff, and browser adapter defined there.
 
 **Deliverables:**
 - [ ] Presemble mascot overlay with mode toggle
-- [ ] Edit mode: inline editing of simple content fields
+- [x] Edit mode: inline editing of simple content fields (Phase A: suggestion nodes interactive)
 - [ ] Suggest mode: mark-for-correction and suggest-changes
 - [ ] Suggestion persistence in `.presemble/suggestions/`
 - [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol
