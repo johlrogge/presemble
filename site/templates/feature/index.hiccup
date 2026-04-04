@@ -9,13 +9,9 @@
     [:presemble/include {:src "header"}]
     [:main {:class "feature-listing"}
       [:presemble/insert {:data "feature.title" :as "h1"}]
-      [:ul {:class "feature-listing__items"}
         [:template {:data-each "features"}
-          [:li {:class "feature-listing__item"}
             [:presemble/insert {:data "link" :as "h3"}]
             [:presemble/insert {:data "tagline" :as "p"}]
-          ]
-        ]
       ]
     ]
     [:presemble/include {:src "footer"}]

@@ -455,10 +455,9 @@ pub fn build_content_page(
 
     // Add url and link to the article graph
     slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
-    let mut link_graph = template::DataGraph::new();
-    link_graph.insert("href", template::Value::Text(addr.url_path.clone()));
-    link_graph.insert("text", template::Value::Text(title_text));
-    slot_graph.insert("link", template::Value::Record(link_graph));
+    slot_graph.insert("link", template::Value::Record(
+        template::synthesize_link(&title_text, &addr.url_path),
+    ));
 
     let mut deps = std::collections::HashSet::new();
     deps.insert(schema_path.to_path_buf());

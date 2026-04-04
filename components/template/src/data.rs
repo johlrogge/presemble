@@ -95,6 +95,21 @@ impl DataGraph {
 }
 
 // ---------------------------------------------------------------------------
+// Synthesized records
+// ---------------------------------------------------------------------------
+
+/// Create a synthesized link record for a content item.
+/// The `_source_slot` field tells the browser editor which grammar slot
+/// to write back to when the link text is edited.
+pub fn synthesize_link(title: &str, url_path: &str) -> DataGraph {
+    let mut link = DataGraph::new();
+    link.insert("href", Value::Text(url_path.to_string()));
+    link.insert("text", Value::Text(title.to_string()));
+    link.insert("_source_slot", Value::Text("title".to_string()));
+    link
+}
+
+// ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
 
@@ -393,6 +408,23 @@ mod tests {
         match graph.resolve(&["title"]) {
             Some(Value::Text(t)) => assert_eq!(t, "My Article"),
             other => panic!("expected Some(Text), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthesize_link_has_href_text_and_source_slot() {
+        let link = synthesize_link("Hello World", "/article/hello-world");
+        match link.resolve(&["href"]) {
+            Some(Value::Text(v)) => assert_eq!(v, "/article/hello-world"),
+            other => panic!("expected href text, got {other:?}"),
+        }
+        match link.resolve(&["text"]) {
+            Some(Value::Text(v)) => assert_eq!(v, "Hello World"),
+            other => panic!("expected text, got {other:?}"),
+        }
+        match link.resolve(&["_source_slot"]) {
+            Some(Value::Text(v)) => assert_eq!(v, "title"),
+            other => panic!("expected _source_slot=title, got {other:?}"),
         }
     }
 

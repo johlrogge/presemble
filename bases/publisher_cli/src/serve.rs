@@ -595,6 +595,8 @@ const INJECT: &str = concat!(
     ".presemble-edit-mode [data-presemble-slot]{cursor:pointer;transition:outline 0.15s,background 0.15s;}",
     ".presemble-edit-mode [data-presemble-slot]:hover{outline:2px dashed #5d8a6e;outline-offset:4px;}",
     ".presemble-edit-mode [data-presemble-slot].presemble-editing{outline:2px solid #5d8a6e;outline-offset:4px;background:rgba(93,138,110,0.05);position:relative;}",
+    ".presemble-suggestion.presemble-editing::before,.presemble-suggestion.presemble-editing::after{display:none;}",
+    ".presemble-suggestion.presemble-editing{border:none;font-style:normal;opacity:1;color:inherit !important;}",
     ".presemble-edit-toolbar{display:flex;gap:0.3rem;justify-content:flex-end;margin:0.3rem 0;}",
     ".presemble-edit-toolbar button{font-size:1rem;width:2rem;height:2rem;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,0.15);}",
     ".presemble-edit-toolbar .presemble-save{background:#5d8a6e;color:#fff;}",
@@ -660,7 +662,7 @@ const INJECT: &str = concat!(
     "if(!el||el.classList.contains('presemble-editing')){return;}",
     "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
     "if(el.tagName==='IMG'){return;}",
-    "if(el.tagName==='A'){",
+    "if(el.tagName==='A'&&!el.getAttribute('data-presemble-source-slot')){",
       "e.preventDefault();",
       "var afile=el.getAttribute('data-presemble-file');",
       "var aslot=el.getAttribute('data-presemble-slot');",
@@ -705,11 +707,13 @@ const INJECT: &str = concat!(
     "e.preventDefault();",
     "var pfile=el.getAttribute('data-presemble-file');",
     "var slot=el.getAttribute('data-presemble-slot');",
+    "var editSlot=el.getAttribute('data-presemble-source-slot')||slot;",
     "if(!pfile||!slot){return;}",
     "var original=el.innerText;",
     "el.contentEditable='true';",
     "el.classList.add('presemble-editing');",
     "el.focus();",
+    "if(!el.textContent.trim()){var r=document.createRange();r.selectNodeContents(el);r.collapse(true);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}",
     "var toolbar=document.createElement('div');",
     "toolbar.className='presemble-edit-toolbar';",
     "toolbar.innerHTML='<button class=\"presemble-save\" title=\"Save\">&#10003;</button><button class=\"presemble-undo\" title=\"Undo\">&#8630;</button>';",
@@ -727,7 +731,7 @@ const INJECT: &str = concat!(
       "fetch('/_presemble/edit',{",
         "method:'POST',",
         "headers:{'Content-Type':'application/json'},",
-        "body:JSON.stringify({file:pfile,slot:slot,value:value})",
+        "body:JSON.stringify({file:pfile,slot:editSlot,value:value})",
       "}).then(function(r){return r.json();}).then(function(data){",
         "if(!data.ok){",
           "var err=document.createElement('div');",
@@ -835,7 +839,7 @@ fn is_relevant_path(path: &std::path::Path) -> bool {
     }
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("md" | "html")
+        Some("md" | "html" | "hiccup" | "css")
     )
 }
 

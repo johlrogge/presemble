@@ -423,6 +423,25 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
     transform(callable_nodes, &effective_graph, &ctx.descend())
 }
 
+/// Build the common presemble attribute vec for a rendered record element.
+/// Appends `data-presemble-source-slot` if the sub-graph carries `_source_slot`.
+fn record_attrs(
+    class: &str,
+    slot: &str,
+    file: &str,
+    sub_graph: &DataGraph,
+) -> Vec<(String, String)> {
+    let mut attrs = vec![
+        ("class".to_string(), class.to_string()),
+        ("data-presemble-slot".to_string(), slot.to_string()),
+        ("data-presemble-file".to_string(), file.to_string()),
+    ];
+    if let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"]) {
+        attrs.push(("data-presemble-source-slot".to_string(), source.clone()));
+    }
+    attrs
+}
+
 /// Render a Record value as a link or image.
 fn render_record(
     sub_graph: &DataGraph,
@@ -453,14 +472,11 @@ fn render_record(
         "a" => {
             let href = extract_text(sub_graph, "href").unwrap_or_default();
             let text = extract_text(sub_graph, "text").unwrap_or_default();
+            let mut attrs = record_attrs(class, slot, file, sub_graph);
+            attrs.insert(0, ("href".to_string(), href));
             let element = Element {
                 name: "a".to_string(),
-                attrs: vec![
-                    ("href".to_string(), href),
-                    ("class".to_string(), class.to_string()),
-                    ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-file".to_string(), file.to_string()),
-                ],
+                attrs,
                 children: vec![Node::Text(text)],
             };
             Ok(vec![Node::Element(element)])
@@ -469,48 +485,43 @@ fn render_record(
         "img" => {
             let src = extract_text(sub_graph, "path").unwrap_or_default();
             let alt = extract_text(sub_graph, "alt").unwrap_or_default();
+            let mut attrs = record_attrs(class, slot, file, sub_graph);
+            attrs.insert(0, ("alt".to_string(), alt));
+            attrs.insert(0, ("src".to_string(), src));
             let element = Element {
                 name: "img".to_string(),
-                attrs: vec![
-                    ("src".to_string(), src),
-                    ("alt".to_string(), alt),
-                    ("class".to_string(), class.to_string()),
-                    ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-file".to_string(), file.to_string()),
-                ],
+                attrs,
                 children: vec![],
             };
             Ok(vec![Node::Element(element)])
         }
 
-        // For other `as` tags: if record has href/text, treat as link; if path/alt, as image.
+        // For other `as` tags: if record has href/text, wrap inner element in <a>.
         _ => {
             if has_href {
                 let href = extract_text(sub_graph, "href").unwrap_or_default();
                 let text = extract_text(sub_graph, "text").unwrap_or_default();
-                let element = Element {
+                let attrs = record_attrs(class, slot, file, sub_graph);
+                let inner = Element {
                     name: effective_tag.to_string(),
-                    attrs: vec![
-                        ("href".to_string(), href),
-                        ("class".to_string(), class.to_string()),
-                        ("data-presemble-slot".to_string(), slot.to_string()),
-                        ("data-presemble-file".to_string(), file.to_string()),
-                    ],
+                    attrs,
                     children: vec![Node::Text(text)],
                 };
-                Ok(vec![Node::Element(element)])
+                let anchor = Element {
+                    name: "a".to_string(),
+                    attrs: vec![("href".to_string(), href)],
+                    children: vec![Node::Element(inner)],
+                };
+                Ok(vec![Node::Element(anchor)])
             } else if has_path {
                 let src = extract_text(sub_graph, "path").unwrap_or_default();
                 let alt = extract_text(sub_graph, "alt").unwrap_or_default();
+                let mut attrs = record_attrs(class, slot, file, sub_graph);
+                attrs.insert(0, ("alt".to_string(), alt));
+                attrs.insert(0, ("src".to_string(), src));
                 let element = Element {
                     name: effective_tag.to_string(),
-                    attrs: vec![
-                        ("src".to_string(), src),
-                        ("alt".to_string(), alt),
-                        ("class".to_string(), class.to_string()),
-                        ("data-presemble-slot".to_string(), slot.to_string()),
-                        ("data-presemble-file".to_string(), file.to_string()),
-                    ],
+                    attrs,
                     children: vec![],
                 };
                 Ok(vec![Node::Element(element)])
@@ -1299,5 +1310,49 @@ mod tests {
         let expr = Expr::Lookup(vec!["tagline".to_string()]);
         let result = eval_expr_to_string(&expr, &graph);
         assert_eq!(result, "Write your tagline here");
+    }
+
+    #[test]
+    fn synthesized_link_renders_with_source_slot_attribute() {
+        let mut graph = DataGraph::new();
+        let link = crate::data::synthesize_link("Hello World", "/article/hello-world");
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<a"), "should render as anchor: {html}");
+        assert!(html.contains(r#"href="/article/hello-world""#), "should have href: {html}");
+        assert!(html.contains("Hello World"), "should have link text: {html}");
+        assert!(
+            html.contains(r#"data-presemble-source-slot="title""#),
+            "should have source slot attribute: {html}"
+        );
+    }
+
+    #[test]
+    fn regular_link_record_does_not_render_source_slot_attribute() {
+        let mut graph = DataGraph::new();
+        let mut link = DataGraph::new();
+        link.insert("href", Value::Text("/page".to_string()));
+        link.insert("text", Value::Text("Page".to_string()));
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<a"), "should render as anchor: {html}");
+        assert!(
+            !html.contains("data-presemble-source-slot"),
+            "regular link should not have source-slot attribute: {html}"
+        );
     }
 }
