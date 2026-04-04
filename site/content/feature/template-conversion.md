@@ -17,8 +17,8 @@ Produces `templates/post/item.hiccup`:
 ```clojure
 [:html {:lang "en"}
  [:body
-  [:presemble/insert {:data "post.title" :as "h1"}]
-  [:presemble/insert {:data "post.body"}]]]
+  [:presemble/insert {:data "input.title" :as "h1"}]
+  [:presemble/insert {:data "input.body"}]]]
 ```
 
 ### Hiccup to HTML
@@ -32,8 +32,8 @@ Produces `templates/post/item.html`:
 ```html
 <html lang="en">
   <body>
-    <presemble:insert data="post.title" as="h1" />
-    <presemble:insert data="post.body" />
+    <presemble:insert data="input.title" as="h1" />
+    <presemble:insert data="input.body" />
   </body>
 </html>
 ```
@@ -47,8 +47,8 @@ HTML is the default. It is what browsers and most editors understand natively. H
 Hiccup templates support line comments with `;`:
 
 ```clojure
-; This section renders once per post
-[:presemble/insert {:data "post.title" :as "h1"}]
+; This section renders the page title
+[:presemble/insert {:data "input.title" :as "h1"}]
 ```
 
 Comments are stripped at parse time and do not appear in output.

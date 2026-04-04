@@ -37,7 +37,7 @@ A markdown list item ending with a `{#name}` anchor declares a list slot. The oc
 In templates, iterate the list with `data-each`; each item exposes a `text` field. To render all items joined with spaces, use `:apply text` directly on the insert:
 
 ```html
-<presemble:insert data="post.tags" apply="text" />
+<presemble:insert data="input.tags" apply="text" />
 ```
 
 #### Heading slots
@@ -244,10 +244,12 @@ Use `presemble convert` to translate any template between HTML and Hiccup syntax
 Insert a named data path into the page:
 
 ```html
-<presemble:insert data="post.title" as="h1" />
-<presemble:insert data="post.summary" as="p" />
-<presemble:insert data="post.body" />
+<presemble:insert data="input.title" as="h1" />
+<presemble:insert data="input.summary" as="p" />
+<presemble:insert data="input.body" />
 ```
+
+`input` always refers to the current page's own content. The name can be changed with the `:input` directive (see [Data context](#data-context)).
 
 | Attribute | Required | Description |
 |---|---|---|
@@ -262,25 +264,25 @@ Omitting `as` inserts the value as raw HTML nodes. If the path is absent from th
 The `apply` attribute (`:apply` in Hiccup) transforms a value before it is inserted. Use `text` to render the Display (text) representation of any value:
 
 ```html
-<presemble:insert data="post.title" as="h1" apply="text" />
+<presemble:insert data="input.title" as="h1" apply="text" />
 ```
 
 In Hiccup:
 
 ```clojure
-[:presemble/insert {:data "post.title" :as "h1" :apply "text"}]
+[:presemble/insert {:data "input.title" :as "h1" :apply "text"}]
 ```
 
 To thread a value through multiple transforms, use a pipe expression:
 
 ```html
-<presemble:insert data="post.title" apply="(-> text to_lower capitalize)" />
+<presemble:insert data="input.title" apply="(-> text to_lower capitalize)" />
 ```
 
 In Hiccup, the expression is a list (no quoting needed):
 
 ```clojure
-[:presemble/insert {:data "post.title" :apply (-> text to_lower capitalize)}]
+[:presemble/insert {:data "input.title" :apply (-> text to_lower capitalize)}]
 ```
 
 **Available functions:**
@@ -300,7 +302,7 @@ In Hiccup, the expression is a list (no quoting needed):
 When the `data` path resolves to a link record (a slot declared as a link in the schema), the `as` attribute wraps the linked text in the given element and the whole thing is wrapped in an `<a>` pointing to the linked page:
 
 ```html
-<presemble:insert data="post.author" as="h3" />
+<presemble:insert data="input.author" as="h3" />
 ```
 
 Produces:
@@ -312,23 +314,33 @@ Produces:
 In Hiccup:
 
 ```clojure
-[:presemble/insert {:data "post.author" :as "h3"}]
+[:presemble/insert {:data "input.author" :as "h3"}]
 ```
 
 ### `data-each`
 
-Iterate over a collection on a `<template>` element:
+Iterate over a collection on a `<template>` element. The value passed to `data-each` is the singular schema stem — the publisher automatically finds all items of that type:
 
 ```html
-<template data-each="posts">
+<template data-each="post">
   <li>
-    <presemble:insert data="post.title" as="h3" />
-    <a data="post.url_path" href="">Read more</a>
+    <presemble:insert data="item.title" as="h3" />
+    <a data-href="item.url_path" href="">Read more</a>
   </li>
 </template>
 ```
 
-The `<template>` wrapper is not emitted. Inside the loop, data paths are relative to the current item.
+The `<template>` wrapper is not emitted. Inside the loop, each item is bound to `item`. The parent context — `input`, other collections, and outer loops — remains accessible inside the loop body.
+
+The item binding name can be customised with the `:item` directive:
+
+```html
+<template data-each="post" :item "p">
+  <presemble:insert data="p.title" as="h3" />
+</template>
+```
+
+Every page template has access to all collections regardless of content type, so a `post` item template can iterate all `guide` items and vice versa.
 
 ### `presemble:include`
 
@@ -350,7 +362,7 @@ The `src` value is a file stem relative to `templates/`. Named template definiti
 Bind an `href` attribute from the data graph:
 
 ```html
-<a data-href="post.url_path">Read more</a>
+<a data-href="input.url_path">Read more</a>
 ```
 
 ### `presemble:class`
@@ -369,7 +381,7 @@ Templates can be written in Hiccup (EDN) format instead of HTML. Use `presemble 
 
 ```clojure
 ; Render title as h1
-[:presemble/insert {:data "post.title" :as "h1"}]
+[:presemble/insert {:data "input.title" :as "h1"}]
 ```
 
 #### EDN attribute types
@@ -378,13 +390,13 @@ Hiccup attribute values are not limited to strings — the full EDN type system 
 
 ```clojure
 ; Symbol — used as a bare function reference in :apply
-[:presemble/insert {:data "post.title" :apply text}]
+[:presemble/insert {:data "input.title" :apply text}]
 
 ; List — used as a pipe expression in :apply
-[:presemble/insert {:data "post.title" :apply (-> text to_lower capitalize)}]
+[:presemble/insert {:data "input.title" :apply (-> text to_lower capitalize)}]
 
 ; Keyword — used as an enum value
-[:presemble/insert {:data "post.title" :as :h1}]
+[:presemble/insert {:data "input.title" :as :h1}]
 
 ; Integer
 [:div {:tabindex 0}]
@@ -393,7 +405,7 @@ Hiccup attribute values are not limited to strings — the full EDN type system 
 This is a key difference from HTML templates, where all attribute values are strings. The HTML equivalent of a pipe expression must quote the list as a string:
 
 ```html
-<presemble:insert data="post.title" apply="(-> text to_lower capitalize)" />
+<presemble:insert data="input.title" apply="(-> text to_lower capitalize)" />
 ```
 
 ### URL paths in templates
@@ -409,28 +421,44 @@ See [URL rewriting](#url-rewriting) for deployment configuration.
 
 ## The data graph
 
-Schemas, content, and templates connect through named data paths. A schema named `post` with a field `{#title}` creates the path `post.title`. Templates traverse these paths to build output.
+Schemas, content, and templates connect through named data paths. Templates traverse these paths to build output.
+
+### Data context
+
+Each template receives a data context with two reserved names:
+
+- **`input`** — the current page's own content. A post template rendering `my-post.md` sees that post's data as `input.title`, `input.summary`, etc.
+- **`item`** — the current loop item inside a `data-each` loop.
+
+Both names can be customised:
+
+- `:input "article"` — rename `input` to `article` for the current template. All paths become `article.title`, `article.summary`, etc.
+- `:item "p"` on a `data-each` element — rename `item` to `p` inside that loop.
+
+These directives only change the binding name; the underlying data is the same.
 
 ### Path structure
 
 | Path form | Example | Description |
 |---|---|---|
-| `schema.field` | `post.title` | A named slot value |
-| `schema.field.subfield` | `post.author.name` | A nested reference (linked content) |
-| `schema.url_path` | `post.url_path` | The page's clean URL |
-| `schema.body` | `post.body` | The free-form body as HTML |
+| `input.field` | `input.title` | A named slot from the current page |
+| `input.field.subfield` | `input.author.name` | A nested reference (linked content) |
+| `input.url_path` | `input.url_path` | The current page's clean URL |
+| `input.body` | `input.body` | The current page's free-form body as HTML |
+| `item.field` | `item.title` | A named slot from the current loop item |
+| `item.url_path` | `item.url_path` | The loop item's clean URL |
 
 ### Collections
 
-Collections are accessed by the plural schema name in `data-each`:
+Collections are accessed by the singular schema stem in `data-each`. A schema named `post` is iterated as `data-each="post"`:
 
 ```html
-<template data-each="posts">
-  <presemble:insert data="post.title" as="h2" />
+<template data-each="post">
+  <presemble:insert data="item.title" as="h2" />
 </template>
 ```
 
-A schema named `post` produces a collection `posts`. The item variable inside the loop is `post` (singular).
+Every page template sees all collections — a guide page can iterate all posts, and a post page can iterate all guides. Loops extend the parent context, so `input` and other collections remain accessible inside a loop.
 
 Because the schema defines which paths exist, the template vocabulary is finite and verified at build time. A template that references a non-existent path fails the build.
 
@@ -494,6 +522,18 @@ When a file changes and the rebuild completes, the browser reloads automatically
 In serve mode, missing or invalid content slots render as inline suggestion nodes instead of error pages. Each suggestion node is derived from the schema: it shows the slot's hint text and indicates what is expected. The page is always browsable — a content file with no fields renders as a fully scaffolded guide. Suggestion nodes never appear in a published build; `presemble build` still fails on missing required slots.
 
 Suggestion nodes are interactive: clicking one in the browser opens an inline editing form for that slot. This is Phase A of the browser editing feature (M5). The suggestion UI has dedicated CSS polish to distinguish editing state from normal content.
+
+### Mascot overlay
+
+The serve UI includes a mascot overlay (M5 Phase B) in the corner of every served page. It indicates the current editorial state at a glance:
+
+| State | Indicator | Meaning |
+|---|---|---|
+| Suggestions present | Mascot + badge | One or more suggestion nodes exist on this page |
+| All clear | Thumbs up | No suggestions — all slots are filled |
+| Edit mode | Pencil | Inline editing is active |
+
+Clicking the mascot opens a popover menu with three mode options: View, Edit, and Suggest. Suggest mode is visible in the menu but not yet enabled (coming in a future release).
 
 ### File watcher coverage
 
@@ -574,8 +614,8 @@ Replace `site/` with the path to your site directory.
 
 | Capability | Description |
 |---|---|
-| Completions | Data-path completions for `data="…"` attributes, derived from the matching schema |
-| Diagnostics | Data paths referencing fields not declared in the schema |
+| Completions | Data-path completions for `data="…"` attributes: `input.*` paths from the matching schema, `item.*` paths inside `data-each` loops, and collection names for `data-each` values |
+| Diagnostics | `input.*` or `item.*` paths referencing fields not declared in the schema |
 | Hover | Schema hint text for the field at the cursor |
 | Go-to-definition | Jumps to `presemble:include` target or `presemble:define` block |
 

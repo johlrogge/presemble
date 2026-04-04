@@ -44,4 +44,4 @@ When a content slot is missing in serve mode, Presemble renders a warm placehold
 
 ### Cross-content references
 
-A link in a content file is not a URL string. It is a typed edge in the data graph. When a post schema declares an author link, the compiler resolves it to the author document, validates that the target satisfies the author schema, and makes the full author document available to the template at post.author. The author's name, bio, and URL are all reachable from any template that renders a post. The reference is verified at build time — a link to an author who does not exist is a build error, not a 404.
+A link in a content file is not a URL string. It is a typed edge in the data graph. When a post schema declares an author link, the compiler resolves it to the author document, validates that the target satisfies the author schema, and makes the full author document available to the template at `input.author`. The author's name, bio, and URL are all reachable from any template that renders a post. The reference is verified at build time — a link to an author who does not exist is a build error, not a 404.
