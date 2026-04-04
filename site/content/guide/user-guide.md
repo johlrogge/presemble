@@ -18,6 +18,28 @@ templates/post/item.html   ← template for individual posts
 
 Each field in a schema is declared as a markdown element followed by a `{#field-name}` anchor. The element type determines what the content author must write.
 
+#### List slots
+
+```markdown
+- hint text {#tags}
+occurs
+: *
+```
+
+A markdown list item ending with a `{#name}` anchor declares a list slot. The occurrence value `*` means unbounded — any number of items. In a content file, write a standard markdown list:
+
+```markdown
+- Rust
+- WebAssembly
+- Publishing
+```
+
+In templates, iterate the list with `data-each`; each item exposes a `text` field. To render all items joined with spaces, use `:apply text` directly on the insert:
+
+```html
+<presemble:insert data="post.tags" apply="text" />
+```
+
 #### Heading slots
 
 ```markdown
@@ -75,6 +97,7 @@ content
 | `at least once` | One or more occurrences |
 | `at least N` | N or more occurrences |
 | `at most N` | Up to N occurrences |
+| `*` | Unbounded — any number of items (used for list slots) |
 
 #### `content` — text content constraint
 
@@ -230,8 +253,67 @@ Insert a named data path into the page:
 |---|---|---|
 | `data` | yes | Dot-separated path into the data graph |
 | `as` | no | Wrap the value in this element (e.g. `h1`, `p`, `span`) |
+| `apply` | no | Transform the value before rendering (see below) |
 
 Omitting `as` inserts the value as raw HTML nodes. If the path is absent from the data graph, the element is removed silently.
+
+#### `:apply` — value transforms
+
+The `apply` attribute (`:apply` in Hiccup) transforms a value before it is inserted. Use `text` to render the Display (text) representation of any value:
+
+```html
+<presemble:insert data="post.title" as="h1" apply="text" />
+```
+
+In Hiccup:
+
+```clojure
+[:presemble/insert {:data "post.title" :as "h1" :apply "text"}]
+```
+
+To thread a value through multiple transforms, use a pipe expression:
+
+```html
+<presemble:insert data="post.title" apply="(-> text to_lower capitalize)" />
+```
+
+In Hiccup, the expression is a list (no quoting needed):
+
+```clojure
+[:presemble/insert {:data "post.title" :apply (-> text to_lower capitalize)}]
+```
+
+**Available functions:**
+
+| Function | Effect |
+|---|---|
+| `text` | Render as plain text (Display representation) |
+| `to_lower` | Convert to lowercase |
+| `to_upper` | Convert to uppercase |
+| `capitalize` | Uppercase the first character |
+| `truncate` | Truncate to a default length |
+
+`:apply text` on a list field joins all items with spaces.
+
+#### Anchor wrapping for link records
+
+When the `data` path resolves to a link record (a slot declared as a link in the schema), the `as` attribute wraps the linked text in the given element and the whole thing is wrapped in an `<a>` pointing to the linked page:
+
+```html
+<presemble:insert data="post.author" as="h3" />
+```
+
+Produces:
+
+```html
+<a href="/author/johlrogge"><h3>Joakim Ohlrogge</h3></a>
+```
+
+In Hiccup:
+
+```clojure
+[:presemble/insert {:data "post.author" :as "h3"}]
+```
 
 ### `data-each`
 
@@ -290,6 +372,30 @@ Templates can be written in Hiccup (EDN) format instead of HTML. Use `presemble 
 [:presemble/insert {:data "post.title" :as "h1"}]
 ```
 
+#### EDN attribute types
+
+Hiccup attribute values are not limited to strings — the full EDN type system is available. Symbols, lists, sets, integers, and keywords are all valid attribute values and are interpreted by the directive that reads them:
+
+```clojure
+; Symbol — used as a bare function reference in :apply
+[:presemble/insert {:data "post.title" :apply text}]
+
+; List — used as a pipe expression in :apply
+[:presemble/insert {:data "post.title" :apply (-> text to_lower capitalize)}]
+
+; Keyword — used as an enum value
+[:presemble/insert {:data "post.title" :as :h1}]
+
+; Integer
+[:div {:tabindex 0}]
+```
+
+This is a key difference from HTML templates, where all attribute values are strings. The HTML equivalent of a pipe expression must quote the list as a string:
+
+```html
+<presemble:insert data="post.title" apply="(-> text to_lower capitalize)" />
+```
+
 ### URL paths in templates
 
 Always write root-relative paths in templates. The publisher rewrites them at build time:
@@ -327,6 +433,14 @@ Collections are accessed by the plural schema name in `data-each`:
 A schema named `post` produces a collection `posts`. The item variable inside the loop is `post` (singular).
 
 Because the schema defines which paths exist, the template vocabulary is finite and verified at build time. A template that references a non-existent path fails the build.
+
+### Stylesheet tracking
+
+CSS files are first-class nodes in the dependency graph. The publisher parses `@import` statements and `url()` references within each stylesheet to build dependency edges. This means:
+
+- A change to an imported CSS file triggers a rebuild of all pages that (directly or transitively) use the importing stylesheet.
+- `url()` asset references in CSS are tracked the same way as `src` and `href` in HTML — missing assets are reported at build time.
+- The serve watcher detects `.css` changes and rebuilds only the affected pages.
 
 See [the data graph](/feature/the-data-graph) for how cross-content references work.
 
@@ -378,6 +492,19 @@ When a file changes and the rebuild completes, the browser reloads automatically
 ### Suggestion nodes
 
 In serve mode, missing or invalid content slots render as inline suggestion nodes instead of error pages. Each suggestion node is derived from the schema: it shows the slot's hint text and indicates what is expected. The page is always browsable — a content file with no fields renders as a fully scaffolded guide. Suggestion nodes never appear in a published build; `presemble build` still fails on missing required slots.
+
+Suggestion nodes are interactive: clicking one in the browser opens an inline editing form for that slot. This is Phase A of the browser editing feature (M5). The suggestion UI has dedicated CSS polish to distinguish editing state from normal content.
+
+### File watcher coverage
+
+The serve watcher monitors all source file types that affect the build. Changes to any of the following trigger an incremental rebuild and browser reload:
+
+| Extension | What changes |
+|---|---|
+| `.md` | Content files and schemas |
+| `.html` | HTML templates |
+| `.hiccup` | Hiccup templates |
+| `.css` | Stylesheets tracked as graph nodes |
 
 ## URL rewriting
 

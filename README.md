@@ -8,7 +8,7 @@ Content is data. Templates are data. Schemas are the contracts between them.
 
 - **Schema-validated content** — define document grammars in markdown; the publisher enforces them at build time with hard failures and clear error messages
 - **Data-bound templates** — templates are parsed DOM trees, not text with holes; structural validity is guaranteed by construction
-- **Live serve** — `presemble serve` rebuilds only affected pages on each save and reloads the browser automatically
+- **Live serve** — `presemble serve` rebuilds only affected pages on each save (including `.hiccup` and `.css` changes) and reloads the browser automatically
 - **LSP support** — `presemble lsp` provides completions, diagnostics, hover, and go-to-definition for content, template, and schema files in any LSP-capable editor
 - **Deployment URL rewriting** — authors write root-relative paths; the publisher rewrites them to relative, root-relative with base path, or absolute at build time
 
@@ -94,6 +94,6 @@ Requires the Nix devenv shell. Do not install packages with `cargo install -g` o
 
 ## Version
 
-Current release: **0.13.0**
+Current release: **0.19.0**
 
 See [ROADMAP.md](ROADMAP.md) for the milestone plan and [RELEASING.md](RELEASING.md) for the release workflow.
