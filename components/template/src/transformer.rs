@@ -1,6 +1,6 @@
 use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, Value};
-use crate::dom::{Element, Node};
+use crate::dom::{Element, Form, Node};
 use crate::expr::parse_expr;
 use crate::registry::RenderContext;
 
@@ -121,14 +121,15 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
 /// If a `presemble:class` attribute is present, evaluates its pipe expression against
 /// the graph and either sets or appends to the `class` attribute. Removes `presemble:class`.
 fn apply_presemble_class(
-    mut attrs: Vec<(String, String)>,
+    mut attrs: Vec<(String, Form)>,
     graph: &DataGraph,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Form)> {
     // Find and remove the `presemble:class` attribute.
     let presemble_class_pos = attrs.iter().position(|(k, _)| k == "presemble:class");
     let presemble_class_value = presemble_class_pos.map(|i| attrs.remove(i).1);
 
-    if let Some(expr_src) = presemble_class_value {
+    if let Some(expr_form) = presemble_class_value {
+        let expr_src = expr_form.as_str().unwrap_or("").to_string();
         let evaluated = match parse_expr(&expr_src) {
             Ok(expr) => eval_expr_to_string(&expr, graph),
             Err(_) => String::new(),
@@ -137,10 +138,12 @@ fn apply_presemble_class(
         if !evaluated.is_empty() {
             // Find or create the `class` attribute.
             if let Some((_k, v)) = attrs.iter_mut().find(|(k, _)| k == "class") {
-                v.push(' ');
-                v.push_str(&evaluated);
+                if let Form::Str(s) = v {
+                    s.push(' ');
+                    s.push_str(&evaluated);
+                }
             } else {
-                attrs.push(("class".to_string(), evaluated));
+                attrs.push(("class".to_string(), Form::Str(evaluated)));
             }
         }
     }
@@ -294,9 +297,9 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             let element = Element {
                 name: tag,
                 attrs: vec![
-                    ("class".to_string(), class),
-                    ("data-presemble-slot".to_string(), slot_name_from_path(data_path)),
-                    ("data-presemble-file".to_string(), presemble_file.clone()),
+                    ("class".to_string(), Form::Str(class)),
+                    ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
+                    ("data-presemble-file".to_string(), Form::Str(presemble_file.clone())),
                 ],
                 children: vec![Node::Text(text.clone())],
             };
@@ -353,16 +356,16 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             // Hint text goes into data-presemble-hint for CSS placeholder display.
             // The element content is empty — the user starts with a clean slate.
             let mut attrs = vec![
-                ("class".to_string(), combined_class),
-                ("data-presemble-slot".to_string(), slot_name.clone()),
-                ("data-presemble-file".to_string(), presemble_file.clone()),
-                ("data-presemble-hint".to_string(), hint.clone()),
+                ("class".to_string(), Form::Str(combined_class)),
+                ("data-presemble-slot".to_string(), Form::Str(slot_name.clone())),
+                ("data-presemble-file".to_string(), Form::Str(presemble_file.clone())),
+                ("data-presemble-hint".to_string(), Form::Str(hint.clone())),
             ];
             if effective_tag == "img" {
-                attrs.push(("alt".to_string(), String::new()));
-                attrs.push(("src".to_string(), String::new()));
+                attrs.push(("alt".to_string(), Form::Str(String::new())));
+                attrs.push(("src".to_string(), Form::Str(String::new())));
             } else if effective_tag == "a" {
-                attrs.push(("href".to_string(), "#".to_string()));
+                attrs.push(("href".to_string(), Form::Str("#".to_string())));
             }
             let element = Element {
                 name: effective_tag.to_string(),
@@ -430,14 +433,14 @@ fn record_attrs(
     slot: &str,
     file: &str,
     sub_graph: &DataGraph,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Form)> {
     let mut attrs = vec![
-        ("class".to_string(), class.to_string()),
-        ("data-presemble-slot".to_string(), slot.to_string()),
-        ("data-presemble-file".to_string(), file.to_string()),
+        ("class".to_string(), Form::Str(class.to_string())),
+        ("data-presemble-slot".to_string(), Form::Str(slot.to_string())),
+        ("data-presemble-file".to_string(), Form::Str(file.to_string())),
     ];
     if let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"]) {
-        attrs.push(("data-presemble-source-slot".to_string(), source.clone()));
+        attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
     }
     attrs
 }
@@ -473,7 +476,7 @@ fn render_record(
             let href = extract_text(sub_graph, "href").unwrap_or_default();
             let text = extract_text(sub_graph, "text").unwrap_or_default();
             let mut attrs = record_attrs(class, slot, file, sub_graph);
-            attrs.insert(0, ("href".to_string(), href));
+            attrs.insert(0, ("href".to_string(), Form::Str(href)));
             let element = Element {
                 name: "a".to_string(),
                 attrs,
@@ -486,8 +489,8 @@ fn render_record(
             let src = extract_text(sub_graph, "path").unwrap_or_default();
             let alt = extract_text(sub_graph, "alt").unwrap_or_default();
             let mut attrs = record_attrs(class, slot, file, sub_graph);
-            attrs.insert(0, ("alt".to_string(), alt));
-            attrs.insert(0, ("src".to_string(), src));
+            attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
+            attrs.insert(0, ("src".to_string(), Form::Str(src)));
             let element = Element {
                 name: "img".to_string(),
                 attrs,
@@ -509,7 +512,7 @@ fn render_record(
                 };
                 let anchor = Element {
                     name: "a".to_string(),
-                    attrs: vec![("href".to_string(), href)],
+                    attrs: vec![("href".to_string(), Form::Str(href))],
                     children: vec![Node::Element(inner)],
                 };
                 Ok(vec![Node::Element(anchor)])
@@ -517,8 +520,8 @@ fn render_record(
                 let src = extract_text(sub_graph, "path").unwrap_or_default();
                 let alt = extract_text(sub_graph, "alt").unwrap_or_default();
                 let mut attrs = record_attrs(class, slot, file, sub_graph);
-                attrs.insert(0, ("alt".to_string(), alt));
-                attrs.insert(0, ("src".to_string(), src));
+                attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
+                attrs.insert(0, ("src".to_string(), Form::Str(src)));
                 let element = Element {
                     name: effective_tag.to_string(),
                     attrs,
@@ -546,9 +549,9 @@ fn render_list_item(
             let element = Element {
                 name: tag.to_string(),
                 attrs: vec![
-                    ("class".to_string(), class.to_string()),
-                    ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-file".to_string(), file.to_string()),
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    ("data-presemble-slot".to_string(), Form::Str(slot.to_string())),
+                    ("data-presemble-file".to_string(), Form::Str(file.to_string())),
                 ],
                 children: vec![Node::Text(text.clone())],
             };
@@ -587,7 +590,7 @@ fn extract_text(graph: &DataGraph, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::data::{DataGraph, Value};
-    use crate::dom::{parse_template_xml, serialize_nodes, Element, Node};
+    use crate::dom::{parse_template_xml, serialize_nodes, Element, Form, Node};
     use crate::registry::{NullRegistry, RenderContext};
 
     fn make_graph_with_title(title: &str) -> DataGraph {
@@ -727,8 +730,8 @@ mod tests {
             name: "div".to_string(),
             attrs: vec![(
                 "presemble:class".to_string(),
-                r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
-                    .to_string(),
+                Form::Str(r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
+                    .to_string()),
             )],
             children: vec![],
         })];
@@ -751,11 +754,11 @@ mod tests {
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
             attrs: vec![
-                ("class".to_string(), "base".to_string()),
+                ("class".to_string(), Form::Str("base".to_string())),
                 (
                     "presemble:class".to_string(),
-                    r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
-                        .to_string(),
+                    Form::Str(r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
+                        .to_string()),
                 ),
             ],
             children: vec![],
@@ -773,7 +776,7 @@ mod tests {
 
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), "article.missing".to_string())],
+            attrs: vec![("presemble:class".to_string(), Form::Str("article.missing".to_string()))],
             children: vec![],
         })];
         let reg = NullRegistry;
@@ -791,7 +794,7 @@ mod tests {
 
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), "article.title".to_string())],
+            attrs: vec![("presemble:class".to_string(), Form::Str("article.title".to_string()))],
             children: vec![],
         })];
         let reg = NullRegistry;

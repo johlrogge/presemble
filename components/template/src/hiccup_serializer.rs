@@ -1,4 +1,4 @@
-use crate::dom::{Element, Node};
+use crate::dom::{Element, Form, Node};
 
 // ---------------------------------------------------------------------------
 // Name mapping helpers (reverse of hiccup.rs keyword_to_tag_name / keyword_to_attr_name)
@@ -42,13 +42,21 @@ fn is_element(node: &Node) -> bool {
 }
 
 /// Serialize an attribute map `{:key "val" ...}`. Returns empty string if attrs is empty.
-fn serialize_attrs(attrs: &[(String, String)]) -> String {
+fn serialize_attrs(attrs: &[(String, Form)]) -> String {
     if attrs.is_empty() {
         return String::new();
     }
     let pairs: Vec<String> = attrs
         .iter()
-        .map(|(k, v)| format!("{} \"{}\"", attr_name_to_keyword(k), escape_edn_string(v)))
+        .map(|(k, v)| {
+            // For Str values (which is all we have currently), serialize as a quoted EDN string.
+            // For other Form variants, use the generic to_edn_string serialization.
+            let value_str = match v {
+                Form::Str(s) => format!("\"{}\"", escape_edn_string(s)),
+                other => other.to_edn_string(),
+            };
+            format!("{} {}", attr_name_to_keyword(k), value_str)
+        })
         .collect();
     format!(" {{{}}}", pairs.join(" "))
 }
@@ -131,7 +139,7 @@ pub fn serialize_to_hiccup(nodes: &[Node]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::{Element, Node};
+    use crate::dom::{Element, Form, Node};
     use crate::hiccup::parse_template_hiccup;
 
     fn make_text(s: &str) -> Node {
@@ -141,7 +149,7 @@ mod tests {
     fn make_el(name: &str, attrs: Vec<(&str, &str)>, children: Vec<Node>) -> Node {
         Node::Element(Element {
             name: name.to_string(),
-            attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), Form::Str(v.to_string()))).collect(),
             children,
         })
     }
@@ -288,7 +296,7 @@ mod tests {
 
         let inner = Node::Element(Element {
             name: "div".to_string(),
-            attrs: vec![],
+            attrs: vec![] as Vec<(String, Form)>,
             children: vec![
                 Node::Text("  \n  ".to_string()),
                 Node::Text("hello".to_string()),

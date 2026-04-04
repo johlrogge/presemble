@@ -1,6 +1,76 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
+/// An EDN form — the output of reading EDN text.
+/// Named `Form` after the Lisp tradition: the reader produces forms,
+/// which are then interpreted in context (as attributes, elements, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Form {
+    Str(String),
+    Symbol(String),
+    Keyword { namespace: Option<String>, name: String },
+    List(Vec<Form>),
+    Vector(Vec<Form>),
+    Map(Vec<(Form, Form)>),
+    Set(Vec<Form>),
+    Integer(i64),
+    Nil,
+}
+
+impl Form {
+    /// Returns the string content if this is a Str or Symbol.
+    /// This is the backwards-compatibility bridge — existing code that
+    /// reads attribute values as strings continues to work.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Form::Str(s) | Form::Symbol(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Serialize this form to its HTML attribute value representation.
+    pub fn to_html_value(&self) -> String {
+        match self {
+            Form::Str(s) => s.clone(),
+            Form::Symbol(s) => s.clone(),
+            Form::Integer(n) => n.to_string(),
+            Form::Nil => String::new(),
+            // Structured forms shouldn't reach HTML output, but be defensive
+            other => other.to_edn_string(),
+        }
+    }
+
+    /// Serialize this form back to EDN text.
+    pub fn to_edn_string(&self) -> String {
+        match self {
+            Form::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+            Form::Symbol(s) => s.clone(),
+            Form::Keyword { namespace: Some(ns), name } => format!(":{ns}/{name}"),
+            Form::Keyword { namespace: None, name } => format!(":{name}"),
+            Form::Integer(n) => n.to_string(),
+            Form::Nil => "nil".to_string(),
+            Form::List(items) => {
+                let inner: Vec<String> = items.iter().map(|f| f.to_edn_string()).collect();
+                format!("({})", inner.join(" "))
+            }
+            Form::Vector(items) => {
+                let inner: Vec<String> = items.iter().map(|f| f.to_edn_string()).collect();
+                format!("[{}]", inner.join(" "))
+            }
+            Form::Map(pairs) => {
+                let inner: Vec<String> = pairs.iter()
+                    .map(|(k, v)| format!("{} {}", k.to_edn_string(), v.to_edn_string()))
+                    .collect();
+                format!("{{{}}}", inner.join(" "))
+            }
+            Form::Set(items) => {
+                let inner: Vec<String> = items.iter().map(|f| f.to_edn_string()).collect();
+                format!("#{{{}}}", inner.join(" "))
+            }
+        }
+    }
+}
+
 /// A node in the template DOM tree.
 #[derive(Debug, Clone)]
 pub enum Node {
@@ -16,7 +86,7 @@ pub struct Element {
     /// The full element name, e.g. "presemble:insert" or "div".
     pub name: String,
     /// Ordered list of (attribute-name, attribute-value) pairs.
-    pub attrs: Vec<(String, String)>,
+    pub attrs: Vec<(String, Form)>,
     /// Child nodes.
     pub children: Vec<Node>,
 }
@@ -32,7 +102,15 @@ impl Element {
         self.attrs
             .iter()
             .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
+            .and_then(|(_, v)| v.as_str())
+    }
+
+    /// Get an attribute form by name.
+    pub fn attr_form(&self, name: &str) -> Option<&Form> {
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
     }
 }
 
@@ -47,7 +125,7 @@ pub fn parse_template_xml(src: &str) -> Result<Vec<Node>, crate::error::Template
     reader.config_mut().trim_text(false);
 
     // Stack of (element_name, attrs, children) while descending.
-    let mut stack: Vec<(String, Vec<(String, String)>, Vec<Node>)> = Vec::new();
+    let mut stack: Vec<(String, Vec<(String, Form)>, Vec<Node>)> = Vec::new();
 
     loop {
         match reader.read_event() {
@@ -121,7 +199,7 @@ pub fn parse_template_xml(src: &str) -> Result<Vec<Node>, crate::error::Template
 /// Extract attributes from a quick-xml BytesStart event.
 fn parse_attrs<'a>(
     e: &quick_xml::events::BytesStart<'a>,
-) -> Result<Vec<(String, String)>, crate::error::TemplateError> {
+) -> Result<Vec<(String, Form)>, crate::error::TemplateError> {
     let mut attrs = Vec::new();
     for attr_result in e.attributes() {
         let attr = attr_result
@@ -131,7 +209,7 @@ fn parse_attrs<'a>(
             .unescape_value()
             .map_err(|err| crate::error::TemplateError::ParseError(err.to_string()))?
             .into_owned();
-        attrs.push((key, value));
+        attrs.push((key, Form::Str(value)));
     }
     Ok(attrs)
 }
@@ -179,7 +257,7 @@ fn serialize_element(el: &Element, out: &mut String) {
         out.push(' ');
         out.push_str(k);
         out.push_str("=\"");
-        out.push_str(&html_escape_attr(v));
+        out.push_str(&html_escape_attr(&v.to_html_value()));
         out.push('"');
     }
 
@@ -300,8 +378,8 @@ fn rewrite_node(node: Node, rewriter: &UrlRewriter) -> Node {
                 .map(|(_, attrs)| *attrs)
             {
                 for (key, value) in &mut el.attrs {
-                    if attr_names.contains(&key.as_str()) {
-                        *value = rewriter.rewrite(value);
+                    if attr_names.contains(&key.as_str()) && let Form::Str(s) = value {
+                        *s = rewriter.rewrite(s);
                     }
                 }
             }
@@ -539,7 +617,10 @@ mod tests {
     fn attr_helper() {
         let el = Element {
             name: "div".into(),
-            attrs: vec![("class".into(), "hero".into()), ("id".into(), "main".into())],
+            attrs: vec![
+                ("class".into(), Form::Str("hero".into())),
+                ("id".into(), Form::Str("main".into())),
+            ],
             children: vec![],
         };
         assert_eq!(el.attr("class"), Some("hero"));

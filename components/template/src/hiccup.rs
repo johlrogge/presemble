@@ -1,4 +1,4 @@
-use crate::dom::{Element, Node};
+use crate::dom::{Element, Form, Node};
 use crate::error::TemplateError;
 
 // ---------------------------------------------------------------------------
@@ -11,12 +11,27 @@ enum Token {
     RBracket,
     LBrace,
     RBrace,
+    LParen,
+    RParen,
+    HashBrace,
     Keyword {
         namespace: Option<String>,
         name: String,
     },
     StringLit(String),
+    Symbol(String),
+    Integer(i64),
     Nil,
+}
+
+/// Characters that can start a symbol (but not a digit, not ':' which starts a keyword).
+fn is_symbol_start(c: char) -> bool {
+    c.is_alphabetic() || matches!(c, '_' | '-' | '.' | '>' | '<' | '=' | '+' | '*' | '/' | '!' | '?')
+}
+
+/// Characters that can continue a symbol.
+fn is_symbol_continue(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '>' | '<' | '=' | '+' | '*' | '/' | '!' | '?')
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
@@ -59,6 +74,25 @@ fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
             '}' => {
                 tokens.push(Token::RBrace);
                 i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            '#' => {
+                // '#' must be followed by '{' to form a set literal
+                if i + 1 < len && chars[i + 1] == '{' {
+                    tokens.push(Token::HashBrace);
+                    i += 2;
+                } else {
+                    return Err(TemplateError::ParseError(format!(
+                        "unexpected '#' at position {i}: expected '#{{' for a set literal"
+                    )));
+                }
             }
             ':' => {
                 // Keyword: collect alphanumeric, '-', '_', '/' characters
@@ -142,19 +176,38 @@ fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
                 }
                 tokens.push(Token::StringLit(s));
             }
-            // nil keyword (bare word)
-            'n' if chars[i..].starts_with(&['n', 'i', 'l']) => {
-                // Make sure it's not followed by an identifier character
-                let end = i + 3;
-                let next_is_ident = end < len
-                    && (chars[end].is_alphanumeric() || chars[end] == '-' || chars[end] == '_');
-                if next_is_ident {
-                    return Err(TemplateError::ParseError(format!(
-                        "unexpected token at position {i}"
-                    )));
+            // Integer literal: optional '-' followed by digits, or just digits.
+            // Note: '-' followed by a non-digit is the start of a symbol (e.g. "->").
+            c if c.is_ascii_digit()
+                || (c == '-' && i + 1 < len && chars[i + 1].is_ascii_digit()) =>
+            {
+                let start = i;
+                if c == '-' {
+                    i += 1; // consume the '-'
                 }
-                tokens.push(Token::Nil);
-                i += 3;
+                while i < len && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let raw: String = chars[start..i].iter().collect();
+                let n: i64 = raw.parse().map_err(|_| {
+                    TemplateError::ParseError(format!("integer literal out of range: {raw}"))
+                })?;
+                tokens.push(Token::Integer(n));
+            }
+            // Symbol characters: starts with alpha, '_', '-', '.', '>', '<', '=', '+', '*', '/', '!', '?'
+            // but NOT a digit. The special case 'nil' is checked first.
+            c if is_symbol_start(c) => {
+                let start = i;
+                i += 1;
+                while i < len && is_symbol_continue(chars[i]) {
+                    i += 1;
+                }
+                let raw: String = chars[start..i].iter().collect();
+                if raw == "nil" {
+                    tokens.push(Token::Nil);
+                } else {
+                    tokens.push(Token::Symbol(raw));
+                }
             }
             other => {
                 return Err(TemplateError::ParseError(format!(
@@ -307,8 +360,8 @@ impl Parser {
     }
 
     /// Parse the interior of an attribute map (after `{` has been consumed).
-    /// Expects pairs of `Keyword StringLit` until `}`.
-    fn parse_attr_map(&mut self) -> Result<Vec<(String, String)>, TemplateError> {
+    /// Expects pairs of `Keyword <form>` until `}`.
+    fn parse_attr_map(&mut self) -> Result<Vec<(String, Form)>, TemplateError> {
         let mut attrs = Vec::new();
 
         loop {
@@ -323,29 +376,20 @@ impl Parser {
                     break;
                 }
                 Some(Token::Keyword { .. }) => {
-                    // Consume the keyword
+                    // Consume the keyword key
                     let (ns, name) = match self.next() {
                         Some(Token::Keyword { namespace, name }) => (namespace, name),
                         _ => unreachable!(),
                     };
                     let attr_name = keyword_to_attr_name(&ns, &name);
 
-                    // Next must be a StringLit value
-                    match self.next() {
-                        Some(Token::StringLit(value)) => {
-                            attrs.push((attr_name, value));
-                        }
-                        Some(other) => {
-                            return Err(TemplateError::ParseError(format!(
-                                "expected string value for attribute '{attr_name}', got {other:?}"
-                            )))
-                        }
-                        None => {
-                            return Err(TemplateError::ParseError(format!(
-                                "unexpected end of input after attribute key '{attr_name}'"
-                            )))
-                        }
-                    }
+                    // Value is any EDN form
+                    let value = self.parse_form().map_err(|e| {
+                        TemplateError::ParseError(format!(
+                            "invalid value for attribute '{attr_name}': {e}"
+                        ))
+                    })?;
+                    attrs.push((attr_name, value));
                 }
                 Some(other) => {
                     let other = other.clone();
@@ -357,6 +401,111 @@ impl Parser {
         }
 
         Ok(attrs)
+    }
+
+    /// Parse a single EDN form from the current position.
+    fn parse_form(&mut self) -> Result<Form, TemplateError> {
+        match self.next() {
+            Some(Token::StringLit(s)) => Ok(Form::Str(s)),
+            Some(Token::Symbol(s)) => Ok(Form::Symbol(s)),
+            Some(Token::Integer(n)) => Ok(Form::Integer(n)),
+            Some(Token::Nil) => Ok(Form::Nil),
+            Some(Token::Keyword { namespace, name }) => Ok(Form::Keyword { namespace, name }),
+            Some(Token::LParen) => self.parse_list(),
+            Some(Token::HashBrace) => self.parse_set(),
+            Some(Token::LBracket) => self.parse_vector_form(),
+            Some(Token::LBrace) => self.parse_map_form(),
+            Some(other) => Err(TemplateError::ParseError(format!(
+                "unexpected token in form position: {other:?}"
+            ))),
+            None => Err(TemplateError::ParseError(
+                "unexpected end of input in form position".into(),
+            )),
+        }
+    }
+
+    /// Parse a list form `(item1 item2 ...)` — LParen already consumed.
+    fn parse_list(&mut self) -> Result<Form, TemplateError> {
+        let mut items = Vec::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(TemplateError::ParseError(
+                        "unexpected end of input inside list, expected ')'".into(),
+                    ))
+                }
+                Some(Token::RParen) => {
+                    self.next(); // consume ')'
+                    break;
+                }
+                _ => items.push(self.parse_form()?),
+            }
+        }
+        Ok(Form::List(items))
+    }
+
+    /// Parse a set form `#{item1 item2 ...}` — HashBrace already consumed.
+    fn parse_set(&mut self) -> Result<Form, TemplateError> {
+        let mut items = Vec::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(TemplateError::ParseError(
+                        "unexpected end of input inside set, expected '}'".into(),
+                    ))
+                }
+                Some(Token::RBrace) => {
+                    self.next(); // consume '}'
+                    break;
+                }
+                _ => items.push(self.parse_form()?),
+            }
+        }
+        Ok(Form::Set(items))
+    }
+
+    /// Parse a vector form `[item1 item2 ...]` as a `Form::Vector` — LBracket already consumed.
+    fn parse_vector_form(&mut self) -> Result<Form, TemplateError> {
+        let mut items = Vec::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(TemplateError::ParseError(
+                        "unexpected end of input inside vector form, expected ']'".into(),
+                    ))
+                }
+                Some(Token::RBracket) => {
+                    self.next(); // consume ']'
+                    break;
+                }
+                _ => items.push(self.parse_form()?),
+            }
+        }
+        Ok(Form::Vector(items))
+    }
+
+    /// Parse a map form `{k1 v1 k2 v2 ...}` as a `Form::Map` — LBrace already consumed.
+    fn parse_map_form(&mut self) -> Result<Form, TemplateError> {
+        let mut pairs = Vec::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(TemplateError::ParseError(
+                        "unexpected end of input inside map form, expected '}'".into(),
+                    ))
+                }
+                Some(Token::RBrace) => {
+                    self.next(); // consume '}'
+                    break;
+                }
+                _ => {
+                    let key = self.parse_form()?;
+                    let val = self.parse_form()?;
+                    pairs.push((key, val));
+                }
+            }
+        }
+        Ok(Form::Map(pairs))
     }
 }
 
@@ -506,6 +655,21 @@ mod tests {
     }
 
     #[test]
+    fn attr_values_are_form_str() {
+        use crate::dom::Form;
+        let nodes = parse("[:div {:class \"hero\"}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("class"),
+                Some(&Form::Str("hero".to_string())),
+                "attr value should be Form::Str"
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
     fn line_comment_before_form() {
         let nodes = parse("; comment\n[:div \"text\"]");
         assert_eq!(nodes.len(), 1);
@@ -536,6 +700,276 @@ mod tests {
             assert_eq!(el.name, "div");
         } else {
             panic!("expected element");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Symbol, Integer, Keyword, List, Set attribute values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_symbol_attr_value() {
+        let nodes = parse("[:div {:apply text}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("apply"),
+                Some(&Form::Symbol("text".to_string())),
+                "expected Form::Symbol(\"text\")"
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn parse_integer_attr_value() {
+        let nodes = parse("[:div {:count 42}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("count"),
+                Some(&Form::Integer(42)),
+                "expected Form::Integer(42)"
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn parse_negative_integer_attr_value() {
+        let nodes = parse("[:div {:offset -1}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("offset"),
+                Some(&Form::Integer(-1)),
+                "expected Form::Integer(-1)"
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn parse_keyword_attr_value() {
+        let nodes = parse("[:div {:as :h3}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("as"),
+                Some(&Form::Keyword { namespace: None, name: "h3".to_string() }),
+                "expected Form::Keyword"
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn parse_namespaced_keyword_attr_value() {
+        let nodes = parse("[:div {:type :presemble/heading}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("type"),
+                Some(&Form::Keyword {
+                    namespace: Some("presemble".to_string()),
+                    name: "heading".to_string()
+                }),
+                "expected namespaced Form::Keyword"
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn parse_list_attr_value() {
+        let nodes = parse("[:div {:apply (-> text to_lower)}]");
+        if let Node::Element(el) = &nodes[0] {
+            let form = el.attr_form("apply").expect("apply attr");
+            assert!(
+                matches!(form, Form::List(_)),
+                "expected Form::List, got {form:?}"
+            );
+            if let Form::List(items) = form {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Form::Symbol("->".to_string()));
+                assert_eq!(items[1], Form::Symbol("text".to_string()));
+                assert_eq!(items[2], Form::Symbol("to_lower".to_string()));
+            }
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn parse_set_attr_value() {
+        let nodes = parse("[:div {:tags #{a b c}}]");
+        if let Node::Element(el) = &nodes[0] {
+            let form = el.attr_form("tags").expect("tags attr");
+            assert!(
+                matches!(form, Form::Set(_)),
+                "expected Form::Set, got {form:?}"
+            );
+            if let Form::Set(items) = form {
+                assert_eq!(items.len(), 3);
+                assert!(items.contains(&Form::Symbol("a".to_string())));
+                assert!(items.contains(&Form::Symbol("b".to_string())));
+                assert!(items.contains(&Form::Symbol("c".to_string())));
+            }
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn parse_nested_list() {
+        // (-> text (format "yyyy")) — nested list inside list
+        let nodes = parse("[:div {:apply (-> text (format \"yyyy\"))}]");
+        if let Node::Element(el) = &nodes[0] {
+            let form = el.attr_form("apply").expect("apply attr");
+            if let Form::List(items) = form {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Form::Symbol("->".to_string()));
+                assert_eq!(items[1], Form::Symbol("text".to_string()));
+                // Third item is nested list (format "yyyy")
+                if let Form::List(inner) = &items[2] {
+                    assert_eq!(inner[0], Form::Symbol("format".to_string()));
+                    assert_eq!(inner[1], Form::Str("yyyy".to_string()));
+                } else {
+                    panic!("expected nested Form::List, got {:?}", items[2]);
+                }
+            } else {
+                panic!("expected Form::List, got {form:?}");
+            }
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn nil_still_works() {
+        // nil in child position is skipped
+        let nodes = parse("[:div nil \"text\"]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(el.children.len(), 1);
+            assert!(matches!(&el.children[0], Node::Text(t) if t == "text"));
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn nil_as_attr_value_gives_nil_form() {
+        let nodes = parse("[:div {:data nil}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("data"),
+                Some(&Form::Nil),
+                "nil attr value should be Form::Nil"
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn symbol_with_arrow_is_valid() {
+        // The threading macro -> is a valid symbol
+        let nodes = parse("[:div {:fn ->}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("fn"),
+                Some(&Form::Symbol("->".to_string()))
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    #[test]
+    fn dash_followed_by_alpha_is_symbol() {
+        // -foo should be parsed as a symbol, not an integer
+        let nodes = parse("[:div {:fn -foo}]");
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(
+                el.attr_form("fn"),
+                Some(&Form::Symbol("-foo".to_string()))
+            );
+        } else {
+            panic!("expected element");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Round-trip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn roundtrip_symbol_attr() {
+        use crate::hiccup_serializer::serialize_to_hiccup;
+        let src = "[:div {:apply text}]";
+        let nodes1 = parse_template_hiccup(src).expect("first parse");
+        let serialized = serialize_to_hiccup(&nodes1);
+        let nodes2 = parse_template_hiccup(&serialized).expect("second parse");
+        if let (Node::Element(el1), Node::Element(el2)) = (&nodes1[0], &nodes2[0]) {
+            assert_eq!(el1.attrs, el2.attrs, "symbol attr roundtrip mismatch");
+        } else {
+            panic!("expected elements");
+        }
+    }
+
+    #[test]
+    fn roundtrip_integer_attr() {
+        use crate::hiccup_serializer::serialize_to_hiccup;
+        let src = "[:div {:count 42}]";
+        let nodes1 = parse_template_hiccup(src).expect("first parse");
+        let serialized = serialize_to_hiccup(&nodes1);
+        let nodes2 = parse_template_hiccup(&serialized).expect("second parse");
+        if let (Node::Element(el1), Node::Element(el2)) = (&nodes1[0], &nodes2[0]) {
+            assert_eq!(el1.attrs, el2.attrs, "integer attr roundtrip mismatch");
+        } else {
+            panic!("expected elements");
+        }
+    }
+
+    #[test]
+    fn roundtrip_keyword_attr() {
+        use crate::hiccup_serializer::serialize_to_hiccup;
+        let src = "[:div {:as :h3}]";
+        let nodes1 = parse_template_hiccup(src).expect("first parse");
+        let serialized = serialize_to_hiccup(&nodes1);
+        let nodes2 = parse_template_hiccup(&serialized).expect("second parse");
+        if let (Node::Element(el1), Node::Element(el2)) = (&nodes1[0], &nodes2[0]) {
+            assert_eq!(el1.attrs, el2.attrs, "keyword attr roundtrip mismatch");
+        } else {
+            panic!("expected elements");
+        }
+    }
+
+    #[test]
+    fn roundtrip_list_attr() {
+        use crate::hiccup_serializer::serialize_to_hiccup;
+        let src = "[:div {:apply (-> text to_lower)}]";
+        let nodes1 = parse_template_hiccup(src).expect("first parse");
+        let serialized = serialize_to_hiccup(&nodes1);
+        let nodes2 = parse_template_hiccup(&serialized).expect("second parse");
+        if let (Node::Element(el1), Node::Element(el2)) = (&nodes1[0], &nodes2[0]) {
+            assert_eq!(el1.attrs, el2.attrs, "list attr roundtrip mismatch");
+        } else {
+            panic!("expected elements");
+        }
+    }
+
+    #[test]
+    fn roundtrip_set_attr() {
+        use crate::hiccup_serializer::serialize_to_hiccup;
+        let src = "[:div {:tags #{a b c}}]";
+        let nodes1 = parse_template_hiccup(src).expect("first parse");
+        let serialized = serialize_to_hiccup(&nodes1);
+        let nodes2 = parse_template_hiccup(&serialized).expect("second parse");
+        if let (Node::Element(el1), Node::Element(el2)) = (&nodes1[0], &nodes2[0]) {
+            assert_eq!(el1.attrs, el2.attrs, "set attr roundtrip mismatch");
+        } else {
+            panic!("expected elements");
         }
     }
 }
