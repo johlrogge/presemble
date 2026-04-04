@@ -10,28 +10,28 @@
     [:main {:class "home"}
       [:section {:class "hero"}
         [:h1 "Data Not Text"]
-        [:presemble/insert {:data "index.tagline" :as "p"}]
+        [:presemble/insert {:data "self.tagline" :as "p"}]
       ]
-      [:template {:data-slot "index.pitch"}
+      [:template {:data-slot "self.pitch"}
         [:section {:class "pitch"}
-          [:presemble/insert {:data "index.pitch" :as "p"}]
+          [:presemble/insert {:data "self.pitch" :as "p"}]
         ]
       ]
-      [:template {:data-slot "index.body"}
+      [:template {:data-slot "self.body"}
         [:section {:class "why-presemble"}
           [:h2 "Why Presemble"]
-          [:presemble/insert {:data "index.body"}]
+          [:presemble/insert {:data "self.body"}]
         ]
       ]
       [:section {:class "feature-grid"}
         [:h2 "Features"]
         [:ul {:class "feature-grid__items"}
-          [:template {:data-each "index.highlight"}
+          [:template {:data-each "self.highlight"}
             [:li {:class "feature-card"}
-              [:presemble/insert {:data "title" :as "h3"}]
-              [:presemble/insert {:data "tagline"}]
-              [:presemble/insert {:data "description" :as "p"}]
-              [:presemble/insert {:data "link"}]
+              [:presemble/insert {:data "item.title" :as "h3"}]
+              [:presemble/insert {:data "item.tagline"}]
+              [:presemble/insert {:data "item.description" :as "p"}]
+              [:presemble/insert {:data "item.link"}]
             ]
           ]
         ]
@@ -42,11 +42,11 @@
       [:section {:class "latest-posts"}
         [:h2 "From the Blog"]
         [:ul {:class "latest-posts__items"}
-          [:template {:data-each "posts"}
+          [:template {:data-each "post"}
             [:li {:class "post-card"}
-              [:presemble/insert {:data "title" :as "h3"}]
-              [:presemble/insert {:data "summary"}]
-              [:presemble/insert {:data "link"}]
+              [:presemble/insert {:data "item.title" :as "h3"}]
+              [:presemble/insert {:data "item.summary"}]
+              [:presemble/insert {:data "item.link"}]
             ]
           ]
         ]

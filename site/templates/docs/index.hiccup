@@ -7,12 +7,12 @@
   [:body
     [:presemble/include {:src "header"}]
     [:main {:class "docs"}
-      [:presemble/insert {:data "docs.title" :as "h1"}]
-      [:presemble/insert {:data "docs.description" :as "p"}]
+      [:presemble/insert {:data "self.title" :as "h1"}]
+      [:presemble/insert {:data "self.description" :as "p"}]
       [:ul {:class "docs__cards"}
-        [:template {:data-each "guides"}
+        [:template {:data-each "guide"}
           [:li
-            [:presemble/insert {:data "title" :as "h2"}]
-            [:presemble/insert {:data "summary" :as "p"}]
-            [:presemble/insert {:data "link"}]]]]]
+            [:presemble/insert {:data "item.title" :as "h2"}]
+            [:presemble/insert {:data "item.summary" :as "p"}]
+            [:presemble/insert {:data "item.link"}]]]]]
     [:presemble/include {:src "footer"}]]]

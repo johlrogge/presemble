@@ -1,10 +1,10 @@
 <!-- cover_thumbnail: future sub-template for reuse across article and article_card.
-     When template composition is implemented, this will accept article.cover as its
+     When template composition is implemented, this will accept item.cover as its
      data context and render the image with orientation-based CSS class.
 
      ADR-005 vocabulary (not yet composed from other templates):
 
-  <div presemble:class="article.cover.orientation | match(landscape: cover--landscape, portrait: cover--portrait)">
-    <presemble:insert data="article.cover" />
+  <div presemble:class="item.cover.orientation | match(landscape: cover--landscape, portrait: cover--portrait)">
+    <presemble:insert data="item.cover" />
   </div>
 -->

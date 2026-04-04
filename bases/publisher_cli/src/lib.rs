@@ -565,49 +565,37 @@ fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
 
 /// Build the template render context for a site node.
 ///
-/// - Item: wraps data under schema stem key
-/// - Collection: data under stem key + item list under pluralized key
-/// - SiteIndex: data under "index" + all collections
+/// Page's own data is always available under `"self"`.
+/// All collections are also available, keyed by stem name (singular).
+/// Inside `data-each` loops, each item is bound under `"item"` (or a
+/// named variable via the `:item` attribute), while `"self"` and all
+/// collection keys remain accessible.
 fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGraph {
     let mut ctx = template::DataGraph::new();
     let Some(pd) = node.page_data() else {
         return ctx;
     };
-    match pd.page_kind {
-        PageKind::Item => {
-            ctx.insert(pd.schema_stem.as_str(), template::Value::Record(pd.data.clone()));
-        }
-        PageKind::Collection => {
-            ctx.insert(pd.schema_stem.as_str(), template::Value::Record(pd.data.clone()));
-            let items: Vec<template::Value> = graph
-                .items_for_stem(&pd.schema_stem)
-                .into_iter()
-                .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
-                .collect();
-            let collection_key = format!("{}s", pd.schema_stem);
-            ctx.insert(&collection_key, template::Value::List(items));
-        }
-        PageKind::SiteIndex => {
-            ctx.insert("index", template::Value::Record(pd.data.clone()));
-            // Collect unique stems from item nodes
-            let mut stems: Vec<SchemaStem> = graph
-                .iter_pages_by_kind(PageKind::Item)
-                .filter_map(|n| n.page_data().map(|d| d.schema_stem.clone()))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            for stem in stems {
-                let items: Vec<template::Value> = graph
-                    .items_for_stem(&stem)
-                    .into_iter()
-                    .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
-                    .collect();
-                let collection_key = format!("{}s", stem);
-                ctx.insert(&collection_key, template::Value::List(items));
-            }
-        }
+
+    // Page's own data under "self"
+    ctx.insert("self", template::Value::Record(pd.data.clone()));
+
+    // All collections by stem name (singular, no pluralization)
+    let mut stems: Vec<SchemaStem> = graph
+        .iter_pages_by_kind(PageKind::Item)
+        .filter_map(|n| n.page_data().map(|d| d.schema_stem.clone()))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    for stem in stems {
+        let items: Vec<template::Value> = graph
+            .items_for_stem(&stem)
+            .into_iter()
+            .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
+            .collect();
+        ctx.insert(stem.as_str(), template::Value::List(items));
     }
+
     ctx
 }
 

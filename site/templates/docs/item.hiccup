@@ -8,8 +8,8 @@
   [:body
     [:presemble/include {:src "header"}]
     [:main {:class "docs"}
-      [:presemble/insert {:data "docs.title" :as "h1"}]
-      [:presemble/insert {:data "docs.lead" :as "p" :class "docs__lead"}]
+      [:presemble/insert {:data "self.title" :as "h1"}]
+      [:presemble/insert {:data "self.lead" :as "p" :class "docs__lead"}]
       [:ul {:class "docs__cards"}
         [:li
           [:a {:href "/guide/getting-started" :class "docs__card"}

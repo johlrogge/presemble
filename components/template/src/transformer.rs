@@ -85,15 +85,18 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
                     }
                 } else if el.name == "template" && el.attr("data-each").is_some() {
                     // Iteration block: repeat children once per item in the list.
+                    // The item is bound under the key from :item attribute (default "item").
+                    // The parent context (including "self" and all collections) is preserved.
                     let each_path = el.attr("data-each").unwrap().to_string();
                     let path_segments: Vec<&str> = each_path.split('.').collect();
-                    let value = graph.resolve(&path_segments);
+                    let value = graph.resolve(&path_segments).cloned();
+                    let item_key = el.attr("item").unwrap_or("item").to_string();
                     if let Some(Value::List(items)) = value {
-                        for item in items {
-                            if let Value::Record(item_graph) = item {
-                                let mut rendered = transform(el.children.clone(), item_graph, ctx)?;
-                                output.append(&mut rendered);
-                            }
+                        for item_value in items {
+                            let mut child_ctx = graph.clone();
+                            child_ctx.insert(item_key.clone(), item_value.clone());
+                            let mut rendered = transform(el.children.clone(), &child_ctx, ctx)?;
+                            output.append(&mut rendered);
                         }
                     }
                     // Absent, non-list, or empty list — produce nothing.
@@ -1034,7 +1037,7 @@ mod tests {
             Value::List(vec![Value::Record(a1), Value::Record(a2)]),
         );
 
-        let src = r#"<template data-each="articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="articles"><presemble:insert data="item.title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::new(&reg);
@@ -1042,7 +1045,7 @@ mod tests {
         let html = serialize_nodes(&result);
         assert_eq!(
             html,
-            r#"<h3 class="title" data-presemble-slot="title" data-presemble-file="">Article 1</h3><h3 class="title" data-presemble-slot="title" data-presemble-file="">Article 2</h3>"#
+            r#"<h3 class="item-title" data-presemble-slot="title" data-presemble-file="">Article 1</h3><h3 class="item-title" data-presemble-slot="title" data-presemble-file="">Article 2</h3>"#
         );
     }
 
@@ -1078,14 +1081,14 @@ mod tests {
         a1.insert("title", Value::Text("Only Article".to_string()));
         graph.insert("articles", Value::List(vec![Value::Record(a1)]));
 
-        let src = r#"<template data-each="articles"><presemble:insert data="title" as="h3" /></template>"#;
+        let src = r#"<template data-each="articles"><presemble:insert data="item.title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::new(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(!html.contains("<template"), "output should not contain <template>: {html}");
-        assert_eq!(html, r#"<h3 class="title" data-presemble-slot="title" data-presemble-file="">Only Article</h3>"#);
+        assert_eq!(html, r#"<h3 class="item-title" data-presemble-slot="title" data-presemble-file="">Only Article</h3>"#);
     }
 
     // ---------------------------------------------------------------------------
