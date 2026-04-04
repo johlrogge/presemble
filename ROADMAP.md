@@ -255,6 +255,34 @@ Shipped in v0.20.0.
 
 ---
 
+## Done — v0.21.0: "Data context redesign and mascot overlay"
+
+Shipped in v0.21.0.
+
+**Data context redesign (BREAKING)**
+- [x] Page data bound as `input` — `input.title` replaces stem-prefixed `article.title`
+- [x] Loop items bound as `item` — `item.title` replaces bare `title` in data-each
+- [x] Optional naming: `:input "article"` and `:item "p"` directives
+- [x] Collections by singular stem name — `data-each="post"` not `data-each="posts"`
+- [x] All pages see all collections — cross-type access (docs page can list guides)
+- [x] Loops extend parent context — input, collections, outer loops accessible inside
+
+**Mascot overlay (M5 Phase B)**
+- [x] Floating mascot replaces simple edit toggle button
+- [x] Contextual icons: 🤗+badge (suggestions), 👍 (all clear), ✏️ (edit mode)
+- [x] Popover menu with View/Edit/Suggest modes
+- [x] Suggest mode visible but disabled (Phase C)
+- [x] Suggestion count badge from `.presemble-suggestion` elements
+
+**LSP alignment**
+- [x] Completions offer `input.field` paths (not stem-prefixed)
+- [x] Validation checks `input.*` paths against schema
+
+**Documentation**
+- [x] User guide, feature content, README updated for input/item model
+
+---
+
 ## M5: "Browser editing"
 
 **Goal:** The served page IS the editor. Content authors who never touch a terminal can create
