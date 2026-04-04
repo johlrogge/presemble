@@ -565,10 +565,10 @@ fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
 
 /// Build the template render context for a site node.
 ///
-/// Page's own data is always available under `"self"`.
+/// Page's own data is always available under `"input"`.
 /// All collections are also available, keyed by stem name (singular).
 /// Inside `data-each` loops, each item is bound under `"item"` (or a
-/// named variable via the `:item` attribute), while `"self"` and all
+/// named variable via the `:item` attribute), while `"input"` and all
 /// collection keys remain accessible.
 fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGraph {
     let mut ctx = template::DataGraph::new();
@@ -576,8 +576,8 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
         return ctx;
     };
 
-    // Page's own data under "self"
-    ctx.insert("self", template::Value::Record(pd.data.clone()));
+    // Page's own data under "input"
+    ctx.insert("input", template::Value::Record(pd.data.clone()));
 
     // All collections by stem name (singular, no pluralization)
     let mut stems: Vec<SchemaStem> = graph

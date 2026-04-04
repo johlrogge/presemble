@@ -10,23 +10,23 @@
     [:main {:class "home"}
       [:section {:class "hero"}
         [:h1 "Data Not Text"]
-        [:presemble/insert {:data "self.tagline" :as "p"}]
+        [:presemble/insert {:data "input.tagline" :as "p"}]
       ]
-      [:template {:data-slot "self.pitch"}
+      [:template {:data-slot "input.pitch"}
         [:section {:class "pitch"}
-          [:presemble/insert {:data "self.pitch" :as "p"}]
+          [:presemble/insert {:data "input.pitch" :as "p"}]
         ]
       ]
-      [:template {:data-slot "self.body"}
+      [:template {:data-slot "input.body"}
         [:section {:class "why-presemble"}
           [:h2 "Why Presemble"]
-          [:presemble/insert {:data "self.body"}]
+          [:presemble/insert {:data "input.body"}]
         ]
       ]
       [:section {:class "feature-grid"}
         [:h2 "Features"]
         [:ul {:class "feature-grid__items"}
-          [:template {:data-each "self.highlight"}
+          [:template {:data-each "input.highlight"}
             [:li {:class "feature-card"}
               [:presemble/insert {:data "item.title" :as "h3"}]
               [:presemble/insert {:data "item.tagline"}]

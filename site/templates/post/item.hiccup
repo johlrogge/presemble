@@ -10,22 +10,22 @@
     [:main {:class "post"}
       [:article
         [:header {:class "post__header"}
-          [:presemble/insert {:data "self.title" :as "h1"}]
+          [:presemble/insert {:data "input.title" :as "h1"}]
         ]
         [:div {:class "post__summary"}
-          [:presemble/insert {:data "self.summary" :as "p"}]
+          [:presemble/insert {:data "input.summary" :as "p"}]
         ]
         [:div {:class "post__author"}
           [:p {:class "post__byline"}
             "\n        By "
-            [:presemble/insert {:data "self.author" :as "a"}]
+            [:presemble/insert {:data "input.author" :as "a"}]
           ]
           [:div {:class "post__author-bio"}
-            [:presemble/insert {:data "self.author.bio" :as "p"}]
+            [:presemble/insert {:data "input.author.bio" :as "p"}]
           ]
         ]
         [:div {:class "post__body"}
-          [:presemble/insert {:data "self.body"}]
+          [:presemble/insert {:data "input.body"}]
         ]
       ]
     ]

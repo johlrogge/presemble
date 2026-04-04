@@ -11,11 +11,11 @@
       [:nav {:class "guide__toc" :id "guide-toc" :aria-label "Contents"}]
       [:article {:class "guide__content"}
         [:header {:class "guide__header"}
-          [:presemble/insert {:data "self.title" :as "h1"}]
-          [:presemble/insert {:data "self.summary" :as "p"}]
+          [:presemble/insert {:data "input.title" :as "h1"}]
+          [:presemble/insert {:data "input.summary" :as "p"}]
         ]
         [:div {:class "guide__body"}
-          [:presemble/insert {:data "self.body"}]
+          [:presemble/insert {:data "input.body"}]
         ]
       ]
     ]

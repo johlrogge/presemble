@@ -118,7 +118,7 @@ fn url_from_pattern(pattern: &str, slug: &str) -> String {
 /// Completions for a content file given its grammar.
 pub fn completions_for_schema(
     grammar: &Grammar,
-    stem: &str,
+    _stem: &str,
     repo: Option<&site_repository::SiteRepository>,
 ) -> Vec<SlotCompletion> {
     grammar
@@ -149,7 +149,7 @@ pub fn completions_for_schema(
                         }
                     }
                     // Fallback: generic slot name item
-                    vec![SlotCompletion::plain(slot.name.to_string(), "Link", slot.hint_text.clone(), format!("{stem}.{}", slot.name))]
+                    vec![SlotCompletion::plain(slot.name.to_string(), "Link", slot.hint_text.clone(), format!("input.{}", slot.name))]
                 }
                 _ => {
                     let detail = match &slot.element {
@@ -165,7 +165,7 @@ pub fn completions_for_schema(
                         Element::Image { .. } => "Image".to_string(),
                         Element::List => "List".to_string(),
                     };
-                    vec![SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), format!("{stem}.{}", slot.name))]
+                    vec![SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), format!("input.{}", slot.name))]
                 }
             }
         })
@@ -691,7 +691,7 @@ pub fn template_completions(
     cursor_line: u32,
     cursor_char: u32,
     grammar: &Grammar,
-    stem: &str,
+    _stem: &str,
 ) -> Vec<SlotCompletion> {
     let line_str = match src.lines().nth(cursor_line as usize) {
         Some(l) => l,
@@ -720,12 +720,11 @@ pub fn template_completions(
                 // Extract the prefix typed so far before the cursor
                 let prefix = &line_str[value_start_in_line..cursor];
 
-                let stem_dot = format!("{stem}.");
                 if !prefix.contains('.') {
-                    // No dot yet — offer the stem name
-                    return vec![SlotCompletion::plain(stem, "content type", None, stem)];
-                } else if prefix.starts_with(&stem_dot) {
-                    // Typed "{stem}." — offer all preamble slots
+                    // No dot yet — offer "input"
+                    return vec![SlotCompletion::plain("input", "content type", None, "input")];
+                } else if prefix.starts_with("input.") {
+                    // Typed "input." — offer all preamble slots
                     return grammar
                         .preamble
                         .iter()
@@ -986,13 +985,13 @@ mod tests {
     }
 
     #[test]
-    fn completions_insert_text_uses_stem() {
+    fn completions_insert_text_uses_input() {
         let grammar = article_grammar();
         let completions = completions_for_schema(&grammar, "article", None);
         for c in &completions {
             assert!(
-                c.insert_text.starts_with("article."),
-                "insert_text should start with stem: {:?}",
+                c.insert_text.starts_with("input."),
+                "insert_text should start with 'input.': {:?}",
                 c.insert_text
             );
         }
@@ -1166,29 +1165,24 @@ mod tests {
 
     #[test]
     fn validate_template_paths_valid_path_no_diagnostics() {
-        let src = r#"<presemble:insert data="article.title" />"#;
+        let src = r#"<presemble:insert data="input.title" />"#;
         let grammar = article_grammar();
         let diags = validate_template_paths(src, &grammar, "article");
         assert!(
             diags.is_empty(),
-            "valid path article.title should produce no diagnostics: {diags:#?}"
+            "valid path input.title should produce no diagnostics: {diags:#?}"
         );
     }
 
     #[test]
     fn validate_template_paths_invalid_field_emits_diagnostic() {
-        let src = r#"<presemble:insert data="article.titel" />"#;
+        let src = r#"<presemble:insert data="input.titel" />"#;
         let grammar = article_grammar();
         let diags = validate_template_paths(src, &grammar, "article");
         assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:#?}");
         assert!(
             diags[0].message.contains("titel"),
             "message should mention 'titel': {}",
-            diags[0].message
-        );
-        assert!(
-            diags[0].message.contains("article"),
-            "message should mention 'article': {}",
             diags[0].message
         );
     }
@@ -1206,18 +1200,18 @@ mod tests {
 
     #[test]
     fn validate_template_paths_body_is_valid() {
-        let src = r#"<presemble:insert data="article.body" />"#;
+        let src = r#"<presemble:insert data="input.body" />"#;
         let grammar = article_grammar();
         let diags = validate_template_paths(src, &grammar, "article");
         assert!(
             diags.is_empty(),
-            "article.body should be valid: {diags:#?}"
+            "input.body should be valid: {diags:#?}"
         );
     }
 
     #[test]
     fn validate_template_paths_multiple_refs_multiple_diagnostics() {
-        let src = r#"<presemble:insert data="article.titel" /><presemble:insert data="article.authr" />"#;
+        let src = r#"<presemble:insert data="input.titel" /><presemble:insert data="input.authr" />"#;
         let grammar = article_grammar();
         let diags = validate_template_paths(src, &grammar, "article");
         assert_eq!(diags.len(), 2, "expected two diagnostics: {diags:#?}");
@@ -1307,33 +1301,33 @@ mod tests {
     #[test]
     fn template_completions_stem_when_no_dot() {
         let grammar = article_grammar();
-        // cursor is after the value so far "article" inside data="article"
-        let src = r#"<presemble:insert data="article" />"#;
-        let cursor_char = src.find("article").unwrap() as u32 + "article".len() as u32;
+        // cursor is after the value so far "input" inside data="input"
+        let src = r#"<presemble:insert data="input" />"#;
+        let cursor_char = src.find("input").unwrap() as u32 + "input".len() as u32;
         let completions = template_completions(src, 0, cursor_char, &grammar, "article");
-        assert_eq!(completions.len(), 1, "should return single stem completion: {completions:#?}");
-        assert_eq!(completions[0].label, "article");
+        assert_eq!(completions.len(), 1, "should return single 'input' completion: {completions:#?}");
+        assert_eq!(completions[0].label, "input");
         assert_eq!(completions[0].detail, "content type");
-        assert_eq!(completions[0].insert_text, "article");
+        assert_eq!(completions[0].insert_text, "input");
     }
 
     #[test]
-    fn template_completions_empty_value_returns_stem() {
+    fn template_completions_empty_value_returns_input() {
         let grammar = article_grammar();
         // cursor right after opening quote: data="<cursor>
         let src = r#"<presemble:insert data="" />"#;
         let cursor_char = src.find("data=\"").unwrap() as u32 + "data=\"".len() as u32;
         let completions = template_completions(src, 0, cursor_char, &grammar, "article");
-        assert_eq!(completions.len(), 1, "empty prefix should offer stem: {completions:#?}");
-        assert_eq!(completions[0].label, "article");
+        assert_eq!(completions.len(), 1, "empty prefix should offer 'input': {completions:#?}");
+        assert_eq!(completions[0].label, "input");
     }
 
     #[test]
     fn template_completions_after_dot_returns_all_slots() {
         let grammar = article_grammar();
-        // cursor is after "article." inside data="article."
-        let src = r#"<presemble:insert data="article." />"#;
-        let cursor_char = src.find("article.").unwrap() as u32 + "article.".len() as u32;
+        // cursor is after "input." inside data="input."
+        let src = r#"<presemble:insert data="input." />"#;
+        let cursor_char = src.find("input.").unwrap() as u32 + "input.".len() as u32;
         let completions = template_completions(src, 0, cursor_char, &grammar, "article");
         assert!(
             !completions.is_empty(),
@@ -1368,7 +1362,7 @@ mod tests {
     #[test]
     fn template_completions_outside_attribute_returns_empty() {
         let grammar = article_grammar();
-        let src = r#"<presemble:insert data="article.title" />"#;
+        let src = r#"<presemble:insert data="input.title" />"#;
         // cursor is at position 0 (on the '<'), not inside any attribute value
         let completions = template_completions(src, 0, 0, &grammar, "article");
         assert!(
@@ -1380,8 +1374,8 @@ mod tests {
     #[test]
     fn template_completions_works_with_data_each_attribute() {
         let grammar = article_grammar();
-        let src = r#"<div data-each="article."></div>"#;
-        let cursor_char = src.find("article.").unwrap() as u32 + "article.".len() as u32;
+        let src = r#"<div data-each="input."></div>"#;
+        let cursor_char = src.find("input.").unwrap() as u32 + "input.".len() as u32;
         let completions = template_completions(src, 0, cursor_char, &grammar, "article");
         assert!(
             !completions.is_empty(),

@@ -7,8 +7,8 @@
   [:body
     [:presemble/include {:src "header"}]
     [:main {:class "docs"}
-      [:presemble/insert {:data "self.title" :as "h1"}]
-      [:presemble/insert {:data "self.description" :as "p"}]
+      [:presemble/insert {:data "input.title" :as "h1"}]
+      [:presemble/insert {:data "input.description" :as "p"}]
       [:ul {:class "docs__cards"}
         [:template {:data-each "guide"}
           [:li

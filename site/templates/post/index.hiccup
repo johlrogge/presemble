@@ -8,7 +8,7 @@
   [:body
     [:presemble/include {:src "header"}]
     [:main {:class "post-listing"}
-      [:presemble/insert {:data "self.title" :as "h1"}]
+      [:presemble/insert {:data "input.title" :as "h1"}]
       [:ul {:class "post-listing__items"}
         [:template {:data-each "post"}
           [:li {:class "post-card"}

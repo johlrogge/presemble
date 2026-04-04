@@ -17,24 +17,24 @@
 <main class="article">
   <article>
     <header class="article__header">
-      <presemble:insert data="self.title" as="h1"></presemble:insert>
+      <presemble:insert data="input.title" as="h1"></presemble:insert>
       <p class="article__byline">
-        By <presemble:insert data="self.author" as="a"></presemble:insert>
+        By <presemble:insert data="input.author" as="a"></presemble:insert>
       </p>
     </header>
 
-    <template data-slot="self.cover">
-      <div presemble:class="self.cover.orientation | match(landscape => &quot;cover--landscape&quot;, portrait => &quot;cover--portrait&quot;)">
-        <presemble:insert data="self.cover"></presemble:insert>
+    <template data-slot="input.cover">
+      <div presemble:class="input.cover.orientation | match(landscape => &quot;cover--landscape&quot;, portrait => &quot;cover--portrait&quot;)">
+        <presemble:insert data="input.cover"></presemble:insert>
       </div>
     </template>
 
     <div class="article__summary">
-      <presemble:insert data="self.summary"></presemble:insert>
+      <presemble:insert data="input.summary"></presemble:insert>
     </div>
 
     <div class="article__body">
-      <presemble:insert data="self.body"></presemble:insert>
+      <presemble:insert data="input.body"></presemble:insert>
     </div>
   </article>
 </main>
