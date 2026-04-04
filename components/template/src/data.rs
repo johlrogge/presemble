@@ -2,6 +2,21 @@ use content::{ContentElement, Document};
 use schema::{Element, Grammar, Spanned};
 use pulldown_cmark;
 
+/// Strip HTML tags from a string, returning only text content.
+fn strip_html_tags(html: &str) -> String {
+    let mut result = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+    result
+}
+
 /// The kind of schema element a suggestion represents.
 #[derive(Debug, Clone)]
 pub enum SuggestionKind {
@@ -32,6 +47,34 @@ pub enum Value {
         slot_name: String,
         element_kind: SuggestionKind,
     },
+}
+
+impl Value {
+    /// Return the Display (text) representation of this value.
+    /// Every value has a Display — this is the universal trait.
+    pub fn display_text(&self) -> Option<String> {
+        match self {
+            Value::Text(s) => Some(s.clone()),
+            Value::Record(graph) => {
+                // For records, Display is the "text" field if present
+                graph.resolve(&["text"])
+                    .and_then(|v| v.display_text())
+            }
+            Value::Html(html) => {
+                // Strip HTML tags, return text content
+                Some(strip_html_tags(html))
+            }
+            Value::List(items) => {
+                // Join Display of each item with space
+                let texts: Vec<String> = items.iter()
+                    .filter_map(|v| v.display_text())
+                    .collect();
+                if texts.is_empty() { None } else { Some(texts.join(" ")) }
+            }
+            Value::Absent => None,
+            Value::Suggestion { .. } => None,
+        }
+    }
 }
 
 /// A data graph node: a map from string keys to values.
@@ -399,6 +442,61 @@ mod tests {
             include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let grammar = article_grammar();
         parse_and_assign(doc_input, &grammar).expect("hello-world.md should parse")
+    }
+
+    // ---------------------------------------------------------------------------
+    // display_text tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn display_text_for_text_value() {
+        let v = Value::Text("hello".to_string());
+        assert_eq!(v.display_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn display_text_for_record_with_text_field() {
+        let mut graph = DataGraph::new();
+        graph.insert("text", Value::Text("world".to_string()));
+        graph.insert("href", Value::Text("/foo".to_string()));
+        let v = Value::Record(graph);
+        assert_eq!(v.display_text(), Some("world".to_string()));
+    }
+
+    #[test]
+    fn display_text_for_html_strips_tags() {
+        let v = Value::Html("<p>Hello <strong>world</strong></p>".to_string());
+        assert_eq!(v.display_text(), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn display_text_for_absent_is_none() {
+        assert_eq!(Value::Absent.display_text(), None);
+    }
+
+    #[test]
+    fn display_text_for_list_joins_with_space() {
+        let v = Value::List(vec![
+            Value::Text("foo".to_string()),
+            Value::Text("bar".to_string()),
+        ]);
+        assert_eq!(v.display_text(), Some("foo bar".to_string()));
+    }
+
+    #[test]
+    fn display_text_for_empty_list_is_none() {
+        let v = Value::List(vec![]);
+        assert_eq!(v.display_text(), None);
+    }
+
+    #[test]
+    fn display_text_for_suggestion_is_none() {
+        let v = Value::Suggestion {
+            hint: "Add title".to_string(),
+            slot_name: "title".to_string(),
+            element_kind: SuggestionKind::Heading { level: 1 },
+        };
+        assert_eq!(v.display_text(), None);
     }
 
     #[test]

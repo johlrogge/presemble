@@ -289,6 +289,38 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
     let value = graph.resolve(&path_segments);
 
+    // Check for :apply attribute
+    if let Some(func_name) = el.attr("apply") {
+        if func_name == "text" {
+            // Apply Display (text) to the value
+            return match value.and_then(|v| v.display_text()) {
+                Some(text) => {
+                    let tag = as_tag.unwrap_or("span").to_string();
+                    let mut attrs = vec![
+                        ("class".to_string(), Form::Str(class)),
+                        ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
+                        ("data-presemble-file".to_string(), Form::Str(presemble_file)),
+                    ];
+                    // Preserve _source_slot from record values for browser editing
+                    if let Some(Value::Record(sub_graph)) = value
+                        && let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"])
+                    {
+                        attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
+                    }
+                    let element = Element {
+                        name: tag,
+                        attrs,
+                        children: vec![Node::Text(text)],
+                    };
+                    Ok(vec![Node::Element(element)])
+                }
+                None => Ok(Vec::new()),
+            };
+        }
+        // Unknown apply function — return error
+        return Err(RenderError::Render(format!("unknown :apply function '{func_name}'")));
+    }
+
     match value {
         None | Some(Value::Absent) => Ok(Vec::new()),
 
@@ -1357,5 +1389,127 @@ mod tests {
             !html.contains("data-presemble-source-slot"),
             "regular link should not have source-slot attribute: {html}"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // :apply text tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn apply_text_on_link_record_renders_plain_text() {
+        // A link record with :apply text should render just the text, no anchor.
+        // <presemble:insert data="link" as="h3" apply="text" />
+        // with link = {href: "/foo", text: "Hello"} -> <h3>Hello</h3>
+        let mut graph = DataGraph::new();
+        let mut link = DataGraph::new();
+        link.insert("href", Value::Text("/foo".to_string()));
+        link.insert("text", Value::Text("Hello".to_string()));
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h3"), "should render as h3: {html}");
+        assert!(html.contains("Hello"), "should contain link text: {html}");
+        assert!(!html.contains("<a"), "should NOT render as anchor with :apply text: {html}");
+        assert!(!html.contains("href"), "should NOT have href with :apply text: {html}");
+        assert!(html.contains(r#"data-presemble-slot="link""#), "should have data-presemble-slot: {html}");
+    }
+
+    #[test]
+    fn apply_text_on_plain_text_is_identity() {
+        // A text value with :apply text should render the same as without.
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("My Title".to_string()));
+
+        let src = r#"<presemble:insert data="title" as="h1" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h1"), "should render as h1: {html}");
+        assert!(html.contains("My Title"), "should contain title text: {html}");
+        assert!(html.contains(r#"data-presemble-slot="title""#), "should have data-presemble-slot: {html}");
+    }
+
+    #[test]
+    fn apply_text_on_html_strips_tags() {
+        // An HTML value with :apply text should strip tags.
+        let mut graph = DataGraph::new();
+        graph.insert("body", Value::Html("<p>Hello <strong>world</strong></p>".to_string()));
+
+        let src = r#"<presemble:insert data="body" as="div" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<div"), "should render as div: {html}");
+        assert!(html.contains("Hello world"), "should contain stripped text: {html}");
+        assert!(!html.contains("<p>"), "should not contain p tag after stripping: {html}");
+        assert!(!html.contains("<strong>"), "should not contain strong tag after stripping: {html}");
+    }
+
+    #[test]
+    fn apply_text_preserves_source_slot() {
+        // A synthesized link record (with _source_slot) should carry
+        // data-presemble-source-slot even when :apply text is used.
+        let mut graph = DataGraph::new();
+        let link = crate::data::synthesize_link("Hello World", "/article/hello-world");
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h3"), "should render as h3: {html}");
+        assert!(html.contains("Hello World"), "should contain link text: {html}");
+        assert!(!html.contains("<a"), "should NOT wrap in anchor with :apply text: {html}");
+        assert!(
+            html.contains(r#"data-presemble-source-slot="title""#),
+            "should preserve source-slot attribute: {html}"
+        );
+    }
+
+    #[test]
+    fn apply_unknown_function_errors() {
+        // :apply foo should produce a render error.
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("My Title".to_string()));
+
+        let src = r#"<presemble:insert data="title" apply="foo" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx);
+
+        assert!(result.is_err(), "unknown :apply function should produce an error");
+        if let Err(RenderError::Render(msg)) = result {
+            assert!(msg.contains("foo"), "error message should mention unknown function name: {msg}");
+        }
+    }
+
+    #[test]
+    fn apply_text_absent_value_produces_no_output() {
+        // :apply text on an absent value should produce empty output.
+        let graph = DataGraph::new();
+
+        let src = r#"<presemble:insert data="missing" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+
+        assert!(result.is_empty(), "absent value with :apply text should produce no output");
     }
 }
