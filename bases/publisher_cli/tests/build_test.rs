@@ -253,7 +253,7 @@ fn presemble_include_inlines_header_and_footer_fragments() {
 <head><title>Test</title></head>
 <body>
 <presemble:include src="header" />
-<main><presemble:insert data="article.title" as="h1" /></main>
+<main><presemble:insert data="input.title" as="h1" /></main>
 <presemble:include src="footer" />
 </body>
 </html>"#,
@@ -446,7 +446,7 @@ fn index_content_is_rendered_into_index_page() {
     // Article template
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
 
@@ -455,10 +455,10 @@ fn index_content_is_rendered_into_index_page() {
         site.join("templates/index.html"),
         r#"<!DOCTYPE html>
 <html>
-<head><title><presemble:insert data="index.site_title" /></title></head>
+<head><title><presemble:insert data="input.site_title" /></title></head>
 <body>
-<h1><presemble:insert data="index.site_title" /></h1>
-<p><presemble:insert data="index.tagline" /></p>
+<h1><presemble:insert data="input.site_title" /></h1>
+<p><presemble:insert data="input.tagline" /></p>
 </body>
 </html>"#,
     )
@@ -521,12 +521,12 @@ fn index_content_schema_and_content_tracked_as_deps() {
 
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
         site.join("templates/index.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="index.site_title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.site_title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(site.join("assets/style.css"), "body {}").unwrap();
@@ -583,7 +583,7 @@ fn broken_link_reference_fails_build() {
     // Minimal templates
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
@@ -638,7 +638,7 @@ fn broken_link_reference_is_warning_in_serve_mode() {
     .unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
@@ -710,20 +710,20 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
     // Item template
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
 
     // Collection (index) template that renders the heading and iterates articles
-    // Note: data-each only works on <template> elements; within the loop, fields
-    // are accessed directly (e.g. "title"), not as "item.title".
+    // Note: data-each only works on <template> elements; within the loop, each
+    // item is bound under "item" (e.g. "item.title").
     fs::write(
         site.join("templates/article/index.html"),
         r#"<!DOCTYPE html>
 <html>
 <body>
-<h1><presemble:insert data="article.heading" /></h1>
-<ul><template data-each="articles"><li><presemble:insert data="title" as="li" /></li></template></ul>
+<h1><presemble:insert data="input.heading" /></h1>
+<ul><template data-each="article"><li><presemble:insert data="item.title" as="li" /></li></template></ul>
 </body>
 </html>"#,
     )
@@ -793,7 +793,7 @@ fn collection_page_without_collection_content_is_skipped() {
     .unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
@@ -854,12 +854,12 @@ fn collection_page_dep_graph_tracks_template_and_content() {
     .unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
         site.join("templates/article/index.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.heading" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.heading" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
@@ -924,7 +924,7 @@ fn rebuild_affected_only_returns_affected_entries_in_site_graph() {
     fs::write(site.join("content/article/beta.md"), "# Beta\n").unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
@@ -990,7 +990,7 @@ fn rebuild_affected_returns_empty_when_nothing_affected() {
     fs::write(site.join("content/article/sample.md"), "# Sample\n").unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="article.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(

@@ -8,7 +8,7 @@
     [:presemble/include {:src "header"}]
     [:main {:class "author"}
       [:article {:class "author__profile"}
-        [:presemble/insert {:data "author.name" :as "h1"}]
+        [:presemble/insert {:data "input.name" :as "h1"}]
         [:div {:class "author__bio"}
-          [:presemble/insert {:data "author.bio" :as "p"}]]]]
+          [:presemble/insert {:data "input.bio" :as "p"}]]]]
     [:presemble/include {:src "footer"}]]]

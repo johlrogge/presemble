@@ -17,11 +17,11 @@
 <main class="article-list">
   <h1>Articles</h1>
   <ul class="article-list__items">
-    <template data-each="articles">
+    <template data-each="article">
       <li class="article-card">
-        <presemble:insert data="title" as="h2" />
-        <presemble:insert data="summary" />
-        <presemble:insert data="link" />
+        <presemble:insert data="item.title" as="h2" />
+        <presemble:insert data="item.summary" />
+        <presemble:insert data="item.link" />
       </li>
     </template>
   </ul>

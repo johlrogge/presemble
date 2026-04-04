@@ -2,7 +2,7 @@
 
 Schemas, content, and templates meet in a single data graph.
 
-Every named slot, every content value, and every cross-content reference is a node in the data graph. Templates traverse it by path — `post.title`, `author.name`, `posts`. Every connection is verified before any output is written.
+Every named slot, every content value, and every cross-content reference is a node in the data graph. Templates traverse it by path — `input.title`, `input.author.name`, `item.title`. Every connection is verified before any output is written.
 
 ----
 
@@ -26,7 +26,7 @@ In the content file, the author writes:
 [Joakim Ohlrogge](/author/johlrogge)
 ```
 
-The publisher resolves `/author/johlrogge` to a built page, validates that it satisfies the author schema, and makes the full author document available to the template via the `post.author` path. The link is a first-class edge in the graph, not a URL string.
+The publisher resolves `/author/johlrogge` to a built page, validates that it satisfies the author schema, and makes the full author document available to the template via the `input.author` path. The link is a first-class edge in the graph, not a URL string.
 
 ### Compile-time completeness
 

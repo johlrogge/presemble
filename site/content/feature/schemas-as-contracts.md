@@ -51,4 +51,4 @@ pointing to the exact constraint that was violated.
 
 ### Named slots
 
-Every piece of content in a schema-validated document is reachable by a dotted path: `feature.title`, `feature.description`, `post.author`. Templates traverse these paths to build output. Because the schema defines which paths exist, the template vocabulary is finite and verifiable.
+Every piece of content in a schema-validated document is reachable by a dotted path: `input.title`, `input.summary`, `input.author`. Templates traverse these paths to build output. Because the schema defines which paths exist, the template vocabulary is finite and verifiable.

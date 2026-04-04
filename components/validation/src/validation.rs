@@ -170,7 +170,7 @@ pub fn validate_template(src: &str, grammar: &Grammar, stem: &str) -> Vec<Diagno
                     if let Ok(expr) = template::parse_expr(value)
                         && let Some(path) = lookup_path(&expr)
                         && !path.is_empty()
-                        && path[0] == stem
+                        && path[0] == "input"
                         && path.len() >= 2
                     {
                         let field = &path[1];
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn validate_template_unknown_field_returns_error_with_span() {
-        let src = r#"<div data="article.nonexistent_field"></div>"#;
+        let src = r#"<div data="input.nonexistent_field"></div>"#;
         let grammar = article_grammar();
         let diagnostics = validate_template(src, &grammar, "article");
 
@@ -387,25 +387,25 @@ mod tests {
 
     #[test]
     fn validate_template_unknown_root_stem_is_skipped() {
-        // `site.*` is a different stem — should produce no diagnostics when stem is "article".
+        // `site.*` is a different root — should produce no diagnostics (not "input").
         let src = r#"<div data="site.title"></div>"#;
         let grammar = article_grammar();
         let diagnostics = validate_template(src, &grammar, "article");
         assert!(
             diagnostics.is_empty(),
-            "paths with a different stem should be skipped, got: {:#?}",
+            "paths with a different root should be skipped, got: {:#?}",
             diagnostics
         );
     }
 
     #[test]
     fn validate_template_body_reference_is_valid() {
-        let src = r#"<div data="article.body"></div>"#;
+        let src = r#"<div data="input.body"></div>"#;
         let grammar = article_grammar();
         let diagnostics = validate_template(src, &grammar, "article");
         assert!(
             diagnostics.is_empty(),
-            "article.body should be valid, got: {:#?}",
+            "input.body should be valid, got: {:#?}",
             diagnostics
         );
     }

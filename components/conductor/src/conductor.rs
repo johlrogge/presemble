@@ -232,9 +232,9 @@ impl Conductor {
         };
         let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
-        // Wrap graph under stem key (template expects stem.field paths)
+        // Wrap page data under "input" key (template expects input.field paths)
         let mut context = template::DataGraph::new();
-        context.insert(&stem, template::Value::Record(graph));
+        context.insert("input", template::Value::Record(graph));
 
         // Transform and serialize
         let transformed = template::transform(nodes, &context, &ctx)
