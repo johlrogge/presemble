@@ -1,6 +1,6 @@
 [package]
 name = "publisher_cli"
-version = "0.12.0"
+version = "0.19.0"
 edition = "2024"
 
 [dependencies]
@@ -14,6 +14,7 @@ site_repository = { workspace = true }
 site_index = { workspace = true }
 lsp_capabilities = { workspace = true }
 lsp_service = { workspace = true }
+stylesheet = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }

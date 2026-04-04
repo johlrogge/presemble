@@ -8,7 +8,7 @@ pub use template_registry::FileTemplateRegistry;
 pub use dep_graph::DependencyGraph;
 pub use error::CliError;
 
-use site_index::{EntryKind, SchemaStem, SiteEntry, SiteGraph, UrlPath};
+use site_index::{NodeRole, PageData, PageKind, SchemaStem, SiteGraph, SiteNode, UrlPath};
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -455,10 +455,9 @@ pub fn build_content_page(
 
     // Add url and link to the article graph
     slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
-    let mut link_graph = template::DataGraph::new();
-    link_graph.insert("href", template::Value::Text(addr.url_path.clone()));
-    link_graph.insert("text", template::Value::Text(title_text));
-    slot_graph.insert("link", template::Value::Record(link_graph));
+    slot_graph.insert("link", template::Value::Record(
+        template::synthesize_link(&title_text, &addr.url_path),
+    ));
 
     let mut deps = std::collections::HashSet::new();
     deps.insert(schema_path.to_path_buf());
@@ -564,33 +563,36 @@ fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
 }
 
 
-/// Build the template render context for a site entry.
+/// Build the template render context for a site node.
 ///
 /// - Item: wraps data under schema stem key
 /// - Collection: data under stem key + item list under pluralized key
 /// - SiteIndex: data under "index" + all collections
-fn build_render_context(entry: &SiteEntry, graph: &SiteGraph) -> template::DataGraph {
+fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGraph {
     let mut ctx = template::DataGraph::new();
-    match entry.kind {
-        EntryKind::Item => {
-            ctx.insert(entry.schema_stem.as_str(), template::Value::Record(entry.data.clone()));
+    let Some(pd) = node.page_data() else {
+        return ctx;
+    };
+    match pd.page_kind {
+        PageKind::Item => {
+            ctx.insert(pd.schema_stem.as_str(), template::Value::Record(pd.data.clone()));
         }
-        EntryKind::Collection => {
-            ctx.insert(entry.schema_stem.as_str(), template::Value::Record(entry.data.clone()));
+        PageKind::Collection => {
+            ctx.insert(pd.schema_stem.as_str(), template::Value::Record(pd.data.clone()));
             let items: Vec<template::Value> = graph
-                .items_for_stem(&entry.schema_stem)
+                .items_for_stem(&pd.schema_stem)
                 .into_iter()
-                .map(|e| template::Value::Record(e.data.clone()))
+                .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
                 .collect();
-            let collection_key = format!("{}s", entry.schema_stem);
+            let collection_key = format!("{}s", pd.schema_stem);
             ctx.insert(&collection_key, template::Value::List(items));
         }
-        EntryKind::SiteIndex => {
-            ctx.insert("index", template::Value::Record(entry.data.clone()));
-            // Collect unique stems from item entries
+        PageKind::SiteIndex => {
+            ctx.insert("index", template::Value::Record(pd.data.clone()));
+            // Collect unique stems from item nodes
             let mut stems: Vec<SchemaStem> = graph
-                .iter_by_kind(EntryKind::Item)
-                .map(|e| e.schema_stem.clone())
+                .iter_pages_by_kind(PageKind::Item)
+                .filter_map(|n| n.page_data().map(|d| d.schema_stem.clone()))
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
@@ -599,7 +601,7 @@ fn build_render_context(entry: &SiteEntry, graph: &SiteGraph) -> template::DataG
                 let items: Vec<template::Value> = graph
                     .items_for_stem(&stem)
                     .into_iter()
-                    .map(|e| template::Value::Record(e.data.clone()))
+                    .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
                     .collect();
                 let collection_key = format!("{}s", stem);
                 ctx.insert(&collection_key, template::Value::List(items));
@@ -820,7 +822,18 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             }
         }
     }
-    copy_referenced_assets(site_dir, &all_asset_paths)?;
+
+    // Discover stylesheet and leaf asset nodes from template references.
+    // Recursively follows @import chains in CSS files.
+    let template_assets: Vec<String> = all_asset_paths.into_iter().collect();
+    discover_assets(site_dir, &template_assets, &mut site_graph)?;
+
+    // Copy all stylesheet and leaf asset nodes to output
+    copy_graph_assets(site_dir, &site_graph)?;
+
+    // Register asset node dependencies in the dep_graph so that incremental
+    // rebuilds triggered by changed stylesheets or assets work correctly.
+    register_asset_deps(&site_graph, &mut dep_graph);
 
     let mut schema_stems: Vec<String> = Vec::new();
 
@@ -893,18 +906,21 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                         dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
                         let url_path_str = page_result.built.url_path.clone();
                         let template_path = page_result.template_path.unwrap_or_default();
-                        let entry = SiteEntry {
-                            kind: EntryKind::Item,
-                            schema_stem: SchemaStem::new(schema_stem),
+                        let node = SiteNode {
                             url_path: UrlPath::new(&url_path_str),
                             output_path: page_result.output_path,
-                            template_path,
-                            content_path: content_path.clone(),
-                            schema_path: schema_path.clone(),
-                            data: page_result.built.data,
+                            source_path: content_path.clone(),
                             deps: page_result.deps,
+                            role: NodeRole::Page(PageData {
+                                page_kind: PageKind::Item,
+                                schema_stem: SchemaStem::new(schema_stem),
+                                template_path,
+                                content_path: content_path.clone(),
+                                schema_path: schema_path.clone(),
+                                data: page_result.built.data,
+                            }),
                         };
-                        site_graph.insert(entry);
+                        site_graph.insert(node);
                         // files_built counted in Phase 3 render
                     }
                 }
@@ -915,18 +931,21 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                         dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
                         let url_path_str = page_result.built.url_path.clone();
                         let template_path = page_result.template_path.unwrap_or_default();
-                        let entry = SiteEntry {
-                            kind: EntryKind::Item,
-                            schema_stem: SchemaStem::new(schema_stem),
+                        let node = SiteNode {
                             url_path: UrlPath::new(&url_path_str),
                             output_path: page_result.output_path,
-                            template_path,
-                            content_path: content_path.clone(),
-                            schema_path: schema_path.clone(),
-                            data: page_result.built.data,
+                            source_path: content_path.clone(),
                             deps: page_result.deps,
+                            role: NodeRole::Page(PageData {
+                                page_kind: PageKind::Item,
+                                schema_stem: SchemaStem::new(schema_stem),
+                                template_path,
+                                content_path: content_path.clone(),
+                                schema_path: schema_path.clone(),
+                                data: page_result.built.data,
+                            }),
                         };
-                        site_graph.insert(entry);
+                        site_graph.insert(node);
                         page_suggestions.insert(url_path_str, msgs);
                         // files_with_suggestions counted here (page exists, not yet rendered)
                         files_with_suggestions += 1;
@@ -1024,18 +1043,21 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             deps_col.insert(repo.content_path(&stem, &slug));
         }
         dep_graph.register(output_path_col.clone(), deps_col.clone());
-        let entry = SiteEntry {
-            kind: EntryKind::Collection,
-            schema_stem: SchemaStem::new(schema_stem),
+        let node = SiteNode {
             url_path: UrlPath::new(&url_path_str),
             output_path: output_path_col,
-            template_path: collection_template_path,
-            content_path: collection_content_path,
-            schema_path: collection_schema_path,
-            data: collection_graph,
+            source_path: collection_content_path.clone(),
             deps: deps_col,
+            role: NodeRole::Page(PageData {
+                page_kind: PageKind::Collection,
+                schema_stem: SchemaStem::new(schema_stem),
+                template_path: collection_template_path,
+                content_path: collection_content_path,
+                schema_path: collection_schema_path,
+                data: collection_graph,
+            }),
         };
-        site_graph.insert(entry);
+        site_graph.insert(node);
     }
 
     // Phase 1c: Build site index entry.
@@ -1070,33 +1092,38 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
             }
             let index_output_path = output_dir(site_dir).join("index.html");
-            let entry = SiteEntry {
-                kind: EntryKind::SiteIndex,
-                schema_stem: index_stem,
+            let node = SiteNode {
                 url_path: UrlPath::new("/"),
                 output_path: index_output_path,
-                template_path: index_tmpl_path,
-                content_path: index_content_path.clone(),
-                schema_path: index_schema_path.clone(),
-                data: index_graph,
+                source_path: index_content_path.clone(),
                 deps: std::collections::HashSet::new(),
+                role: NodeRole::Page(PageData {
+                    page_kind: PageKind::SiteIndex,
+                    schema_stem: index_stem,
+                    template_path: index_tmpl_path,
+                    content_path: index_content_path.clone(),
+                    schema_path: index_schema_path.clone(),
+                    data: index_graph,
+                }),
             };
-            site_graph.insert(entry);
+            site_graph.insert(node);
         }
     }
 
     // Phase 2: Resolve all cross-content references once
     {
         let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
-            .iter_by_kind(EntryKind::Item)
-            .map(|e| (e.url_path.as_str().to_string(), e.data.clone()))
+            .iter_pages_by_kind(PageKind::Item)
+            .filter_map(|n| n.page_data().map(|pd| (n.url_path.as_str().to_string(), pd.data.clone())))
             .collect();
         if !url_index.is_empty() {
             // collect urls to avoid borrow issues
-            let urls: Vec<UrlPath> = site_graph.iter().map(|e| e.url_path.clone()).collect();
+            let urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
             for url in &urls {
-                if let Some(entry) = site_graph.get_mut(url) {
-                    resolve_graph(&mut entry.data, &url_index);
+                if let Some(node) = site_graph.get_mut(url)
+                    && let Some(pd) = node.page_data_mut()
+                {
+                    resolve_graph(&mut pd.data, &url_index);
                 }
             }
         }
@@ -1105,41 +1132,45 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     // Phase 2: Resolve index graph separately (it may reference item pages added above)
     {
         let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
-            .iter_by_kind(EntryKind::Item)
-            .map(|e| (e.url_path.as_str().to_string(), e.data.clone()))
+            .iter_pages_by_kind(PageKind::Item)
+            .filter_map(|n| n.page_data().map(|pd| (n.url_path.as_str().to_string(), pd.data.clone())))
             .collect();
         let index_url = UrlPath::new("/");
-        if let Some(entry) = site_graph.get_mut(&index_url) {
-            resolve_graph(&mut entry.data, &url_index);
+        if let Some(node) = site_graph.get_mut(&index_url)
+            && let Some(pd) = node.page_data_mut()
+        {
+            resolve_graph(&mut pd.data, &url_index);
         }
     }
 
     // Phase 2b: Validate link references — internal hrefs must point to existing pages
     {
         let url_set: std::collections::HashSet<String> = site_graph
-            .iter_by_kind(EntryKind::Item)
-            .map(|e| e.url_path.as_str().to_string())
+            .iter_pages_by_kind(PageKind::Item)
+            .map(|n| n.url_path.as_str().to_string())
             .collect();
 
         let mut link_errors: Vec<(String, String)> = Vec::new();
 
-        for entry in site_graph.iter_by_kind(EntryKind::Item) {
-            for (key, value) in entry.data.iter() {
-                if key.starts_with('_') {
-                    continue; // skip internal metadata
-                }
-                if let template::Value::Record(sub) = value
-                    && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
-                {
-                    // Only validate internal links (starting with /)
-                    if href.starts_with('/') && !url_set.contains(href) {
-                        link_errors.push((
-                            entry.url_path.as_str().to_string(),
-                            format!(
-                                "broken link: '{key}' references '{}' which does not exist",
-                                href
-                            ),
-                        ));
+        for node in site_graph.iter_pages_by_kind(PageKind::Item) {
+            if let Some(pd) = node.page_data() {
+                for (key, value) in pd.data.iter() {
+                    if key.starts_with('_') {
+                        continue; // skip internal metadata
+                    }
+                    if let template::Value::Record(sub) = value
+                        && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                    {
+                        // Only validate internal links (starting with /)
+                        if href.starts_with('/') && !url_set.contains(href) {
+                            link_errors.push((
+                                node.url_path.as_str().to_string(),
+                                format!(
+                                    "broken link: '{key}' references '{}' which does not exist",
+                                    href
+                                ),
+                            ));
+                        }
                     }
                 }
             }
@@ -1172,24 +1203,25 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
 
     // Phase 3: Render all entries using build_render_context
     {
-        let entry_urls: Vec<UrlPath> = site_graph.iter().map(|e| e.url_path.clone()).collect();
-        for url in &entry_urls {
+        let node_urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
+        for url in &node_urls {
             let (render_context, schema_stem_str, template_path, output_path, page_url_str) = {
-                let entry = match site_graph.get(url) {
-                    Some(e) => e,
+                let node = match site_graph.get(url) {
+                    Some(n) => n,
                     None => continue,
                 };
-                let tmpl = &entry.template_path;
+                let Some(pd) = node.page_data() else { continue };
+                let tmpl = &pd.template_path;
                 if tmpl == std::path::Path::new("") || !tmpl.exists() {
                     continue;
                 }
-                let ctx = build_render_context(entry, &site_graph);
+                let ctx = build_render_context(node, &site_graph);
                 (
                     ctx,
-                    entry.schema_stem.as_str().to_string(),
+                    pd.schema_stem.as_str().to_string(),
                     tmpl.clone(),
-                    entry.output_path.clone(),
-                    entry.url_path.as_str().to_string(),
+                    node.output_path.clone(),
+                    node.url_path.as_str().to_string(),
                 )
             };
 
@@ -1213,7 +1245,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         // Register dep_graph for index
         let index_template_path_opt: Option<std::path::PathBuf> = {
             let idx_url = UrlPath::new("/");
-            site_graph.get(&idx_url).map(|e| e.template_path.clone())
+            site_graph.get(&idx_url).and_then(|n| n.page_data().map(|pd| pd.template_path.clone()))
         };
         if let Some(index_template_path) = index_template_path_opt {
             let index_output = output_dir(site_dir).join("index.html");
@@ -1271,7 +1303,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         &schema_stems,
         &all_template_stems,
         &included_template_stems,
-        &all_asset_paths,
+        &site_graph,
     );
 
     // Clean up stale output files that are no longer in the dep_graph
@@ -1358,19 +1390,22 @@ pub fn rebuild_affected(
     // After the full build we know the output path of every new content file.
     // Include those output paths in the affected set.
     for new_file in new_content_files {
-        for entry in outcome.site_graph.iter() {
-            if entry.content_path == *new_file {
-                affected_outputs.insert(entry.output_path.clone());
+        for node in outcome.site_graph.iter() {
+            let content_path = node.page_data()
+                .map(|pd| &pd.content_path)
+                .unwrap_or(&node.source_path);
+            if content_path == new_file {
+                affected_outputs.insert(node.output_path.clone());
             }
         }
     }
 
-    // Filter site_graph to only the affected entries so the serve loop only
+    // Filter site_graph to only the affected nodes so the serve loop only
     // triggers browser reloads for pages that actually changed.
     let mut filtered_graph = SiteGraph::new();
-    for entry in outcome.site_graph.iter() {
-        if affected_outputs.contains(&entry.output_path) {
-            filtered_graph.insert(entry.clone());
+    for node in outcome.site_graph.iter() {
+        if affected_outputs.contains(&node.output_path) {
+            filtered_graph.insert(node.clone());
         }
     }
     outcome.site_graph = filtered_graph;
@@ -1465,28 +1500,182 @@ fn extract_internal_links(html: &str) -> Vec<String> {
     links
 }
 
-/// Verify that each referenced asset exists and copy it to the output directory.
-/// Returns an error if any referenced asset is missing.
-fn copy_referenced_assets(
+
+/// Walk template asset references and populate Stylesheet and LeafAsset nodes
+/// in the SiteGraph. Recursively follows @import chains in stylesheets.
+fn discover_assets(
     site_dir: &std::path::Path,
-    asset_paths: &std::collections::BTreeSet<String>,
+    template_asset_paths: &[String],
+    site_graph: &mut site_index::SiteGraph,
 ) -> Result<(), CliError> {
-    for path in asset_paths {
-        let relative = path.trim_start_matches('/');
-        let src = site_dir.join(relative);
-        if !src.exists() {
-            return Err(CliError::Render(format!(
-                "referenced asset not found: {path} (expected at {})",
-                src.display()
-            )));
-        }
-        let dest = output_dir(site_dir).join(relative);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(&src, &dest)?;
-        println!("  asset: {path}");
+    for path in template_asset_paths {
+        add_asset_node(site_dir, path, site_graph)?;
     }
+    Ok(())
+}
+
+/// Add a single asset node to the graph if not already present.
+/// For CSS files, creates a Stylesheet node and recursively discovers its references.
+/// For everything else, creates a LeafAsset node.
+fn add_asset_node(
+    site_dir: &std::path::Path,
+    path: &str,
+    site_graph: &mut site_index::SiteGraph,
+) -> Result<(), CliError> {
+    let url_path = site_index::UrlPath::new(path);
+    // Already in the graph — skip (prevents infinite loops on circular @imports)
+    if site_graph.get(&url_path).is_some() {
+        return Ok(());
+    }
+
+    let relative = path.trim_start_matches('/');
+    let source = site_dir.join(relative);
+    let output = output_dir(site_dir).join(relative);
+
+    if path.ends_with(".css") {
+        let css_content = std::fs::read_to_string(&source).map_err(|_| {
+            CliError::Render(format!(
+                "referenced stylesheet not found: {path} (expected at {})",
+                source.display()
+            ))
+        })?;
+        let refs = stylesheet::extract_refs(&css_content);
+
+        let import_urls: Vec<site_index::UrlPath> = refs
+            .imports
+            .iter()
+            .map(site_index::UrlPath::new)
+            .collect();
+        let asset_ref_urls: Vec<site_index::UrlPath> = refs
+            .asset_urls
+            .iter()
+            .map(site_index::UrlPath::new)
+            .collect();
+
+        let node = site_index::SiteNode {
+            url_path: url_path.clone(),
+            output_path: output,
+            source_path: source,
+            deps: std::collections::HashSet::new(),
+            role: site_index::NodeRole::Stylesheet(site_index::StylesheetData {
+                imports: import_urls,
+                asset_refs: asset_ref_urls,
+            }),
+        };
+        site_graph.insert(node);
+
+        // Recursively discover imported stylesheets
+        for import_path in &refs.imports {
+            add_asset_node(site_dir, import_path, site_graph)?;
+        }
+        // Discover referenced leaf assets
+        for asset_path in &refs.asset_urls {
+            add_asset_node(site_dir, asset_path, site_graph)?;
+        }
+    } else {
+        let node = site_index::SiteNode {
+            url_path,
+            output_path: output,
+            source_path: source,
+            deps: std::collections::HashSet::new(),
+            role: site_index::NodeRole::LeafAsset,
+        };
+        site_graph.insert(node);
+    }
+
+    Ok(())
+}
+
+/// Copy all stylesheet and leaf asset nodes from the SiteGraph to the output directory.
+fn copy_graph_assets(
+    site_dir: &std::path::Path,
+    site_graph: &site_index::SiteGraph,
+) -> Result<(), CliError> {
+    for node in site_graph.iter_stylesheets() {
+        copy_asset_file(site_dir, &node.url_path)?;
+    }
+    for node in site_graph.iter_leaf_assets() {
+        copy_asset_file(site_dir, &node.url_path)?;
+    }
+    Ok(())
+}
+
+/// Register stylesheet and leaf asset node dependencies in the DependencyGraph.
+///
+/// For each LeafAsset: output depends on its own source file (1:1).
+/// For each Stylesheet: output depends on its own source file plus the source
+/// files of all transitively @import-ed stylesheets, so changing any imported
+/// CSS triggers a re-copy of the importer.
+fn register_asset_deps(
+    site_graph: &site_index::SiteGraph,
+    dep_graph: &mut DependencyGraph,
+) {
+    // Leaf assets: simple 1:1 mapping
+    for node in site_graph.iter_leaf_assets() {
+        let mut sources = std::collections::HashSet::new();
+        sources.insert(node.source_path.clone());
+        dep_graph.register(node.output_path.clone(), sources);
+    }
+
+    // Stylesheets: own source + all transitive @import sources
+    for node in site_graph.iter_stylesheets() {
+        let sources = collect_stylesheet_sources(node, site_graph);
+        dep_graph.register(node.output_path.clone(), sources);
+    }
+}
+
+/// Collect the set of source paths that a stylesheet node transitively depends on.
+/// Includes the stylesheet's own source plus every @import-ed stylesheet's sources.
+fn collect_stylesheet_sources(
+    node: &site_index::SiteNode,
+    site_graph: &site_index::SiteGraph,
+) -> std::collections::HashSet<std::path::PathBuf> {
+    let mut sources = std::collections::HashSet::new();
+    let mut visited = std::collections::HashSet::new();
+    collect_stylesheet_sources_rec(node, site_graph, &mut sources, &mut visited);
+    sources
+}
+
+fn collect_stylesheet_sources_rec(
+    node: &site_index::SiteNode,
+    site_graph: &site_index::SiteGraph,
+    sources: &mut std::collections::HashSet<std::path::PathBuf>,
+    visited: &mut std::collections::HashSet<site_index::UrlPath>,
+) {
+    if visited.contains(&node.url_path) {
+        return;
+    }
+    visited.insert(node.url_path.clone());
+    sources.insert(node.source_path.clone());
+
+    if let site_index::NodeRole::Stylesheet(data) = &node.role {
+        for import_url in &data.imports {
+            if let Some(imported_node) = site_graph.get(import_url) {
+                collect_stylesheet_sources_rec(imported_node, site_graph, sources, visited);
+            }
+        }
+    }
+}
+
+fn copy_asset_file(
+    site_dir: &std::path::Path,
+    url_path: &site_index::UrlPath,
+) -> Result<(), CliError> {
+    let path = url_path.as_str();
+    let relative = path.trim_start_matches('/');
+    let src = site_dir.join(relative);
+    if !src.exists() {
+        return Err(CliError::Render(format!(
+            "referenced asset not found: {path} (expected at {})",
+            src.display()
+        )));
+    }
+    let dest = output_dir(site_dir).join(relative);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&src, &dest)?;
+    println!("  asset: {path}");
     Ok(())
 }
 
@@ -1507,7 +1696,7 @@ fn warn_unused_sources(
     schema_stems: &[String],
     all_template_stems: &std::collections::BTreeSet<String>,
     included_template_stems: &std::collections::BTreeSet<String>,
-    all_asset_paths: &std::collections::BTreeSet<String>,
+    site_graph: &site_index::SiteGraph,
 ) {
     // A. Unused assets
     let assets_dir = site_dir.join("assets");
@@ -1526,7 +1715,7 @@ fn warn_unused_sources(
             } else {
                 format!("/{rel}")
             };
-            if !all_asset_paths.contains(&root_rel) {
+            if site_graph.get(&site_index::UrlPath::new(&root_rel)).is_none() {
                 // Show path relative to site_dir without leading slash
                 let display = root_rel.trim_start_matches('/');
                 eprintln!("warning: {display} is not referenced by any template, consider deleting it");
@@ -1724,4 +1913,101 @@ mod tests {
         let written = std::fs::read_to_string(output_file.path()).unwrap();
         assert!(!written.is_empty(), "output file should not be empty");
     }
+
+    #[test]
+    fn register_asset_deps_registers_leaf_asset() {
+        use site_index::{NodeRole, SiteGraph, SiteNode, UrlPath};
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut graph = SiteGraph::new();
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/logo.png"),
+            output_path: PathBuf::from("/out/assets/logo.png"),
+            source_path: PathBuf::from("/site/assets/logo.png"),
+            deps: HashSet::new(),
+            role: NodeRole::LeafAsset,
+        });
+
+        let mut dep_graph = DependencyGraph::new();
+        register_asset_deps(&graph, &mut dep_graph);
+
+        let sources = dep_graph.sources_for(std::path::Path::new("/out/assets/logo.png"));
+        assert!(sources.contains(&PathBuf::from("/site/assets/logo.png")));
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn register_asset_deps_registers_stylesheet() {
+        use site_index::{NodeRole, StylesheetData, SiteGraph, SiteNode, UrlPath};
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut graph = SiteGraph::new();
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/style.css"),
+            output_path: PathBuf::from("/out/assets/style.css"),
+            source_path: PathBuf::from("/site/assets/style.css"),
+            deps: HashSet::new(),
+            role: NodeRole::Stylesheet(StylesheetData {
+                imports: vec![],
+                asset_refs: vec![],
+            }),
+        });
+
+        let mut dep_graph = DependencyGraph::new();
+        register_asset_deps(&graph, &mut dep_graph);
+
+        let sources = dep_graph.sources_for(std::path::Path::new("/out/assets/style.css"));
+        assert!(sources.contains(&PathBuf::from("/site/assets/style.css")));
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn register_asset_deps_stylesheet_includes_imported_sources() {
+        use site_index::{NodeRole, StylesheetData, SiteGraph, SiteNode, UrlPath};
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut graph = SiteGraph::new();
+        // An imported stylesheet
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/base.css"),
+            output_path: PathBuf::from("/out/assets/base.css"),
+            source_path: PathBuf::from("/site/assets/base.css"),
+            deps: HashSet::new(),
+            role: NodeRole::Stylesheet(StylesheetData {
+                imports: vec![],
+                asset_refs: vec![],
+            }),
+        });
+        // A stylesheet that @imports base.css
+        graph.insert(SiteNode {
+            url_path: UrlPath::new("/assets/style.css"),
+            output_path: PathBuf::from("/out/assets/style.css"),
+            source_path: PathBuf::from("/site/assets/style.css"),
+            deps: HashSet::new(),
+            role: NodeRole::Stylesheet(StylesheetData {
+                imports: vec![UrlPath::new("/assets/base.css")],
+                asset_refs: vec![],
+            }),
+        });
+
+        let mut dep_graph = DependencyGraph::new();
+        register_asset_deps(&graph, &mut dep_graph);
+
+        // style.css output should depend on both source files
+        let sources = dep_graph.sources_for(std::path::Path::new("/out/assets/style.css"));
+        assert!(sources.contains(&PathBuf::from("/site/assets/style.css")),
+            "should contain own source");
+        assert!(sources.contains(&PathBuf::from("/site/assets/base.css")),
+            "should contain @imported source");
+        assert_eq!(sources.len(), 2);
+
+        // Changing base.css should trigger rebuild of both outputs
+        let affected = dep_graph.affected_outputs(std::path::Path::new("/site/assets/base.css"));
+        assert!(affected.contains(&PathBuf::from("/out/assets/base.css")));
+        assert!(affected.contains(&PathBuf::from("/out/assets/style.css")));
+    }
+
 }

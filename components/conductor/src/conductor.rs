@@ -205,10 +205,9 @@ impl Conductor {
             Some(template::Value::Text(t)) => t.clone(),
             _ => slug.to_string(),
         };
-        let mut link_graph = template::DataGraph::new();
-        link_graph.insert("href", template::Value::Text(url_path.clone()));
-        link_graph.insert("text", template::Value::Text(title));
-        graph.insert("link", template::Value::Record(link_graph));
+        graph.insert("link", template::Value::Record(
+            template::synthesize_link(&title, &url_path),
+        ));
 
         // Load and parse template via repo (try directory-based item template first,
         // then flat partial convention for backward compatibility)

@@ -1,6 +1,6 @@
 use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, Value};
-use crate::dom::{Element, Node};
+use crate::dom::{Element, Form, Node};
 use crate::expr::parse_expr;
 use crate::registry::RenderContext;
 
@@ -121,14 +121,15 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
 /// If a `presemble:class` attribute is present, evaluates its pipe expression against
 /// the graph and either sets or appends to the `class` attribute. Removes `presemble:class`.
 fn apply_presemble_class(
-    mut attrs: Vec<(String, String)>,
+    mut attrs: Vec<(String, Form)>,
     graph: &DataGraph,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Form)> {
     // Find and remove the `presemble:class` attribute.
     let presemble_class_pos = attrs.iter().position(|(k, _)| k == "presemble:class");
     let presemble_class_value = presemble_class_pos.map(|i| attrs.remove(i).1);
 
-    if let Some(expr_src) = presemble_class_value {
+    if let Some(expr_form) = presemble_class_value {
+        let expr_src = expr_form.as_str().unwrap_or("").to_string();
         let evaluated = match parse_expr(&expr_src) {
             Ok(expr) => eval_expr_to_string(&expr, graph),
             Err(_) => String::new(),
@@ -137,10 +138,12 @@ fn apply_presemble_class(
         if !evaluated.is_empty() {
             // Find or create the `class` attribute.
             if let Some((_k, v)) = attrs.iter_mut().find(|(k, _)| k == "class") {
-                v.push(' ');
-                v.push_str(&evaluated);
+                if let Form::Str(s) = v {
+                    s.push(' ');
+                    s.push_str(&evaluated);
+                }
             } else {
-                attrs.push(("class".to_string(), evaluated));
+                attrs.push(("class".to_string(), Form::Str(evaluated)));
             }
         }
     }
@@ -286,6 +289,49 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
     let value = graph.resolve(&path_segments);
 
+    // Check for :apply attribute — resolve to Form (native from hiccup, re-parsed from HTML strings)
+    let apply_form = match el.attr_form("apply") {
+        Some(form @ (Form::Symbol(_) | Form::List(_))) => Some(form.clone()),
+        Some(Form::Str(s)) => Some(crate::hiccup::parse_edn_form(s)
+            .map_err(|e| RenderError::Render(format!(":apply parse error: {e}")))?),
+        Some(other) => return Err(RenderError::Render(format!(":apply expects a symbol or expression, got {:?}", other))),
+        None => None,
+    };
+    if let Some(ref form) = apply_form {
+        let func_name = match form {
+            Form::Symbol(s) => s.as_str(),
+            _ => "", // Complex expressions — future Layer 2
+        };
+        if func_name == "text" {
+            // Apply Display (text) to the value
+            return match value.and_then(|v| v.display_text()) {
+                Some(text) => {
+                    let tag = as_tag.unwrap_or("span").to_string();
+                    let mut attrs = vec![
+                        ("class".to_string(), Form::Str(class)),
+                        ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
+                        ("data-presemble-file".to_string(), Form::Str(presemble_file)),
+                    ];
+                    // Preserve _source_slot from record values for browser editing
+                    if let Some(Value::Record(sub_graph)) = value
+                        && let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"])
+                    {
+                        attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
+                    }
+                    let element = Element {
+                        name: tag,
+                        attrs,
+                        children: vec![Node::Text(text)],
+                    };
+                    Ok(vec![Node::Element(element)])
+                }
+                None => Ok(Vec::new()),
+            };
+        }
+        // Unknown apply function/expression — return error
+        return Err(RenderError::Render(format!("unknown :apply expression '{}'", form.to_edn_string())));
+    }
+
     match value {
         None | Some(Value::Absent) => Ok(Vec::new()),
 
@@ -294,9 +340,9 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             let element = Element {
                 name: tag,
                 attrs: vec![
-                    ("class".to_string(), class),
-                    ("data-presemble-slot".to_string(), slot_name_from_path(data_path)),
-                    ("data-presemble-file".to_string(), presemble_file.clone()),
+                    ("class".to_string(), Form::Str(class)),
+                    ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
+                    ("data-presemble-file".to_string(), Form::Str(presemble_file.clone())),
                 ],
                 children: vec![Node::Text(text.clone())],
             };
@@ -353,16 +399,16 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             // Hint text goes into data-presemble-hint for CSS placeholder display.
             // The element content is empty — the user starts with a clean slate.
             let mut attrs = vec![
-                ("class".to_string(), combined_class),
-                ("data-presemble-slot".to_string(), slot_name.clone()),
-                ("data-presemble-file".to_string(), presemble_file.clone()),
-                ("data-presemble-hint".to_string(), hint.clone()),
+                ("class".to_string(), Form::Str(combined_class)),
+                ("data-presemble-slot".to_string(), Form::Str(slot_name.clone())),
+                ("data-presemble-file".to_string(), Form::Str(presemble_file.clone())),
+                ("data-presemble-hint".to_string(), Form::Str(hint.clone())),
             ];
             if effective_tag == "img" {
-                attrs.push(("alt".to_string(), String::new()));
-                attrs.push(("src".to_string(), String::new()));
+                attrs.push(("alt".to_string(), Form::Str(String::new())));
+                attrs.push(("src".to_string(), Form::Str(String::new())));
             } else if effective_tag == "a" {
-                attrs.push(("href".to_string(), "#".to_string()));
+                attrs.push(("href".to_string(), Form::Str("#".to_string())));
             }
             let element = Element {
                 name: effective_tag.to_string(),
@@ -423,6 +469,25 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
     transform(callable_nodes, &effective_graph, &ctx.descend())
 }
 
+/// Build the common presemble attribute vec for a rendered record element.
+/// Appends `data-presemble-source-slot` if the sub-graph carries `_source_slot`.
+fn record_attrs(
+    class: &str,
+    slot: &str,
+    file: &str,
+    sub_graph: &DataGraph,
+) -> Vec<(String, Form)> {
+    let mut attrs = vec![
+        ("class".to_string(), Form::Str(class.to_string())),
+        ("data-presemble-slot".to_string(), Form::Str(slot.to_string())),
+        ("data-presemble-file".to_string(), Form::Str(file.to_string())),
+    ];
+    if let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"]) {
+        attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
+    }
+    attrs
+}
+
 /// Render a Record value as a link or image.
 fn render_record(
     sub_graph: &DataGraph,
@@ -453,14 +518,11 @@ fn render_record(
         "a" => {
             let href = extract_text(sub_graph, "href").unwrap_or_default();
             let text = extract_text(sub_graph, "text").unwrap_or_default();
+            let mut attrs = record_attrs(class, slot, file, sub_graph);
+            attrs.insert(0, ("href".to_string(), Form::Str(href)));
             let element = Element {
                 name: "a".to_string(),
-                attrs: vec![
-                    ("href".to_string(), href),
-                    ("class".to_string(), class.to_string()),
-                    ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-file".to_string(), file.to_string()),
-                ],
+                attrs,
                 children: vec![Node::Text(text)],
             };
             Ok(vec![Node::Element(element)])
@@ -469,48 +531,43 @@ fn render_record(
         "img" => {
             let src = extract_text(sub_graph, "path").unwrap_or_default();
             let alt = extract_text(sub_graph, "alt").unwrap_or_default();
+            let mut attrs = record_attrs(class, slot, file, sub_graph);
+            attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
+            attrs.insert(0, ("src".to_string(), Form::Str(src)));
             let element = Element {
                 name: "img".to_string(),
-                attrs: vec![
-                    ("src".to_string(), src),
-                    ("alt".to_string(), alt),
-                    ("class".to_string(), class.to_string()),
-                    ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-file".to_string(), file.to_string()),
-                ],
+                attrs,
                 children: vec![],
             };
             Ok(vec![Node::Element(element)])
         }
 
-        // For other `as` tags: if record has href/text, treat as link; if path/alt, as image.
+        // For other `as` tags: if record has href/text, wrap inner element in <a>.
         _ => {
             if has_href {
                 let href = extract_text(sub_graph, "href").unwrap_or_default();
                 let text = extract_text(sub_graph, "text").unwrap_or_default();
-                let element = Element {
+                let attrs = record_attrs(class, slot, file, sub_graph);
+                let inner = Element {
                     name: effective_tag.to_string(),
-                    attrs: vec![
-                        ("href".to_string(), href),
-                        ("class".to_string(), class.to_string()),
-                        ("data-presemble-slot".to_string(), slot.to_string()),
-                        ("data-presemble-file".to_string(), file.to_string()),
-                    ],
+                    attrs,
                     children: vec![Node::Text(text)],
                 };
-                Ok(vec![Node::Element(element)])
+                let anchor = Element {
+                    name: "a".to_string(),
+                    attrs: vec![("href".to_string(), Form::Str(href))],
+                    children: vec![Node::Element(inner)],
+                };
+                Ok(vec![Node::Element(anchor)])
             } else if has_path {
                 let src = extract_text(sub_graph, "path").unwrap_or_default();
                 let alt = extract_text(sub_graph, "alt").unwrap_or_default();
+                let mut attrs = record_attrs(class, slot, file, sub_graph);
+                attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
+                attrs.insert(0, ("src".to_string(), Form::Str(src)));
                 let element = Element {
                     name: effective_tag.to_string(),
-                    attrs: vec![
-                        ("src".to_string(), src),
-                        ("alt".to_string(), alt),
-                        ("class".to_string(), class.to_string()),
-                        ("data-presemble-slot".to_string(), slot.to_string()),
-                        ("data-presemble-file".to_string(), file.to_string()),
-                    ],
+                    attrs,
                     children: vec![],
                 };
                 Ok(vec![Node::Element(element)])
@@ -535,9 +592,9 @@ fn render_list_item(
             let element = Element {
                 name: tag.to_string(),
                 attrs: vec![
-                    ("class".to_string(), class.to_string()),
-                    ("data-presemble-slot".to_string(), slot.to_string()),
-                    ("data-presemble-file".to_string(), file.to_string()),
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    ("data-presemble-slot".to_string(), Form::Str(slot.to_string())),
+                    ("data-presemble-file".to_string(), Form::Str(file.to_string())),
                 ],
                 children: vec![Node::Text(text.clone())],
             };
@@ -576,7 +633,7 @@ fn extract_text(graph: &DataGraph, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::data::{DataGraph, Value};
-    use crate::dom::{parse_template_xml, serialize_nodes, Element, Node};
+    use crate::dom::{parse_template_xml, serialize_nodes, Element, Form, Node};
     use crate::registry::{NullRegistry, RenderContext};
 
     fn make_graph_with_title(title: &str) -> DataGraph {
@@ -716,8 +773,8 @@ mod tests {
             name: "div".to_string(),
             attrs: vec![(
                 "presemble:class".to_string(),
-                r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
-                    .to_string(),
+                Form::Str(r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
+                    .to_string()),
             )],
             children: vec![],
         })];
@@ -740,11 +797,11 @@ mod tests {
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
             attrs: vec![
-                ("class".to_string(), "base".to_string()),
+                ("class".to_string(), Form::Str("base".to_string())),
                 (
                     "presemble:class".to_string(),
-                    r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
-                        .to_string(),
+                    Form::Str(r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
+                        .to_string()),
                 ),
             ],
             children: vec![],
@@ -762,7 +819,7 @@ mod tests {
 
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), "article.missing".to_string())],
+            attrs: vec![("presemble:class".to_string(), Form::Str("article.missing".to_string()))],
             children: vec![],
         })];
         let reg = NullRegistry;
@@ -780,7 +837,7 @@ mod tests {
 
         let nodes = vec![Node::Element(Element {
             name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), "article.title".to_string())],
+            attrs: vec![("presemble:class".to_string(), Form::Str("article.title".to_string()))],
             children: vec![],
         })];
         let reg = NullRegistry;
@@ -1299,5 +1356,171 @@ mod tests {
         let expr = Expr::Lookup(vec!["tagline".to_string()]);
         let result = eval_expr_to_string(&expr, &graph);
         assert_eq!(result, "Write your tagline here");
+    }
+
+    #[test]
+    fn synthesized_link_renders_with_source_slot_attribute() {
+        let mut graph = DataGraph::new();
+        let link = crate::data::synthesize_link("Hello World", "/article/hello-world");
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<a"), "should render as anchor: {html}");
+        assert!(html.contains(r#"href="/article/hello-world""#), "should have href: {html}");
+        assert!(html.contains("Hello World"), "should have link text: {html}");
+        assert!(
+            html.contains(r#"data-presemble-source-slot="title""#),
+            "should have source slot attribute: {html}"
+        );
+    }
+
+    #[test]
+    fn regular_link_record_does_not_render_source_slot_attribute() {
+        let mut graph = DataGraph::new();
+        let mut link = DataGraph::new();
+        link.insert("href", Value::Text("/page".to_string()));
+        link.insert("text", Value::Text("Page".to_string()));
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<a"), "should render as anchor: {html}");
+        assert!(
+            !html.contains("data-presemble-source-slot"),
+            "regular link should not have source-slot attribute: {html}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // :apply text tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn apply_text_on_link_record_renders_plain_text() {
+        // A link record with :apply text should render just the text, no anchor.
+        // <presemble:insert data="link" as="h3" apply="text" />
+        // with link = {href: "/foo", text: "Hello"} -> <h3>Hello</h3>
+        let mut graph = DataGraph::new();
+        let mut link = DataGraph::new();
+        link.insert("href", Value::Text("/foo".to_string()));
+        link.insert("text", Value::Text("Hello".to_string()));
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h3"), "should render as h3: {html}");
+        assert!(html.contains("Hello"), "should contain link text: {html}");
+        assert!(!html.contains("<a"), "should NOT render as anchor with :apply text: {html}");
+        assert!(!html.contains("href"), "should NOT have href with :apply text: {html}");
+        assert!(html.contains(r#"data-presemble-slot="link""#), "should have data-presemble-slot: {html}");
+    }
+
+    #[test]
+    fn apply_text_on_plain_text_is_identity() {
+        // A text value with :apply text should render the same as without.
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("My Title".to_string()));
+
+        let src = r#"<presemble:insert data="title" as="h1" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h1"), "should render as h1: {html}");
+        assert!(html.contains("My Title"), "should contain title text: {html}");
+        assert!(html.contains(r#"data-presemble-slot="title""#), "should have data-presemble-slot: {html}");
+    }
+
+    #[test]
+    fn apply_text_on_html_strips_tags() {
+        // An HTML value with :apply text should strip tags.
+        let mut graph = DataGraph::new();
+        graph.insert("body", Value::Html("<p>Hello <strong>world</strong></p>".to_string()));
+
+        let src = r#"<presemble:insert data="body" as="div" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<div"), "should render as div: {html}");
+        assert!(html.contains("Hello world"), "should contain stripped text: {html}");
+        assert!(!html.contains("<p>"), "should not contain p tag after stripping: {html}");
+        assert!(!html.contains("<strong>"), "should not contain strong tag after stripping: {html}");
+    }
+
+    #[test]
+    fn apply_text_preserves_source_slot() {
+        // A synthesized link record (with _source_slot) should carry
+        // data-presemble-source-slot even when :apply text is used.
+        let mut graph = DataGraph::new();
+        let link = crate::data::synthesize_link("Hello World", "/article/hello-world");
+        graph.insert("link", Value::Record(link));
+
+        let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("<h3"), "should render as h3: {html}");
+        assert!(html.contains("Hello World"), "should contain link text: {html}");
+        assert!(!html.contains("<a"), "should NOT wrap in anchor with :apply text: {html}");
+        assert!(
+            html.contains(r#"data-presemble-source-slot="title""#),
+            "should preserve source-slot attribute: {html}"
+        );
+    }
+
+    #[test]
+    fn apply_unknown_function_errors() {
+        // :apply foo should produce a render error.
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("My Title".to_string()));
+
+        let src = r#"<presemble:insert data="title" apply="foo" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx);
+
+        assert!(result.is_err(), "unknown :apply function should produce an error");
+        if let Err(RenderError::Render(msg)) = result {
+            assert!(msg.contains("foo"), "error message should mention unknown function name: {msg}");
+        }
+    }
+
+    #[test]
+    fn apply_text_absent_value_produces_no_output() {
+        // :apply text on an absent value should produce empty output.
+        let graph = DataGraph::new();
+
+        let src = r#"<presemble:insert data="missing" apply="text" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+
+        assert!(result.is_empty(), "absent value with :apply text should produce no output");
     }
 }

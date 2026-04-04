@@ -11,6 +11,7 @@ members = [
     "components/mem_site_repository",
     "components/schema",
     "components/site_index",
+    "components/stylesheet",
     "components/template",
     "components/validation",
     "bases/editor_server",
@@ -21,7 +22,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.17.0"
+version = "0.19.0"
 edition = "2024"
 
 [workspace.dependencies]
@@ -36,6 +37,7 @@ publisher_cli = { path = "bases/publisher_cli" }
 schema = { path = "components/schema" }
 site_index = { path = "components/site_index" }
 site_repository = { path = "components/mem_site_repository", package = "mem_site_repository" }
+stylesheet = { path = "components/stylesheet" }
 template = { path = "components/template" }
 validation = { path = "components/validation" }
 axum = { version = "0.8", features = ["ws"] }

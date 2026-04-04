@@ -18,6 +18,8 @@ Start the server:
 
 ```
 presemble serve site/
+
+
 ```
 
 Then edit any file under `content/`, `schemas/`, or `templates/`. The terminal shows
@@ -28,6 +30,8 @@ Rebuilding 2 page(s)...
   → site/output/post/building-presemble/index.html
   → site/output/index.html
 Rebuild complete (2 file(s))
+
+
 ```
 
 ### Incremental rebuild
@@ -53,6 +57,8 @@ files in a single process.
 
 ```
 presemble lsp site/
+
+
 ```
 
 Point your editor at that binary. In Helix, add it to `languages.toml`:
@@ -65,4 +71,6 @@ language-servers = ["presemble-lsp"]
 [language-server.presemble-lsp]
 command = "presemble"
 args = ["lsp", "site/"]
+
+
 ```

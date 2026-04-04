@@ -9,11 +9,11 @@ pub mod registry;
 pub mod transformer;
 
 pub use ast::{Expr, Transform};
-pub use data::{build_article_graph, DataGraph, SuggestionKind, Value};
+pub use data::{build_article_graph, synthesize_link, DataGraph, SuggestionKind, Value};
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};
-pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes};
+pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes, Form};
 pub use hiccup::parse_template_hiccup;
 pub use hiccup_serializer::serialize_to_hiccup;
 pub use registry::{extract_definitions, NullRegistry, RenderContext, TemplateRegistry};
