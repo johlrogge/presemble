@@ -289,8 +289,19 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
     let value = graph.resolve(&path_segments);
 
-    // Check for :apply attribute
-    if let Some(func_name) = el.attr("apply") {
+    // Check for :apply attribute — resolve to Form (native from hiccup, re-parsed from HTML strings)
+    let apply_form = match el.attr_form("apply") {
+        Some(form @ (Form::Symbol(_) | Form::List(_))) => Some(form.clone()),
+        Some(Form::Str(s)) => Some(crate::hiccup::parse_edn_form(s)
+            .map_err(|e| RenderError::Render(format!(":apply parse error: {e}")))?),
+        Some(other) => return Err(RenderError::Render(format!(":apply expects a symbol or expression, got {:?}", other))),
+        None => None,
+    };
+    if let Some(ref form) = apply_form {
+        let func_name = match form {
+            Form::Symbol(s) => s.as_str(),
+            _ => "", // Complex expressions — future Layer 2
+        };
         if func_name == "text" {
             // Apply Display (text) to the value
             return match value.and_then(|v| v.display_text()) {
@@ -317,8 +328,8 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                 None => Ok(Vec::new()),
             };
         }
-        // Unknown apply function — return error
-        return Err(RenderError::Render(format!("unknown :apply function '{func_name}'")));
+        // Unknown apply function/expression — return error
+        return Err(RenderError::Render(format!("unknown :apply expression '{}'", form.to_edn_string())));
     }
 
     match value {

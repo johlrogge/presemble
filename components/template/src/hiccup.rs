@@ -533,6 +533,14 @@ pub fn parse_template_hiccup(src: &str) -> Result<Vec<Node>, TemplateError> {
     Ok(nodes)
 }
 
+/// Parse a string as a single EDN form.
+/// Used by the transformer to re-parse HTML attribute strings as structured forms.
+pub fn parse_edn_form(src: &str) -> Result<Form, TemplateError> {
+    let tokens = tokenize(src)?;
+    let mut parser = Parser::new(tokens);
+    parser.parse_form()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
