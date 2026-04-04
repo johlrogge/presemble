@@ -8,6 +8,7 @@ Maintains a bipartite graph mapping each output page to the set of source files 
 
 - Record `output → {source files}` edges after each build
 - Provide `rebuild_affected(changed: &Path) -> Vec<OutputPage>` via the reverse index
+- Track CSS files as first-class graph nodes, with edges for `@import` and `url()` references (ADR-029)
 - Serve as the subscription/notification backbone for WebSocket live reload (M3)
 
 ## Used by

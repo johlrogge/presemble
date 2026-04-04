@@ -260,6 +260,110 @@ fn semantic_class(data_path: &str) -> String {
     }
 }
 
+/// Evaluate an `:apply` expression against a resolved value.
+/// Returns the resulting text string, or None if value is absent.
+fn evaluate_apply(form: &Form, value: Option<&Value>) -> Result<Option<String>, RenderError> {
+    match form {
+        Form::Symbol(name) => apply_function(name, value),
+        Form::List(items) => evaluate_pipe(items, value),
+        other => Err(RenderError::Render(format!(
+            ":apply expects a symbol or (-> ...) expression, got '{}'",
+            other.to_edn_string()
+        ))),
+    }
+}
+
+/// Evaluate a `(-> initial fn1 fn2 ...)` threading expression.
+fn evaluate_pipe(items: &[Form], value: Option<&Value>) -> Result<Option<String>, RenderError> {
+    match items.first() {
+        Some(Form::Symbol(s)) if s == "->" => {}
+        _ => {
+            return Err(RenderError::Render(
+                ":apply list must start with -> (threading macro)".to_string(),
+            ))
+        }
+    }
+
+    if items.len() < 2 {
+        return Err(RenderError::Render(
+            ":apply (-> ...) requires at least one function".to_string(),
+        ));
+    }
+
+    let first_fn = items[1].as_str().ok_or_else(|| {
+        RenderError::Render(format!(
+            "expected function name, got '{}'",
+            items[1].to_edn_string()
+        ))
+    })?;
+    let mut current: Option<String> = apply_function(first_fn, value)?;
+
+    for item in &items[2..] {
+        let func_name = item.as_str().ok_or_else(|| {
+            RenderError::Render(format!(
+                "expected function name, got '{}'",
+                item.to_edn_string()
+            ))
+        })?;
+        current = match current {
+            Some(text) => apply_string_function(func_name, &text)?,
+            None => None,
+        };
+    }
+
+    Ok(current)
+}
+
+/// Apply a named function to a Value — converts Value to Option<String>.
+fn apply_function(name: &str, value: Option<&Value>) -> Result<Option<String>, RenderError> {
+    match name {
+        "text" => Ok(value.and_then(|v| v.display_text())),
+        "to_lower" | "to_upper" | "capitalize" | "truncate" => {
+            let text = value.and_then(|v| v.display_text());
+            match text {
+                Some(t) => apply_string_function(name, &t),
+                None => Ok(None),
+            }
+        }
+        _ => Err(RenderError::Render(format!("unknown :apply function '{name}'"))),
+    }
+}
+
+/// Apply a named pure string→string transform.
+fn apply_string_function(name: &str, text: &str) -> Result<Option<String>, RenderError> {
+    match name {
+        "text" => Ok(Some(text.to_string())),
+        "to_lower" => Ok(Some(text.to_lowercase())),
+        "to_upper" => Ok(Some(text.to_uppercase())),
+        "capitalize" => Ok(Some(capitalize_string(text))),
+        "truncate" => Ok(Some(truncate_string(text, 100))),
+        _ => Err(RenderError::Render(format!("unknown string function '{name}'"))),
+    }
+}
+
+fn capitalize_string(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => {
+            let upper: String = c.to_uppercase().collect();
+            upper + chars.as_str()
+        }
+    }
+}
+
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        let mut end = max_len;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}
+
 /// Handle a `<presemble:insert>` element.
 fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderError> {
     let data_path = match el.attr("data") {
@@ -298,38 +402,29 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
         None => None,
     };
     if let Some(ref form) = apply_form {
-        let func_name = match form {
-            Form::Symbol(s) => s.as_str(),
-            _ => "", // Complex expressions — future Layer 2
-        };
-        if func_name == "text" {
-            // Apply Display (text) to the value
-            return match value.and_then(|v| v.display_text()) {
-                Some(text) => {
-                    let tag = as_tag.unwrap_or("span").to_string();
-                    let mut attrs = vec![
-                        ("class".to_string(), Form::Str(class)),
-                        ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
-                        ("data-presemble-file".to_string(), Form::Str(presemble_file)),
-                    ];
-                    // Preserve _source_slot from record values for browser editing
-                    if let Some(Value::Record(sub_graph)) = value
-                        && let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"])
-                    {
-                        attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
-                    }
-                    let element = Element {
-                        name: tag,
-                        attrs,
-                        children: vec![Node::Text(text)],
-                    };
-                    Ok(vec![Node::Element(element)])
+        return match evaluate_apply(form, value)? {
+            Some(text) => {
+                let tag = as_tag.unwrap_or("span").to_string();
+                let mut attrs = vec![
+                    ("class".to_string(), Form::Str(class)),
+                    ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
+                    ("data-presemble-file".to_string(), Form::Str(presemble_file)),
+                ];
+                // Preserve _source_slot from record values for browser editing
+                if let Some(Value::Record(sub_graph)) = value
+                    && let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"])
+                {
+                    attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
                 }
-                None => Ok(Vec::new()),
-            };
-        }
-        // Unknown apply function/expression — return error
-        return Err(RenderError::Render(format!("unknown :apply expression '{}'", form.to_edn_string())));
+                let element = Element {
+                    name: tag,
+                    attrs,
+                    children: vec![Node::Text(text)],
+                };
+                Ok(vec![Node::Element(element)])
+            }
+            None => Ok(Vec::new()),
+        };
     }
 
     match value {
@@ -391,6 +486,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                     SuggestionKind::Link => "a".to_string(),
                     SuggestionKind::Image => "img".to_string(),
                     SuggestionKind::Body => "div".to_string(),
+                    SuggestionKind::List => "ul".to_string(),
                 }
             };
 
@@ -1522,5 +1618,200 @@ mod tests {
         let result = transform(nodes, &graph, &ctx).unwrap();
 
         assert!(result.is_empty(), "absent value with :apply text should produce no output");
+    }
+
+    // ---------------------------------------------------------------------------
+    // pipe expression tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn apply_pipe_to_lower() {
+        // :apply (-> text to_lower) on Value::Text("HELLO") -> "hello"
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("HELLO".to_string()));
+
+        // Build element with apply attribute as a List form directly
+        let nodes = vec![Node::Element(Element {
+            name: "presemble:insert".to_string(),
+            attrs: vec![
+                ("data".to_string(), Form::Str("title".to_string())),
+                ("as".to_string(), Form::Str("span".to_string())),
+                (
+                    "apply".to_string(),
+                    Form::List(vec![
+                        Form::Symbol("->".to_string()),
+                        Form::Symbol("text".to_string()),
+                        Form::Symbol("to_lower".to_string()),
+                    ]),
+                ),
+            ],
+            children: vec![],
+        })];
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("hello"), "to_lower should lowercase: {html}");
+        assert!(!html.contains("HELLO"), "uppercase should be gone: {html}");
+    }
+
+    #[test]
+    fn apply_pipe_chain() {
+        // :apply (-> text to_lower capitalize) on "HELLO WORLD" -> "Hello world"
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("HELLO WORLD".to_string()));
+
+        let nodes = vec![Node::Element(Element {
+            name: "presemble:insert".to_string(),
+            attrs: vec![
+                ("data".to_string(), Form::Str("title".to_string())),
+                ("as".to_string(), Form::Str("span".to_string())),
+                (
+                    "apply".to_string(),
+                    Form::List(vec![
+                        Form::Symbol("->".to_string()),
+                        Form::Symbol("text".to_string()),
+                        Form::Symbol("to_lower".to_string()),
+                        Form::Symbol("capitalize".to_string()),
+                    ]),
+                ),
+            ],
+            children: vec![],
+        })];
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("Hello world"), "chain should produce Hello world: {html}");
+    }
+
+    #[test]
+    fn apply_to_upper_directly() {
+        // :apply to_upper on "hello" -> "HELLO"
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("hello".to_string()));
+
+        let nodes = vec![Node::Element(Element {
+            name: "presemble:insert".to_string(),
+            attrs: vec![
+                ("data".to_string(), Form::Str("title".to_string())),
+                ("as".to_string(), Form::Str("span".to_string())),
+                ("apply".to_string(), Form::Symbol("to_upper".to_string())),
+            ],
+            children: vec![],
+        })];
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("HELLO"), "to_upper should uppercase: {html}");
+    }
+
+    #[test]
+    fn apply_pipe_on_record() {
+        // :apply (-> text to_upper) on a record with text field -> "TITLE TEXT"
+        let mut graph = DataGraph::new();
+        let mut link = DataGraph::new();
+        link.insert("text", Value::Text("title text".to_string()));
+        link.insert("href", Value::Text("/foo".to_string()));
+        graph.insert("link", Value::Record(link));
+
+        let nodes = vec![Node::Element(Element {
+            name: "presemble:insert".to_string(),
+            attrs: vec![
+                ("data".to_string(), Form::Str("link".to_string())),
+                ("as".to_string(), Form::Str("span".to_string())),
+                (
+                    "apply".to_string(),
+                    Form::List(vec![
+                        Form::Symbol("->".to_string()),
+                        Form::Symbol("text".to_string()),
+                        Form::Symbol("to_upper".to_string()),
+                    ]),
+                ),
+            ],
+            children: vec![],
+        })];
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        assert!(html.contains("TITLE TEXT"), "pipe on record should uppercase display text: {html}");
+        assert!(!html.contains("<a"), "should NOT render as anchor: {html}");
+    }
+
+    #[test]
+    fn apply_pipe_missing_arrow_errors() {
+        // :apply (text to_lower) without -> should produce an error
+        let result = evaluate_pipe(
+            &[
+                Form::Symbol("text".to_string()),
+                Form::Symbol("to_lower".to_string()),
+            ],
+            Some(&Value::Text("hello".to_string())),
+        );
+        assert!(result.is_err(), "pipe without -> should error");
+        if let Err(RenderError::Render(msg)) = result {
+            assert!(msg.contains("->"), "error should mention ->: {msg}");
+        }
+    }
+
+    #[test]
+    fn apply_unknown_function_in_pipe_errors() {
+        // :apply (-> text unknown_fn) should produce an error
+        let result = evaluate_pipe(
+            &[
+                Form::Symbol("->".to_string()),
+                Form::Symbol("text".to_string()),
+                Form::Symbol("unknown_fn".to_string()),
+            ],
+            Some(&Value::Text("hello".to_string())),
+        );
+        assert!(result.is_err(), "unknown function in pipe should error");
+        if let Err(RenderError::Render(msg)) = result {
+            assert!(
+                msg.contains("unknown_fn"),
+                "error should mention unknown function name: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_truncate() {
+        // :apply truncate on a string <= 100 chars should pass through unchanged
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("short text".to_string()));
+
+        let nodes = vec![Node::Element(Element {
+            name: "presemble:insert".to_string(),
+            attrs: vec![
+                ("data".to_string(), Form::Str("title".to_string())),
+                ("as".to_string(), Form::Str("span".to_string())),
+                ("apply".to_string(), Form::Symbol("truncate".to_string())),
+            ],
+            children: vec![],
+        })];
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("short text"), "truncate should pass through short text: {html}");
+
+        // A string > 100 chars should be truncated with ellipsis
+        let long = "a".repeat(150);
+        let truncated = truncate_string(&long, 100);
+        assert!(truncated.ends_with('…'), "long string should end with ellipsis: {truncated}");
+        assert!(truncated.len() < 150, "long string should be shorter after truncation");
+    }
+
+    #[test]
+    fn apply_capitalize() {
+        // :apply capitalize on "hello world" -> "Hello world"
+        let result = apply_string_function("capitalize", "hello world").unwrap();
+        assert_eq!(result, Some("Hello world".to_string()));
     }
 }

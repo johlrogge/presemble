@@ -157,6 +157,9 @@ fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentEleme
                 ))
             }
         }
+        Element::List => Ok(ContentElement::List {
+            source: new_value.to_string(),
+        }),
     }
 }
 

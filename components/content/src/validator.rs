@@ -1,4 +1,5 @@
 use crate::document::{ContentElement, Document};
+use crate::parse_list_items;
 use schema::{
     AltRequirement, BodyRules, Constraint, ContentConstraint, CountRange, Element, Grammar,
     HeadingLevelRange, Slot, SlotName, Spanned,
@@ -89,6 +90,11 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 
             Element::Image { .. } => {
                 let count = validate_images(elements, grammar_slot, &mut diagnostics);
+                check_occurs_count(count, grammar_slot, &mut diagnostics);
+            }
+
+            Element::List => {
+                let count = validate_list(elements, grammar_slot, &mut diagnostics);
                 check_occurs_count(count, grammar_slot, &mut diagnostics);
             }
         }
@@ -351,6 +357,37 @@ fn validate_images(
     count
 }
 
+/// Validate a list slot. Returns the count of items in the first List element
+/// found (the `occurs` constraint bounds the item count, not element count).
+fn validate_list(
+    elements: &im::Vector<Spanned<ContentElement>>,
+    slot: &Slot,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) -> usize {
+    // Find the first ContentElement::List in the assigned elements.
+    let list_source = elements.iter().find_map(|s| {
+        if let ContentElement::List { source } = &s.node {
+            Some(source.as_str())
+        } else {
+            None
+        }
+    });
+
+    match list_source {
+        None => {
+            if expected_count_for_slot(slot).min() > 0 {
+                diagnostics.push(ValidationDiagnostic {
+                    severity: Severity::Error,
+                    message: format!("slot '{}': missing required list", slot.name),
+                    slot: Some(slot.name.clone()),
+                });
+            }
+            0
+        }
+        Some(source) => parse_list_items(source).len(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Constraint checkers
 // ---------------------------------------------------------------------------
@@ -553,6 +590,75 @@ mod tests {
             has_capitalized_error,
             "expected a capitalization error for 'title' slot, got: {:#?}",
             result.diagnostics
+        );
+    }
+
+    // ── Test: list slot validation ───────────────────────────────────────
+
+    fn list_grammar() -> Grammar {
+        let schema_src = "# Title {#title}\n\n- Tags for the post {#tags}\noccurs\n: 2..5\n";
+        parse_schema(schema_src).expect("list schema should parse")
+    }
+
+    #[test]
+    fn valid_list_passes_with_items_in_range() {
+        let grammar = list_grammar();
+        // Two list items — satisfies `occurs: 2..5`
+        let doc_input = "# Article Title\n\n- tag-one\n- tag-two\n";
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        let result = validate(&doc, &grammar);
+        assert!(
+            result.is_valid(),
+            "document with 2 list items should be valid, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn missing_list_slot_produces_error() {
+        let grammar = list_grammar();
+        // No list present at all
+        let doc_input = "# Article Title\n";
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        let result = validate(&doc, &grammar);
+        assert!(
+            !result.is_valid(),
+            "document missing required list should be invalid"
+        );
+        let has_list_error = result
+            .diagnostics
+            .iter()
+            .any(|d| d.slot.as_ref().map(|s| s.as_str()) == Some("tags"));
+        assert!(
+            has_list_error,
+            "expected an error for the 'tags' slot, got: {:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn list_with_too_few_items_produces_error() {
+        let grammar = list_grammar();
+        // Only 1 item but min is 2
+        let doc_input = "# Article Title\n\n- only-one\n";
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        let result = validate(&doc, &grammar);
+        assert!(
+            !result.is_valid(),
+            "list with 1 item (min 2) should be invalid"
+        );
+    }
+
+    #[test]
+    fn list_with_too_many_items_produces_error() {
+        let grammar = list_grammar();
+        // 6 items but max is 5
+        let doc_input = "# Article Title\n\n- a\n- b\n- c\n- d\n- e\n- f\n";
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        let result = validate(&doc, &grammar);
+        assert!(
+            !result.is_valid(),
+            "list with 6 items (max 5) should be invalid"
         );
     }
 }
