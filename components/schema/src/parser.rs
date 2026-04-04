@@ -167,7 +167,13 @@ fn try_parse_element(line: &str, span: Span) -> Result<Option<Slot>, SchemaError
         return parse_link_line(line, span).map(Some);
     }
 
-    // 4. Paragraph: any other line with a `{#name}` anchor is a paragraph slot.
+    // 4. List: a line starting with `- ` and containing a `{#name}` anchor.
+    //    Must be checked before the paragraph fallback.
+    if line.starts_with("- ") && line.contains("{#") {
+        return parse_list_line(line, span).map(Some);
+    }
+
+    // 5. Paragraph: any other line with a `{#name}` anchor is a paragraph slot.
     //    The line text becomes the hint shown to authors in the content editor.
     if line.contains("{#") {
         return parse_paragraph_line(line, span).map(Some);
@@ -279,6 +285,25 @@ fn parse_image_line(line: &str, span: Span) -> Result<Slot, SchemaError> {
     })
 }
 
+/// Parse `- hint text {#name}` → Slot with Element::List.
+fn parse_list_line(line: &str, span: Span) -> Result<Slot, SchemaError> {
+    let rest = line
+        .strip_prefix("- ")
+        .ok_or_else(|| SchemaError::ParseError(format!("expected '- ' prefix: {line}")))?;
+    let (hint_text, name) = extract_anchor(rest.trim())?;
+    Ok(Slot {
+        name: SlotName::new(name),
+        element: Element::List,
+        constraints: Vec::new(),
+        hint_text: if hint_text.is_empty() {
+            None
+        } else {
+            Some(hint_text)
+        },
+        span,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Constraint application
 // ---------------------------------------------------------------------------
@@ -325,6 +350,7 @@ fn parse_occurs_value(value: &str) -> Result<CountRange, SchemaError> {
         return parse_count_range_from_bracket(trimmed, value);
     }
     match trimmed {
+        "*" => Ok(CountRange::AtLeast(0)),
         "exactly once" => Ok(CountRange::Exactly(1)),
         "at least once" => Ok(CountRange::AtLeast(1)),
         "at most once" => Ok(CountRange::AtMost(1)),
@@ -755,6 +781,62 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         assert_eq!(names, vec!["title", "summary", "author", "cover"]);
+    }
+
+    // -------------------------------------------------------------------
+    // List element
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn list_slot_is_parsed() {
+        let grammar = parse("- List of items {#tags}\n");
+        assert_eq!(grammar.preamble.len(), 1);
+        let slot = &grammar.preamble[0];
+        assert_eq!(slot.name.as_str(), "tags");
+        assert!(matches!(slot.element, Element::List));
+        assert_eq!(slot.hint_text.as_deref(), Some("List of items"));
+    }
+
+    #[test]
+    fn list_slot_with_occurs_constraint() {
+        let grammar = parse("- Tags {#tags}\noccurs\n: 1..5\n");
+        let slot = &grammar.preamble[0];
+        assert!(matches!(slot.element, Element::List));
+        assert!(matches!(
+            slot.constraints[0],
+            Constraint::Occurs(CountRange::Between { min: 1, max: 5 })
+        ));
+    }
+
+    #[test]
+    fn list_slot_with_star_occurs() {
+        let grammar = parse("- Tags {#tags}\noccurs\n: *\n");
+        let slot = &grammar.preamble[0];
+        assert!(matches!(
+            slot.constraints[0],
+            Constraint::Occurs(CountRange::AtLeast(0))
+        ));
+    }
+
+    #[test]
+    fn list_line_without_anchor_does_not_parse_as_list() {
+        // A "- " line without {#name} should not match as list or paragraph
+        let grammar = parse("- plain list item without anchor\n");
+        assert_eq!(grammar.preamble.len(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // occurs: * value
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn occurs_star_is_at_least_zero() {
+        let grammar = parse("Summary text. {#summary}\noccurs\n: *\n");
+        let slot = &grammar.preamble[0];
+        assert!(matches!(
+            slot.constraints[0],
+            Constraint::Occurs(CountRange::AtLeast(0))
+        ));
     }
 
     // -------------------------------------------------------------------

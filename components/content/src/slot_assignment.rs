@@ -142,6 +142,7 @@ fn element_matches_slot(element: &ContentElement, slot_element: &Element) -> boo
             | (ContentElement::Paragraph { .. }, Element::Paragraph)
             | (ContentElement::Link { .. }, Element::Link { .. })
             | (ContentElement::Image { .. }, Element::Image { .. })
+            | (ContentElement::List { .. }, Element::List)
     )
 }
 

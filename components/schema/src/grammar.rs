@@ -46,6 +46,9 @@ pub enum Element {
     Paragraph,
     Link { pattern: String },
     Image { pattern: String },
+    /// A flat sequence of text items (markdown list). The `occurs` constraint
+    /// on a list slot bounds the number of items, not the number of list elements.
+    List,
 }
 
 /// A valid heading level (1..=6). Constructed via `HeadingLevel::new`.

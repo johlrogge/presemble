@@ -25,6 +25,7 @@ pub enum SuggestionKind {
     Link,
     Image,
     Body,
+    List,
 }
 
 /// A value in the data graph.
@@ -260,6 +261,25 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
                     graph.insert(slot_key, Value::Record(record));
                 }
             }
+
+            Element::List => {
+                // Extract items from the first ContentElement::List in the slot.
+                // Each item is wrapped as a Record({"text": item_text}) so
+                // `data-each` templates can access `${item.text}`.
+                if let Some(spanned) = elements.front()
+                    && let ContentElement::List { source } = &spanned.node
+                {
+                    let items: Vec<Value> = content::parse_list_items(source)
+                        .into_iter()
+                        .map(|text| {
+                            let mut record = DataGraph::new();
+                            record.insert("text", Value::Text(text));
+                            Value::Record(record)
+                        })
+                        .collect();
+                    graph.insert(slot_key, Value::List(items));
+                }
+            }
         }
     }
 
@@ -287,6 +307,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
             Element::Paragraph => SuggestionKind::Paragraph,
             Element::Link { .. } => SuggestionKind::Link,
             Element::Image { .. } => SuggestionKind::Image,
+            Element::List => SuggestionKind::List,
         };
         let hint = slot.hint_text.clone().unwrap_or_else(|| slot.name.to_string());
         graph.insert(

@@ -391,6 +391,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                     SuggestionKind::Link => "a".to_string(),
                     SuggestionKind::Image => "img".to_string(),
                     SuggestionKind::Body => "div".to_string(),
+                    SuggestionKind::List => "ul".to_string(),
                 }
             };
 

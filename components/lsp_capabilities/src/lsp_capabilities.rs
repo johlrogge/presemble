@@ -163,6 +163,7 @@ pub fn completions_for_schema(
                         Element::Paragraph => "Paragraph".to_string(),
                         Element::Link { .. } => "Link".to_string(),
                         Element::Image { .. } => "Image".to_string(),
+                        Element::List => "List".to_string(),
                     };
                     vec![SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), format!("{stem}.{}", slot.name))]
                 }
@@ -198,6 +199,9 @@ fn snippet_for_slot(slot: &schema::Slot) -> String {
             let url = pattern.replace('*', "filename.ext");
             let escaped_url = escape_snippet(&url);
             format!("![${{1:{escaped}}}](${{2:{escaped_url}}})")
+        }
+        Element::List => {
+            format!("- ${{1:{escaped}}}")
         }
     }
 }
@@ -280,6 +284,7 @@ pub fn content_completions(
                 Element::Paragraph => "Paragraph".to_string(),
                 Element::Link { .. } => "Link".to_string(),
                 Element::Image { .. } => "Image".to_string(),
+                Element::List => "List".to_string(),
             },
             slot.hint_text.clone(),
             snippet,
@@ -381,6 +386,9 @@ fn template_for_slot(slot: &schema::Slot) -> String {
         Element::Image { pattern } => {
             let url = pattern.replace('*', "filename.ext");
             format!("![Description]({url})")
+        }
+        Element::List => {
+            format!("- {hint}")
         }
     }
 }
@@ -727,6 +735,7 @@ pub fn template_completions(
                                 Element::Paragraph => "paragraph".to_string(),
                                 Element::Link { .. } => "link".to_string(),
                                 Element::Image { .. } => "image".to_string(),
+                                Element::List => "list".to_string(),
                             };
                             SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), slot.name.to_string())
                         })
