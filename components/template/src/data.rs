@@ -92,7 +92,7 @@ impl Value {
 /// Supports colon-separated path resolution.
 #[derive(Debug, Clone, Default)]
 pub struct DataGraph {
-    entries: std::collections::HashMap<String, Value>,
+    entries: im::HashMap<String, Value>,
 }
 
 impl DataGraph {
