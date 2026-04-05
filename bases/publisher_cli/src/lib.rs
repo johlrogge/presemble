@@ -814,8 +814,6 @@ fn render_with_context(
             let html = template::serialize_nodes(&rewritten);
             std::fs::create_dir_all(output_path.parent().unwrap())?;
             std::fs::write(output_path, &html)?;
-            println!("{schema_stem}: PASS");
-            println!("  \u{2192} {}", output_path.display());
             Ok(true)
         }
         Err(e) => {
@@ -1105,7 +1103,6 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             let disposition = (policy.page_policy)(&attempt);
             match disposition {
                 PageDisposition::Include => {
-                    println!("{}: PASS", attempt.file_name);
                     if let Some(page_result) = attempt.page {
                         dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
                         let url_path_str = page_result.built.url_path.clone();
@@ -1533,6 +1530,13 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     // Clean up stale output files that are no longer in the dep_graph
     if output_dir.exists() {
         cleanup_stale_outputs(&output_dir, &dep_graph);
+    }
+
+    // Print build summary
+    if files_failed == 0 {
+        println!("  {} pages built successfully", files_built);
+    } else {
+        println!("  {} pages built, {} failed", files_built, files_failed);
     }
 
     Ok(BuildOutcome {
