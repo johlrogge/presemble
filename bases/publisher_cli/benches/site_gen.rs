@@ -5,13 +5,16 @@ pub struct BenchSiteConfig {
     pub pages: usize,
     pub schemas: usize,
     pub links_per_page: usize,
+    /// Number of link expression slots per schema (in addition to regular `links_per_page` links).
+    /// Each slot gets a `(->> :typeN ...)` expression that queries a different collection.
+    pub link_expressions: usize,
     pub body_bytes: usize,
 }
 
 pub fn generate_site(config: &BenchSiteConfig) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "presemble-bench-{}-{}-{}-{}",
-        config.pages, config.schemas, config.links_per_page, config.body_bytes
+        "presemble-bench-{}-{}-{}-{}-{}",
+        config.pages, config.schemas, config.links_per_page, config.link_expressions, config.body_bytes
     ));
 
     // Clean up from previous runs
@@ -69,6 +72,15 @@ fn generate_schema(dir: &Path, schema_idx: usize, config: &BenchSiteConfig) {
         ));
     }
 
+    // Link expression slots (each queries a different target type)
+    for e in 0..config.link_expressions {
+        let target_schema = (schema_idx + e + 1) % config.schemas.max(1);
+        let target_stem = stem_name(target_schema);
+        content.push_str(&format!(
+            "[<name>](/{target_stem}/<name>) {{#expr{e}}}\noccurs\n: 0..10\n\n"
+        ));
+    }
+
     content.push_str("----\n\nBody content.\nheadings\n: h2..h6\n");
 
     fs::write(schema_dir.join("item.md"), content).unwrap();
@@ -104,6 +116,16 @@ fn generate_content(
         let target_idx = (item_idx * 7 + l * 13 + 3) % items_per_schema.max(1);
         let target_slug = format!("item-{target_idx:04}");
         content.push_str(&format!("[Link to {target_stem}](/{target_stem}/{target_slug})\n\n"));
+    }
+
+    // Link expression slots (each queries a different target collection)
+    for e in 0..config.link_expressions {
+        let target_schema = (schema_idx + e + 1) % config.schemas.max(1);
+        let target_stem = stem_name(target_schema);
+        // Angle-bracket form allows spaces in the link destination
+        content.push_str(&format!(
+            "[](<(->> :{target_stem} (sort-by :title :desc) (take 4))>)\n\n"
+        ));
     }
 
     // Body separator
@@ -147,6 +169,12 @@ fn generate_template(dir: &Path, schema_idx: usize, config: &BenchSiteConfig) {
 
     for l in 0..config.links_per_page {
         content.push_str(&format!("  <presemble:insert data=\"input.link{l}\" />\n"));
+    }
+
+    for e in 0..config.link_expressions {
+        content.push_str(&format!(
+            "  <template data-each=\"input.expr{e}\">\n    <presemble:insert data=\"item.title\" as=\"h3\" />\n  </template>\n"
+        ));
     }
 
     content.push_str("  <div><presemble:insert data=\"input.body\" /></div>\n");
