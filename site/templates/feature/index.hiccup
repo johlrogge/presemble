@@ -1,3 +1,15 @@
+;; Local template definition for the feature listing body
+[:template {:presemble/define "body"}
+  [:main {:class "feature-listing"}
+    [:presemble/insert {:data "input.title" :as "h1"}]
+      [:template {:data-each "input.feature"}
+          [:presemble/insert {:data "item.link" :as "h3"}]
+          [:presemble/insert {:data "item.tagline" :as "p"}]
+      ]
+  ]
+]
+
+;; Main template: juxt composes header + local body + footer
 [:html {:lang "en"}
   [:head
     [:meta {:charset "utf-8"}]
@@ -6,14 +18,6 @@
     [:link {:rel "stylesheet" :href "/assets/style.css"}]
   ]
   [:body
-    [:presemble/include {:src "header"}]
-    [:main {:class "feature-listing"}
-      [:presemble/insert {:data "input.title" :as "h1"}]
-        [:template {:data-each "input.feature"}
-            [:presemble/insert {:data "item.link" :as "h3"}]
-            [:presemble/insert {:data "item.tagline" :as "p"}]
-      ]
-    ]
-    [:presemble/include {:src "footer"}]
+    (juxt header self/body footer)
   ]
 ]
