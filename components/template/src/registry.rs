@@ -5,7 +5,7 @@ use crate::dom::Node;
 /// Trait for resolving named template fragments.
 /// Implemented by FileTemplateRegistry in publisher_cli (filesystem access).
 /// NullRegistry is used in tests and contexts without composition.
-pub trait TemplateRegistry {
+pub trait TemplateRegistry: Send + Sync {
     /// Resolve a template name to its parsed node tree.
     /// Bare names (`header`) resolve locally (current file).
     /// File-qualified names (`templates/common::header`) resolve from another file.
@@ -211,11 +211,11 @@ mod tests {
         use crate::dom::parse_template_xml;
 
         struct RecordingRegistry {
-            resolved: std::cell::Cell<bool>,
+            resolved: std::sync::atomic::AtomicBool,
         }
         impl TemplateRegistry for RecordingRegistry {
             fn resolve(&self, _name: &str) -> Option<Vec<crate::dom::Node>> {
-                self.resolved.set(true);
+                self.resolved.store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }
         }
@@ -223,12 +223,12 @@ mod tests {
         let mut defs = HashMap::new();
         defs.insert("local-card".to_string(), parse_template_xml("<p>local</p>").unwrap());
 
-        let reg = RecordingRegistry { resolved: std::cell::Cell::new(false) };
+        let reg = RecordingRegistry { resolved: std::sync::atomic::AtomicBool::new(false) };
         let ctx = RenderContext::with_local_defs(&reg, &defs);
 
         let result = ctx.resolve_callable("local-card");
         assert!(result.is_some(), "local def should be found");
-        assert!(!reg.resolved.get(), "registry should not have been consulted");
+        assert!(!reg.resolved.load(std::sync::atomic::Ordering::SeqCst), "registry should not have been consulted");
     }
 
     #[test]

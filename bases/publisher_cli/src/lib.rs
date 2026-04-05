@@ -3,6 +3,8 @@ mod lsp;
 mod serve;
 pub mod template_registry;
 
+use rayon::prelude::*;
+
 pub use template_registry::FileTemplateRegistry;
 
 pub use dep_graph::DependencyGraph;
@@ -1045,14 +1047,21 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             }
         };
 
-        // Discover content slugs for this schema via repo
-        let content_slugs = repo.content_slugs(stem);
+        // Discover content slugs for this schema via repo.
+        // Collect (content_path, source) pairs sequentially first, then
+        // parallelize the CPU-bound build_content_page step.
+        struct SlugInput {
+            content_path: std::path::PathBuf,
+            content_source: String,
+        }
 
-        for slug in content_slugs {
-            let content_path = repo.content_path(stem, &slug);
+        let content_slugs = repo.content_slugs(stem);
+        let mut slug_inputs: Vec<SlugInput> = Vec::with_capacity(content_slugs.len());
+        for slug in &content_slugs {
+            let content_path = repo.content_path(stem, slug);
 
             // Read content source via repo
-            let content_source = match repo.content_source(stem, &slug) {
+            let content_source = match repo.content_source(stem, slug) {
                 Some(s) => s,
                 None => {
                     eprintln!("warning: could not read content/{schema_stem}/{slug}.md");
@@ -1060,17 +1069,39 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 }
             };
 
-            // Track content path for index deps
+            // Track content path for index deps (sequential, safe)
             all_content_paths.push(content_path.clone());
+            slug_inputs.push(SlugInput { content_path, content_source });
+        }
 
-            let attempt = build_content_page(
-                site_dir,
-                schema_stem,
-                &schema_path,
-                &content_path,
-                &content_source,
-                &grammar,
-            )?;
+        // Build all pages for this schema in parallel.
+        struct SlugBuildResult {
+            content_path: std::path::PathBuf,
+            attempt: Result<PageBuildAttempt, CliError>,
+        }
+
+        let slug_results: Vec<SlugBuildResult> = slug_inputs
+            .par_iter()
+            .map(|input| {
+                let attempt = build_content_page(
+                    site_dir,
+                    schema_stem,
+                    &schema_path,
+                    &input.content_path,
+                    &input.content_source,
+                    &grammar,
+                );
+                SlugBuildResult {
+                    content_path: input.content_path.clone(),
+                    attempt,
+                }
+            })
+            .collect();
+
+        // Merge results sequentially into site_graph, dep_graph, etc.
+        for result in slug_results {
+            let content_path = result.content_path;
+            let attempt = result.attempt?;
             let disposition = (policy.page_policy)(&attempt);
             match disposition {
                 PageDisposition::Include => {
@@ -1326,31 +1357,35 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             .map(|n| n.url_path.as_str().to_string())
             .collect();
 
-        let mut link_errors: Vec<(String, String)> = Vec::new();
-
-        for node in site_graph.iter_pages_by_kind(PageKind::Item) {
-            if let Some(pd) = node.page_data() {
-                for (key, value) in pd.data.iter() {
-                    if key.starts_with('_') {
-                        continue; // skip internal metadata
-                    }
-                    if let template::Value::Record(sub) = value
-                        && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
-                    {
-                        // Only validate internal links (starting with /)
-                        if href.starts_with('/') && !url_set.contains(href) {
-                            link_errors.push((
-                                node.url_path.as_str().to_string(),
-                                format!(
-                                    "broken link: '{key}' references '{}' which does not exist",
-                                    href
-                                ),
-                            ));
+        let item_pages: Vec<&SiteNode> = site_graph.iter_pages_by_kind(PageKind::Item).collect();
+        let link_errors: Vec<(String, String)> = item_pages
+            .par_iter()
+            .flat_map(|node| {
+                let mut errors = Vec::new();
+                if let Some(pd) = node.page_data() {
+                    for (key, value) in pd.data.iter() {
+                        if key.starts_with('_') {
+                            continue; // skip internal metadata
+                        }
+                        if let template::Value::Record(sub) = value
+                            && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                        {
+                            // Only validate internal links (starting with /)
+                            if href.starts_with('/') && !url_set.contains(href) {
+                                errors.push((
+                                    node.url_path.as_str().to_string(),
+                                    format!(
+                                        "broken link: '{key}' references '{}' which does not exist",
+                                        href
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
-            }
-        }
+                errors
+            })
+            .collect();
 
         if !link_errors.is_empty() {
             for (page_url, msg) in &link_errors {
@@ -1379,42 +1414,55 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
 
     // Phase 3: Render all entries using build_render_context
     {
-        let node_urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
-        for url in &node_urls {
-            let (render_context, schema_stem_str, template_path, output_path, page_url_str) = {
-                let node = match site_graph.get(url) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let Some(pd) = node.page_data() else { continue };
+        // Collect all render inputs up front (immutable reads from site_graph).
+        struct RenderInput {
+            context: template::DataGraph,
+            schema_stem: String,
+            template_path: std::path::PathBuf,
+            output_path: std::path::PathBuf,
+            page_url: String,
+        }
+
+        let render_inputs: Vec<RenderInput> = site_graph
+            .iter()
+            .filter_map(|node| {
+                let pd = node.page_data()?;
                 let tmpl = &pd.template_path;
                 if tmpl == std::path::Path::new("") || !tmpl.exists() {
-                    continue;
+                    return None;
                 }
                 let ctx = build_render_context(node, &site_graph);
-                (
-                    ctx,
-                    pd.schema_stem.as_str().to_string(),
-                    tmpl.clone(),
-                    node.output_path.clone(),
-                    node.url_path.as_str().to_string(),
-                )
-            };
+                Some(RenderInput {
+                    context: ctx,
+                    schema_stem: pd.schema_stem.as_str().to_string(),
+                    template_path: tmpl.clone(),
+                    output_path: node.output_path.clone(),
+                    page_url: node.url_path.as_str().to_string(),
+                })
+            })
+            .collect();
 
-            // Render using the pre-assembled context.
-            let rendered = render_with_context(
-                &render_context,
-                &schema_stem_str,
-                &template_path,
-                &output_path,
-                &registry,
-                &page_url_str,
-                url_config,
-            )?;
-            if rendered {
-                files_built += 1;
-            } else {
-                files_failed += 1;
+        // Render in parallel. Each page writes to a distinct output file.
+        let render_results: Vec<Result<bool, CliError>> = render_inputs
+            .par_iter()
+            .map(|input| {
+                render_with_context(
+                    &input.context,
+                    &input.schema_stem,
+                    &input.template_path,
+                    &input.output_path,
+                    &registry,
+                    &input.page_url,
+                    url_config,
+                )
+            })
+            .collect();
+
+        // Merge results sequentially.
+        for result in render_results {
+            match result? {
+                true => files_built += 1,
+                false => files_failed += 1,
             }
         }
 

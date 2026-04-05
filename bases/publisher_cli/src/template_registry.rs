@@ -1,5 +1,5 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 use site_index::SchemaStem;
 use template::{
@@ -23,14 +23,14 @@ type ParsedTemplate = (Vec<Node>, HashMap<String, Vec<Node>>);
 pub struct FileTemplateRegistry {
     repo: site_repository::SiteRepository,
     /// Cache: file_stem -> parsed template (main nodes + named definitions)
-    cache: RefCell<HashMap<String, ParsedTemplate>>,
+    cache: RwLock<HashMap<String, ParsedTemplate>>,
 }
 
 impl FileTemplateRegistry {
     pub fn new(repo: site_repository::SiteRepository) -> Self {
         Self {
             repo,
-            cache: RefCell::new(HashMap::new()),
+            cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -38,7 +38,7 @@ impl FileTemplateRegistry {
     /// Returns (main_nodes, definitions).
     fn load_file(&self, file_stem: &str) -> Option<ParsedTemplate> {
         {
-            let cache = self.cache.borrow();
+            let cache = self.cache.read().unwrap();
             if let Some(cached) = cache.get(file_stem) {
                 return Some(cached.clone());
             }
@@ -61,7 +61,8 @@ impl FileTemplateRegistry {
         let (main, defs) = extract_definitions(nodes);
         let result = (main, defs);
         self.cache
-            .borrow_mut()
+            .write()
+            .unwrap()
             .insert(file_stem.to_string(), result.clone());
         Some(result)
     }
@@ -228,7 +229,7 @@ mod tests {
         assert!(first.is_some());
         assert!(second.is_some());
         // Cache should have one entry
-        assert_eq!(registry.cache.borrow().len(), 1);
+        assert_eq!(registry.cache.read().unwrap().len(), 1);
     }
 
     #[test]
