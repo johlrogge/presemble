@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Run the MCP server on stdio, connected to the Presemble conductor.
+///
+/// The server reconnects to the conductor on each tool call rather than
+/// holding a persistent connection. This means the conductor can be
+/// restarted without killing the MCP server.
 pub fn run(site_dir: &Path) -> Result<(), String> {
     let site_dir = site_dir
         .canonicalize()
         .unwrap_or_else(|_| site_dir.to_path_buf());
-
-    // Connect to the conductor
-    let cond = conductor::ConductorClient::connect(&conductor::socket_url(&site_dir))
-        .map_err(|e| format!("conductor connect: {e}"))?;
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -35,7 +35,7 @@ pub fn run(site_dir: &Path) -> Result<(), String> {
             }
         };
 
-        let response = handle_request(&request, &cond, &site_dir);
+        let response = handle_request(&request, &site_dir);
         write_response(&mut writer, &response)?;
     }
 
@@ -96,9 +96,50 @@ fn write_response(writer: &mut impl Write, response: &JsonRpcResponse) -> Result
     Ok(())
 }
 
+/// Connect to the conductor for this request, starting it if needed.
+/// Reconnects on each call so the conductor can be restarted without
+/// killing the MCP server.
+fn connect_conductor(site_dir: &Path) -> Result<conductor::ConductorClient, String> {
+    conductor::ensure_conductor(site_dir)
+}
+
+fn handle_list_content(req: &JsonRpcRequest, site_dir: &Path) -> JsonRpcResponse {
+    let content_dir = site_dir.join("content");
+    let mut result = String::new();
+    if let Ok(entries) = std::fs::read_dir(&content_dir) {
+        let mut type_dirs: Vec<_> = entries.flatten().collect();
+        type_dirs.sort_by_key(|e| e.file_name());
+        for entry in type_dirs {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                let stem = entry.file_name().to_string_lossy().to_string();
+                result.push_str(&format!("\n## {stem}\n"));
+                let type_dir = content_dir.join(&stem);
+                if let Ok(files) = std::fs::read_dir(&type_dir) {
+                    let mut file_entries: Vec<_> = files.flatten().collect();
+                    file_entries.sort_by_key(|e| e.file_name());
+                    for f in file_entries {
+                        let name = f.file_name().to_string_lossy().to_string();
+                        if name.ends_with(".md") {
+                            result.push_str(&format!("- content/{stem}/{name}\n"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if result.is_empty() {
+        result = "No content files found.".to_string();
+    }
+    json_rpc_ok(
+        req.id.clone(),
+        serde_json::json!({
+            "content": [{"type": "text", "text": result.trim()}]
+        }),
+    )
+}
+
 fn handle_request(
     req: &JsonRpcRequest,
-    cond: &conductor::ConductorClient,
     site_dir: &Path,
 ) -> JsonRpcResponse {
     match req.method.as_str() {
@@ -218,6 +259,22 @@ fn handle_request(
                 .get("arguments")
                 .cloned()
                 .unwrap_or(Value::Object(Default::default()));
+
+            // list_content doesn't need the conductor — handle it before connecting
+            if tool_name == "list_content" {
+                return handle_list_content(req, site_dir);
+            }
+
+            // Connect to conductor per-call (survives conductor restarts)
+            let cond = match connect_conductor(site_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    return json_rpc_ok(req.id.clone(), serde_json::json!({
+                        "content": [{"type": "text", "text": format!("Cannot connect to conductor: {e}. Is `presemble serve` running?")}],
+                        "isError": true
+                    }));
+                }
+            };
 
             match tool_name {
                 "get_content" => {
@@ -406,41 +463,8 @@ fn handle_request(
                 }
 
                 "list_content" => {
-                    // List content files by reading the content directory
-                    let content_dir = site_dir.join("content");
-                    let mut result = String::new();
-                    if let Ok(entries) = std::fs::read_dir(&content_dir) {
-                        let mut type_dirs: Vec<_> = entries.flatten().collect();
-                        type_dirs.sort_by_key(|e| e.file_name());
-                        for entry in type_dirs {
-                            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                                let stem = entry.file_name().to_string_lossy().to_string();
-                                result.push_str(&format!("\n## {stem}\n"));
-                                let type_dir = content_dir.join(&stem);
-                                if let Ok(files) = std::fs::read_dir(&type_dir) {
-                                    let mut file_entries: Vec<_> = files.flatten().collect();
-                                    file_entries.sort_by_key(|e| e.file_name());
-                                    for f in file_entries {
-                                        let name = f.file_name().to_string_lossy().to_string();
-                                        if name.ends_with(".md") {
-                                            result.push_str(&format!(
-                                                "- content/{stem}/{name}\n"
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if result.is_empty() {
-                        result = "No content files found.".to_string();
-                    }
-                    json_rpc_ok(
-                        req.id.clone(),
-                        serde_json::json!({
-                            "content": [{"type": "text", "text": result.trim()}]
-                        }),
-                    )
+                    // Handled before conductor connect — should not reach here
+                    unreachable!("list_content handled before conductor connect")
                 }
 
                 _ => json_rpc_ok(
