@@ -74,6 +74,45 @@ pub enum ContentElement {
     Blockquote { text: String },
     /// A list (ordered or unordered) stored as raw markdown source.
     List { source: String },
+    /// A link expression: [text](target) with optional binding and threaded ops.
+    LinkExpression {
+        text: LinkText,
+        target: LinkTarget,
+    },
+}
+
+/// Target of a link expression in content.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkTarget {
+    /// Simple path reference: /fragments/header
+    PathRef(String),
+    /// Threaded expression: (->> :post (sort-by :published :desc) (take 4))
+    ThreadExpr {
+        source: String,
+        operations: Vec<LinkOp>,
+    },
+}
+
+/// An operation in a threaded link expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkOp {
+    /// (sort-by :field :asc/:desc)
+    SortBy { field: String, descending: bool },
+    /// (take n)
+    Take(usize),
+    /// (filter :field "value")
+    Filter { field: String, value: String },
+}
+
+/// The text part of a link expression [text](target).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkText {
+    /// [] — anonymous, no display text
+    Empty,
+    /// [Read more] — static label
+    Static(String),
+    /// [name] — binding name (result stored under this key)
+    Binding(String),
 }
 
 #[cfg(test)]
@@ -87,6 +126,41 @@ mod tests {
         let c = ContentElement::Paragraph { text: "world".to_string() };
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn link_expression_path_ref_round_trips() {
+        let elem = ContentElement::LinkExpression {
+            text: LinkText::Static("Read more".to_string()),
+            target: LinkTarget::PathRef("/fragments/header".to_string()),
+        };
+        let cloned = elem.clone();
+        assert_eq!(elem, cloned);
+    }
+
+    #[test]
+    fn link_expression_thread_expr_with_ops() {
+        let ops = vec![
+            LinkOp::SortBy { field: "published".to_string(), descending: true },
+            LinkOp::Take(4),
+            LinkOp::Filter { field: "category".to_string(), value: "news".to_string() },
+        ];
+        let elem = ContentElement::LinkExpression {
+            text: LinkText::Binding("posts".to_string()),
+            target: LinkTarget::ThreadExpr {
+                source: ":post".to_string(),
+                operations: ops,
+            },
+        };
+        let cloned = elem.clone();
+        assert_eq!(elem, cloned);
+    }
+
+    #[test]
+    fn link_text_variants_are_distinct() {
+        assert_ne!(LinkText::Empty, LinkText::Static("x".to_string()));
+        assert_ne!(LinkText::Static("a".to_string()), LinkText::Binding("a".to_string()));
+        assert_eq!(LinkText::Empty, LinkText::Empty);
     }
 
     #[test]

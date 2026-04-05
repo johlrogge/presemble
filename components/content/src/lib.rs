@@ -14,7 +14,7 @@ pub use adapters::{
     SourceEdit,
 };
 pub use diff::{diff, Change, DocumentDiff};
-pub use document::{ContentElement, Document, DocumentSlot, FlatDocument};
+pub use document::{ContentElement, Document, DocumentSlot, FlatDocument, LinkOp, LinkTarget, LinkText};
 pub use error::ContentError;
 pub use parser::{byte_to_position, parse_and_assign, parse_document};
 pub use serializer::serialize_document;

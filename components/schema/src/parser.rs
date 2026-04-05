@@ -326,6 +326,10 @@ fn apply_constraint(slot: &mut Slot, key: &str, value: &str) -> Result<(), Schem
             let alt = parse_alt_requirement(value)?;
             slot.constraints.push(Constraint::Alt(alt));
         }
+        "type" => {
+            let type_constraint = parse_type_constraint(value)?;
+            slot.constraints.push(type_constraint);
+        }
         // Unknown keys are silently skipped (forward compatibility)
         _ => {}
     }
@@ -399,6 +403,23 @@ fn parse_alt_requirement(value: &str) -> Result<AltRequirement, SchemaError> {
         other => Err(SchemaError::ParseError(format!(
             "unknown alt requirement: {other}"
         ))),
+    }
+}
+
+fn parse_type_constraint(value: &str) -> Result<Constraint, SchemaError> {
+    let trimmed = value.trim();
+    if let Some(inner) = trimmed.strip_prefix("link(").and_then(|s| s.strip_suffix(')')) {
+        let stem = inner.trim().to_string();
+        if stem.is_empty() {
+            return Err(SchemaError::ParseError(
+                "link() type constraint requires a schema stem".to_string(),
+            ));
+        }
+        Ok(Constraint::TypeLink(stem))
+    } else {
+        Err(SchemaError::ParseError(format!(
+            "unknown type constraint: {trimmed}"
+        )))
     }
 }
 
@@ -917,5 +938,46 @@ mod tests {
         let slot = &grammar.preamble[0];
         let covered = &input[slot.span.start..slot.span.end];
         assert_eq!(covered, "## Section {#section}");
+    }
+
+    // -------------------------------------------------------------------
+    // TypeLink constraint
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn type_link_post_constraint() {
+        let input = "[<name>](/posts/<name>) {#related}\ntype\n: link(post)\n";
+        let grammar = parse(input);
+        let slot = &grammar.preamble[0];
+        assert_eq!(slot.constraints.len(), 1);
+        if let Constraint::TypeLink(stem) = &slot.constraints[0] {
+            assert_eq!(stem, "post");
+        } else {
+            panic!("expected TypeLink constraint, got {:?}", slot.constraints[0]);
+        }
+    }
+
+    #[test]
+    fn type_link_feature_constraint() {
+        let input = "[<name>](/features/<name>) {#feature_ref}\ntype\n: link(feature)\n";
+        let grammar = parse(input);
+        let slot = &grammar.preamble[0];
+        assert_eq!(slot.constraints.len(), 1);
+        if let Constraint::TypeLink(stem) = &slot.constraints[0] {
+            assert_eq!(stem, "feature");
+        } else {
+            panic!("expected TypeLink constraint, got {:?}", slot.constraints[0]);
+        }
+    }
+
+    #[test]
+    fn unknown_type_value_is_an_error() {
+        let err = parse_err("[<name>](/posts/<name>) {#related}\ntype\n: unknown\n");
+        assert!(matches!(err, SchemaError::ParseError(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown type constraint"),
+            "error message should mention unknown type constraint, got: {msg}"
+        );
     }
 }

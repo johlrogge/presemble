@@ -175,6 +175,7 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &DataGraph) -> String {
                     .unwrap_or_default(),
                 Some(Value::Record(_)) => String::new(),
                 Some(Value::Suggestion { hint, .. }) => hint.clone(),
+                Some(Value::LinkExpression { .. }) => String::new(),
             }
         }
         Expr::Pipe(inner, transform) => {
@@ -523,6 +524,8 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
             Ok(vec![Node::Element(element)])
         }
+
+        Some(Value::LinkExpression { .. }) => Ok(Vec::new()),
     }
 }
 
@@ -719,6 +722,8 @@ fn render_list_item(
         Value::List(_) => Ok(Vec::new()),
 
         Value::Suggestion { .. } => Ok(Vec::new()),
+
+        Value::LinkExpression { .. } => Ok(Vec::new()),
     }
 }
 

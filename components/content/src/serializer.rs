@@ -1,4 +1,4 @@
-use crate::document::{ContentElement, Document};
+use crate::document::{ContentElement, Document, LinkOp, LinkTarget, LinkText};
 use schema::Spanned;
 
 /// Serialize a Document back to canonical markdown.
@@ -78,6 +78,38 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
             text.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
         }
         ContentElement::List { source } => source.clone(),
+        ContentElement::LinkExpression { text, target } => {
+            let text_part = match text {
+                LinkText::Empty => String::new(),
+                LinkText::Static(s) => s.clone(),
+                LinkText::Binding(b) => b.clone(),
+            };
+            let target_part = match target {
+                LinkTarget::PathRef(path) => path.clone(),
+                LinkTarget::ThreadExpr { source, operations } => {
+                    let ops: Vec<String> = operations
+                        .iter()
+                        .map(|op| match op {
+                            LinkOp::SortBy { field, descending } => {
+                                let dir = if *descending { ":desc" } else { ":asc" };
+                                format!("(sort-by :{field} {dir})")
+                            }
+                            LinkOp::Take(n) => format!("(take {n})"),
+                            LinkOp::Filter { field, value } => {
+                                format!("(filter :{field} \"{value}\")")
+                            }
+                        })
+                        .collect();
+                    let ops_str = ops.join(" ");
+                    if ops_str.is_empty() {
+                        format!("(->> {source})")
+                    } else {
+                        format!("(->> {source} {ops_str})")
+                    }
+                }
+            };
+            format!("[{text_part}]({target_part})")
+        }
     }
 }
 
