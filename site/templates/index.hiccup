@@ -42,7 +42,7 @@
       [:section {:class "latest-posts"}
         [:h2 "From the Blog"]
         [:ul {:class "latest-posts__items"}
-          [:template {:data-each "post"}
+          [:template {:data-each "input.post"}
             [:li {:class "post-card"}
               [:presemble/insert {:data "item.title" :as "h3"}]
               [:presemble/insert {:data "item.summary"}]

@@ -566,7 +566,7 @@ fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
 /// Build the template render context for a site node.
 ///
 /// Page's own data is always available under `"input"`.
-/// All collections are also available, keyed by stem name (singular).
+/// All collections are also available under `"input.<stem>"` (e.g., `input.post`).
 /// Inside `data-each` loops, each item is bound under `"item"` (or a
 /// named variable via the `:item` attribute), while `"input"` and all
 /// collection keys remain accessible.
@@ -576,10 +576,9 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
         return ctx;
     };
 
-    // Page's own data under "input"
-    ctx.insert("input", template::Value::Record(pd.data.clone()));
-
-    // All collections by stem name (singular, no pluralization)
+    // All collections by stem name (singular, no pluralization), injected into
+    // the input record so templates reference them as `input.<stem>`.
+    let mut page_data = pd.data.clone();
     let mut stems: Vec<SchemaStem> = graph
         .iter_pages_by_kind(PageKind::Item)
         .filter_map(|n| n.page_data().map(|d| d.schema_stem.clone()))
@@ -593,8 +592,11 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
             .into_iter()
             .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
             .collect();
-        ctx.insert(stem.as_str(), template::Value::List(items));
+        page_data.insert(stem.as_str(), template::Value::List(items));
     }
+
+    // Page's own data (plus injected collections) under "input"
+    ctx.insert("input", template::Value::Record(page_data));
 
     ctx
 }

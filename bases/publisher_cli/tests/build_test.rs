@@ -723,7 +723,7 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
 <html>
 <body>
 <h1><presemble:insert data="input.heading" /></h1>
-<ul><template data-each="article"><li><presemble:insert data="item.title" as="li" /></li></template></ul>
+<ul><template data-each="input.article"><li><presemble:insert data="item.title" as="li" /></li></template></ul>
 </body>
 </html>"#,
     )

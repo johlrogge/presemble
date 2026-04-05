@@ -10,7 +10,7 @@
     [:main {:class "post-listing"}
       [:presemble/insert {:data "input.title" :as "h1"}]
       [:ul {:class "post-listing__items"}
-        [:template {:data-each "post"}
+        [:template {:data-each "input.post"}
           [:li {:class "post-card"}
             [:presemble/insert {:data "item.title" :as "h2"}]
             [:presemble/insert {:data "item.summary"}]

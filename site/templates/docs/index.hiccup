@@ -10,7 +10,7 @@
       [:presemble/insert {:data "input.title" :as "h1"}]
       [:presemble/insert {:data "input.description" :as "p"}]
       [:ul {:class "docs__cards"}
-        [:template {:data-each "guide"}
+        [:template {:data-each "input.guide"}
           [:li
             [:presemble/insert {:data "item.title" :as "h2"}]
             [:presemble/insert {:data "item.summary" :as "p"}]
