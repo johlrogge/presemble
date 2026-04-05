@@ -23,7 +23,7 @@ pub struct PresembleLsp {
     pub site_dir: std::path::PathBuf,
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
-    conductor: Option<conductor::ConductorClient>,
+    conductor: Arc<Mutex<Option<conductor::ConductorClient>>>,
 }
 
 impl PresembleLsp {
@@ -38,7 +38,7 @@ impl PresembleLsp {
             site_dir,
             doc_sources: Arc::new(Mutex::new(HashMap::new())),
             doc_diagnostics: Arc::new(Mutex::new(HashMap::new())),
-            conductor,
+            conductor: Arc::new(Mutex::new(conductor)),
         }
     }
 
@@ -103,38 +103,40 @@ impl PresembleLsp {
             .collect();
 
         // Query the conductor for pending editorial suggestions on this file.
-        if let Some(ref cond) = self.conductor
-            && let Some(content_path) = uri.to_file_path().ok()
-                .and_then(|p| p.strip_prefix(&self.site_dir).ok().map(|rel| rel.to_string_lossy().into_owned()))
+        if let Some(content_path) = uri.to_file_path().ok()
+            .and_then(|p| p.strip_prefix(&self.site_dir).ok().map(|rel| rel.to_string_lossy().into_owned()))
         {
-            let cmd = conductor::Command::GetSuggestions {
-                file: editorial_types::ContentPath::new(&content_path),
-            };
-            if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
-                for suggestion in suggestions {
-                    // Position the diagnostic at the suggested slot, falling back to (0,0).
-                    let (pos_start, pos_end) = slot_position(&src, &grammar, suggestion.slot.as_str());
-                    let message = format!(
-                        "[{}] {}: \"{}\"",
-                        suggestion.author, suggestion.reason, suggestion.proposed_value
-                    );
-                    let lsp_diag = Diagnostic {
-                        range: Range {
-                            start: Position { line: pos_start.0, character: pos_start.1 },
-                            end: Position { line: pos_end.0, character: pos_end.1 },
-                        },
-                        severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
-                        message,
-                        ..Default::default()
-                    };
-                    stored.push(StoredDiagnostic {
-                        lsp_diag,
-                        action: Some(SlotAction::AcceptSuggestion {
-                            suggestion_id: suggestion.id.to_string(),
-                            slot_name: suggestion.slot.to_string(),
-                            proposed_value: suggestion.proposed_value.clone(),
-                        }),
-                    });
+            let cond_guard = self.conductor.lock().await;
+            if let Some(ref cond) = *cond_guard {
+                let cmd = conductor::Command::GetSuggestions {
+                    file: editorial_types::ContentPath::new(&content_path),
+                };
+                if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
+                    for suggestion in suggestions {
+                        // Position the diagnostic at the suggested slot, falling back to (0,0).
+                        let (pos_start, pos_end) = slot_position(&src, &grammar, suggestion.slot.as_str());
+                        let message = format!(
+                            "[{}] {}: \"{}\"",
+                            suggestion.author, suggestion.reason, suggestion.proposed_value
+                        );
+                        let lsp_diag = Diagnostic {
+                            range: Range {
+                                start: Position { line: pos_start.0, character: pos_start.1 },
+                                end: Position { line: pos_end.0, character: pos_end.1 },
+                            },
+                            severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
+                            message,
+                            ..Default::default()
+                        };
+                        stored.push(StoredDiagnostic {
+                            lsp_diag,
+                            action: Some(SlotAction::AcceptSuggestion {
+                                suggestion_id: suggestion.id.to_string(),
+                                slot_name: suggestion.slot.to_string(),
+                                proposed_value: suggestion.proposed_value.clone(),
+                            }),
+                        });
+                    }
                 }
             }
         }
@@ -308,6 +310,119 @@ impl LanguageServer for PresembleLsp {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client.log_message(MessageType::INFO, "Presemble LSP ready").await;
+
+        // Spawn a background task that polls the conductor for new suggestions every 2 seconds.
+        // This ensures diagnostics update when Claude pushes a suggestion via MCP,
+        // without requiring the user to manually edit the file.
+        let client = self.client.clone();
+        let doc_sources = Arc::clone(&self.doc_sources);
+        let doc_diagnostics = Arc::clone(&self.doc_diagnostics);
+        let conductor = Arc::clone(&self.conductor);
+        let site_dir = self.site_dir.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                // Collect the set of open content files and their sources.
+                let open_files: Vec<(String, String)> = {
+                    let sources = doc_sources.lock().await;
+                    sources.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                };
+
+                for (uri_str, src) in open_files {
+                    let Ok(uri) = uri_str.parse::<Url>() else { continue };
+                    let path = uri.to_file_path().unwrap_or_default();
+
+                    // Only re-validate content files — templates and schemas don't have suggestions.
+                    let tmp_index = site_index::SiteIndex::new(site_dir.clone());
+                    let schema_stem = match tmp_index.classify(&path) {
+                        site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
+                        _ => continue,
+                    };
+                    let Some(grammar) = tmp_index.load_grammar(&schema_stem) else { continue };
+
+                    // Query current suggestions from conductor.
+                    let suggestions = {
+                        let cond_guard = conductor.lock().await;
+                        if let Some(ref cond) = *cond_guard {
+                            if let Some(content_path) = path
+                                .strip_prefix(&site_dir)
+                                .ok()
+                                .map(|rel| rel.to_string_lossy().into_owned())
+                            {
+                                let cmd = conductor::Command::GetSuggestions {
+                                    file: editorial_types::ContentPath::new(&content_path),
+                                };
+                                match cond.send(&cmd) {
+                                    Ok(conductor::Response::Suggestions(s)) => s,
+                                    _ => continue,
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    // Build the stored diagnostics for the current open files.
+                    // We only update if the suggestion count has changed to avoid
+                    // flooding the editor with redundant publishDiagnostics notifications.
+                    let current_suggestion_count = {
+                        let diags = doc_diagnostics.lock().await;
+                        diags.get(&uri_str)
+                            .map(|v| v.iter().filter(|sd| matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. }))).count())
+                            .unwrap_or(0)
+                    };
+                    if suggestions.len() == current_suggestion_count {
+                        continue;
+                    }
+
+                    // Re-validate to pick up the new/removed suggestions and publish diagnostics.
+                    // We inline the suggestion-only part here to avoid duplicating full validation.
+                    // Fetch all stored diagnostics, replace suggestion entries, re-publish.
+                    let mut stored: Vec<StoredDiagnostic> = {
+                        let diags = doc_diagnostics.lock().await;
+                        diags.get(&uri_str)
+                            .map(|v| v.iter()
+                                .filter(|sd| !matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. })))
+                                .map(|sd| StoredDiagnostic { lsp_diag: sd.lsp_diag.clone(), action: sd.action.clone() })
+                                .collect())
+                            .unwrap_or_default()
+                    };
+
+                    for suggestion in &suggestions {
+                        let (pos_start, pos_end) = slot_position(&src, &grammar, suggestion.slot.as_str());
+                        let message = format!(
+                            "[{}] {}: \"{}\"",
+                            suggestion.author, suggestion.reason, suggestion.proposed_value
+                        );
+                        let lsp_diag = Diagnostic {
+                            range: Range {
+                                start: Position { line: pos_start.0, character: pos_start.1 },
+                                end: Position { line: pos_end.0, character: pos_end.1 },
+                            },
+                            severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
+                            message,
+                            ..Default::default()
+                        };
+                        stored.push(StoredDiagnostic {
+                            lsp_diag,
+                            action: Some(SlotAction::AcceptSuggestion {
+                                suggestion_id: suggestion.id.to_string(),
+                                slot_name: suggestion.slot.to_string(),
+                                proposed_value: suggestion.proposed_value.clone(),
+                            }),
+                        });
+                    }
+
+                    let diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
+                    *doc_diagnostics.lock().await.entry(uri_str).or_default() = stored;
+                    client.publish_diagnostics(uri, diags, None).await;
+                }
+            }
+        });
     }
 
     async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
@@ -338,11 +453,14 @@ impl LanguageServer for PresembleLsp {
             let kind = self.site_index.classify(&path);
             // Notify conductor of the change (triggers rebuild + browser reload).
             // Fire-and-forget: if it fails, the LSP still works locally.
-            if let Some(ref cond) = self.conductor {
-                let _ = cond.send(&conductor::Command::DocumentChanged {
-                    path: path.to_string_lossy().to_string(),
-                    text: c.text.clone(),
-                });
+            {
+                let cond_guard = self.conductor.lock().await;
+                if let Some(ref cond) = *cond_guard {
+                    let _ = cond.send(&conductor::Command::DocumentChanged {
+                        path: path.to_string_lossy().to_string(),
+                        text: c.text.clone(),
+                    });
+                }
             }
             match kind {
                 site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, c.text).await,
@@ -360,11 +478,14 @@ impl LanguageServer for PresembleLsp {
     async fn did_save(&self, p: DidSaveTextDocumentParams) {
         // Notify conductor that this file was saved (clears in-memory buffer, triggers rebuild).
         // Fire-and-forget: if it fails, the LSP still works locally.
-        if let Some(ref cond) = self.conductor {
-            let path = p.text_document.uri.to_file_path().unwrap_or_default();
-            let _ = cond.send(&conductor::Command::DocumentSaved {
-                path: path.to_string_lossy().to_string(),
-            });
+        {
+            let cond_guard = self.conductor.lock().await;
+            if let Some(ref cond) = *cond_guard {
+                let path = p.text_document.uri.to_file_path().unwrap_or_default();
+                let _ = cond.send(&conductor::Command::DocumentSaved {
+                    path: path.to_string_lossy().to_string(),
+                });
+            }
         }
         if let Ok(mut src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
             let uri = p.text_document.uri;
@@ -582,13 +703,16 @@ impl LanguageServer for PresembleLsp {
         let path = uri.to_file_path().unwrap_or_default();
         // Notify conductor of cursor position for browser scroll-follow.
         // Fire-and-forget: if conductor is unavailable, hover still works.
-        if let Some(ref cond) = self.conductor {
-            let rel = path
-                .strip_prefix(&self.site_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
+        {
+            let cond_guard = self.conductor.lock().await;
+            if let Some(ref cond) = *cond_guard {
+                let rel = path
+                    .strip_prefix(&self.site_dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
+            }
         }
         let kind = self.site_index.classify(&path);
         match kind {
@@ -814,9 +938,12 @@ impl LanguageServer for PresembleLsp {
                 }
 
                 // Notify conductor to mark the suggestion accepted.
-                if let Some(ref cond) = self.conductor {
-                    let id = editorial_types::SuggestionId::from(suggestion_id);
-                    let _ = cond.send(&conductor::Command::AcceptSuggestion { id });
+                {
+                    let cond_guard = self.conductor.lock().await;
+                    if let Some(ref cond) = *cond_guard {
+                        let id = editorial_types::SuggestionId::from(suggestion_id);
+                        let _ = cond.send(&conductor::Command::AcceptSuggestion { id });
+                    }
                 }
 
                 // Trigger revalidation to remove the suggestion diagnostic.
@@ -832,9 +959,12 @@ impl LanguageServer for PresembleLsp {
                 let file_uri_str = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
                 // Notify conductor to dismiss the suggestion.
-                if let Some(ref cond) = self.conductor {
-                    let id = editorial_types::SuggestionId::from(suggestion_id);
-                    let _ = cond.send(&conductor::Command::RejectSuggestion { id });
+                {
+                    let cond_guard = self.conductor.lock().await;
+                    if let Some(ref cond) = *cond_guard {
+                        let id = editorial_types::SuggestionId::from(suggestion_id);
+                        let _ = cond.send(&conductor::Command::RejectSuggestion { id });
+                    }
                 }
 
                 // Trigger revalidation to remove the suggestion diagnostic.
