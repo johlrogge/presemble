@@ -353,6 +353,105 @@ impl Parser {
                 })))
             }
 
+            Some(Token::LParen) => {
+                self.next(); // consume '('
+
+                // The next token must be a Symbol naming the composition form.
+                let form_name = match self.next() {
+                    Some(Token::Symbol(s)) => s,
+                    Some(other) => {
+                        return Err(TemplateError::ParseError(format!(
+                            "expected symbol after '(' in composition form, got {other:?}"
+                        )))
+                    }
+                    None => {
+                        return Err(TemplateError::ParseError(
+                            "unexpected end of input after '(' in composition form".into(),
+                        ))
+                    }
+                };
+
+                match form_name.as_str() {
+                    "juxt" => {
+                        // (juxt arg1 arg2 ...) — collect arguments until ')'
+                        let mut children: Vec<Node> = Vec::new();
+                        loop {
+                            match self.peek() {
+                                None => {
+                                    return Err(TemplateError::ParseError(
+                                        "unexpected end of input inside (juxt ...), expected ')'".into(),
+                                    ))
+                                }
+                                Some(Token::RParen) => {
+                                    self.next(); // consume ')'
+                                    break;
+                                }
+                                Some(Token::Symbol(_)) => {
+                                    let sym = match self.next() {
+                                        Some(Token::Symbol(s)) => s,
+                                        _ => unreachable!(),
+                                    };
+                                    let child = juxt_symbol_to_node(&sym);
+                                    children.push(child);
+                                }
+                                Some(Token::LParen) => {
+                                    // Nested composition form — parse as a child node
+                                    if let Some(nested) = self.parse_node()? {
+                                        children.push(nested);
+                                    }
+                                }
+                                Some(other) => {
+                                    let other = other.clone();
+                                    return Err(TemplateError::ParseError(format!(
+                                        "unexpected token in (juxt ...) argument position: {other:?}"
+                                    )));
+                                }
+                            }
+                        }
+                        Ok(Some(Node::Element(Element {
+                            name: "presemble:juxt".to_string(),
+                            attrs: Vec::new(),
+                            children,
+                        })))
+                    }
+                    "apply" => {
+                        // (apply template-name) — single argument
+                        let name = match self.next() {
+                            Some(Token::Symbol(s)) => s,
+                            Some(other) => {
+                                return Err(TemplateError::ParseError(format!(
+                                    "expected symbol as argument to (apply ...), got {other:?}"
+                                )))
+                            }
+                            None => {
+                                return Err(TemplateError::ParseError(
+                                    "unexpected end of input in (apply ...) form".into(),
+                                ))
+                            }
+                        };
+                        // Consume ')'
+                        match self.next() {
+                            Some(Token::RParen) => {}
+                            Some(other) => {
+                                return Err(TemplateError::ParseError(format!(
+                                    "expected ')' after (apply {name}), got {other:?}"
+                                )))
+                            }
+                            None => {
+                                return Err(TemplateError::ParseError(
+                                    "unexpected end of input after (apply ...) argument".into(),
+                                ))
+                            }
+                        }
+                        let node = apply_symbol_to_node(&name);
+                        Ok(Some(node))
+                    }
+                    other => Err(TemplateError::ParseError(format!(
+                        "unknown composition form '({other} ...)'"
+                    ))),
+                }
+            }
+
             Some(other) => Err(TemplateError::ParseError(format!(
                 "unexpected token in node position: {other:?}"
             ))),
@@ -507,6 +606,43 @@ impl Parser {
         }
         Ok(Form::Map(pairs))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Composition form helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a symbol from a `(juxt ...)` argument to a Node.
+///
+/// - `self/name` → `presemble:apply` with template=name, data=input
+/// - bare `name` → `presemble:include` with src=name
+fn juxt_symbol_to_node(sym: &str) -> Node {
+    if sym.starts_with("self/") {
+        // self/name variant — delegate to apply_symbol_to_node
+        apply_symbol_to_node(sym)
+    } else {
+        Node::Element(Element {
+            name: "presemble:include".to_string(),
+            attrs: vec![("src".to_string(), crate::dom::Form::Str(sym.to_string()))],
+            children: Vec::new(),
+        })
+    }
+}
+
+/// Convert a symbol from an `(apply ...)` form to a Node.
+///
+/// - `self/name` → `presemble:apply` with template=name, data=input
+/// - bare `name` → also `presemble:apply` with template=name, data=input
+fn apply_symbol_to_node(sym: &str) -> Node {
+    let template_name = sym.strip_prefix("self/").unwrap_or(sym);
+    Node::Element(Element {
+        name: "presemble:apply".to_string(),
+        attrs: vec![
+            ("template".to_string(), crate::dom::Form::Str(template_name.to_string())),
+            ("data".to_string(), crate::dom::Form::Str("input".to_string())),
+        ],
+        children: Vec::new(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +1040,121 @@ mod tests {
             );
         } else {
             panic!("expected element");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3a: (juxt ...) and (apply ...) composition forms
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_juxt_form() {
+        // (juxt header footer) should produce presemble:juxt with two presemble:include children
+        let nodes = parse("(juxt header footer)");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(juxt) = &nodes[0] {
+            assert_eq!(juxt.name, "presemble:juxt");
+            assert_eq!(juxt.children.len(), 2);
+            if let Node::Element(c0) = &juxt.children[0] {
+                assert_eq!(c0.name, "presemble:include");
+                assert_eq!(c0.attr("src"), Some("header"));
+            } else {
+                panic!("expected first child to be element");
+            }
+            if let Node::Element(c1) = &juxt.children[1] {
+                assert_eq!(c1.name, "presemble:include");
+                assert_eq!(c1.attr("src"), Some("footer"));
+            } else {
+                panic!("expected second child to be element");
+            }
+        } else {
+            panic!("expected presemble:juxt element");
+        }
+    }
+
+    #[test]
+    fn parse_juxt_with_self_apply() {
+        // (juxt header (apply self/body) footer) should produce:
+        //   presemble:juxt with [presemble:include, presemble:apply, presemble:include]
+        let nodes = parse("(juxt header (apply self/body) footer)");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(juxt) = &nodes[0] {
+            assert_eq!(juxt.name, "presemble:juxt");
+            assert_eq!(juxt.children.len(), 3, "expected 3 children, got {:?}", juxt.children.len());
+
+            if let Node::Element(c0) = &juxt.children[0] {
+                assert_eq!(c0.name, "presemble:include");
+                assert_eq!(c0.attr("src"), Some("header"));
+            } else {
+                panic!("first child should be presemble:include");
+            }
+
+            if let Node::Element(c1) = &juxt.children[1] {
+                assert_eq!(c1.name, "presemble:apply");
+                assert_eq!(c1.attr("template"), Some("body"));
+                assert_eq!(c1.attr("data"), Some("input"));
+            } else {
+                panic!("second child should be presemble:apply");
+            }
+
+            if let Node::Element(c2) = &juxt.children[2] {
+                assert_eq!(c2.name, "presemble:include");
+                assert_eq!(c2.attr("src"), Some("footer"));
+            } else {
+                panic!("third child should be presemble:include");
+            }
+        } else {
+            panic!("expected presemble:juxt element");
+        }
+    }
+
+    #[test]
+    fn parse_juxt_with_bare_self_symbol() {
+        // (juxt header self/nav footer) — self/nav becomes presemble:apply
+        let nodes = parse("(juxt header self/nav footer)");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(juxt) = &nodes[0] {
+            assert_eq!(juxt.children.len(), 3);
+            if let Node::Element(c1) = &juxt.children[1] {
+                assert_eq!(c1.name, "presemble:apply");
+                assert_eq!(c1.attr("template"), Some("nav"));
+                assert_eq!(c1.attr("data"), Some("input"));
+            } else {
+                panic!("middle child should be presemble:apply");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_standalone_apply_form() {
+        // (apply self/body) at top level should produce a presemble:apply node
+        let nodes = parse("(apply self/body)");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(el) = &nodes[0] {
+            assert_eq!(el.name, "presemble:apply");
+            assert_eq!(el.attr("template"), Some("body"));
+            assert_eq!(el.attr("data"), Some("input"));
+        } else {
+            panic!("expected presemble:apply element");
+        }
+    }
+
+    #[test]
+    fn parse_juxt_inside_element() {
+        // [:body (juxt header self/content footer)] — juxt inside an element
+        let nodes = parse("[:body (juxt header self/content footer)]");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(body) = &nodes[0] {
+            assert_eq!(body.name, "body");
+            assert_eq!(body.children.len(), 1);
+            if let Node::Element(juxt) = &body.children[0] {
+                assert_eq!(juxt.name, "presemble:juxt");
+                assert_eq!(juxt.children.len(), 3);
+            } else {
+                panic!("expected presemble:juxt child inside body");
+            }
+        } else {
+            panic!("expected body element");
         }
     }
 

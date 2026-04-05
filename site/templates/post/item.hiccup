@@ -1,3 +1,30 @@
+;; Local template definition for the post body
+[:template {:presemble/define "body"}
+  [:main {:class "post"}
+    [:article
+      [:header {:class "post__header"}
+        [:presemble/insert {:data "input.title" :as "h1"}]
+      ]
+      [:div {:class "post__summary"}
+        [:presemble/insert {:data "input.summary" :as "p"}]
+      ]
+      [:div {:class "post__author"}
+        [:p {:class "post__byline"}
+          "\n        By "
+          [:presemble/insert {:data "input.author" :as "a"}]
+        ]
+        [:div {:class "post__author-bio"}
+          [:presemble/insert {:data "input.author.bio" :as "p"}]
+        ]
+      ]
+      [:div {:class "post__body"}
+        [:presemble/insert {:data "input.body"}]
+      ]
+    ]
+  ]
+]
+
+;; Main template: juxt composes header + local body + footer
 [:html {:lang "en"}
   [:head
     [:meta {:charset "utf-8"}]
@@ -6,29 +33,6 @@
     [:link {:rel "stylesheet" :href "/assets/style.css"}]
   ]
   [:body
-    [:presemble/include {:src "header"}]
-    [:main {:class "post"}
-      [:article
-        [:header {:class "post__header"}
-          [:presemble/insert {:data "input.title" :as "h1"}]
-        ]
-        [:div {:class "post__summary"}
-          [:presemble/insert {:data "input.summary" :as "p"}]
-        ]
-        [:div {:class "post__author"}
-          [:p {:class "post__byline"}
-            "\n        By "
-            [:presemble/insert {:data "input.author" :as "a"}]
-          ]
-          [:div {:class "post__author-bio"}
-            [:presemble/insert {:data "input.author.bio" :as "p"}]
-          ]
-        ]
-        [:div {:class "post__body"}
-          [:presemble/insert {:data "input.body"}]
-        ]
-      ]
-    ]
-    [:presemble/include {:src "footer"}]
+    (juxt header self/body footer)
   ]
 ]
