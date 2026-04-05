@@ -24,6 +24,26 @@ pub enum Command {
     Shutdown,
     /// Editor cursor moved to a new position.
     CursorMoved { path: String, line: u32 },
+    /// Create an editorial suggestion without applying it.
+    SuggestSlotValue {
+        file: editorial_types::ContentPath,
+        slot: editorial_types::SlotName,
+        value: String,
+        reason: String,
+        author: editorial_types::Author,
+    },
+    /// Query all pending suggestions for a file.
+    GetSuggestions {
+        file: editorial_types::ContentPath,
+    },
+    /// Accept a suggestion: apply the edit and mark as accepted.
+    AcceptSuggestion {
+        id: editorial_types::SuggestionId,
+    },
+    /// Reject a suggestion: dismiss without applying.
+    RejectSuggestion {
+        id: editorial_types::SuggestionId,
+    },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -35,6 +55,10 @@ pub enum Response {
     BuildErrors(HashMap<String, Vec<String>>),
     Error(String),
     Pong,
+    /// A suggestion was created successfully.
+    SuggestionCreated(editorial_types::SuggestionId),
+    /// List of pending suggestions for a file.
+    Suggestions(Vec<editorial_types::Suggestion>),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.
@@ -51,4 +75,19 @@ pub enum ConductorEvent {
     },
     /// Browser should scroll to follow cursor.
     CursorScrollTo { anchor: String },
+    /// An editorial suggestion was created.
+    SuggestionCreated {
+        suggestion: editorial_types::Suggestion,
+    },
+    /// A suggestion was accepted and applied.
+    SuggestionAccepted {
+        id: editorial_types::SuggestionId,
+        file: editorial_types::ContentPath,
+        pages: Vec<String>,
+    },
+    /// A suggestion was rejected.
+    SuggestionRejected {
+        id: editorial_types::SuggestionId,
+        file: editorial_types::ContentPath,
+    },
 }

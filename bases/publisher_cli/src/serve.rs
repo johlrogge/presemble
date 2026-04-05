@@ -167,6 +167,9 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                         Ok(conductor::ConductorEvent::CursorScrollTo { anchor }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::ScrollTo { anchor });
                         }
+                        Ok(_) => {
+                            // Ignore events not relevant to the browser (e.g. suggestion lifecycle)
+                        }
                         Err(e) => {
                             eprintln!("Conductor subscription error: {e}");
                             break;

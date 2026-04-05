@@ -5,6 +5,7 @@ mod protocol;
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber};
 pub use conductor::{CommandResult, Conductor};
 pub use protocol::{Command, ConductorEvent, Response};
+pub use editorial_types;
 
 #[cfg(test)]
 mod tests {
@@ -320,6 +321,179 @@ mod tests {
                 }
                 other => panic!("expected CursorScrollTo, got {other:?}"),
             }
+        }
+    }
+
+    // ── Suggestions ──────────────────────────────────────────────────────────
+
+    const ARTICLE_SCHEMA_SRC: &str = "# Your blog post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\nYour article summary. {#summary}\noccurs\n: 1..3\n";
+
+    /// Build a conductor with a temp dir, article schema, and one content file.
+    fn article_conductor_with_file() -> (tempfile::TempDir, Conductor) {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write content file to disk
+        let content_dir = dir.path().join("content/article");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(content_dir.join("test.md"), "# Old Title\n\nSome summary text.\n").unwrap();
+
+        let repo = site_repository::SiteRepository::builder()
+            .schema("article", ARTICLE_SCHEMA_SRC)
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+        (dir, conductor)
+    }
+
+    #[test]
+    fn suggest_slot_value_creates_pending_suggestion() {
+        let (_dir, conductor) = article_conductor_with_file();
+
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+        let slot = editorial_types::SlotName::new("title");
+
+        let result = conductor.handle_command(Command::SuggestSlotValue {
+            file: file.clone(),
+            slot: slot.clone(),
+            value: "A Better Title".to_string(),
+            reason: "More descriptive".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        // Response must be SuggestionCreated
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // One SuggestionCreated event
+        assert_eq!(result.events.len(), 1, "expected one event");
+        match &result.events[0] {
+            ConductorEvent::SuggestionCreated { suggestion } => {
+                assert_eq!(suggestion.id, id);
+                assert_eq!(suggestion.file, file);
+                assert_eq!(suggestion.slot, slot);
+                assert_eq!(suggestion.proposed_value, "A Better Title");
+                assert_eq!(suggestion.status, editorial_types::SuggestionStatus::Pending);
+            }
+            other => panic!("expected SuggestionCreated event, got {other:?}"),
+        }
+
+        // GetSuggestions must return the suggestion
+        let result2 = conductor.handle_command(Command::GetSuggestions { file });
+        match result2.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(suggestions.len(), 1);
+                assert_eq!(suggestions[0].id, id);
+                assert_eq!(suggestions[0].proposed_value, "A Better Title");
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_suggestion_applies_edit() {
+        let (dir, conductor) = article_conductor_with_file();
+        let content_file = dir.path().join("content/article/test.md");
+
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+        let slot = editorial_types::SlotName::new("title");
+
+        // Create suggestion
+        let result = conductor.handle_command(Command::SuggestSlotValue {
+            file: file.clone(),
+            slot,
+            value: "Accepted Title".to_string(),
+            reason: "Test".to_string(),
+            author: editorial_types::Author::Human("Alice".to_string()),
+        });
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // Accept suggestion
+        let accept_result = conductor.handle_command(Command::AcceptSuggestion { id: id.clone() });
+        match &accept_result.response {
+            Response::Ok => {}
+            Response::Error(e) => panic!("expected Ok, got Error({e})"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Verify content file was updated
+        let new_content = std::fs::read_to_string(&content_file).unwrap();
+        assert!(
+            new_content.contains("Accepted Title"),
+            "file should contain accepted title, got: {new_content}"
+        );
+
+        // Verify events: PagesRebuilt and SuggestionAccepted
+        let has_accepted = accept_result.events.iter().any(|e| matches!(
+            e,
+            ConductorEvent::SuggestionAccepted { id: eid, .. } if eid == &id
+        ));
+        assert!(has_accepted, "expected SuggestionAccepted event");
+
+        // GetSuggestions should return empty (accepted, not pending)
+        let get_result = conductor.handle_command(Command::GetSuggestions { file });
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert!(suggestions.is_empty(), "accepted suggestion should not appear in pending list");
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_suggestion_marks_rejected_without_edit() {
+        let (dir, conductor) = article_conductor_with_file();
+        let content_file = dir.path().join("content/article/test.md");
+        let original_content = std::fs::read_to_string(&content_file).unwrap();
+
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+        let slot = editorial_types::SlotName::new("title");
+
+        // Create suggestion
+        let result = conductor.handle_command(Command::SuggestSlotValue {
+            file: file.clone(),
+            slot,
+            value: "Rejected Title".to_string(),
+            reason: "Test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // Reject suggestion
+        let reject_result = conductor.handle_command(Command::RejectSuggestion { id: id.clone() });
+        match &reject_result.response {
+            Response::Ok => {}
+            Response::Error(e) => panic!("expected Ok, got Error({e})"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Verify content file was NOT changed
+        let after_content = std::fs::read_to_string(&content_file).unwrap();
+        assert_eq!(
+            after_content, original_content,
+            "file should not be modified after rejection"
+        );
+
+        // Verify SuggestionRejected event was emitted
+        let has_rejected = reject_result.events.iter().any(|e| matches!(
+            e,
+            ConductorEvent::SuggestionRejected { id: eid, .. } if eid == &id
+        ));
+        assert!(has_rejected, "expected SuggestionRejected event");
+
+        // GetSuggestions should return empty (rejected, not pending)
+        let get_result = conductor.handle_command(Command::GetSuggestions { file });
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert!(suggestions.is_empty(), "rejected suggestion should not appear in pending list");
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
         }
     }
 }
