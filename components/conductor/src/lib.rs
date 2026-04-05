@@ -371,8 +371,10 @@ mod tests {
             ConductorEvent::SuggestionCreated { suggestion } => {
                 assert_eq!(suggestion.id, id);
                 assert_eq!(suggestion.file, file);
-                assert_eq!(suggestion.slot, slot);
-                assert_eq!(suggestion.proposed_value, "A Better Title");
+                assert!(
+                    matches!(&suggestion.target, editorial_types::SuggestionTarget::Slot { slot: s, proposed_value } if s == &slot && proposed_value == "A Better Title"),
+                    "expected Slot target with correct slot and value"
+                );
                 assert_eq!(suggestion.status, editorial_types::SuggestionStatus::Pending);
             }
             other => panic!("expected SuggestionCreated event, got {other:?}"),
@@ -384,7 +386,10 @@ mod tests {
             Response::Suggestions(suggestions) => {
                 assert_eq!(suggestions.len(), 1);
                 assert_eq!(suggestions[0].id, id);
-                assert_eq!(suggestions[0].proposed_value, "A Better Title");
+                assert!(
+                    matches!(&suggestions[0].target, editorial_types::SuggestionTarget::Slot { proposed_value, .. } if proposed_value == "A Better Title"),
+                    "expected Slot target with proposed value"
+                );
             }
             other => panic!("expected Suggestions, got {other:?}"),
         }
@@ -495,5 +500,109 @@ mod tests {
             }
             other => panic!("expected Suggestions, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn suggest_body_edit_creates_pending_suggestion() {
+        let (dir, conductor) = article_conductor_with_file();
+
+        // The test file contains "Some summary text." (from article_conductor_with_file fixture)
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        let result = conductor.handle_command(Command::SuggestBodyEdit {
+            file: file.clone(),
+            search: "Some summary text.".to_string(),
+            replace: "Some improved summary text.".to_string(),
+            reason: "More precise wording".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        assert_eq!(result.events.len(), 1, "expected one event");
+        match &result.events[0] {
+            ConductorEvent::SuggestionCreated { suggestion } => {
+                assert_eq!(suggestion.id, id);
+                assert_eq!(suggestion.file, file);
+                assert!(
+                    matches!(&suggestion.target, editorial_types::SuggestionTarget::BodyText { search, replace }
+                        if search == "Some summary text." && replace == "Some improved summary text."),
+                    "expected BodyText target with correct search and replace"
+                );
+                assert_eq!(suggestion.status, editorial_types::SuggestionStatus::Pending);
+            }
+            other => panic!("expected SuggestionCreated event, got {other:?}"),
+        }
+
+        // drop dir to suppress unused warning
+        drop(dir);
+    }
+
+    #[test]
+    fn suggest_body_edit_fails_when_search_not_found() {
+        let (_dir, conductor) = article_conductor_with_file();
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        let result = conductor.handle_command(Command::SuggestBodyEdit {
+            file,
+            search: "text that does not exist in the document".to_string(),
+            replace: "replacement".to_string(),
+            reason: "test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        assert!(
+            matches!(result.response, Response::Error(_)),
+            "expected Error when search text is not found"
+        );
+    }
+
+    #[test]
+    fn accept_body_suggestion_applies_text_replacement() {
+        let (dir, conductor) = article_conductor_with_file();
+        let content_file = dir.path().join("content/article/test.md");
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        // Create body edit suggestion using text present in the test file
+        let result = conductor.handle_command(Command::SuggestBodyEdit {
+            file: file.clone(),
+            search: "Some summary text.".to_string(),
+            replace: "Some improved text.".to_string(),
+            reason: "Better".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // Accept suggestion
+        let accept_result = conductor.handle_command(Command::AcceptSuggestion { id: id.clone() });
+        match &accept_result.response {
+            Response::Ok => {}
+            Response::Error(e) => panic!("expected Ok, got Error({e})"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Verify content file was updated
+        let new_content = std::fs::read_to_string(&content_file).unwrap();
+        assert!(
+            new_content.contains("Some improved text."),
+            "file should contain accepted replacement, got: {new_content}"
+        );
+        assert!(
+            !new_content.contains("Some summary text."),
+            "file should not contain original text after accept, got: {new_content}"
+        );
+
+        // Verify SuggestionAccepted event was emitted
+        let has_accepted = accept_result.events.iter().any(|e| matches!(
+            e,
+            ConductorEvent::SuggestionAccepted { id: eid, .. } if eid == &id
+        ));
+        assert!(has_accepted, "expected SuggestionAccepted event");
     }
 }

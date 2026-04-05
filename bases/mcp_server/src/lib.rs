@@ -236,6 +236,32 @@ fn handle_request(
                         }
                     },
                     {
+                        "name": "suggest_body_edit",
+                        "description": "Suggest a text replacement in the body of a content file. The suggestion appears as a diagnostic in the editor.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "description": "Content-relative path, e.g. 'content/post/hello.md'"
+                                },
+                                "search": {
+                                    "type": "string",
+                                    "description": "Exact text to find and replace"
+                                },
+                                "replace": {
+                                    "type": "string",
+                                    "description": "Proposed replacement text"
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Why this change is suggested"
+                                }
+                            },
+                            "required": ["file", "search", "replace", "reason"]
+                        }
+                    },
+                    {
                         "name": "list_content",
                         "description": "List all content files in the site, grouped by schema type.",
                         "inputSchema": {
@@ -426,14 +452,28 @@ fn handle_request(
                                 suggestions
                                     .iter()
                                     .map(|s| {
-                                        format!(
-                                            "[{}] {}: {} → \"{}\" ({})",
-                                            s.author,
-                                            s.slot,
-                                            s.reason,
-                                            s.proposed_value,
-                                            s.id
-                                        )
+                                        match &s.target {
+                                            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
+                                                format!(
+                                                    "[{}] slot {}: {} \u{2192} \"{}\" ({})",
+                                                    s.author,
+                                                    slot,
+                                                    s.reason,
+                                                    proposed_value,
+                                                    s.id
+                                                )
+                                            }
+                                            editorial_types::SuggestionTarget::BodyText { search, replace } => {
+                                                format!(
+                                                    "[{}] body: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
+                                                    s.author,
+                                                    s.reason,
+                                                    search,
+                                                    replace,
+                                                    s.id
+                                                )
+                                            }
+                                        }
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n")
@@ -445,6 +485,49 @@ fn handle_request(
                                 }),
                             )
                         }
+                        Ok(other) => json_rpc_ok(
+                            req.id.clone(),
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": format!("Unexpected response: {other:?}")}],
+                                "isError": true
+                            }),
+                        ),
+                        Err(e) => json_rpc_ok(
+                            req.id.clone(),
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": format!("Conductor error: {e}")}],
+                                "isError": true
+                            }),
+                        ),
+                    }
+                }
+
+                "suggest_body_edit" => {
+                    let file = arguments.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                    let search = arguments.get("search").and_then(|v| v.as_str()).unwrap_or("");
+                    let replace = arguments.get("replace").and_then(|v| v.as_str()).unwrap_or("");
+                    let reason = arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+
+                    match cond.send(&conductor::Command::SuggestBodyEdit {
+                        file: editorial_types::ContentPath::new(file),
+                        search: search.to_string(),
+                        replace: replace.to_string(),
+                        reason: reason.to_string(),
+                        author: editorial_types::Author::Claude,
+                    }) {
+                        Ok(conductor::Response::SuggestionCreated(id)) => json_rpc_ok(
+                            req.id.clone(),
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": format!("Suggestion created: {id}. It will appear as a diagnostic in the editor.")}]
+                            }),
+                        ),
+                        Ok(conductor::Response::Error(e)) => json_rpc_ok(
+                            req.id.clone(),
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": format!("Error: {e}")}],
+                                "isError": true
+                            }),
+                        ),
                         Ok(other) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
@@ -559,15 +642,16 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_response_contains_all_five_tools() {
+    fn tools_list_response_contains_all_six_tools() {
         let tools = serde_json::json!([
             {"name": "get_content"},
             {"name": "get_schema"},
             {"name": "suggest"},
             {"name": "get_suggestions"},
+            {"name": "suggest_body_edit"},
             {"name": "list_content"}
         ]);
-        let expected = ["get_content", "get_schema", "suggest", "get_suggestions", "list_content"];
+        let expected = ["get_content", "get_schema", "suggest", "get_suggestions", "suggest_body_edit", "list_content"];
         for name in expected {
             let found = tools
                 .as_array()

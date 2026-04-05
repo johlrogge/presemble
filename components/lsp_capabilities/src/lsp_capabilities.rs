@@ -69,6 +69,12 @@ pub enum SlotAction {
         slot_name: String,
         proposed_value: String,
     },
+    /// Accept an editorial body suggestion — replace `search` with `replace`.
+    AcceptBodySuggestion {
+        suggestion_id: String,
+        search: String,
+        replace: String,
+    },
     /// Reject an editorial suggestion — dismiss it.
     RejectSuggestion {
         suggestion_id: String,
@@ -981,6 +987,11 @@ pub fn build_transform(grammar: &Grammar, action: &SlotAction) -> Result<Box<dyn
                 InsertSlot::new(Arc::clone(&grammar_arc), slot_name, proposed_value.clone())
                     .map_err(|e| e.to_string())?,
             ))
+        }
+        SlotAction::AcceptBodySuggestion { .. } => {
+            // Body text replacement is handled directly via apply_edit in the LSP service;
+            // it does not go through the document parse/serialize pipeline.
+            Err("AcceptBodySuggestion is applied directly, not via Transform".to_string())
         }
         SlotAction::RejectSuggestion { .. } => {
             // Rejection does not modify the document; treated as a no-op transform.

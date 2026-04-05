@@ -21,6 +21,12 @@ in
     pkgs.helix
   ];
 
+  claude.code.mcpServers.presemble = {
+    type = "stdio";
+    command = "cargo";
+    args = [ "polylith" "cargo" "--profile" "dev" "run" "--bin" "presemble" "--" "mcp" "site/" ];
+  };
+
   enterShell = ''
     if [ -z "''${CI:-}" ]; then
       cargo polylith cargo --profile live build -q --release --bin presemble 2>/dev/null \

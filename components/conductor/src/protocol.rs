@@ -32,6 +32,14 @@ pub enum Command {
         reason: String,
         author: editorial_types::Author,
     },
+    /// Suggest a text replacement in the body of a content file.
+    SuggestBodyEdit {
+        file: editorial_types::ContentPath,
+        search: String,
+        replace: String,
+        reason: String,
+        author: editorial_types::Author,
+    },
     /// Query all pending suggestions for a file.
     GetSuggestions {
         file: editorial_types::ContentPath,

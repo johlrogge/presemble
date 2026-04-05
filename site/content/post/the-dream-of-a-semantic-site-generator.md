@@ -4,6 +4,7 @@ You may wonder why on earth another site generator is really needed. There are m
 
 In this post I'll try to explain why I have not been able to let go of this idea for over two decades. Yes, you read that right, even before site generators were "a thing".
 
+
 [Joakim Ohlrogge](/author/johlrogge)
 
 ----

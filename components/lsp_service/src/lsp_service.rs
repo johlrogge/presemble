@@ -113,12 +113,34 @@ impl PresembleLsp {
                 };
                 if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
                     for suggestion in suggestions {
-                        // Position the diagnostic at the suggested slot, falling back to (0,0).
-                        let (pos_start, pos_end) = slot_position(&src, &grammar, suggestion.slot.as_str());
-                        let message = format!(
-                            "[{}] {}: \"{}\"",
-                            suggestion.author, suggestion.reason, suggestion.proposed_value
-                        );
+                        let (pos_start, pos_end, message, action) = match &suggestion.target {
+                            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
+                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
+                                let msg = format!(
+                                    "[{}] {}: \"{}\"",
+                                    suggestion.author, suggestion.reason, proposed_value
+                                );
+                                let act = SlotAction::AcceptSuggestion {
+                                    suggestion_id: suggestion.id.to_string(),
+                                    slot_name: slot.to_string(),
+                                    proposed_value: proposed_value.clone(),
+                                };
+                                (ps, pe, msg, act)
+                            }
+                            editorial_types::SuggestionTarget::BodyText { search, replace } => {
+                                let (ps, pe) = find_text_position(&src, search);
+                                let msg = format!(
+                                    "[{}] {}: \"{}\" \u{2192} \"{}\"",
+                                    suggestion.author, suggestion.reason, search, replace
+                                );
+                                let act = SlotAction::AcceptBodySuggestion {
+                                    suggestion_id: suggestion.id.to_string(),
+                                    search: search.clone(),
+                                    replace: replace.clone(),
+                                };
+                                (ps, pe, msg, act)
+                            }
+                        };
                         let lsp_diag = Diagnostic {
                             range: Range {
                                 start: Position { line: pos_start.0, character: pos_start.1 },
@@ -130,11 +152,7 @@ impl PresembleLsp {
                         };
                         stored.push(StoredDiagnostic {
                             lsp_diag,
-                            action: Some(SlotAction::AcceptSuggestion {
-                                suggestion_id: suggestion.id.to_string(),
-                                slot_name: suggestion.slot.to_string(),
-                                proposed_value: suggestion.proposed_value.clone(),
-                            }),
+                            action: Some(action),
                         });
                     }
                 }
@@ -372,7 +390,7 @@ impl LanguageServer for PresembleLsp {
                     let current_suggestion_count = {
                         let diags = doc_diagnostics.lock().await;
                         diags.get(&uri_str)
-                            .map(|v| v.iter().filter(|sd| matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. }))).count())
+                            .map(|v| v.iter().filter(|sd| matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. }) | Some(SlotAction::AcceptBodySuggestion { .. }))).count())
                             .unwrap_or(0)
                     };
                     if suggestions.len() == current_suggestion_count {
@@ -386,18 +404,41 @@ impl LanguageServer for PresembleLsp {
                         let diags = doc_diagnostics.lock().await;
                         diags.get(&uri_str)
                             .map(|v| v.iter()
-                                .filter(|sd| !matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. })))
+                                .filter(|sd| !matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. }) | Some(SlotAction::AcceptBodySuggestion { .. })))
                                 .map(|sd| StoredDiagnostic { lsp_diag: sd.lsp_diag.clone(), action: sd.action.clone() })
                                 .collect())
                             .unwrap_or_default()
                     };
 
                     for suggestion in &suggestions {
-                        let (pos_start, pos_end) = slot_position(&src, &grammar, suggestion.slot.as_str());
-                        let message = format!(
-                            "[{}] {}: \"{}\"",
-                            suggestion.author, suggestion.reason, suggestion.proposed_value
-                        );
+                        let (pos_start, pos_end, message, action) = match &suggestion.target {
+                            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
+                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
+                                let msg = format!(
+                                    "[{}] {}: \"{}\"",
+                                    suggestion.author, suggestion.reason, proposed_value
+                                );
+                                let act = SlotAction::AcceptSuggestion {
+                                    suggestion_id: suggestion.id.to_string(),
+                                    slot_name: slot.to_string(),
+                                    proposed_value: proposed_value.clone(),
+                                };
+                                (ps, pe, msg, act)
+                            }
+                            editorial_types::SuggestionTarget::BodyText { search, replace } => {
+                                let (ps, pe) = find_text_position(&src, search);
+                                let msg = format!(
+                                    "[{}] {}: \"{}\" \u{2192} \"{}\"",
+                                    suggestion.author, suggestion.reason, search, replace
+                                );
+                                let act = SlotAction::AcceptBodySuggestion {
+                                    suggestion_id: suggestion.id.to_string(),
+                                    search: search.clone(),
+                                    replace: replace.clone(),
+                                };
+                                (ps, pe, msg, act)
+                            }
+                        };
                         let lsp_diag = Diagnostic {
                             range: Range {
                                 start: Position { line: pos_start.0, character: pos_start.1 },
@@ -409,11 +450,7 @@ impl LanguageServer for PresembleLsp {
                         };
                         stored.push(StoredDiagnostic {
                             lsp_diag,
-                            action: Some(SlotAction::AcceptSuggestion {
-                                suggestion_id: suggestion.id.to_string(),
-                                slot_name: suggestion.slot.to_string(),
-                                proposed_value: suggestion.proposed_value.clone(),
-                            }),
+                            action: Some(action),
                         });
                     }
 
@@ -823,8 +860,45 @@ impl LanguageServer for PresembleLsp {
                     };
                     actions.push(CodeActionOrCommand::CodeAction(reject_action));
                 }
+                SlotAction::AcceptBodySuggestion { suggestion_id, search, replace } => {
+                    // Accept: apply the text replacement via executeCommand.
+                    let accept_action = CodeAction {
+                        title: format!("Accept body suggestion: \"{}\" \u{2192} \"{}\"", search, replace),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        command: Some(Command {
+                            title: "Accept body suggestion".to_string(),
+                            command: "presemble.acceptSuggestion".to_string(),
+                            arguments: Some(vec![
+                                serde_json::Value::String(suggestion_id.clone()),
+                                serde_json::Value::String(uri.to_string()),
+                                serde_json::Value::String(String::new()), // no slot_name for body suggestions
+                                serde_json::Value::String(String::new()), // no proposed_value for body suggestions
+                                serde_json::Value::String(search.clone()),
+                                serde_json::Value::String(replace.clone()),
+                            ]),
+                        }),
+                        ..Default::default()
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(accept_action));
+
+                    // Reject: notify conductor via executeCommand, no document edit.
+                    let reject_action = CodeAction {
+                        title: format!("Reject body suggestion: \"{}\"", search),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        command: Some(Command {
+                            title: "Reject body suggestion".to_string(),
+                            command: "presemble.rejectSuggestion".to_string(),
+                            arguments: Some(vec![
+                                serde_json::Value::String(suggestion_id.clone()),
+                                serde_json::Value::String(uri.to_string()),
+                            ]),
+                        }),
+                        ..Default::default()
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(reject_action));
+                }
                 SlotAction::RejectSuggestion { .. } => {
-                    // Stored diagnostics only use AcceptSuggestion; reject is generated alongside it above.
+                    // Stored diagnostics only use AcceptSuggestion/AcceptBodySuggestion; reject is generated alongside it above.
                 }
                 _ => {
                     let title = match &slot_action {
@@ -912,28 +986,47 @@ impl LanguageServer for PresembleLsp {
         match params.command.as_str() {
             "presemble.acceptSuggestion" => {
                 // args: [suggestion_id, file_uri, slot_name, proposed_value]
+                // For body suggestions: args[4] = search, args[5] = replace
                 let args = &params.arguments;
                 let suggestion_id = args.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let file_uri_str = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let slot_name = args.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let proposed_value = args.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let body_search = args.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let body_replace = args.get(5).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
                 // Apply the edit to the document in the editor buffer.
-                if let Ok(uri) = file_uri_str.parse::<Url>()
-                    && let Some((grammar, _)) = self.grammar_for_uri(&uri)
-                {
+                if let Ok(uri) = file_uri_str.parse::<Url>() {
                     let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
-                    let action = SlotAction::AcceptSuggestion {
-                        suggestion_id: suggestion_id.clone(),
-                        slot_name: slot_name.clone(),
-                        proposed_value: proposed_value.clone(),
-                    };
-                    let text_edits = build_targeted_edits(&src, &grammar, &action);
-                    if !text_edits.is_empty() {
+
+                    if !body_search.is_empty() {
+                        // Body text replacement: find the search range and replace it.
+                        let (pos_start, pos_end) = find_text_position(&src, &body_search);
+                        let text_edit = TextEdit {
+                            range: Range {
+                                start: Position { line: pos_start.0, character: pos_start.1 },
+                                end: Position { line: pos_end.0, character: pos_end.1 },
+                            },
+                            new_text: body_replace.clone(),
+                        };
                         let mut changes = std::collections::HashMap::new();
-                        changes.insert(uri.clone(), text_edits);
+                        changes.insert(uri.clone(), vec![text_edit]);
                         let edit = WorkspaceEdit { changes: Some(changes), ..Default::default() };
                         let _ = self.client.apply_edit(edit).await;
+                    } else if let Some((grammar, _)) = self.grammar_for_uri(&uri) {
+                        // Slot suggestion: use the existing slot transform pipeline.
+                        let action = SlotAction::AcceptSuggestion {
+                            suggestion_id: suggestion_id.clone(),
+                            slot_name: slot_name.clone(),
+                            proposed_value: proposed_value.clone(),
+                        };
+                        let text_edits = build_targeted_edits(&src, &grammar, &action);
+                        if !text_edits.is_empty() {
+                            let mut changes = std::collections::HashMap::new();
+                            changes.insert(uri.clone(), text_edits);
+                            let edit = WorkspaceEdit { changes: Some(changes), ..Default::default() };
+                            let _ = self.client.apply_edit(edit).await;
+                        }
                     }
                 }
 
@@ -998,4 +1091,27 @@ fn separator_line(src: &str) -> Option<u32> {
         .enumerate()
         .find(|(_, l)| l.trim() == "----")
         .map(|(i, _)| i as u32)
+}
+
+/// Find the LSP position range of a text string within source.
+///
+/// Returns `((start_line, start_char), (end_line, end_char))`.
+/// Falls back to `((0,0),(0,0))` if the text is not found.
+fn find_text_position(src: &str, search: &str) -> ((u32, u32), (u32, u32)) {
+    if let Some(byte_offset) = src.find(search) {
+        let before = &src[..byte_offset];
+        let start_line = before.lines().count().saturating_sub(1) as u32;
+        let last_newline = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let start_char = (byte_offset - last_newline) as u32;
+
+        let end_offset = byte_offset + search.len();
+        let before_end = &src[..end_offset];
+        let end_line = before_end.lines().count().saturating_sub(1) as u32;
+        let last_newline_end = before_end.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let end_char = (end_offset - last_newline_end) as u32;
+
+        ((start_line, start_char), (end_line, end_char))
+    } else {
+        ((0, 0), (0, 0))
+    }
 }

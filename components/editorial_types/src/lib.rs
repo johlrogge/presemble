@@ -115,20 +115,34 @@ pub enum SuggestionStatus {
     Rejected,
 }
 
+/// Where a suggestion targets within a content file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SuggestionTarget {
+    /// Named slot in preamble
+    Slot {
+        slot: SlotName,
+        proposed_value: String,
+    },
+    /// Text replacement in body
+    BodyText {
+        search: String,
+        replace: String,
+    },
+}
+
 /// A first-class editorial suggestion.
 ///
-/// Represents a proposed change to a specific slot in a content file,
+/// Represents a proposed change to a content file,
 /// with full provenance tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Suggestion {
     pub id: SuggestionId,
     pub author: Author,
     pub file: ContentPath,
-    pub slot: SlotName,
-    pub proposed_value: String,
+    pub target: SuggestionTarget,
     pub reason: String,
     pub status: SuggestionStatus,
-    /// The slot's value at the time the suggestion was created.
+    /// The original value at the time the suggestion was created.
     /// Used for conflict detection on accept.
     pub original_value: Option<String>,
     /// ISO 8601 timestamp of creation.
@@ -210,8 +224,10 @@ mod tests {
             id: SuggestionId(String::from("sug-000000000000abcd")),
             author: Author::Claude,
             file: ContentPath::new("content/post/hello.md"),
-            slot: SlotName::new("title"),
-            proposed_value: String::from("Hello World"),
+            target: SuggestionTarget::Slot {
+                slot: SlotName::new("title"),
+                proposed_value: String::from("Hello World"),
+            },
             reason: String::from("More descriptive title"),
             status: SuggestionStatus::Pending,
             original_value: Some(String::from("Hello")),
@@ -221,7 +237,29 @@ mod tests {
         let back: Suggestion = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.id, suggestion.id);
         assert_eq!(back.author, suggestion.author);
-        assert_eq!(back.slot.as_str(), "title");
+        assert!(matches!(&back.target, SuggestionTarget::Slot { slot, .. } if slot.as_str() == "title"));
+        assert_eq!(back.status, SuggestionStatus::Pending);
+    }
+
+    #[test]
+    fn body_text_suggestion_serializes_and_deserializes() {
+        let suggestion = Suggestion {
+            id: SuggestionId(String::from("sug-000000000000ef01")),
+            author: Author::Claude,
+            file: ContentPath::new("content/post/hello.md"),
+            target: SuggestionTarget::BodyText {
+                search: String::from("old text"),
+                replace: String::from("new text"),
+            },
+            reason: String::from("Clearer wording"),
+            status: SuggestionStatus::Pending,
+            original_value: Some(String::from("old text")),
+            created_at: String::from("2026-04-05T00:00:00Z"),
+        };
+        let json = serde_json::to_string(&suggestion).expect("serialize");
+        let back: Suggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, suggestion.id);
+        assert!(matches!(&back.target, SuggestionTarget::BodyText { search, .. } if search == "old text"));
         assert_eq!(back.status, SuggestionStatus::Pending);
     }
 }
