@@ -614,11 +614,10 @@ impl Parser {
 
 /// Convert a symbol from a `(juxt ...)` argument to a Node.
 ///
-/// - `self/name` → `presemble:apply` with template=name, data=input
-/// - bare `name` → `presemble:include` with src=name
+/// - `self/name` → `presemble:apply` with template=name (no data attr = full graph)
+/// - bare `name` → `presemble:include` with src=name (registry template)
 fn juxt_symbol_to_node(sym: &str) -> Node {
     if sym.starts_with("self/") {
-        // self/name variant — delegate to apply_symbol_to_node
         apply_symbol_to_node(sym)
     } else {
         Node::Element(Element {
@@ -631,15 +630,17 @@ fn juxt_symbol_to_node(sym: &str) -> Node {
 
 /// Convert a symbol from an `(apply ...)` form to a Node.
 ///
-/// - `self/name` → `presemble:apply` with template=name, data=input
-/// - bare `name` → also `presemble:apply` with template=name, data=input
+/// - `self/name` → `presemble:apply` with template=name (no data = full graph)
+/// - bare `name` → also `presemble:apply` with template=name (no data = full graph)
+///
+/// When `data` is absent, `render_apply` passes the full parent graph through.
+/// This is the juxt semantic: all children see the same data.
 fn apply_symbol_to_node(sym: &str) -> Node {
     let template_name = sym.strip_prefix("self/").unwrap_or(sym);
     Node::Element(Element {
         name: "presemble:apply".to_string(),
         attrs: vec![
             ("template".to_string(), crate::dom::Form::Str(template_name.to_string())),
-            ("data".to_string(), crate::dom::Form::Str("input".to_string())),
         ],
         children: Vec::new(),
     })
@@ -1092,7 +1093,7 @@ mod tests {
             if let Node::Element(c1) = &juxt.children[1] {
                 assert_eq!(c1.name, "presemble:apply");
                 assert_eq!(c1.attr("template"), Some("body"));
-                assert_eq!(c1.attr("data"), Some("input"));
+                assert_eq!(c1.attr("data"), None, "juxt apply should have no data attr");
             } else {
                 panic!("second child should be presemble:apply");
             }
@@ -1111,6 +1112,7 @@ mod tests {
     #[test]
     fn parse_juxt_with_bare_self_symbol() {
         // (juxt header self/nav footer) — self/nav becomes presemble:apply
+        // with template="nav" and no data attr (full graph pass-through)
         let nodes = parse("(juxt header self/nav footer)");
         assert_eq!(nodes.len(), 1);
         if let Node::Element(juxt) = &nodes[0] {
@@ -1118,7 +1120,7 @@ mod tests {
             if let Node::Element(c1) = &juxt.children[1] {
                 assert_eq!(c1.name, "presemble:apply");
                 assert_eq!(c1.attr("template"), Some("nav"));
-                assert_eq!(c1.attr("data"), Some("input"));
+                assert_eq!(c1.attr("data"), None, "juxt apply should have no data attr");
             } else {
                 panic!("middle child should be presemble:apply");
             }
@@ -1133,7 +1135,7 @@ mod tests {
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:apply");
             assert_eq!(el.attr("template"), Some("body"));
-            assert_eq!(el.attr("data"), Some("input"));
+            assert_eq!(el.attr("data"), None, "apply should have no data attr");
         } else {
             panic!("expected presemble:apply element");
         }

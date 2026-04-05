@@ -537,11 +537,6 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
         .ok_or_else(|| RenderError::Render("presemble:apply requires a 'template' attribute".into()))?
         .to_string();
 
-    let data_path = el
-        .attr("data")
-        .ok_or_else(|| RenderError::Render("presemble:apply requires a 'data' attribute".into()))?
-        .to_string();
-
     if ctx.is_too_deep() {
         return Err(RenderError::Render("max depth exceeded".into()));
     }
@@ -549,6 +544,13 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
     let callable_nodes = ctx
         .resolve_callable(&template_name)
         .ok_or_else(|| RenderError::Render(format!("callable not found: '{template_name}'")))?;
+
+    // If data attribute is absent, pass the full graph through (no scoping).
+    // This is the juxt semantic: all children see the same data.
+    let Some(data_path) = el.attr("data") else {
+        return transform(callable_nodes, graph, &ctx.descend());
+    };
+    let data_path = data_path.to_string();
 
     // Resolve the data value. If absent, produce no output.
     let segments: Vec<&str> = data_path.split('.').collect();
