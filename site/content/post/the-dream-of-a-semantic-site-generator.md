@@ -10,17 +10,17 @@ In this post I'll try to explain why I have not been able to let go of this idea
 
 ### There are 2 hard problems in software...
 
-You know how the original joke goes:
+You know how the _original_ joke goes:
 
 > there are two hard problems in software: naming things, cache invalidation and off by one errors.
 
 I was working as a contractor for a customer that does not need to be named. They had invested heavily in a platform: broadvision. I would be extremely surprised if this product is not long dead and even if it's not I think this post that almost noone will read is a small payback for the immense suffering their shitty product caused me.
 
-The product promised personalization. What they delivered: a patchwork of expensive products that did not perform and wasn't even thread safe. Our team spent a lot of time trying to deliver anyway and I was young and stupid and clocked 36h working days more than once.
+The product promised personalization. What they delivered: a patchwork of expensive products that did not perform and werent even thread safe. Our team spent a lot of time trying to deliver anyway and I was young and stupid and clocked 36h working days more than once.
 
 Broadvision claimed to do cacheing really well and I am very thankful to them for learning a lot of things about what not to do (they were better at making their customers pay cash...). And we started thinking: what if we would push content to the cache when needed instead? And what if each page knew which assets it needed and those were automatically delivered by some tool?
 
-Incidentally, a few years after that I worked for a large phone manufacturer and their site. They actually had something that resembled a static page generator, but it was the inverse, it was request driven and a glorified cache. Another cool thing: they used akamai's content delivery network and edge computing which would actually benefit a lot from cache predictability. Again I started thinking of how to reverse the process.
+Incidentally, a few years after that I worked for a large phone manufacturer and their site. They actually had something that resembled a static page generator, but it was the inverse, it was request driven and a glorified cache. Another cool thing: they used Akamai's content delivery network and edge computing which would actually benefit a lot from cache predictability. Again I started thinking of how to reverse the process.
 
 ### Trying and failing
 
@@ -30,9 +30,9 @@ I have made many attempts over the years to get this generator right. I have sta
 
 Homoiconicity is a fancy word for a property that, among others, Lisp and its dialiects display. What this means for a programming language is roughly that the code is represented in the same way as data which makes meta programming easier. You can use the language itself modify it's code since the code is expressed in the data structure of the language.
 
-Homoiconicity is merely an inspiration for presemble and what is important for presemble is that the text the different entities are expressed as are merely a serialization form. The primary representation of an entity (template, schema, css, and markdown) are the nodes producesd by parseing the content. The dom-tree is primary and the textual representation secondary (so don't be surprised by a reformat when you save your "text").
+Homoiconicity is merely an inspiration for presemble and what is important for presemble is that the text the different entities are expressed as are merely a serialization form. The primary representation of an entity (template, schema, css, and markdown) are the nodes produced by parseing the content. The DOM-tree is primary and the textual representation secondary (so don't be surprised by a reformat when you save your "text").
 
-#### Well formed templates
+#### Well formed, templates
 
 My first attempt was _pick a template language and move on_. Then I remembered [templistic](https://templistic.vercel.app/), that two of my collegues at Agical, Olle Wreede and Daniel Brolund invented. Templistic runs as javascript in the browser, but I cannot emphasize how much of an inspiration templistic was for what templates in Presemble looks like.
 
@@ -46,8 +46,38 @@ So now we have a few types of node trees: template-trees, content (markdown) tre
 
 In the same way templates are not "just text with holes anymore", I did not want content to be "just documents". I wanted presemble to understand a bit more about the content than that. It may not be completely obvious why but I hope to demonstrate why it may be useful. But first a bit about how I have failed in this regard before: I tend to derail with semantic web technologies, and before long I have lost sight of the problem I'm trying to solve and fumble around in taxonomies and onthologies, and I'm completely lost in RDFs, RDF schemas and whatever all that is called: my original idea is swallowed by a huge linguistic problem that I have convinced myself that I have to solve first.
 
-I need something simpler. So I came up with a markdown schema, id is not as feature rich as the semantic web perhaps but can still express things like "this document represents an author has a name, a biography..."
+I needed something simpler. So I came up with a markdown schema, it is not as feature rich as the semantic web perhaps but can still express things like "this document represents an author has a name, a biography..."
 
-The semanticness also adds structure and I can spec the structure of my site with placeholders, that look like markdown, with some contraints like "occurs exactly once". I can say that a blog post like this one, should link to an author, start with a capitalized title and the template can reference the linked author and the title for instance.
+The semanticness also adds structure and I can spec the structure of my site with placeholders, that look like markdown, with some contraints like `occurs exactly once`. I can say that a blog post like this one, should link to an author, start with a capitalized title and the template can reference the linked author and the title for instance.
 
 If the post does not conform, it can't be published.
+
+#### Separate content and presentation
+
+When combining schemas and markdown content, something pretty remarkable happens: you have a content model that is completely independent of presentation. What do I mean by that?
+
+Most sites have a header, perhaps navigation, a body, a footer, a sidebar etc. What decides what content goes into all that extra page structure? Usually it is the template the page is rendered with. The template selects content and presents it, often even contains logig for showing/hideing/highlighting specific parts of it.
+
+But when the content is semantic it can make a lot of those decisions. For instance: I could make a markdown document that links to another document, like an author. Or a collectio of documents, like a list of products. It could add some editorial content like a paragraph and a headline to this without even thinking about how this will be presented. You have a navigatable _content graph_.
+
+What the template adds to this is _how to present_ the content visually.
+
+#### Pure templates
+
+The first version of presemble pulled in content via templates, but in a round about way I started thinking about _pure templates_. What if a template was just a function that takes a node tree in and produces a new node tree? What would have to be true for that to be possible and what would pure mean?
+
+The obvious first: no side effects, that was already true. But I realized another trait: no content selection! The template can't sideload any content in addition to what it got passed as input. And the afore mentioned content separation fell out of that.
+
+The templates receive all it's data as input and produces it's output based on that.  The template _can_ apply other _pure_ templates and still be pure:
+
+```clojure
+[:template {:presemble/define "body"}
+    [:presemble/insert {:data "input.title" :as "h1"}]]
+
+[:body (juxt header
+             self/body
+             footer)]
+```
+
+
+

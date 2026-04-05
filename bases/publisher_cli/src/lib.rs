@@ -300,6 +300,11 @@ enum Command {
         #[arg(long, short)]
         output: Option<String>,
     },
+    /// Run the MCP server for Claude Code integration (reads JSON-RPC from stdin, writes to stdout)
+    Mcp {
+        /// Path to the site directory
+        site_dir: String,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -342,6 +347,9 @@ pub fn run() -> Result<(), CliError> {
         }
         Some(Command::Convert { input, to, output }) => {
             convert_template(Path::new(&input), &to, output.as_deref().map(Path::new))
+        }
+        Some(Command::Mcp { site_dir }) => {
+            mcp_server::run(Path::new(&site_dir)).map_err(CliError::Render)
         }
         None => {
             // backward compat: presemble <site-dir>
