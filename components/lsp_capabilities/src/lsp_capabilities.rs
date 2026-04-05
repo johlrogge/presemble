@@ -63,6 +63,16 @@ pub enum SlotAction {
     },
     /// Insert a missing body separator.
     InsertSeparator,
+    /// Accept an editorial suggestion — replace the slot with the proposed value.
+    AcceptSuggestion {
+        suggestion_id: String,
+        slot_name: String,
+        proposed_value: String,
+    },
+    /// Reject an editorial suggestion — dismiss it.
+    RejectSuggestion {
+        suggestion_id: String,
+    },
 }
 
 /// A diagnostic with source position for LSP.
@@ -485,6 +495,26 @@ fn span_to_positions(src: &str, span: Option<&std::ops::Range<usize>>) -> ((u32,
         }
         None => ((0, 0), (0, 0)),
     }
+}
+
+/// Find the LSP position range of a named slot in a content source.
+///
+/// Returns `((start_line, start_char), (end_line, end_char))`.
+/// Falls back to `((0,0),(0,0))` if the slot is not found.
+pub fn slot_position(src: &str, grammar: &Grammar, slot_name: &str) -> ((u32, u32), (u32, u32)) {
+    let Ok(doc) = parse_and_assign(src, grammar) else {
+        return ((0, 0), (0, 0));
+    };
+    for slot in &doc.preamble {
+        if slot.name.as_str() == slot_name
+            && let Some(spanned) = slot.elements.get(0)
+        {
+            let start = byte_to_position(src, spanned.span.start);
+            let end = byte_to_position(src, spanned.span.end);
+            return (start, end);
+        }
+    }
+    ((0, 0), (0, 0))
 }
 
 /// Validate a content source against its grammar and return positioned diagnostics.
@@ -946,6 +976,16 @@ pub fn build_transform(grammar: &Grammar, action: &SlotAction) -> Result<Box<dyn
             ))
         }
         SlotAction::InsertSeparator => Ok(Box::new(InsertSeparator)),
+        SlotAction::AcceptSuggestion { slot_name, proposed_value, .. } => {
+            Ok(Box::new(
+                InsertSlot::new(Arc::clone(&grammar_arc), slot_name, proposed_value.clone())
+                    .map_err(|e| e.to_string())?,
+            ))
+        }
+        SlotAction::RejectSuggestion { .. } => {
+            // Rejection does not modify the document; treated as a no-op transform.
+            Err("RejectSuggestion produces no document transform".to_string())
+        }
     }
 }
 
@@ -1876,5 +1916,54 @@ mod tests {
                 c.insert_text
             );
         }
+    }
+
+    // --- AcceptSuggestion / RejectSuggestion SlotAction tests ---
+
+    #[test]
+    fn build_transform_accept_suggestion_applies_proposed_value() {
+        let grammar = article_grammar();
+        let src = "# Original Title\n\nSome paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let action = SlotAction::AcceptSuggestion {
+            suggestion_id: "sug-0001".to_string(),
+            slot_name: "title".to_string(),
+            proposed_value: "# New Title".to_string(),
+        };
+        let result = apply_action(src, &grammar, &action);
+        assert!(result.is_ok(), "apply_action should succeed: {:?}", result);
+        let new_src = result.unwrap();
+        assert!(
+            new_src.contains("New Title"),
+            "output should contain the proposed value: {new_src}"
+        );
+    }
+
+    #[test]
+    fn build_transform_reject_suggestion_returns_error() {
+        let grammar = article_grammar();
+        let action = SlotAction::RejectSuggestion {
+            suggestion_id: "sug-0002".to_string(),
+        };
+        let result = build_transform(&grammar, &action);
+        assert!(result.is_err(), "RejectSuggestion should return Err from build_transform");
+    }
+
+    #[test]
+    fn slot_position_returns_title_position() {
+        let src = "# Hello World\n\nSome paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
+        let grammar = article_grammar();
+        let (start, _end) = slot_position(src, &grammar, "title");
+        // Title is on line 0
+        assert_eq!(start.0, 0, "title slot should start on line 0");
+    }
+
+    #[test]
+    fn slot_position_returns_zero_for_missing_slot() {
+        // Slot "nonexistent" is not in the article grammar
+        let src = "# Hello World\n\n[Author](/authors/test)\n\n----\n\n### Body\n";
+        let grammar = article_grammar();
+        let (start, end) = slot_position(src, &grammar, "nonexistent");
+        assert_eq!(start, (0, 0), "missing slot should return (0,0) start");
+        assert_eq!(end, (0, 0), "missing slot should return (0,0) end");
     }
 }

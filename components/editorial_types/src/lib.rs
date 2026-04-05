@@ -26,6 +26,12 @@ impl Default for SuggestionId {
     }
 }
 
+impl From<String> for SuggestionId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 impl fmt::Display for SuggestionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)

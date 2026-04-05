@@ -1,7 +1,7 @@
 use lsp_capabilities::{
     build_transform, content_completions, definition_for_position, hover_for_line,
     link_completions,
-    schema_completions, template_completions, template_definition,
+    schema_completions, slot_position, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
     DiagnosticSeverity, SlotAction, TemplateDefinitionTarget,
 };
@@ -79,7 +79,7 @@ impl PresembleLsp {
             return;
         };
         let positioned = validate_with_positions(&src, &grammar);
-        let stored: Vec<StoredDiagnostic> = positioned
+        let mut stored: Vec<StoredDiagnostic> = positioned
             .iter()
             .map(|p| {
                 let severity = match p.severity {
@@ -101,6 +101,44 @@ impl PresembleLsp {
                 }
             })
             .collect();
+
+        // Query the conductor for pending editorial suggestions on this file.
+        if let Some(ref cond) = self.conductor
+            && let Some(content_path) = uri.to_file_path().ok()
+                .and_then(|p| p.strip_prefix(&self.site_dir).ok().map(|rel| rel.to_string_lossy().into_owned()))
+        {
+            let cmd = conductor::Command::GetSuggestions {
+                file: editorial_types::ContentPath::new(&content_path),
+            };
+            if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
+                for suggestion in suggestions {
+                    // Position the diagnostic at the suggested slot, falling back to (0,0).
+                    let (pos_start, pos_end) = slot_position(&src, &grammar, suggestion.slot.as_str());
+                    let message = format!(
+                        "[{}] {}: \"{}\"",
+                        suggestion.author, suggestion.reason, suggestion.proposed_value
+                    );
+                    let lsp_diag = Diagnostic {
+                        range: Range {
+                            start: Position { line: pos_start.0, character: pos_start.1 },
+                            end: Position { line: pos_end.0, character: pos_end.1 },
+                        },
+                        severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
+                        message,
+                        ..Default::default()
+                    };
+                    stored.push(StoredDiagnostic {
+                        lsp_diag,
+                        action: Some(SlotAction::AcceptSuggestion {
+                            suggestion_id: suggestion.id.to_string(),
+                            slot_name: suggestion.slot.to_string(),
+                            proposed_value: suggestion.proposed_value.clone(),
+                        }),
+                    });
+                }
+            }
+        }
+
         let diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
         *self.doc_diagnostics.lock().await.entry(uri.to_string()).or_default() = stored;
         self.client.publish_diagnostics(uri, diags, None).await;
@@ -255,6 +293,13 @@ impl LanguageServer for PresembleLsp {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                execute_command_provider: Some(ExecuteCommandOptions {
+                    commands: vec![
+                        "presemble.acceptSuggestion".to_string(),
+                        "presemble.rejectSuggestion".to_string(),
+                    ],
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -617,32 +662,76 @@ impl LanguageServer for PresembleLsp {
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
         for (_diag, maybe_action) in stored {
             let Some(slot_action) = maybe_action else { continue };
-            let title = match &slot_action {
-                SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
-                SlotAction::InsertSlot { slot_name, .. } => format!("Insert {slot_name}"),
-                SlotAction::InsertSeparator => "Insert body separator".to_string(),
-            };
 
-            // Build targeted source edits using the diff pipeline.
-            let text_edits = build_targeted_edits(&src, &grammar, &slot_action);
-            // If targeted edits returned nothing, skip this action (shouldn't happen).
-            if text_edits.is_empty() {
-                continue;
+            match &slot_action {
+                SlotAction::AcceptSuggestion { suggestion_id, slot_name, proposed_value } => {
+                    // Accept: apply the proposed value via executeCommand so the conductor is notified.
+                    let accept_action = CodeAction {
+                        title: format!("Accept suggestion for {slot_name}"),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        command: Some(Command {
+                            title: format!("Accept suggestion for {slot_name}"),
+                            command: "presemble.acceptSuggestion".to_string(),
+                            arguments: Some(vec![
+                                serde_json::Value::String(suggestion_id.clone()),
+                                serde_json::Value::String(uri.to_string()),
+                                serde_json::Value::String(slot_name.clone()),
+                                serde_json::Value::String(proposed_value.clone()),
+                            ]),
+                        }),
+                        ..Default::default()
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(accept_action));
+
+                    // Reject: notify conductor via executeCommand, no document edit.
+                    let reject_action = CodeAction {
+                        title: format!("Reject suggestion for {slot_name}"),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        command: Some(Command {
+                            title: format!("Reject suggestion for {slot_name}"),
+                            command: "presemble.rejectSuggestion".to_string(),
+                            arguments: Some(vec![
+                                serde_json::Value::String(suggestion_id.clone()),
+                                serde_json::Value::String(uri.to_string()),
+                            ]),
+                        }),
+                        ..Default::default()
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(reject_action));
+                }
+                SlotAction::RejectSuggestion { .. } => {
+                    // Stored diagnostics only use AcceptSuggestion; reject is generated alongside it above.
+                }
+                _ => {
+                    let title = match &slot_action {
+                        SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
+                        SlotAction::InsertSlot { slot_name, .. } => format!("Insert {slot_name}"),
+                        SlotAction::InsertSeparator => "Insert body separator".to_string(),
+                        _ => continue,
+                    };
+
+                    // Build targeted source edits using the diff pipeline.
+                    let text_edits = build_targeted_edits(&src, &grammar, &slot_action);
+                    // If targeted edits returned nothing, skip this action (shouldn't happen).
+                    if text_edits.is_empty() {
+                        continue;
+                    }
+
+                    let mut changes = std::collections::HashMap::new();
+                    changes.insert(uri.clone(), text_edits);
+                    let workspace_edit = WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    };
+                    let code_action = CodeAction {
+                        title,
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        edit: Some(workspace_edit),
+                        ..Default::default()
+                    };
+                    actions.push(CodeActionOrCommand::CodeAction(code_action));
+                }
             }
-
-            let mut changes = std::collections::HashMap::new();
-            changes.insert(uri.clone(), text_edits);
-            let workspace_edit = WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            };
-            let code_action = CodeAction {
-                title,
-                kind: Some(CodeActionKind::QUICKFIX),
-                edit: Some(workspace_edit),
-                ..Default::default()
-            };
-            actions.push(CodeActionOrCommand::CodeAction(code_action));
         }
         Ok(Some(actions))
     }
@@ -693,6 +782,70 @@ impl LanguageServer for PresembleLsp {
                 })))
             }
         }
+    }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
+        match params.command.as_str() {
+            "presemble.acceptSuggestion" => {
+                // args: [suggestion_id, file_uri, slot_name, proposed_value]
+                let args = &params.arguments;
+                let suggestion_id = args.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let file_uri_str = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let slot_name = args.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let proposed_value = args.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+                // Apply the edit to the document in the editor buffer.
+                if let Ok(uri) = file_uri_str.parse::<Url>()
+                    && let Some((grammar, _)) = self.grammar_for_uri(&uri)
+                {
+                    let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                    let action = SlotAction::AcceptSuggestion {
+                        suggestion_id: suggestion_id.clone(),
+                        slot_name: slot_name.clone(),
+                        proposed_value: proposed_value.clone(),
+                    };
+                    let text_edits = build_targeted_edits(&src, &grammar, &action);
+                    if !text_edits.is_empty() {
+                        let mut changes = std::collections::HashMap::new();
+                        changes.insert(uri.clone(), text_edits);
+                        let edit = WorkspaceEdit { changes: Some(changes), ..Default::default() };
+                        let _ = self.client.apply_edit(edit).await;
+                    }
+                }
+
+                // Notify conductor to mark the suggestion accepted.
+                if let Some(ref cond) = self.conductor {
+                    let id = editorial_types::SuggestionId::from(suggestion_id);
+                    let _ = cond.send(&conductor::Command::AcceptSuggestion { id });
+                }
+
+                // Trigger revalidation to remove the suggestion diagnostic.
+                if let Ok(uri) = file_uri_str.parse::<Url>() {
+                    let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                    self.validate_and_publish(uri, src).await;
+                }
+            }
+            "presemble.rejectSuggestion" => {
+                // args: [suggestion_id, file_uri]
+                let args = &params.arguments;
+                let suggestion_id = args.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let file_uri_str = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+                // Notify conductor to dismiss the suggestion.
+                if let Some(ref cond) = self.conductor {
+                    let id = editorial_types::SuggestionId::from(suggestion_id);
+                    let _ = cond.send(&conductor::Command::RejectSuggestion { id });
+                }
+
+                // Trigger revalidation to remove the suggestion diagnostic.
+                if let Ok(uri) = file_uri_str.parse::<Url>() {
+                    let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                    self.validate_and_publish(uri, src).await;
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
     }
 }
 
