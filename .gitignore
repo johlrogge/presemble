@@ -12,3 +12,4 @@ site/.devenv/
 profiles/*/
 .pre-commit-config.yaml
 bases/publisher_cli/target
+site/.presemble/
