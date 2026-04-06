@@ -1,15 +1,17 @@
 [package]
-name = "lsp_capabilities"
+name = "expressions"
 version = "0.24.0"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "lsp_capabilities"
+interface = "expressions"
 
 [dependencies]
-schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
-validation = { workspace = true }
-site_repository = { workspace = true }
+conductor = { workspace = true }
 site_index = { workspace = true }
+
+[dev-dependencies]
+site_repository = { workspace = true }
+tempfile = "3"

@@ -19,6 +19,7 @@ in
 
   packages = [
     pkgs.helix
+    pkgs.rep
   ];
 
   claude.code.mcpServers.presemble = {

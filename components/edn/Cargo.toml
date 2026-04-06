@@ -1,12 +1,11 @@
 [package]
-name = "validation"
+name = "edn"
 version = "0.24.0"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "validation"
+interface = "edn"
 
 [dependencies]
-schema = { workspace = true }
-content = { workspace = true }
 template = { workspace = true }
+content = { workspace = true }

@@ -1,10 +1,10 @@
 [package]
-name = "stylesheet"
+name = "nrepl"
 version = "0.24.0"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "stylesheet"
+interface = "nrepl"
 
 [dependencies]
-cssparser = "0.34"
+bencode = { workspace = true }

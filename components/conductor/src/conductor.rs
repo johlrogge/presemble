@@ -102,6 +102,7 @@ pub struct Conductor {
     site_index: site_index::SiteIndex,
     repo: site_repository::SiteRepository,
     suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::Suggestion>>,
+    site_graph: RwLock<site_index::SiteGraph>,
 }
 
 impl Conductor {
@@ -138,11 +139,17 @@ impl Conductor {
             site_index,
             repo,
             suggestions: RwLock::new(HashMap::new()),
+            site_graph: RwLock::new(site_index::SiteGraph::new()),
         };
 
         // Load persisted pending suggestions from disk
         let suggestions = conductor.load_suggestions();
         *conductor.suggestions.write().unwrap() = suggestions;
+
+        // Build the site graph from all known content
+        if let Err(e) = conductor.build_full_graph() {
+            eprintln!("conductor: initial graph build failed: {e}");
+        }
 
         Ok(conductor)
     }
@@ -154,6 +161,143 @@ impl Conductor {
     /// Get cached schema source for a stem.
     pub fn schema_source(&self, stem: &str) -> Option<String> {
         self.schema_cache.read().unwrap().get(stem).cloned()
+    }
+
+    /// Replace the site graph with a new one built externally.
+    pub fn set_site_graph(&self, graph: site_index::SiteGraph) {
+        *self.site_graph.write().unwrap() = graph;
+    }
+
+    /// Read access to the site graph.
+    pub fn site_graph(&self) -> std::sync::RwLockReadGuard<'_, site_index::SiteGraph> {
+        self.site_graph.read().unwrap()
+    }
+
+    /// Build the full site graph by iterating all schema stems and content slugs.
+    ///
+    /// Skips items that fail to parse or have no schema. Errors are logged but
+    /// non-fatal. This is intentionally a simplified build: it covers item pages
+    /// only (no collection pages, no site index, no link expression resolution).
+    pub fn build_full_graph(&self) -> Result<(), String> {
+        let mut graph = site_index::SiteGraph::new();
+
+        for stem in self.repo.schema_stems() {
+            let schema_src = match self.schema_source(stem.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            let grammar = match schema::parse_schema(&schema_src) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("conductor: schema parse error for {}: {e:?}", stem.as_str());
+                    continue;
+                }
+            };
+
+            for slug in self.repo.content_slugs(&stem) {
+                let content_src = match self.repo.content_source(&stem, &slug) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                let doc = match content::parse_and_assign(&content_src, &grammar) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!(
+                            "conductor: parse error for {}/{}: {e}",
+                            stem.as_str(),
+                            slug
+                        );
+                        continue;
+                    }
+                };
+
+                let mut data = template::build_article_graph_with_source(&doc, &grammar, &content_src);
+
+                let url_path = site_index::UrlPath::new(format!("/{}/{}", stem.as_str(), slug));
+                data.insert("url", template::Value::Text(url_path.as_str().to_string()));
+                data.insert(
+                    "_presemble_stem",
+                    template::Value::Text(stem.as_str().to_string()),
+                );
+                data.insert(
+                    "_presemble_file",
+                    template::Value::Text(format!("content/{}/{}.md", stem.as_str(), slug)),
+                );
+
+                let title = match data.resolve(&["title"]) {
+                    Some(template::Value::Text(t)) => t.clone(),
+                    _ => slug.clone(),
+                };
+                data.insert(
+                    "link",
+                    template::Value::Record(template::synthesize_link(
+                        &title,
+                        url_path.as_str(),
+                    )),
+                );
+
+                let content_path = self.repo.content_path(&stem, &slug);
+                let schema_path = self.repo.schema_path(&stem);
+                let template_path = self
+                    .repo
+                    .item_template_source(&stem)
+                    .map(|_| {
+                        self.site_dir
+                            .join("templates")
+                            .join(stem.as_str())
+                            .join("item")
+                    })
+                    .unwrap_or_else(|| {
+                        self.site_dir
+                            .join("templates")
+                            .join(format!("{}.html", stem.as_str()))
+                    });
+
+                let output_path = self
+                    .output_dir
+                    .join(stem.as_str())
+                    .join(&slug)
+                    .join("index.html");
+
+                let node = site_index::SiteNode {
+                    url_path: url_path.clone(),
+                    output_path,
+                    source_path: content_path.clone(),
+                    deps: std::collections::HashSet::from([content_path, schema_path]),
+                    role: site_index::NodeRole::Page(site_index::PageData {
+                        page_kind: site_index::PageKind::Item,
+                        schema_stem: stem.clone(),
+                        template_path,
+                        content_path: self.repo.content_path(&stem, &slug),
+                        schema_path: self.repo.schema_path(&stem),
+                        data,
+                    }),
+                };
+
+                graph.insert(node);
+            }
+        }
+
+        *self.site_graph.write().unwrap() = graph;
+        Ok(())
+    }
+
+    /// Return all item data graphs for a given schema stem.
+    ///
+    /// Returns a vec of `(url_path, data_graph)` pairs, one per item page.
+    pub fn query_items_for_stem(&self, stem: &str) -> Vec<(String, template::DataGraph)> {
+        let graph = self.site_graph.read().unwrap();
+        let schema_stem = site_index::SchemaStem::new(stem);
+        graph
+            .items_for_stem(&schema_stem)
+            .into_iter()
+            .filter_map(|node| {
+                node.page_data().map(|pd| {
+                    (node.url_path.as_str().to_string(), pd.data.clone())
+                })
+            })
+            .collect()
     }
 
     /// Get in-memory document text, falling back to disk.

@@ -1,12 +1,13 @@
 [package]
 name = "publisher_cli"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 
 [dependencies]
 schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
+expressions = { workspace = true }
 dep_graph = { workspace = true }
 conductor = { workspace = true }
 editor_server = { workspace = true }
