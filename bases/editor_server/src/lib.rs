@@ -33,9 +33,11 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
         conductor: Arc::clone(&conductor),
     });
     let nrepl_server = nrepl::NreplServer::new(nrepl_handler);
-    let nrepl_site_dir = site_dir.to_path_buf();
+    // Write .nrepl-port to the workspace root (site_dir's parent), not the site dir.
+    // Tools like rep and Calva search upward from the current directory.
+    let nrepl_project_dir = site_dir.parent().unwrap_or(site_dir).to_path_buf();
     std::thread::spawn(move || {
-        if let Err(e) = nrepl_server.listen(&nrepl_site_dir) {
+        if let Err(e) = nrepl_server.listen(&nrepl_project_dir) {
             eprintln!("nREPL server error: {e}");
         }
     });
