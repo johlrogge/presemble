@@ -1027,7 +1027,12 @@ fn watch_and_rebuild(
             continue;
         }
 
-        println!("Rebuilding {} page(s)...", affected_count.max(1));
+        let trigger_files: Vec<&str> = dirty.iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+            .collect();
+        println!("  rebuild: {} file(s) changed → {} page(s) affected [{}]",
+            dirty.len(), affected_count.max(1),
+            trigger_files.join(", "));
         match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, &BuildPolicy::lenient()) {
             Ok(outcome) => {
                 let mut g = graph.lock().unwrap();
@@ -1048,12 +1053,12 @@ fn watch_and_rebuild(
                 }
 
                 if outcome.files_failed > 0 {
-                    eprintln!("Rebuild completed with {} error(s)", outcome.files_failed);
+                    eprintln!("  rebuild failed: {} error(s)", outcome.files_failed);
                     // Send a reload so the browser navigates to the error page.
                     let error_pages: Vec<String> = outcome.build_errors.keys().cloned().collect();
                     let _ = reload_tx.send(BrowserMessage::Reload { pages: error_pages, anchor: None });
                 } else if outcome.files_built > 0 || outcome.files_with_suggestions > 0 {
-                    println!("Rebuild complete ({} file(s), {} with suggestions)", outcome.files_built, outcome.files_with_suggestions);
+                    println!("  {} page(s) rebuilt", outcome.files_built);
                     let mut pages: Vec<String> = outcome.site_graph
                         .iter()
                         .map(|e| e.url_path.as_str().to_string())
