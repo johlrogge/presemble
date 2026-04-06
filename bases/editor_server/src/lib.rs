@@ -4,6 +4,18 @@ pub use error::ServerError;
 
 use conductor::{socket_url, Command, Conductor, Response}; // Response kept for parse-error path
 use std::path::Path;
+use std::sync::Arc;
+
+struct PresembleNreplHandler {
+    conductor: Arc<Conductor>,
+}
+
+impl nrepl::NreplHandler for PresembleNreplHandler {
+    fn eval(&self, _session: &str, code: &str) -> Result<String, String> {
+        let value = expressions::eval_repl(code, &self.conductor)?;
+        Ok(edn::value_to_edn(&value))
+    }
+}
 
 /// Run the conductor daemon for a site directory.
 /// Listens on a nng IPC socket and handles commands from clients.
@@ -14,7 +26,19 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     println!("Socket: {url}");
 
     // Create conductor with full site build
-    let conductor = Conductor::new(site_dir.to_path_buf())?;
+    let conductor = Arc::new(Conductor::new(site_dir.to_path_buf())?);
+
+    // Spawn the nREPL server thread before the nng event loop
+    let nrepl_handler = Arc::new(PresembleNreplHandler {
+        conductor: Arc::clone(&conductor),
+    });
+    let nrepl_server = nrepl::NreplServer::new(nrepl_handler);
+    let nrepl_site_dir = site_dir.to_path_buf();
+    std::thread::spawn(move || {
+        if let Err(e) = nrepl_server.listen(&nrepl_site_dir) {
+            eprintln!("nREPL server error: {e}");
+        }
+    });
 
     // Create REP socket for commands
     let rep_socket = nng::Socket::new(nng::Protocol::Rep0)
