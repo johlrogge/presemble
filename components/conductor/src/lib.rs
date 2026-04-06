@@ -396,9 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn accept_suggestion_applies_edit() {
+    fn accept_suggestion_marks_status_without_writing_to_disk() {
         let (dir, conductor) = article_conductor_with_file();
         let content_file = dir.path().join("content/article/test.md");
+        let original_content = std::fs::read_to_string(&content_file).unwrap();
 
         let file = editorial_types::ContentPath::new("content/article/test.md");
         let slot = editorial_types::SlotName::new("title");
@@ -416,7 +417,7 @@ mod tests {
             other => panic!("expected SuggestionCreated, got {other:?}"),
         };
 
-        // Accept suggestion
+        // Accept suggestion — should NOT write to disk
         let accept_result = conductor.handle_command(Command::AcceptSuggestion { id: id.clone() });
         match &accept_result.response {
             Response::Ok => {}
@@ -424,14 +425,11 @@ mod tests {
             other => panic!("expected Ok, got {other:?}"),
         }
 
-        // Verify content file was updated
-        let new_content = std::fs::read_to_string(&content_file).unwrap();
-        assert!(
-            new_content.contains("Accepted Title"),
-            "file should contain accepted title, got: {new_content}"
-        );
+        // Verify file was NOT modified (LSP applies the edit to the buffer, not the conductor)
+        let current_content = std::fs::read_to_string(&content_file).unwrap();
+        assert_eq!(original_content, current_content, "conductor should not write to disk on accept");
 
-        // Verify events: PagesRebuilt and SuggestionAccepted
+        // Verify SuggestionAccepted event
         let has_accepted = accept_result.events.iter().any(|e| matches!(
             e,
             ConductorEvent::SuggestionAccepted { id: eid, .. } if eid == &id
@@ -579,7 +577,8 @@ mod tests {
             other => panic!("expected SuggestionCreated, got {other:?}"),
         };
 
-        // Accept suggestion
+        // Accept suggestion — should NOT write to disk
+        let original_content = std::fs::read_to_string(&content_file).unwrap();
         let accept_result = conductor.handle_command(Command::AcceptSuggestion { id: id.clone() });
         match &accept_result.response {
             Response::Ok => {}
@@ -587,16 +586,9 @@ mod tests {
             other => panic!("expected Ok, got {other:?}"),
         }
 
-        // Verify content file was updated
-        let new_content = std::fs::read_to_string(&content_file).unwrap();
-        assert!(
-            new_content.contains("Some improved text."),
-            "file should contain accepted replacement, got: {new_content}"
-        );
-        assert!(
-            !new_content.contains("Some summary text."),
-            "file should not contain original text after accept, got: {new_content}"
-        );
+        // Verify file was NOT modified
+        let current_content = std::fs::read_to_string(&content_file).unwrap();
+        assert_eq!(original_content, current_content, "conductor should not write to disk on accept");
 
         // Verify SuggestionAccepted event was emitted
         let has_accepted = accept_result.events.iter().any(|e| matches!(

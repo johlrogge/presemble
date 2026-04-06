@@ -582,38 +582,9 @@ impl Conductor {
                     }
                 };
 
-                // Apply the edit based on target type
-                let pages = match &suggestion.target {
-                    editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
-                        match self.apply_slot_edit(
-                            suggestion.file.as_str(),
-                            slot.as_str(),
-                            proposed_value,
-                        ) {
-                            Ok(pages) => pages,
-                            Err(e) => return CommandResult::error(e),
-                        }
-                    }
-                    editorial_types::SuggestionTarget::BodyText { search, replace } => {
-                        let abs_path = suggestion.file.resolve(&self.site_dir);
-                        let text = match self.document_text(&abs_path) {
-                            Some(t) => t,
-                            None => return CommandResult::error(format!("cannot read {}", suggestion.file)),
-                        };
-                        if !text.contains(search.as_str()) {
-                            return CommandResult::error(format!("search text no longer found in {}: {search:?}", suggestion.file));
-                        }
-                        let new_text = text.replacen(search.as_str(), replace.as_str(), 1);
-                        if let Err(e) = std::fs::write(&abs_path, &new_text) {
-                            return CommandResult::error(format!("write error: {e}"));
-                        }
-                        self.doc_sources.write().unwrap().insert(abs_path, new_text);
-                        let url = derive_url_from_content_path(suggestion.file.as_str());
-                        vec![url]
-                    }
-                };
-
-                // Update status in memory and on disk
+                // The LSP applies the edit to the editor buffer via applyEdit.
+                // The conductor only marks the suggestion as accepted — it does NOT
+                // write to disk. The user saves when ready, which writes normally.
                 let mut updated = suggestion.clone();
                 updated.status = editorial_types::SuggestionStatus::Accepted;
                 if let Err(e) = self.persist_suggestion(&updated) {
@@ -622,8 +593,7 @@ impl Conductor {
                 self.suggestions.write().unwrap().insert(id.clone(), updated);
 
                 CommandResult::ok_with_events(vec![
-                    ConductorEvent::PagesRebuilt { pages: pages.clone(), anchor: None },
-                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages },
+                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages: vec![] },
                 ])
             }
             Command::RejectSuggestion { id } => {
