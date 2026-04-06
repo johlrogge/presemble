@@ -25,6 +25,6 @@
     [:link {:rel "stylesheet" :href "/assets/style.css"}]
   ]
   [:body
-    (juxt header self/body footer)
+    ((juxt header self/body footer) input)
   ]
 ]

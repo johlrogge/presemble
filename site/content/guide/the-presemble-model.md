@@ -99,10 +99,10 @@ Templates are written in Hiccup (an EDN-based syntax) as the primary format, wit
     [presemble/insert {:data input.summary :as :p.summary}]
     [presemble/insert {:data input.body}]]
 
-  (juxt
+  ((juxt
     /fragments/structure#header
     (apply self/body)
-    /fragments/structure#footer)
+    /fragments/structure#footer) input)
 ]
 ```
 

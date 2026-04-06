@@ -88,16 +88,13 @@ The templates receive all it's data as input and produces it's output based on t
     [:title "Presemble"]
     [:link {:rel "stylesheet" :href "/assets/style.css"}]]
   [:body
-    (juxt header self/body footer)]]
+    ((juxt header self/body footer) input)]]
 ```
 The `body` definition is a pure function: it receives a content tree as `input` and produces a DOM tree. It cannot select content, it cannot reach outside its input. The `juxt` composes three such functions — header, body, footer — applying each to the same input and concatenating their DOM output.
 
 #### The content graph
 
-When a blog post links to an author, that link is not just a URL string. It is a typed edge in a graph. The publisher resolves it at build time: the author document's name, biography, and portrait become available to the template that renders the post. If the author does not exist, the build fails — not with a 404 at request time, but with a clear error naming the missing reference.
-
-This turns the site into a navigatable graph of interconnected content. A homepage can assemble itself from that graph: pull in the five most recent posts, three featured articles, the site metadata — all via expressions in the content file, not in the template. The content decides what appears. The template decides how it looks.
-
+When a blog post links to an author, that link is not just a URL string. It is a typed edge in a graph. The publisher resolves it at build time: the author document's name, biography, and portrait become available to the template that renders the post. If the author does not exist, the build fails — not with a 404 at request time, but with a clear error naming the missing reference. This turns the site into a navigatable graph of interconnected content. A homepage can assemble itself from that graph: pull in the five most recent posts, three featured articles, the site metadata — all via expressions in the content file, not in the template. The content decides what appears. The template decides how it looks.
 #### Your editor knows your content
 
 Presemble ships an LSP server. Point your editor at it and your content files become first-class citizens: completions for every slot the schema declares, diagnostics for every violation, hover documentation showing the schema constraints, and go-to-definition that jumps from a content reference to the referenced document.
