@@ -11,6 +11,8 @@ pub use editorial_types;
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+    use site_index;
+    use template;
 
     const POST_SCHEMA_SRC: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
@@ -691,5 +693,103 @@ mod tests {
             ConductorEvent::SuggestionAccepted { id: eid, .. } if eid == &id
         ));
         assert!(has_accepted, "expected SuggestionAccepted event");
+    }
+
+    // ── SiteGraph ─────────────────────────────────────────────────────────────
+
+    /// Build a conductor backed by a real temp-dir repo with two post content files.
+    fn two_post_conductor() -> (tempfile::TempDir, Conductor) {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Schema and templates
+        let schema_dir = dir.path().join("schemas/post");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(
+            schema_dir.join("item.md"),
+            "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n",
+        )
+        .unwrap();
+
+        let tpl_dir = dir.path().join("templates/post");
+        std::fs::create_dir_all(&tpl_dir).unwrap();
+        std::fs::write(
+            tpl_dir.join("item.hiccup"),
+            "[:html [:body [:h1 (get input :title)]]]",
+        )
+        .unwrap();
+
+        // Two content files
+        let content_dir = dir.path().join("content/post");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(content_dir.join("first.md"), "# First Post\n\n----\n\nBody of first.\n")
+            .unwrap();
+        std::fs::write(content_dir.join("second.md"), "# Second Post\n\n----\n\nBody of second.\n")
+            .unwrap();
+
+        // Use builder().from_dir() so the mem repo reads schemas/content from the filesystem
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(dir.path())
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+        (dir, conductor)
+    }
+
+    #[test]
+    fn build_full_graph_populates_item_nodes() {
+        let (_dir, conductor) = two_post_conductor();
+
+        let graph = conductor.site_graph();
+        // Expect exactly two Item nodes for the "post" stem
+        assert_eq!(
+            graph.len(),
+            2,
+            "graph should have 2 nodes after build_full_graph"
+        );
+        assert!(
+            graph.get(&site_index::UrlPath::new("/post/first")).is_some(),
+            "graph should have /post/first node"
+        );
+        assert!(
+            graph.get(&site_index::UrlPath::new("/post/second")).is_some(),
+            "graph should have /post/second node"
+        );
+    }
+
+    #[test]
+    fn query_items_for_stem_returns_data_graphs() {
+        let (_dir, conductor) = two_post_conductor();
+
+        let items = conductor.query_items_for_stem("post");
+        assert_eq!(items.len(), 2, "expected 2 items for stem 'post'");
+
+        let urls: Vec<&str> = items.iter().map(|(url, _)| url.as_str()).collect();
+        assert!(urls.contains(&"/post/first"), "should contain /post/first");
+        assert!(urls.contains(&"/post/second"), "should contain /post/second");
+
+        // Verify each item has a title field
+        for (url, data) in &items {
+            assert!(
+                matches!(data.resolve(&["title"]), Some(template::Value::Text(_))),
+                "item {url} should have a title in its DataGraph"
+            );
+        }
+    }
+
+    #[test]
+    fn set_site_graph_replaces_graph() {
+        let (_dir, conductor) = two_post_conductor();
+
+        // Replace with empty graph
+        conductor.set_site_graph(site_index::SiteGraph::new());
+
+        let graph = conductor.site_graph();
+        assert!(graph.is_empty(), "graph should be empty after set_site_graph with empty");
+    }
+
+    #[test]
+    fn empty_conductor_has_empty_graph() {
+        let conductor = empty_conductor();
+        let graph = conductor.site_graph();
+        assert!(graph.is_empty(), "empty conductor should have empty site graph");
     }
 }

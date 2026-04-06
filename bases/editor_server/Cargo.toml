@@ -5,5 +5,8 @@ edition = "2024"
 
 [dependencies]
 conductor = { workspace = true }
+edn = { workspace = true }
+expressions = { workspace = true }
 nng = { workspace = true }
+nrepl = { workspace = true }
 serde_json = { workspace = true }

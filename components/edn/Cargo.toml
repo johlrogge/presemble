@@ -1,0 +1,11 @@
+[package]
+name = "edn"
+version = "0.23.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "edn"
+
+[dependencies]
+template = { workspace = true }
+content = { workspace = true }

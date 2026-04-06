@@ -1,0 +1,10 @@
+[package]
+name = "nrepl"
+version = "0.23.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "nrepl"
+
+[dependencies]
+bencode = { workspace = true }
