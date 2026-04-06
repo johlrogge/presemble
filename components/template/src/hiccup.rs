@@ -356,6 +356,55 @@ impl Parser {
             Some(Token::LParen) => {
                 self.next(); // consume '('
 
+                // Check if next token is another '(' — nested function application:
+                // ((fn-form) arg1 arg2 ...) applies the inner form to the arguments.
+                if let Some(Token::LParen) = self.peek() {
+                    // Parse the inner form (e.g. (juxt header self/body footer))
+                    let inner = self.parse_node()?
+                        .ok_or_else(|| TemplateError::ParseError(
+                            "empty inner form in function application".into()
+                        ))?;
+
+                    // Parse arguments until ')'
+                    let mut args: Vec<String> = Vec::new();
+                    loop {
+                        match self.peek() {
+                            Some(Token::RParen) => {
+                                self.next(); // consume ')'
+                                break;
+                            }
+                            Some(Token::Symbol(_)) => {
+                                if let Some(Token::Symbol(s)) = self.next() {
+                                    args.push(s);
+                                }
+                            }
+                            None => {
+                                return Err(TemplateError::ParseError(
+                                    "unexpected end of input in function application form".into(),
+                                ));
+                            }
+                            other => {
+                                let other = other.cloned();
+                                return Err(TemplateError::ParseError(format!(
+                                    "unexpected token in function application argument position: {other:?}"
+                                )));
+                            }
+                        }
+                    }
+
+                    // Attach the first argument as a `data` attribute on the inner node
+                    return if let Node::Element(mut el) = inner {
+                        if !args.is_empty() {
+                            el.attrs.push(("data".to_string(), Form::Str(args[0].clone())));
+                        }
+                        Ok(Some(Node::Element(el)))
+                    } else {
+                        Err(TemplateError::ParseError(
+                            "function application: inner form must be an element".into()
+                        ))
+                    };
+                }
+
                 // The next token must be a Symbol naming the composition form.
                 let form_name = match self.next() {
                     Some(Token::Symbol(s)) => s,
@@ -1124,6 +1173,52 @@ mod tests {
             } else {
                 panic!("middle child should be presemble:apply");
             }
+        }
+    }
+
+    #[test]
+    fn parse_juxt_applied_to_input() {
+        // ((juxt header self/body footer) input) — Clojure-style function application.
+        // Should produce presemble:juxt with data="input" attr and 3 children.
+        let nodes = parse("((juxt header self/body footer) input)");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(juxt) = &nodes[0] {
+            assert_eq!(juxt.name, "presemble:juxt");
+            assert_eq!(juxt.attr("data"), Some("input"), "juxt should have data=input attr");
+            assert_eq!(juxt.children.len(), 3);
+            if let Node::Element(c0) = &juxt.children[0] {
+                assert_eq!(c0.name, "presemble:include");
+                assert_eq!(c0.attr("src"), Some("header"));
+            } else {
+                panic!("first child should be presemble:include");
+            }
+            if let Node::Element(c1) = &juxt.children[1] {
+                assert_eq!(c1.name, "presemble:apply");
+                assert_eq!(c1.attr("template"), Some("body"));
+            } else {
+                panic!("second child should be presemble:apply");
+            }
+            if let Node::Element(c2) = &juxt.children[2] {
+                assert_eq!(c2.name, "presemble:include");
+                assert_eq!(c2.attr("src"), Some("footer"));
+            } else {
+                panic!("third child should be presemble:include");
+            }
+        } else {
+            panic!("expected presemble:juxt element");
+        }
+    }
+
+    #[test]
+    fn parse_juxt_without_application_has_no_data_attr() {
+        // (juxt header footer) without outer application should NOT have data attr (backward compat)
+        let nodes = parse("(juxt header footer)");
+        assert_eq!(nodes.len(), 1);
+        if let Node::Element(juxt) = &nodes[0] {
+            assert_eq!(juxt.name, "presemble:juxt");
+            assert_eq!(juxt.attr("data"), None, "plain juxt should have no data attr");
+        } else {
+            panic!("expected presemble:juxt element");
         }
     }
 

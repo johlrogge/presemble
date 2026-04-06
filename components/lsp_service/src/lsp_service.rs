@@ -532,38 +532,12 @@ impl LanguageServer for PresembleLsp {
                 });
             }
         }
-        if let Ok(mut src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
+        if let Ok(src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
             let kind = self.site_index.classify(&path);
             match kind {
                 site_index::FileKind::Content { .. } => {
-                    // Auto-format: parse and serialize to canonical form
-                    if let Some((grammar, _)) = self.grammar_for_uri(&uri)
-                        && let Ok(doc) = content::parse_and_assign(&src, &grammar)
-                    {
-                        let canonical = content::serialize_document(&doc);
-                        if canonical != src {
-                            // Send the canonical form to the editor buffer via applyEdit.
-                            // Don't write to disk — Helix will write on the next save,
-                            // avoiding the "document modified on disk" warning.
-                            let mut changes = std::collections::HashMap::new();
-                            changes.insert(uri.clone(), vec![TextEdit {
-                                range: Range {
-                                    start: Position { line: 0, character: 0 },
-                                    end: Position { line: u32::MAX, character: 0 },
-                                },
-                                new_text: canonical.clone(),
-                            }]);
-                            let edit = WorkspaceEdit {
-                                changes: Some(changes),
-                                ..Default::default()
-                            };
-                            let _ = self.client.apply_edit(edit).await;
-                            // Re-validate with the canonical source
-                            src = canonical;
-                        }
-                    }
                     self.validate_and_publish(uri, src).await;
                 }
                 site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, src).await,
