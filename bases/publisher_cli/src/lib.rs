@@ -780,6 +780,11 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
         .collect();
     stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for stem in stems {
+        // Don't overwrite page's own slots (e.g., a resolved "author" link)
+        // with the collection of all authors.
+        if page_data.resolve(&[stem.as_str()]).is_some() {
+            continue;
+        }
         let items: Vec<template::Value> = graph
             .items_for_stem(&stem)
             .into_iter()
