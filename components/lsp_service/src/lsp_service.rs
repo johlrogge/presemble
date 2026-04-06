@@ -11,6 +11,14 @@ use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
+/// Check if two LSP ranges overlap (a diagnostic is relevant to a code action request).
+fn ranges_overlap(a: &Range, b: &Range) -> bool {
+    !(a.end.line < b.start.line
+        || (a.end.line == b.start.line && a.end.character < b.start.character)
+        || b.end.line < a.start.line
+        || (b.end.line == a.start.line && b.end.character < a.start.character))
+}
+
 struct StoredDiagnostic {
     lsp_diag: Diagnostic,
     action: Option<SlotAction>,
@@ -821,7 +829,8 @@ impl LanguageServer for PresembleLsp {
         let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
 
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
-        for (_diag, maybe_action) in stored {
+        let request_range = p.range;
+        for (_diag, maybe_action) in stored.into_iter().filter(|(d, _)| ranges_overlap(&d.range, &request_range)) {
             let Some(slot_action) = maybe_action else { continue };
 
             match &slot_action {
