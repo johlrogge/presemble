@@ -1,0 +1,11 @@
+{
+  "id": "sug-18a3998841c14d48",
+  "author": "Claude",
+  "file": "content/post/the-dream-of-a-semantic-site-generator.md",
+  "slot": "summary",
+  "proposed_value": "In this post I explain why I have not been able to let go of this idea for over two decades — yes, even before site generators were a thing.",
+  "reason": "Tighter phrasing: removed hedging (\"I'll try to\"), simplified the aside, replaced quotes with an em dash",
+  "status": "Accepted",
+  "original_value": null,
+  "created_at": "1775431488"
+}

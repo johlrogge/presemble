@@ -498,8 +498,54 @@ impl Conductor {
                     id: id.clone(),
                     author,
                     file,
-                    slot,
-                    proposed_value: value,
+                    target: editorial_types::SuggestionTarget::Slot {
+                        slot,
+                        proposed_value: value,
+                    },
+                    reason,
+                    status: editorial_types::SuggestionStatus::Pending,
+                    original_value,
+                    created_at,
+                };
+
+                if let Err(e) = self.persist_suggestion(&suggestion) {
+                    return CommandResult::error(format!("persist error: {e}"));
+                }
+                self.suggestions.write().unwrap().insert(id.clone(), suggestion.clone());
+
+                CommandResult {
+                    response: Response::SuggestionCreated(id),
+                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
+                }
+            }
+            Command::SuggestBodyEdit { file, search, replace, reason, author } => {
+                // Verify the search string exists in the document
+                let abs_path = file.resolve(&self.site_dir);
+                let text = match self.document_text(&abs_path) {
+                    Some(t) => t,
+                    None => return CommandResult::error(format!("cannot read {file}")),
+                };
+                if !text.contains(&search) {
+                    return CommandResult::error(format!("search text not found in {file}: {search:?}"));
+                }
+
+                let original_value = Some(search.clone());
+
+                let created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string();
+
+                let id = editorial_types::SuggestionId::new();
+                let suggestion = editorial_types::Suggestion {
+                    id: id.clone(),
+                    author,
+                    file,
+                    target: editorial_types::SuggestionTarget::BodyText {
+                        search,
+                        replace,
+                    },
                     reason,
                     status: editorial_types::SuggestionStatus::Pending,
                     original_value,
@@ -536,14 +582,35 @@ impl Conductor {
                     }
                 };
 
-                // Apply the edit
-                let pages = match self.apply_slot_edit(
-                    suggestion.file.as_str(),
-                    suggestion.slot.as_str(),
-                    &suggestion.proposed_value,
-                ) {
-                    Ok(pages) => pages,
-                    Err(e) => return CommandResult::error(e),
+                // Apply the edit based on target type
+                let pages = match &suggestion.target {
+                    editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
+                        match self.apply_slot_edit(
+                            suggestion.file.as_str(),
+                            slot.as_str(),
+                            proposed_value,
+                        ) {
+                            Ok(pages) => pages,
+                            Err(e) => return CommandResult::error(e),
+                        }
+                    }
+                    editorial_types::SuggestionTarget::BodyText { search, replace } => {
+                        let abs_path = suggestion.file.resolve(&self.site_dir);
+                        let text = match self.document_text(&abs_path) {
+                            Some(t) => t,
+                            None => return CommandResult::error(format!("cannot read {}", suggestion.file)),
+                        };
+                        if !text.contains(search.as_str()) {
+                            return CommandResult::error(format!("search text no longer found in {}: {search:?}", suggestion.file));
+                        }
+                        let new_text = text.replacen(search.as_str(), replace.as_str(), 1);
+                        if let Err(e) = std::fs::write(&abs_path, &new_text) {
+                            return CommandResult::error(format!("write error: {e}"));
+                        }
+                        self.doc_sources.write().unwrap().insert(abs_path, new_text);
+                        let url = derive_url_from_content_path(suggestion.file.as_str());
+                        vec![url]
+                    }
                 };
 
                 // Update status in memory and on disk

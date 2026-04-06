@@ -300,6 +300,11 @@ enum Command {
         #[arg(long, short)]
         output: Option<String>,
     },
+    /// Run the MCP server for Claude Code integration (reads JSON-RPC from stdin, writes to stdout)
+    Mcp {
+        /// Path to the site directory
+        site_dir: String,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -342,6 +347,9 @@ pub fn run() -> Result<(), CliError> {
         }
         Some(Command::Convert { input, to, output }) => {
             convert_template(Path::new(&input), &to, output.as_deref().map(Path::new))
+        }
+        Some(Command::Mcp { site_dir }) => {
+            mcp_server::run(Path::new(&site_dir)).map_err(CliError::Render)
         }
         None => {
             // backward compat: presemble <site-dir>
@@ -772,6 +780,11 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
         .collect();
     stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for stem in stems {
+        // Don't overwrite page's own slots (e.g., a resolved "author" link)
+        // with the collection of all authors.
+        if page_data.resolve(&[stem.as_str()]).is_some() {
+            continue;
+        }
         let items: Vec<template::Value> = graph
             .items_for_stem(&stem)
             .into_iter()

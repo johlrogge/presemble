@@ -7,6 +7,7 @@ pub use lsp_capabilities::{
     template_completions, schema_completions, template_definition, validate_schema_with_positions,
     validate_template_paths,
     validate_with_positions, write_slot_to_file, write_slot_to_string,
+    slot_position,
     DiagnosticSeverity, PositionedDiagnostic,
     SlotAction, SlotCompletion, TemplateDefinitionTarget,
 };
