@@ -48,6 +48,11 @@ pub enum Value {
         slot_name: String,
         element_kind: SuggestionKind,
     },
+    /// Unresolved link expression — evaluated during the expression resolution phase.
+    LinkExpression {
+        text: content::LinkText,
+        target: content::LinkTarget,
+    },
 }
 
 impl Value {
@@ -74,6 +79,11 @@ impl Value {
             }
             Value::Absent => None,
             Value::Suggestion { .. } => None,
+            Value::LinkExpression { text, .. } => match text {
+                content::LinkText::Static(s) => Some(s.clone()),
+                content::LinkText::Binding(b) => Some(b.clone()),
+                content::LinkText::Empty => None,
+            },
         }
     }
 }
@@ -82,7 +92,7 @@ impl Value {
 /// Supports colon-separated path resolution.
 #[derive(Debug, Clone, Default)]
 pub struct DataGraph {
-    entries: std::collections::HashMap<String, Value>,
+    entries: im::HashMap<String, Value>,
 }
 
 impl DataGraph {
@@ -226,15 +236,20 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
                 let max = max_paragraphs(slot); // reuse count logic
                 let links: Vec<Value> = elements
                     .iter()
-                    .filter_map(|s| {
-                        if let ContentElement::Link { text, href } = &s.node {
+                    .filter_map(|s| match &s.node {
+                        ContentElement::Link { text, href } => {
                             let mut record = DataGraph::new();
                             record.insert("text", Value::Text(text.clone()));
                             record.insert("href", Value::Text(href.clone()));
                             Some(Value::Record(record))
-                        } else {
-                            None
                         }
+                        ContentElement::LinkExpression { text, target } => {
+                            Some(Value::LinkExpression {
+                                text: text.clone(),
+                                target: target.clone(),
+                            })
+                        }
+                        _ => None,
                     })
                     .take(max)
                     .collect();
@@ -408,6 +423,22 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
                 // Render the raw markdown list source to HTML via pulldown-cmark.
                 let html = render_inline_markdown(source);
                 format!("<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>")
+            }
+            ContentElement::LinkExpression { text, target } => {
+                use content::{LinkTarget, LinkText};
+                let display_text = match text {
+                    LinkText::Empty => String::new(),
+                    LinkText::Static(s) => escape_html(s),
+                    LinkText::Binding(b) => escape_html(b),
+                };
+                let href = match target {
+                    LinkTarget::PathRef(path) => escape_html(path),
+                    LinkTarget::ThreadExpr { source, .. } => escape_html(source),
+                };
+                format!(
+                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\" href=\"{}\">{}</a>",
+                    href, display_text
+                )
             }
             ContentElement::Table { headers, rows } => {
                 let header_cells = headers
@@ -803,6 +834,120 @@ mod tests {
             }
             other => panic!("expected description as List, got: {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // LinkExpression tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn build_article_graph_stores_link_expression_in_preamble_slot() {
+        use content::{LinkTarget, LinkText};
+        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+
+        // Schema: one heading slot (title) and one link slot (related).
+        let grammar = Grammar {
+            preamble: vec![
+                Slot {
+                    name: SlotName::new("title"),
+                    element: Element::Heading {
+                        level: HeadingLevelRange {
+                            min: HeadingLevel::new(1).unwrap(),
+                            max: HeadingLevel::new(1).unwrap(),
+                        },
+                    },
+                    constraints: vec![],
+                    hint_text: None,
+                    span: Span { start: 0, end: 0 },
+                },
+                Slot {
+                    name: SlotName::new("related"),
+                    element: Element::Link { pattern: String::new() },
+                    constraints: vec![],
+                    hint_text: None,
+                    span: Span { start: 0, end: 0 },
+                },
+            ],
+            body: Some(BodyRules { heading_range: None }),
+        };
+
+        // Manually build a document with a LinkExpression in the "related" slot.
+        use content::{Document, DocumentSlot};
+        use im::vector;
+
+        let related_expr = ContentElement::LinkExpression {
+            text: LinkText::Binding("posts".to_string()),
+            target: LinkTarget::ThreadExpr {
+                source: "post".to_string(),
+                operations: vec![
+                    content::LinkOp::SortBy { field: "published".to_string(), descending: true },
+                    content::LinkOp::Take(4),
+                ],
+            },
+        };
+
+        let doc = Document {
+            preamble: im::vector![
+                DocumentSlot {
+                    name: SlotName::new("title"),
+                    elements: vector![spanned(ContentElement::Heading {
+                        level: schema::HeadingLevel::new(1).unwrap(),
+                        text: "My Page".to_string(),
+                    })],
+                },
+                DocumentSlot {
+                    name: SlotName::new("related"),
+                    elements: vector![spanned(related_expr)],
+                },
+            ],
+            body: vector![],
+            has_separator: true,
+            separator_span: None,
+        };
+
+        let graph = build_article_graph(&doc, &grammar);
+
+        // The "related" slot should contain a Value::LinkExpression.
+        match graph.resolve(&["related"]) {
+            Some(Value::LinkExpression { text, target }) => {
+                assert_eq!(*text, LinkText::Binding("posts".to_string()));
+                assert!(
+                    matches!(target, LinkTarget::ThreadExpr { source, .. } if source == "post"),
+                    "expected ThreadExpr with source 'post', got {target:?}"
+                );
+            }
+            other => panic!("expected Value::LinkExpression for 'related', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn link_expression_display_text_returns_binding_name() {
+        use content::{LinkTarget, LinkText};
+        let v = Value::LinkExpression {
+            text: LinkText::Binding("posts".to_string()),
+            target: LinkTarget::PathRef("/posts".to_string()),
+        };
+        assert_eq!(v.display_text(), Some("posts".to_string()));
+    }
+
+    #[test]
+    fn link_expression_display_text_returns_static_label() {
+        use content::{LinkTarget, LinkText};
+        let v = Value::LinkExpression {
+            text: LinkText::Static("Read more".to_string()),
+            target: LinkTarget::PathRef("/articles".to_string()),
+        };
+        assert_eq!(v.display_text(), Some("Read more".to_string()));
+    }
+
+    #[test]
+    fn link_expression_display_text_empty_is_none() {
+        use content::{LinkTarget, LinkText};
+        let v = Value::LinkExpression {
+            text: LinkText::Empty,
+            target: LinkTarget::PathRef("/articles".to_string()),
+        };
+        assert_eq!(v.display_text(), None);
     }
 
     // ---------------------------------------------------------------------------

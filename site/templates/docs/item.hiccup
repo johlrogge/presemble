@@ -1,3 +1,20 @@
+;; Local template definition for the individual doc page body
+[:template {:presemble/define "body"}
+  [:main {:class "docs"}
+    [:presemble/insert {:data "input.title" :as "h1"}]
+    [:presemble/insert {:data "input.lead" :as "p" :class "docs__lead"}]
+    [:ul {:class "docs__cards"}
+      [:template {:data-each "input.guide"}
+        [:li
+          [:presemble/insert {:data "item.link" :as "h2"}]
+          [:presemble/insert {:data "item.summary" :as "p"}]
+        ]
+      ]
+    ]
+  ]
+]
+
+;; Main template: juxt composes header + local body + footer
 [:html {:lang "en"}
   [:head
     [:meta {:charset "utf-8"}]
@@ -6,25 +23,6 @@
     [:link {:rel "stylesheet" :href "/assets/style.css"}]
   ]
   [:body
-    [:presemble/include {:src "header"}]
-    [:main {:class "docs"}
-      [:presemble/insert {:data "input.title" :as "h1"}]
-      [:presemble/insert {:data "input.lead" :as "p" :class "docs__lead"}]
-      [:ul {:class "docs__cards"}
-        [:li
-          [:a {:href "/guide/getting-started" :class "docs__card"}
-            [:h2 "Getting Started"]
-            [:p "Go from zero to a published site in minutes."]
-          ]
-        ]
-        [:li
-          [:a {:href "/guide/user-guide" :class "docs__card"}
-            [:h2 "User Guide"]
-            [:p "Complete reference for schemas, templates, content, and the build pipeline."]
-          ]
-        ]
-      ]
-    ]
-    [:presemble/include {:src "footer"}]
+    (juxt header self/body footer)
   ]
 ]

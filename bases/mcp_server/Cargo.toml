@@ -1,0 +1,16 @@
+[package]
+name = "mcp_server"
+version = "0.22.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "mcp_server"
+
+[dependencies]
+conductor = { workspace = true }
+editorial_types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

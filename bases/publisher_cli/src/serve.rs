@@ -167,6 +167,9 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                         Ok(conductor::ConductorEvent::CursorScrollTo { anchor }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::ScrollTo { anchor });
                         }
+                        Ok(_) => {
+                            // Ignore events not relevant to the browser (e.g. suggestion lifecycle)
+                        }
                         Err(e) => {
                             eprintln!("Conductor subscription error: {e}");
                             break;
@@ -683,7 +686,8 @@ const INJECT: &str = concat!(
     "icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};",
     "document.addEventListener('click',function(){menu.classList.remove('open');});",
     "menu.onclick=function(e){e.stopPropagation();};",
-    "function setMode(m){mode=m;sessionStorage.setItem('presemble-mode',m);menu.classList.remove('open');update();}",
+    "function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});}",
+    "function setMode(m){if(m!=='edit'){cleanupEditing();}mode=m;sessionStorage.setItem('presemble-mode',m);menu.classList.remove('open');update();}",
     "viewBtn.onclick=function(){setMode('view');};",
     "editBtn.onclick=function(){setMode('edit');};",
     "})();",

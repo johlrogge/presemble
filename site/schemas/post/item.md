@@ -9,6 +9,8 @@ occurs
 : 1..3
 
 [<name>](/author/<name>) {#author}
+type
+: link(author)
 occurs
 : exactly once
 

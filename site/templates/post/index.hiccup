@@ -1,3 +1,20 @@
+;; Local template definition for the post listing body
+[:template {:presemble/define "body"}
+  [:main {:class "post-listing"}
+    [:presemble/insert {:data "input.title" :as "h1"}]
+    [:ul {:class "post-listing__items"}
+      [:template {:data-each "input.post"}
+        [:li {:class "post-card"}
+          [:presemble/insert {:data "item.title" :as "h2"}]
+          [:presemble/insert {:data "item.summary"}]
+          [:presemble/insert {:data "item.link"}]
+        ]
+      ]
+    ]
+  ]
+]
+
+;; Main template: juxt composes header + local body + footer
 [:html {:lang "en"}
   [:head
     [:meta {:charset "utf-8"}]
@@ -6,19 +23,6 @@
     [:link {:rel "stylesheet" :href "/assets/style.css"}]
   ]
   [:body
-    [:presemble/include {:src "header"}]
-    [:main {:class "post-listing"}
-      [:presemble/insert {:data "input.title" :as "h1"}]
-      [:ul {:class "post-listing__items"}
-        [:template {:data-each "post"}
-          [:li {:class "post-card"}
-            [:presemble/insert {:data "item.title" :as "h2"}]
-            [:presemble/insert {:data "item.summary"}]
-            [:presemble/insert {:data "item.link"}]
-          ]
-        ]
-      ]
-    ]
-    [:presemble/include {:src "footer"}]
+    (juxt header self/body footer)
   ]
 ]

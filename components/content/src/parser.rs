@@ -1,4 +1,4 @@
-use crate::document::{ContentElement, Document, FlatDocument};
+use crate::document::{ContentElement, Document, FlatDocument, LinkOp, LinkTarget, LinkText};
 use crate::error::ContentError;
 use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -216,8 +216,17 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::End(TagEnd::Link) => {
                 if let State::Link { text, href, byte_range } = state {
+                    let node = if is_link_expression(&href) {
+                        let link_text = parse_link_text(&text);
+                        match parse_link_target(&href) {
+                            Ok(target) => ContentElement::LinkExpression { text: link_text, target },
+                            Err(_) => ContentElement::Link { text, href },
+                        }
+                    } else {
+                        ContentElement::Link { text, href }
+                    };
                     elements.push_back(Spanned {
-                        node: ContentElement::Link { text, href },
+                        node,
                         span: Span::from(byte_range),
                     });
                     state = State::Idle;
@@ -404,6 +413,174 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
 pub fn parse_and_assign(input: &str, grammar: &Grammar) -> Result<Document, ContentError> {
     let flat = parse_document(input)?;
     Ok(assign_slots(&flat.elements, grammar))
+}
+
+/// Return true when the href should be treated as a link expression (not a plain URL).
+fn is_link_expression(href: &str) -> bool {
+    href.starts_with("(->>") || href.starts_with("(->") || href.starts_with(':')
+}
+
+/// Parse the text part of a link expression `[text](target)`.
+///
+/// - Empty string → `LinkText::Empty`
+/// - Starts with `(` → `LinkText::Static(text)` (expression text, deferred)
+/// - Otherwise → `LinkText::Binding(text)` (the text is a binding name)
+pub fn parse_link_text(text: &str) -> LinkText {
+    if text.is_empty() {
+        LinkText::Empty
+    } else if text.starts_with('(') {
+        LinkText::Static(text.to_string())
+    } else {
+        LinkText::Binding(text.to_string())
+    }
+}
+
+/// Parse the href of a link expression into a [`LinkTarget`].
+///
+/// Recognises:
+/// - `:keyword/path` → `LinkTarget::PathRef` (the leading `:` is stripped)
+/// - `(->> ...)` or `(-> ...)` → `LinkTarget::ThreadExpr`
+///
+/// URL-encoded spaces (`%20`) are decoded before parsing, enabling valid
+/// CommonMark link destinations for expressions that contain spaces.
+pub fn parse_link_target(href: &str) -> Result<LinkTarget, ContentError> {
+    // Decode %20 so callers can write valid CommonMark hrefs with spaces encoded.
+    let decoded;
+    let href = if href.contains("%20") {
+        decoded = href.replace("%20", " ");
+        &decoded
+    } else {
+        href
+    };
+
+    if let Some(path) = href.strip_prefix(':') {
+        // Simple keyword path reference — strip the leading `:`
+        return Ok(LinkTarget::PathRef(path.to_string()));
+    }
+
+    // Threaded expression: (->> ...) or (-> ...)
+    let inner = if href.starts_with("(->>") {
+        href.strip_prefix("(->>")
+            .and_then(|s| s.strip_suffix(')'))
+            .ok_or_else(|| ContentError::ParseError(format!("malformed thread expression: {href}")))?
+            .trim()
+    } else if href.starts_with("(->") {
+        href.strip_prefix("(->")
+            .and_then(|s| s.strip_suffix(')'))
+            .ok_or_else(|| ContentError::ParseError(format!("malformed thread expression: {href}")))?
+            .trim()
+    } else {
+        return Err(ContentError::ParseError(format!("unrecognised link expression: {href}")));
+    };
+
+    // Tokenise the inner content: first token is the source, then balanced `(...)` forms.
+    let mut tokens = split_expression_tokens(inner);
+    if tokens.is_empty() {
+        return Err(ContentError::ParseError("thread expression has no source".to_string()));
+    }
+
+    let raw_source = tokens.remove(0);
+    let source = raw_source.trim_start_matches(':').to_string();
+
+    let mut operations: Vec<LinkOp> = Vec::new();
+    for token in tokens {
+        let op = parse_link_op(token.trim())?;
+        operations.push(op);
+    }
+
+    Ok(LinkTarget::ThreadExpr { source, operations })
+}
+
+/// Split an expression body into tokens: bare words and balanced `(...)` groups.
+fn split_expression_tokens(s: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+                if depth == 0 {
+                    let t = current.trim().to_string();
+                    if !t.is_empty() {
+                        tokens.push(t);
+                    }
+                    current = String::new();
+                }
+            }
+            ' ' | '\t' | '\n' if depth == 0 => {
+                let t = current.trim().to_string();
+                if !t.is_empty() {
+                    tokens.push(t);
+                }
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let t = current.trim().to_string();
+    if !t.is_empty() {
+        tokens.push(t);
+    }
+    tokens
+}
+
+/// Parse a single operation group like `(sort-by :field :desc)` or `(take 4)`.
+fn parse_link_op(s: &str) -> Result<LinkOp, ContentError> {
+    // Strip surrounding parens.
+    let inner = s
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .ok_or_else(|| ContentError::ParseError(format!("expected parenthesised op, got: {s}")))?
+        .trim();
+
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err(ContentError::ParseError("empty operation".to_string()));
+    }
+
+    match parts[0] {
+        "sort-by" => {
+            let field = parts
+                .get(1)
+                .ok_or_else(|| ContentError::ParseError("sort-by requires a field".to_string()))?
+                .trim_start_matches(':')
+                .to_string();
+            let descending = parts
+                .get(2)
+                .map(|d| *d == ":desc")
+                .unwrap_or(false);
+            Ok(LinkOp::SortBy { field, descending })
+        }
+        "take" => {
+            let n: usize = parts
+                .get(1)
+                .ok_or_else(|| ContentError::ParseError("take requires a count".to_string()))?
+                .parse()
+                .map_err(|_| ContentError::ParseError(format!("take argument is not a number: {}", parts[1])))?;
+            Ok(LinkOp::Take(n))
+        }
+        "filter" => {
+            let field = parts
+                .get(1)
+                .ok_or_else(|| ContentError::ParseError("filter requires a field".to_string()))?
+                .trim_start_matches(':')
+                .to_string();
+            let value = parts
+                .get(2)
+                .ok_or_else(|| ContentError::ParseError("filter requires a value".to_string()))?
+                .trim_matches('"')
+                .to_string();
+            Ok(LinkOp::Filter { field, value })
+        }
+        other => Err(ContentError::ParseError(format!("unknown link operation: {other}"))),
+    }
 }
 
 /// Convert a pulldown-cmark HeadingLevel to schema's HeadingLevel.
@@ -952,5 +1129,162 @@ headings
             }
             other => panic!("expected Heading for body heading, got: {other:?}"),
         }
+    }
+
+    // ── Link expressions ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_simple_path_ref() {
+        // [](:fragments/header) -> LinkExpression with PathRef
+        let doc = parse_document("[](:fragments/header)").unwrap();
+        let expr = doc
+            .elements
+            .iter()
+            .find(|e| matches!(e.node, ContentElement::LinkExpression { .. }))
+            .expect("expected a LinkExpression element");
+        match &expr.node {
+            ContentElement::LinkExpression { text, target } => {
+                assert_eq!(*text, crate::document::LinkText::Empty);
+                assert_eq!(
+                    *target,
+                    crate::document::LinkTarget::PathRef("fragments/header".to_string())
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_threaded_expression() {
+        // []((->>%20:post%20(sort-by%20:published%20:desc)%20(take%204)))
+        // -> ThreadExpr with source "post", SortBy + Take ops
+        // %20 encodes spaces so the href is a valid CommonMark bare link destination.
+        let doc = parse_document(
+            "[]((->>%20:post%20(sort-by%20:published%20:desc)%20(take%204)))",
+        )
+        .unwrap();
+        let expr = doc
+            .elements
+            .iter()
+            .find(|e| matches!(e.node, ContentElement::LinkExpression { .. }))
+            .expect("expected a LinkExpression element");
+        match &expr.node {
+            ContentElement::LinkExpression { text, target } => {
+                assert_eq!(*text, crate::document::LinkText::Empty);
+                match target {
+                    crate::document::LinkTarget::ThreadExpr { source, operations } => {
+                        assert_eq!(source, "post");
+                        assert_eq!(operations.len(), 2);
+                        assert_eq!(
+                            operations[0],
+                            crate::document::LinkOp::SortBy {
+                                field: "published".to_string(),
+                                descending: true,
+                            }
+                        );
+                        assert_eq!(operations[1], crate::document::LinkOp::Take(4));
+                    }
+                    other => panic!("expected ThreadExpr, got {other:?}"),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_binding_name() {
+        // [posts]((->>%20:post%20(take%204))) -> LinkText::Binding("posts")
+        // %20 encodes spaces so the href is a valid CommonMark bare link destination.
+        let doc = parse_document("[posts]((->>%20:post%20(take%204)))").unwrap();
+        let expr = doc
+            .elements
+            .iter()
+            .find(|e| matches!(e.node, ContentElement::LinkExpression { .. }))
+            .expect("expected a LinkExpression element");
+        match &expr.node {
+            ContentElement::LinkExpression { text, .. } => {
+                assert_eq!(*text, crate::document::LinkText::Binding("posts".to_string()));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn plain_link_unchanged() {
+        // [text](/some/path) -> regular Link, not LinkExpression
+        let doc = parse_document("[text](/some/path)").unwrap();
+        let link = doc
+            .elements
+            .iter()
+            .find(|e| matches!(e.node, ContentElement::Link { .. }))
+            .expect("expected a plain Link element");
+        match &link.node {
+            ContentElement::Link { text, href } => {
+                assert_eq!(text, "text");
+                assert_eq!(href, "/some/path");
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !doc.elements.iter().any(|e| matches!(e.node, ContentElement::LinkExpression { .. })),
+            "plain link should not produce a LinkExpression"
+        );
+    }
+
+    // ── parse_link_target unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn parse_link_target_path_ref_strips_colon() {
+        let target = super::parse_link_target(":fragments/header").unwrap();
+        assert_eq!(target, crate::document::LinkTarget::PathRef("fragments/header".to_string()));
+    }
+
+    #[test]
+    fn parse_link_target_sort_by_asc_default() {
+        let target = super::parse_link_target("(->> :post (sort-by :published))").unwrap();
+        match target {
+            crate::document::LinkTarget::ThreadExpr { source, operations } => {
+                assert_eq!(source, "post");
+                assert_eq!(
+                    operations[0],
+                    crate::document::LinkOp::SortBy {
+                        field: "published".to_string(),
+                        descending: false,
+                    }
+                );
+            }
+            _ => panic!("expected ThreadExpr"),
+        }
+    }
+
+    #[test]
+    fn parse_link_target_filter_op() {
+        let target =
+            super::parse_link_target(r#"(->> :post (filter :category "news"))"#).unwrap();
+        match target {
+            crate::document::LinkTarget::ThreadExpr { operations, .. } => {
+                assert_eq!(
+                    operations[0],
+                    crate::document::LinkOp::Filter {
+                        field: "category".to_string(),
+                        value: "news".to_string(),
+                    }
+                );
+            }
+            _ => panic!("expected ThreadExpr"),
+        }
+    }
+
+    #[test]
+    fn parse_link_text_empty() {
+        assert_eq!(super::parse_link_text(""), crate::document::LinkText::Empty);
+    }
+
+    #[test]
+    fn parse_link_text_expression_is_static() {
+        assert_eq!(
+            super::parse_link_text("(str title)"),
+            crate::document::LinkText::Static("(str title)".to_string())
+        );
     }
 }

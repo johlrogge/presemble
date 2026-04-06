@@ -1,3 +1,53 @@
+;; Local template definition for the homepage body
+[:template {:presemble/define "body"}
+  [:main {:class "home"}
+    [:section {:class "hero"}
+      [:h1 "Data Not Text"]
+      [:presemble/insert {:data "input.tagline" :as "p"}]
+    ]
+    [:template {:data-slot "input.pitch"}
+      [:section {:class "pitch"}
+        [:presemble/insert {:data "input.pitch" :as "p"}]
+      ]
+    ]
+    [:template {:data-slot "input.body"}
+      [:section {:class "why-presemble"}
+        [:h2 "Why Presemble"]
+        [:presemble/insert {:data "input.body"}]
+      ]
+    ]
+    [:section {:class "feature-grid"}
+      [:h2 "Features"]
+      [:ul {:class "feature-grid__items"}
+        [:template {:data-each "input.highlight"}
+          [:li {:class "feature-card"}
+            [:presemble/insert {:data "item.title" :as "h3"}]
+            [:presemble/insert {:data "item.tagline"}]
+            [:presemble/insert {:data "item.description" :as "p"}]
+            [:presemble/insert {:data "item.link"}]
+          ]
+        ]
+      ]
+      [:p {:class "feature-grid__all"}
+        [:a {:href "/feature"} "See all features →"]
+      ]
+    ]
+    [:section {:class "latest-posts"}
+      [:h2 "From the Blog"]
+      [:ul {:class "latest-posts__items"}
+        [:template {:data-each "input.post"}
+          [:li {:class "post-card"}
+            [:presemble/insert {:data "item.title" :as "h3"}]
+            [:presemble/insert {:data "item.summary"}]
+            [:presemble/insert {:data "item.link"}]
+          ]
+        ]
+      ]
+    ]
+  ]
+]
+
+;; Main template: juxt composes header + local body + footer
 [:html {:lang "en"}
   [:head
     [:meta {:charset "utf-8"}]
@@ -6,52 +56,6 @@
     [:link {:rel "stylesheet" :href "/assets/style.css"}]
   ]
   [:body
-    [:presemble/include {:src "header"}]
-    [:main {:class "home"}
-      [:section {:class "hero"}
-        [:h1 "Data Not Text"]
-        [:presemble/insert {:data "input.tagline" :as "p"}]
-      ]
-      [:template {:data-slot "input.pitch"}
-        [:section {:class "pitch"}
-          [:presemble/insert {:data "input.pitch" :as "p"}]
-        ]
-      ]
-      [:template {:data-slot "input.body"}
-        [:section {:class "why-presemble"}
-          [:h2 "Why Presemble"]
-          [:presemble/insert {:data "input.body"}]
-        ]
-      ]
-      [:section {:class "feature-grid"}
-        [:h2 "Features"]
-        [:ul {:class "feature-grid__items"}
-          [:template {:data-each "input.highlight"}
-            [:li {:class "feature-card"}
-              [:presemble/insert {:data "item.title" :as "h3"}]
-              [:presemble/insert {:data "item.tagline"}]
-              [:presemble/insert {:data "item.description" :as "p"}]
-              [:presemble/insert {:data "item.link"}]
-            ]
-          ]
-        ]
-        [:p {:class "feature-grid__all"}
-          [:a {:href "/feature"} "See all features →"]
-        ]
-      ]
-      [:section {:class "latest-posts"}
-        [:h2 "From the Blog"]
-        [:ul {:class "latest-posts__items"}
-          [:template {:data-each "post"}
-            [:li {:class "post-card"}
-              [:presemble/insert {:data "item.title" :as "h3"}]
-              [:presemble/insert {:data "item.summary"}]
-              [:presemble/insert {:data "item.link"}]
-            ]
-          ]
-        ]
-      ]
-    ]
-    [:presemble/include {:src "footer"}]
+    (juxt header self/body footer)
   ]
 ]

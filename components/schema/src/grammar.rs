@@ -93,6 +93,8 @@ pub enum Constraint {
     Content(ContentConstraint),
     Alt(AltRequirement),
     Orientation(Orientation),
+    /// `type: link(post)` — the slot value must be items of the given schema stem.
+    TypeLink(String),
 }
 
 /// Image orientation constraint.

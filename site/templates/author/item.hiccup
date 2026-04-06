@@ -1,3 +1,12 @@
+;; Local template definition for the individual author page body
+[:template {:presemble/define "body"}
+  [:main {:class "author"}
+    [:article {:class "author__profile"}
+      [:presemble/insert {:data "input.name" :as "h1"}]
+      [:div {:class "author__bio"}
+        [:presemble/insert {:data "input.bio" :as "p"}]]]]]
+
+;; Main template: juxt composes header + local body + footer
 [:html {:lang "en"}
   [:head
     [:meta {:charset "utf-8"}]
@@ -5,10 +14,4 @@
     [:title "Presemble"]
     [:link {:rel "stylesheet" :href "/assets/style.css"}]]
   [:body
-    [:presemble/include {:src "header"}]
-    [:main {:class "author"}
-      [:article {:class "author__profile"}
-        [:presemble/insert {:data "input.name" :as "h1"}]
-        [:div {:class "author__bio"}
-          [:presemble/insert {:data "input.bio" :as "p"}]]]]
-    [:presemble/include {:src "footer"}]]]
+    (juxt header self/body footer)]]

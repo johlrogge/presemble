@@ -1,6 +1,6 @@
 [package]
 name = "conductor"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2024"
 
 [package.metadata.polylith]
@@ -8,6 +8,7 @@ interface = "conductor"
 
 [dependencies]
 dep_graph = { workspace = true }
+editorial_types = { workspace = true }
 site_repository = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }

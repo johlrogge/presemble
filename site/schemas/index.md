@@ -7,6 +7,8 @@ occurs
 : 1..3
 
 [<name>](/feature/<name>) {#highlight}
+type
+: link(feature)
 occurs
 : 1..6
 

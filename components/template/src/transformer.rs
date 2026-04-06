@@ -66,6 +66,12 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
                 } else if el.is_presemble() && el.name == "presemble:apply" {
                     let mut rendered = render_apply(&el, graph, ctx)?;
                     output.append(&mut rendered);
+                } else if el.is_presemble() && el.name == "presemble:juxt" {
+                    // Juxt: transform each child against the same data graph,
+                    // concatenating results. Children are synthetic presemble:include
+                    // or presemble:apply nodes produced by the hiccup parser.
+                    let mut rendered = transform(el.children, graph, ctx)?;
+                    output.append(&mut rendered);
                 } else if el.name == "template" && el.attr("data-slot").is_some() {
                     // Conditional block: render children only if the slot is present.
                     let slot_path = el.attr("data-slot").unwrap().to_string();
@@ -169,6 +175,7 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &DataGraph) -> String {
                     .unwrap_or_default(),
                 Some(Value::Record(_)) => String::new(),
                 Some(Value::Suggestion { hint, .. }) => hint.clone(),
+                Some(Value::LinkExpression { .. }) => String::new(),
             }
         }
         Expr::Pipe(inner, transform) => {
@@ -517,6 +524,8 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
             Ok(vec![Node::Element(element)])
         }
+
+        Some(Value::LinkExpression { .. }) => Ok(Vec::new()),
     }
 }
 
@@ -528,11 +537,6 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
         .ok_or_else(|| RenderError::Render("presemble:apply requires a 'template' attribute".into()))?
         .to_string();
 
-    let data_path = el
-        .attr("data")
-        .ok_or_else(|| RenderError::Render("presemble:apply requires a 'data' attribute".into()))?
-        .to_string();
-
     if ctx.is_too_deep() {
         return Err(RenderError::Render("max depth exceeded".into()));
     }
@@ -540,6 +544,13 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
     let callable_nodes = ctx
         .resolve_callable(&template_name)
         .ok_or_else(|| RenderError::Render(format!("callable not found: '{template_name}'")))?;
+
+    // If data attribute is absent, pass the full graph through (no scoping).
+    // This is the juxt semantic: all children see the same data.
+    let Some(data_path) = el.attr("data") else {
+        return transform(callable_nodes, graph, &ctx.descend());
+    };
+    let data_path = data_path.to_string();
 
     // Resolve the data value. If absent, produce no output.
     let segments: Vec<&str> = data_path.split('.').collect();
@@ -713,6 +724,8 @@ fn render_list_item(
         Value::List(_) => Ok(Vec::new()),
 
         Value::Suggestion { .. } => Ok(Vec::new()),
+
+        Value::LinkExpression { .. } => Ok(Vec::new()),
     }
 }
 
@@ -1816,5 +1829,102 @@ mod tests {
         // :apply capitalize on "hello world" -> "Hello world"
         let result = apply_string_function("capitalize", "hello world").unwrap();
         assert_eq!(result, Some("Hello world".to_string()));
+    }
+
+    // ---------------------------------------------------------------------------
+    // presemble:juxt tests
+    // ---------------------------------------------------------------------------
+
+    struct TwoTemplateRegistry;
+    impl crate::registry::TemplateRegistry for TwoTemplateRegistry {
+        fn resolve(&self, name: &str) -> Option<Vec<Node>> {
+            match name {
+                "header" => Some(parse_template_xml(r#"<header>HEADER</header>"#).unwrap()),
+                "footer" => Some(parse_template_xml(r#"<footer>FOOTER</footer>"#).unwrap()),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn juxt_concatenates_template_outputs() {
+        // A presemble:juxt node with two presemble:include children should produce
+        // the output of both templates concatenated in order.
+        let graph = DataGraph::new();
+        let reg = TwoTemplateRegistry;
+        let ctx = RenderContext::new(&reg);
+
+        let juxt_node = Node::Element(Element {
+            name: "presemble:juxt".to_string(),
+            attrs: vec![],
+            children: vec![
+                Node::Element(Element {
+                    name: "presemble:include".to_string(),
+                    attrs: vec![("src".to_string(), Form::Str("header".to_string()))],
+                    children: vec![],
+                }),
+                Node::Element(Element {
+                    name: "presemble:include".to_string(),
+                    attrs: vec![("src".to_string(), Form::Str("footer".to_string()))],
+                    children: vec![],
+                }),
+            ],
+        });
+
+        let result = transform(vec![juxt_node], &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        // Both outputs should appear in order
+        let header_pos = html.find("<header>HEADER</header>").expect("header should appear");
+        let footer_pos = html.find("<footer>FOOTER</footer>").expect("footer should appear");
+        assert!(header_pos < footer_pos, "header should come before footer in: {html}");
+    }
+
+    #[test]
+    fn juxt_children_share_same_data() {
+        // All juxt children should see the same data graph.
+        let mut graph = DataGraph::new();
+        graph.insert("greeting", Value::Text("Hello".to_string()));
+
+        struct DataReadRegistry;
+        impl crate::registry::TemplateRegistry for DataReadRegistry {
+            fn resolve(&self, name: &str) -> Option<Vec<Node>> {
+                match name {
+                    "part1" => Some(parse_template_xml(r#"<span><presemble:insert data="greeting" /></span>"#).unwrap()),
+                    "part2" => Some(parse_template_xml(r#"<em><presemble:insert data="greeting" /></em>"#).unwrap()),
+                    _ => None,
+                }
+            }
+        }
+
+        let reg = DataReadRegistry;
+        let ctx = RenderContext::new(&reg);
+
+        let juxt_node = Node::Element(Element {
+            name: "presemble:juxt".to_string(),
+            attrs: vec![],
+            children: vec![
+                Node::Element(Element {
+                    name: "presemble:include".to_string(),
+                    attrs: vec![("src".to_string(), Form::Str("part1".to_string()))],
+                    children: vec![],
+                }),
+                Node::Element(Element {
+                    name: "presemble:include".to_string(),
+                    attrs: vec![("src".to_string(), Form::Str("part2".to_string()))],
+                    children: vec![],
+                }),
+            ],
+        });
+
+        let result = transform(vec![juxt_node], &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+
+        // Both children should have seen "greeting" = "Hello"
+        assert_eq!(html.matches("Hello").count(), 2, "both children should see 'Hello': {html}");
+        assert!(html.contains("<em"), "second template output (em) should appear: {html}");
+        // The output should contain both template wrappers
+        let part1_pos = html.find("<span").expect("span from part1 should appear");
+        let part2_pos = html.find("<em").expect("em from part2 should appear");
+        assert!(part1_pos < part2_pos, "part1 output should come before part2: {html}");
     }
 }

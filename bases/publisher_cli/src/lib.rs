@@ -3,6 +3,8 @@ mod lsp;
 mod serve;
 pub mod template_registry;
 
+use rayon::prelude::*;
+
 pub use template_registry::FileTemplateRegistry;
 
 pub use dep_graph::DependencyGraph;
@@ -298,6 +300,11 @@ enum Command {
         #[arg(long, short)]
         output: Option<String>,
     },
+    /// Run the MCP server for Claude Code integration (reads JSON-RPC from stdin, writes to stdout)
+    Mcp {
+        /// Path to the site directory
+        site_dir: String,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -340,6 +347,9 @@ pub fn run() -> Result<(), CliError> {
         }
         Some(Command::Convert { input, to, output }) => {
             convert_template(Path::new(&input), &to, output.as_deref().map(Path::new))
+        }
+        Some(Command::Mcp { site_dir }) => {
+            mcp_server::run(Path::new(&site_dir)).map_err(CliError::Render)
         }
         None => {
             // backward compat: presemble <site-dir>
@@ -485,6 +495,189 @@ pub fn build_content_page(
     })
 }
 
+/// Phase 1.5: Resolve link expressions in all page data graphs.
+///
+/// Walks every page's data graph looking for `Value::LinkExpression` entries
+/// (either at the top level or inside a `Value::List`).
+/// For each one:
+/// - `PathRef`: resolves to a single item's data (like a link to /post/hello-world)
+/// - `ThreadExpr`: collects items for the source stem, applies operations, produces a list
+///
+/// The resolved value replaces the `LinkExpression` in the data graph.
+fn resolve_link_expressions(site_graph: &mut SiteGraph) {
+    // Build a URL → DataGraph index for PathRef lookups
+    let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
+        .iter_pages_by_kind(PageKind::Item)
+        .filter_map(|n| n.page_data().map(|pd| (n.url_path.as_str().to_string(), pd.data.clone())))
+        .collect();
+
+    // Build a stem → Vec<DataGraph> index for ThreadExpr lookups
+    let mut stem_index: std::collections::HashMap<String, Vec<(String, template::DataGraph)>> =
+        std::collections::HashMap::new();
+    for node in site_graph.iter_pages_by_kind(PageKind::Item) {
+        if let Some(pd) = node.page_data() {
+            stem_index
+                .entry(pd.schema_stem.as_str().to_string())
+                .or_default()
+                .push((node.url_path.as_str().to_string(), pd.data.clone()));
+        }
+    }
+
+    // Collect all page URLs to iterate over (avoids borrow conflicts)
+    let urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
+
+    for url in &urls {
+        if let Some(node) = site_graph.get_mut(url)
+            && let Some(pd) = node.page_data_mut()
+        {
+            resolve_link_expressions_in_graph(&mut pd.data, &url_index, &stem_index);
+        }
+    }
+}
+
+/// Resolve all `Value::LinkExpression` entries in a single `DataGraph`.
+/// Also resolves `LinkExpression` values inside `Value::List` items.
+fn resolve_link_expressions_in_graph(
+    graph: &mut template::DataGraph,
+    url_index: &std::collections::HashMap<String, template::DataGraph>,
+    stem_index: &std::collections::HashMap<String, Vec<(String, template::DataGraph)>>,
+) {
+    // Collect all top-level keys first (avoids borrow conflicts)
+    let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
+
+    for key in keys {
+        let resolved = match graph.resolve(&[key.as_str()]) {
+            Some(template::Value::LinkExpression { text, target }) => {
+                let text = text.clone();
+                let target = target.clone();
+                Some(evaluate_link_expression(&text, &target, url_index, stem_index))
+            }
+            Some(template::Value::List(items)) => {
+                // Resolve any LinkExpression items inside a list
+                let new_items: Vec<template::Value> = items
+                    .iter()
+                    .flat_map(|item| match item {
+                        template::Value::LinkExpression { text, target } => {
+                            let resolved =
+                                evaluate_link_expression(text, target, url_index, stem_index);
+                            // A ThreadExpr inside a list may expand to a List — flatten it
+                            match resolved {
+                                template::Value::List(inner) => inner,
+                                other => vec![other],
+                            }
+                        }
+                        other => vec![other.clone()],
+                    })
+                    .collect();
+                Some(template::Value::List(new_items))
+            }
+            _ => None,
+        };
+
+        if let Some(value) = resolved {
+            graph.insert(key, value);
+        }
+    }
+}
+
+/// Evaluate a single link expression to a concrete `Value`.
+fn evaluate_link_expression(
+    text: &content::LinkText,
+    target: &content::LinkTarget,
+    url_index: &std::collections::HashMap<String, template::DataGraph>,
+    stem_index: &std::collections::HashMap<String, Vec<(String, template::DataGraph)>>,
+) -> template::Value {
+    match target {
+        content::LinkTarget::PathRef(path) => {
+            if let Some(data) = url_index.get(path) {
+                let mut record = data.clone();
+                // Inject href and text into the resolved record
+                record.insert("href", template::Value::Text(path.clone()));
+                if let content::LinkText::Static(label) = text {
+                    record.insert("text", template::Value::Text(label.clone()));
+                }
+                template::Value::Record(record)
+            } else {
+                eprintln!(
+                    "[presemble] warning: link expression references unknown path '{path}'"
+                );
+                template::Value::Absent
+            }
+        }
+
+        content::LinkTarget::ThreadExpr { source, operations } => {
+            let items = stem_index.get(source).cloned().unwrap_or_default();
+
+            // Build initial list of (url, DataGraph) pairs
+            let mut result: Vec<(String, template::DataGraph)> = items;
+
+            // Apply operations in order
+            for op in operations {
+                match op {
+                    content::LinkOp::SortBy { field, descending } => {
+                        let field = field.clone();
+                        let desc = *descending;
+                        result.sort_by(|(_, a), (_, b)| {
+                            let ak = sort_key_for(a, &field);
+                            let bk = sort_key_for(b, &field);
+                            let ord = ak.cmp(&bk);
+                            if desc { ord.reverse() } else { ord }
+                        });
+                    }
+                    content::LinkOp::Take(n) => {
+                        result.truncate(*n);
+                    }
+                    content::LinkOp::Filter { field, value } => {
+                        let field = field.clone();
+                        let value = value.clone();
+                        result.retain(|(_, data)| {
+                            let field_ref: &str = &field;
+                            data.resolve(&[field_ref])
+                                .and_then(|v| v.display_text())
+                                .map(|t| t == value)
+                                .unwrap_or(false)
+                        });
+                    }
+                }
+            }
+
+            // Convert to Value::List of Records (with href injected)
+            let values: Vec<template::Value> = result
+                .into_iter()
+                .map(|(url, mut data)| {
+                    data.insert("href", template::Value::Text(url));
+                    template::Value::Record(data)
+                })
+                .collect();
+
+            template::Value::List(values)
+        }
+    }
+}
+
+/// Produce a sort key for a DataGraph field.
+/// Returns a `SortKey` enum that compares numeric values numerically
+/// and falls back to string comparison.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum SortKey {
+    Numeric(i64),
+    Text(String),
+    Missing,
+}
+
+fn sort_key_for(data: &template::DataGraph, field: &str) -> SortKey {
+    match data.resolve(&[field]).and_then(|v| v.display_text()) {
+        None => SortKey::Missing,
+        Some(text) => {
+            if let Ok(n) = text.parse::<i64>() {
+                SortKey::Numeric(n)
+            } else {
+                SortKey::Text(text)
+            }
+        }
+    }
+}
+
 /// Resolve cross-content references in a single DataGraph (one level deep).
 ///
 /// When a `Value::Record` has an `href` that matches another page's url_path,
@@ -566,7 +759,7 @@ fn make_rewriter(page_url: &str, config: &UrlConfig) -> template::UrlRewriter {
 /// Build the template render context for a site node.
 ///
 /// Page's own data is always available under `"input"`.
-/// All collections are also available, keyed by stem name (singular).
+/// All collections are also available under `"input.<stem>"` (e.g., `input.post`).
 /// Inside `data-each` loops, each item is bound under `"item"` (or a
 /// named variable via the `:item` attribute), while `"input"` and all
 /// collection keys remain accessible.
@@ -576,10 +769,9 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
         return ctx;
     };
 
-    // Page's own data under "input"
-    ctx.insert("input", template::Value::Record(pd.data.clone()));
-
-    // All collections by stem name (singular, no pluralization)
+    // All collections by stem name (singular, no pluralization), injected into
+    // the input record so templates reference them as `input.<stem>`.
+    let mut page_data = pd.data.clone();
     let mut stems: Vec<SchemaStem> = graph
         .iter_pages_by_kind(PageKind::Item)
         .filter_map(|n| n.page_data().map(|d| d.schema_stem.clone()))
@@ -588,13 +780,21 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
         .collect();
     stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for stem in stems {
+        // Don't overwrite page's own slots (e.g., a resolved "author" link)
+        // with the collection of all authors.
+        if page_data.resolve(&[stem.as_str()]).is_some() {
+            continue;
+        }
         let items: Vec<template::Value> = graph
             .items_for_stem(&stem)
             .into_iter()
             .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
             .collect();
-        ctx.insert(stem.as_str(), template::Value::List(items));
+        page_data.insert(stem.as_str(), template::Value::List(items));
     }
+
+    // Page's own data (plus injected collections) under "input"
+    ctx.insert("input", template::Value::Record(page_data));
 
     ctx
 }
@@ -627,8 +827,6 @@ fn render_with_context(
             let html = template::serialize_nodes(&rewritten);
             std::fs::create_dir_all(output_path.parent().unwrap())?;
             std::fs::write(output_path, &html)?;
-            println!("{schema_stem}: PASS");
-            println!("  \u{2192} {}", output_path.display());
             Ok(true)
         }
         Err(e) => {
@@ -860,14 +1058,21 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             }
         };
 
-        // Discover content slugs for this schema via repo
-        let content_slugs = repo.content_slugs(stem);
+        // Discover content slugs for this schema via repo.
+        // Collect (content_path, source) pairs sequentially first, then
+        // parallelize the CPU-bound build_content_page step.
+        struct SlugInput {
+            content_path: std::path::PathBuf,
+            content_source: String,
+        }
 
-        for slug in content_slugs {
-            let content_path = repo.content_path(stem, &slug);
+        let content_slugs = repo.content_slugs(stem);
+        let mut slug_inputs: Vec<SlugInput> = Vec::with_capacity(content_slugs.len());
+        for slug in &content_slugs {
+            let content_path = repo.content_path(stem, slug);
 
             // Read content source via repo
-            let content_source = match repo.content_source(stem, &slug) {
+            let content_source = match repo.content_source(stem, slug) {
                 Some(s) => s,
                 None => {
                     eprintln!("warning: could not read content/{schema_stem}/{slug}.md");
@@ -875,21 +1080,42 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 }
             };
 
-            // Track content path for index deps
+            // Track content path for index deps (sequential, safe)
             all_content_paths.push(content_path.clone());
+            slug_inputs.push(SlugInput { content_path, content_source });
+        }
 
-            let attempt = build_content_page(
-                site_dir,
-                schema_stem,
-                &schema_path,
-                &content_path,
-                &content_source,
-                &grammar,
-            )?;
+        // Build all pages for this schema in parallel.
+        struct SlugBuildResult {
+            content_path: std::path::PathBuf,
+            attempt: Result<PageBuildAttempt, CliError>,
+        }
+
+        let slug_results: Vec<SlugBuildResult> = slug_inputs
+            .par_iter()
+            .map(|input| {
+                let attempt = build_content_page(
+                    site_dir,
+                    schema_stem,
+                    &schema_path,
+                    &input.content_path,
+                    &input.content_source,
+                    &grammar,
+                );
+                SlugBuildResult {
+                    content_path: input.content_path.clone(),
+                    attempt,
+                }
+            })
+            .collect();
+
+        // Merge results sequentially into site_graph, dep_graph, etc.
+        for result in slug_results {
+            let content_path = result.content_path;
+            let attempt = result.attempt?;
             let disposition = (policy.page_policy)(&attempt);
             match disposition {
                 PageDisposition::Include => {
-                    println!("{}: PASS", attempt.file_name);
                     if let Some(page_result) = attempt.page {
                         dep_graph.register(page_result.output_path.clone(), page_result.deps.clone());
                         let url_path_str = page_result.built.url_path.clone();
@@ -1098,6 +1324,9 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         }
     }
 
+    // Phase 1.5: Resolve link expressions (before cross-content reference resolution)
+    resolve_link_expressions(&mut site_graph);
+
     // Phase 2: Resolve all cross-content references once
     {
         let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
@@ -1138,31 +1367,35 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             .map(|n| n.url_path.as_str().to_string())
             .collect();
 
-        let mut link_errors: Vec<(String, String)> = Vec::new();
-
-        for node in site_graph.iter_pages_by_kind(PageKind::Item) {
-            if let Some(pd) = node.page_data() {
-                for (key, value) in pd.data.iter() {
-                    if key.starts_with('_') {
-                        continue; // skip internal metadata
-                    }
-                    if let template::Value::Record(sub) = value
-                        && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
-                    {
-                        // Only validate internal links (starting with /)
-                        if href.starts_with('/') && !url_set.contains(href) {
-                            link_errors.push((
-                                node.url_path.as_str().to_string(),
-                                format!(
-                                    "broken link: '{key}' references '{}' which does not exist",
-                                    href
-                                ),
-                            ));
+        let item_pages: Vec<&SiteNode> = site_graph.iter_pages_by_kind(PageKind::Item).collect();
+        let link_errors: Vec<(String, String)> = item_pages
+            .par_iter()
+            .flat_map(|node| {
+                let mut errors = Vec::new();
+                if let Some(pd) = node.page_data() {
+                    for (key, value) in pd.data.iter() {
+                        if key.starts_with('_') {
+                            continue; // skip internal metadata
+                        }
+                        if let template::Value::Record(sub) = value
+                            && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                        {
+                            // Only validate internal links (starting with /)
+                            if href.starts_with('/') && !url_set.contains(href) {
+                                errors.push((
+                                    node.url_path.as_str().to_string(),
+                                    format!(
+                                        "broken link: '{key}' references '{}' which does not exist",
+                                        href
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
-            }
-        }
+                errors
+            })
+            .collect();
 
         if !link_errors.is_empty() {
             for (page_url, msg) in &link_errors {
@@ -1191,42 +1424,55 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
 
     // Phase 3: Render all entries using build_render_context
     {
-        let node_urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
-        for url in &node_urls {
-            let (render_context, schema_stem_str, template_path, output_path, page_url_str) = {
-                let node = match site_graph.get(url) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let Some(pd) = node.page_data() else { continue };
+        // Collect all render inputs up front (immutable reads from site_graph).
+        struct RenderInput {
+            context: template::DataGraph,
+            schema_stem: String,
+            template_path: std::path::PathBuf,
+            output_path: std::path::PathBuf,
+            page_url: String,
+        }
+
+        let render_inputs: Vec<RenderInput> = site_graph
+            .iter()
+            .filter_map(|node| {
+                let pd = node.page_data()?;
                 let tmpl = &pd.template_path;
                 if tmpl == std::path::Path::new("") || !tmpl.exists() {
-                    continue;
+                    return None;
                 }
                 let ctx = build_render_context(node, &site_graph);
-                (
-                    ctx,
-                    pd.schema_stem.as_str().to_string(),
-                    tmpl.clone(),
-                    node.output_path.clone(),
-                    node.url_path.as_str().to_string(),
-                )
-            };
+                Some(RenderInput {
+                    context: ctx,
+                    schema_stem: pd.schema_stem.as_str().to_string(),
+                    template_path: tmpl.clone(),
+                    output_path: node.output_path.clone(),
+                    page_url: node.url_path.as_str().to_string(),
+                })
+            })
+            .collect();
 
-            // Render using the pre-assembled context.
-            let rendered = render_with_context(
-                &render_context,
-                &schema_stem_str,
-                &template_path,
-                &output_path,
-                &registry,
-                &page_url_str,
-                url_config,
-            )?;
-            if rendered {
-                files_built += 1;
-            } else {
-                files_failed += 1;
+        // Render in parallel. Each page writes to a distinct output file.
+        let render_results: Vec<Result<bool, CliError>> = render_inputs
+            .par_iter()
+            .map(|input| {
+                render_with_context(
+                    &input.context,
+                    &input.schema_stem,
+                    &input.template_path,
+                    &input.output_path,
+                    &registry,
+                    &input.page_url,
+                    url_config,
+                )
+            })
+            .collect();
+
+        // Merge results sequentially.
+        for result in render_results {
+            match result? {
+                true => files_built += 1,
+                false => files_failed += 1,
             }
         }
 
@@ -1297,6 +1543,13 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     // Clean up stale output files that are no longer in the dep_graph
     if output_dir.exists() {
         cleanup_stale_outputs(&output_dir, &dep_graph);
+    }
+
+    // Print build summary
+    if files_failed == 0 {
+        println!("  {} pages built successfully", files_built);
+    } else {
+        println!("  {} pages built, {} failed", files_built, files_failed);
     }
 
     Ok(BuildOutcome {
@@ -1996,6 +2249,348 @@ mod tests {
         let affected = dep_graph.affected_outputs(std::path::Path::new("/site/assets/base.css"));
         assert!(affected.contains(&PathBuf::from("/out/assets/base.css")));
         assert!(affected.contains(&PathBuf::from("/out/assets/style.css")));
+    }
+
+    // ── resolve_link_expressions unit tests ──────────────────────────────────
+
+    fn make_item_node_with_data(
+        stem: &str,
+        url: &str,
+        data: template::DataGraph,
+    ) -> SiteNode {
+        use std::collections::HashSet;
+        SiteNode {
+            url_path: UrlPath::new(url),
+            output_path: std::path::PathBuf::from(format!("output{url}/index.html")),
+            source_path: std::path::PathBuf::from(format!("content/{stem}/item.md")),
+            deps: HashSet::new(),
+            role: NodeRole::Page(PageData {
+                page_kind: PageKind::Item,
+                schema_stem: SchemaStem::new(stem),
+                template_path: std::path::PathBuf::from(format!("templates/{stem}/item.html")),
+                content_path: std::path::PathBuf::from(format!("content/{stem}/item.md")),
+                schema_path: std::path::PathBuf::from(format!("schemas/{stem}/item.md")),
+                data,
+            }),
+        }
+    }
+
+    fn make_consumer_node(
+        stem: &str,
+        url: &str,
+        link_expr_key: &str,
+        link_text: content::LinkText,
+        link_target: content::LinkTarget,
+    ) -> SiteNode {
+        use std::collections::HashSet;
+        let mut data = template::DataGraph::new();
+        data.insert(
+            link_expr_key,
+            template::Value::LinkExpression {
+                text: link_text,
+                target: link_target,
+            },
+        );
+        SiteNode {
+            url_path: UrlPath::new(url),
+            output_path: std::path::PathBuf::from(format!("output{url}/index.html")),
+            source_path: std::path::PathBuf::from(format!("content/{stem}/item.md")),
+            deps: HashSet::new(),
+            role: NodeRole::Page(PageData {
+                page_kind: PageKind::Item,
+                schema_stem: SchemaStem::new(stem),
+                template_path: std::path::PathBuf::from(format!("templates/{stem}/item.html")),
+                content_path: std::path::PathBuf::from(format!("content/{stem}/item.md")),
+                schema_path: std::path::PathBuf::from(format!("schemas/{stem}/item.md")),
+                data,
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_link_expressions_path_ref_resolves_to_record() {
+        let mut graph = SiteGraph::new();
+
+        // Target item with some data
+        let mut target_data = template::DataGraph::new();
+        target_data.insert("title", template::Value::Text("Hello World".to_string()));
+        graph.insert(make_item_node_with_data("post", "/post/hello", target_data));
+
+        // Consumer page with a PathRef expression
+        graph.insert(make_consumer_node(
+            "page",
+            "/page/about",
+            "featured",
+            content::LinkText::Static("Read more".to_string()),
+            content::LinkTarget::PathRef("/post/hello".to_string()),
+        ));
+
+        resolve_link_expressions(&mut graph);
+
+        let consumer = graph.get(&UrlPath::new("/page/about")).unwrap();
+        let pd = consumer.page_data().unwrap();
+        let value = pd.data.resolve(&["featured"]);
+        assert!(
+            matches!(value, Some(template::Value::Record(_))),
+            "PathRef should resolve to a Record; got: {value:?}"
+        );
+        // The resolved record should contain the target's title
+        if let Some(template::Value::Record(rec)) = value {
+            assert_eq!(
+                rec.resolve(&["title"]).and_then(|v| v.display_text()),
+                Some("Hello World".to_string()),
+                "resolved record should have target's title"
+            );
+            // href should be injected
+            assert_eq!(
+                rec.resolve(&["href"]).and_then(|v| v.display_text()),
+                Some("/post/hello".to_string()),
+                "resolved record should have href"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_link_expressions_path_ref_missing_path_becomes_absent() {
+        let mut graph = SiteGraph::new();
+
+        // Consumer with a PathRef to a non-existent page
+        graph.insert(make_consumer_node(
+            "page",
+            "/page/about",
+            "missing_ref",
+            content::LinkText::Empty,
+            content::LinkTarget::PathRef("/does-not-exist".to_string()),
+        ));
+
+        resolve_link_expressions(&mut graph);
+
+        let consumer = graph.get(&UrlPath::new("/page/about")).unwrap();
+        let pd = consumer.page_data().unwrap();
+        let value = pd.data.resolve(&["missing_ref"]);
+        assert!(
+            matches!(value, Some(template::Value::Absent)),
+            "unknown PathRef should resolve to Absent; got: {value:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_link_expressions_thread_expr_collects_all_items() {
+        let mut graph = SiteGraph::new();
+
+        // Three post items
+        for (slug, title) in [("a", "Alpha"), ("b", "Beta"), ("c", "Gamma")] {
+            let mut data = template::DataGraph::new();
+            data.insert("title", template::Value::Text(title.to_string()));
+            graph.insert(make_item_node_with_data(
+                "post",
+                &format!("/post/{slug}"),
+                data,
+            ));
+        }
+
+        // Consumer with a ThreadExpr collecting all posts (no operations)
+        graph.insert(make_consumer_node(
+            "page",
+            "/page/listing",
+            "posts",
+            content::LinkText::Empty,
+            content::LinkTarget::ThreadExpr {
+                source: "post".to_string(),
+                operations: vec![],
+            },
+        ));
+
+        resolve_link_expressions(&mut graph);
+
+        let consumer = graph.get(&UrlPath::new("/page/listing")).unwrap();
+        let pd = consumer.page_data().unwrap();
+        let value = pd.data.resolve(&["posts"]);
+        assert!(
+            matches!(value, Some(template::Value::List(_))),
+            "ThreadExpr should resolve to a List; got: {value:?}"
+        );
+        if let Some(template::Value::List(items)) = value {
+            assert_eq!(items.len(), 3, "should have all 3 posts");
+        }
+    }
+
+    #[test]
+    fn resolve_link_expressions_thread_expr_take_limits_results() {
+        let mut graph = SiteGraph::new();
+
+        for (slug, title) in [("a", "Alpha"), ("b", "Beta"), ("c", "Gamma")] {
+            let mut data = template::DataGraph::new();
+            data.insert("title", template::Value::Text(title.to_string()));
+            graph.insert(make_item_node_with_data(
+                "post",
+                &format!("/post/{slug}"),
+                data,
+            ));
+        }
+
+        graph.insert(make_consumer_node(
+            "page",
+            "/page/limited",
+            "recent_posts",
+            content::LinkText::Empty,
+            content::LinkTarget::ThreadExpr {
+                source: "post".to_string(),
+                operations: vec![content::LinkOp::Take(2)],
+            },
+        ));
+
+        resolve_link_expressions(&mut graph);
+
+        let consumer = graph.get(&UrlPath::new("/page/limited")).unwrap();
+        let pd = consumer.page_data().unwrap();
+        if let Some(template::Value::List(items)) = pd.data.resolve(&["recent_posts"]) {
+            assert_eq!(items.len(), 2, "Take(2) should limit to 2 items");
+        } else {
+            panic!("expected List for recent_posts");
+        }
+    }
+
+    #[test]
+    fn resolve_link_expressions_thread_expr_sort_by_ascending() {
+        let mut graph = SiteGraph::new();
+
+        // Posts with numeric published field
+        for (slug, published) in [("a", "3"), ("b", "1"), ("c", "2")] {
+            let mut data = template::DataGraph::new();
+            data.insert("published", template::Value::Text(published.to_string()));
+            graph.insert(make_item_node_with_data(
+                "post",
+                &format!("/post/{slug}"),
+                data,
+            ));
+        }
+
+        graph.insert(make_consumer_node(
+            "page",
+            "/page/sorted",
+            "sorted_posts",
+            content::LinkText::Empty,
+            content::LinkTarget::ThreadExpr {
+                source: "post".to_string(),
+                operations: vec![content::LinkOp::SortBy {
+                    field: "published".to_string(),
+                    descending: false,
+                }],
+            },
+        ));
+
+        resolve_link_expressions(&mut graph);
+
+        let consumer = graph.get(&UrlPath::new("/page/sorted")).unwrap();
+        let pd = consumer.page_data().unwrap();
+        if let Some(template::Value::List(items)) = pd.data.resolve(&["sorted_posts"]) {
+            assert_eq!(items.len(), 3);
+            // Verify ascending order by published
+            let pubs: Vec<String> = items
+                .iter()
+                .filter_map(|v| {
+                    if let template::Value::Record(r) = v {
+                        r.resolve(&["published"])
+                            .and_then(|vv| vv.display_text())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(pubs, vec!["1", "2", "3"], "should be sorted ascending: {pubs:?}");
+        } else {
+            panic!("expected List for sorted_posts");
+        }
+    }
+
+    #[test]
+    fn resolve_link_expressions_thread_expr_filter_by_field() {
+        let mut graph = SiteGraph::new();
+
+        // Posts with a category field
+        for (slug, cat) in [("a", "rust"), ("b", "news"), ("c", "rust")] {
+            let mut data = template::DataGraph::new();
+            data.insert("category", template::Value::Text(cat.to_string()));
+            graph.insert(make_item_node_with_data(
+                "post",
+                &format!("/post/{slug}"),
+                data,
+            ));
+        }
+
+        graph.insert(make_consumer_node(
+            "page",
+            "/page/rust",
+            "rust_posts",
+            content::LinkText::Empty,
+            content::LinkTarget::ThreadExpr {
+                source: "post".to_string(),
+                operations: vec![content::LinkOp::Filter {
+                    field: "category".to_string(),
+                    value: "rust".to_string(),
+                }],
+            },
+        ));
+
+        resolve_link_expressions(&mut graph);
+
+        let consumer = graph.get(&UrlPath::new("/page/rust")).unwrap();
+        let pd = consumer.page_data().unwrap();
+        if let Some(template::Value::List(items)) = pd.data.resolve(&["rust_posts"]) {
+            assert_eq!(items.len(), 2, "Filter should keep only 'rust' posts");
+        } else {
+            panic!("expected List for rust_posts");
+        }
+    }
+
+    #[test]
+    fn resolve_link_expressions_thread_expr_sort_descending() {
+        let mut graph = SiteGraph::new();
+
+        for (slug, published) in [("a", "1"), ("b", "3"), ("c", "2")] {
+            let mut data = template::DataGraph::new();
+            data.insert("published", template::Value::Text(published.to_string()));
+            graph.insert(make_item_node_with_data(
+                "post",
+                &format!("/post/{slug}"),
+                data,
+            ));
+        }
+
+        graph.insert(make_consumer_node(
+            "page",
+            "/page/desc",
+            "latest_posts",
+            content::LinkText::Empty,
+            content::LinkTarget::ThreadExpr {
+                source: "post".to_string(),
+                operations: vec![content::LinkOp::SortBy {
+                    field: "published".to_string(),
+                    descending: true,
+                }],
+            },
+        ));
+
+        resolve_link_expressions(&mut graph);
+
+        let consumer = graph.get(&UrlPath::new("/page/desc")).unwrap();
+        let pd = consumer.page_data().unwrap();
+        if let Some(template::Value::List(items)) = pd.data.resolve(&["latest_posts"]) {
+            let pubs: Vec<String> = items
+                .iter()
+                .filter_map(|v| {
+                    if let template::Value::Record(r) = v {
+                        r.resolve(&["published"]).and_then(|vv| vv.display_text())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(pubs, vec!["3", "2", "1"], "should be sorted descending: {pubs:?}");
+        } else {
+            panic!("expected List for latest_posts");
+        }
     }
 
 }

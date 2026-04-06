@@ -1,0 +1,11 @@
+{
+  "id": "sug-18a39a121c276ae2",
+  "author": "Claude",
+  "file": "content/post/the-dream-of-a-semantic-site-generator.md",
+  "slot": "summary",
+  "proposed_value": "Why I have spent two decades chasing the idea of a semantic site generator — and why this time, with homoiconic templates, content graphs, and pure functions, the model finally works.",
+  "reason": "More specific and compelling — names the key ideas (homoiconic templates, content graphs, pure functions) that make the reader want to continue",
+  "status": "Accepted",
+  "original_value": null,
+  "created_at": "1775432080"
+}

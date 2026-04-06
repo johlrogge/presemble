@@ -101,6 +101,7 @@ pub struct Conductor {
     doc_sources: RwLock<HashMap<PathBuf, String>>, // path -> in-memory text
     site_index: site_index::SiteIndex,
     repo: site_repository::SiteRepository,
+    suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::Suggestion>>,
 }
 
 impl Conductor {
@@ -128,7 +129,7 @@ impl Conductor {
             }
         }
 
-        Ok(Self {
+        let conductor = Self {
             site_dir,
             output_dir,
             dep_graph: RwLock::new(dep_graph::DependencyGraph::new()),
@@ -136,7 +137,14 @@ impl Conductor {
             doc_sources: RwLock::new(HashMap::new()),
             site_index,
             repo,
-        })
+            suggestions: RwLock::new(HashMap::new()),
+        };
+
+        // Load persisted pending suggestions from disk
+        let suggestions = conductor.load_suggestions();
+        *conductor.suggestions.write().unwrap() = suggestions;
+
+        Ok(conductor)
     }
 
     pub fn site_dir(&self) -> &Path {
@@ -308,6 +316,87 @@ impl Conductor {
         None
     }
 
+    /// Path to the .presemble/suggestions directory.
+    fn suggestions_dir(&self) -> PathBuf {
+        self.site_dir.join(".presemble").join("suggestions")
+    }
+
+    /// Persist a suggestion to disk as JSON.
+    fn persist_suggestion(&self, suggestion: &editorial_types::Suggestion) -> Result<(), String> {
+        let dir = self.suggestions_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+        let path = dir.join(format!("{}.json", suggestion.id));
+        let json = serde_json::to_string_pretty(suggestion).map_err(|e| format!("json: {e}"))?;
+        std::fs::write(path, json).map_err(|e| format!("write: {e}"))?;
+        Ok(())
+    }
+
+    /// Load all pending suggestions from the suggestions directory.
+    fn load_suggestions(&self) -> HashMap<editorial_types::SuggestionId, editorial_types::Suggestion> {
+        let dir = self.suggestions_dir();
+        let mut map = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().is_some_and(|e| e == "json")
+                    && let Ok(contents) = std::fs::read_to_string(entry.path())
+                    && let Ok(s) = serde_json::from_str::<editorial_types::Suggestion>(&contents)
+                    && s.status == editorial_types::SuggestionStatus::Pending
+                {
+                    map.insert(s.id.clone(), s);
+                }
+            }
+        }
+        map
+    }
+
+    /// Apply a slot edit: read the file, modify the slot, write to disk.
+    /// Returns the list of affected URL paths, or an error string.
+    fn apply_slot_edit(&self, file: &str, slot: &str, value: &str) -> Result<Vec<String>, String> {
+        let abs_path = self.site_dir.join(file);
+
+        // Derive schema stem from path component (content/{stem}/file.md)
+        let stem = match std::path::Path::new(file).components().nth(1) {
+            Some(c) => match c.as_os_str().to_str() {
+                Some(s) => s.to_string(),
+                None => return Err(format!("cannot derive schema stem from: {file}")),
+            },
+            None => return Err(format!("cannot derive schema stem from: {file}")),
+        };
+
+        // Load grammar from cache
+        let grammar = match self.schema_source(&stem) {
+            Some(src) => match schema::parse_schema(&src) {
+                Ok(g) => g,
+                Err(e) => return Err(format!("schema parse error: {e:?}")),
+            },
+            None => return Err(format!("no schema for: {stem}")),
+        };
+
+        // Read from in-memory buffer or fall back to disk
+        let content_src = match self.document_text(&abs_path) {
+            Some(s) => s,
+            None => return Err(format!("cannot read {file}")),
+        };
+
+        // Parse, modify, serialize, and write
+        let doc = content::parse_and_assign(&content_src, &grammar)
+            .map_err(|e| format!("parse error: {e}"))?;
+
+        let grammar_arc = Arc::new(grammar);
+        let transform = content::InsertSlot::new(Arc::clone(&grammar_arc), slot, value.to_string())
+            .map_err(|e| e.to_string())?;
+        use content::Transform as _;
+        let doc = transform.apply(doc).map_err(|e| e.to_string())?;
+
+        let new_src = content::serialize_document(&doc);
+        std::fs::write(&abs_path, &new_src).map_err(|e| format!("write error: {e}"))?;
+        // Update in-memory state to stay consistent
+        self.doc_sources.write().unwrap().insert(abs_path, new_src);
+
+        let url = derive_url_from_content_path(file);
+        Ok(vec![url])
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -376,74 +465,189 @@ impl Conductor {
                 CommandResult::ok()
             }
             Command::EditSlot { file, slot, value } => {
-                let abs_path = self.site_dir.join(&file);
-
-                // Derive schema stem from path component (content/{stem}/file.md)
-                let stem = match std::path::Path::new(&file).components().nth(1) {
-                    Some(c) => match c.as_os_str().to_str() {
-                        Some(s) => s.to_string(),
-                        None => {
-                            return CommandResult::error(format!(
-                                "cannot derive schema stem from: {file}"
-                            ))
-                        }
-                    },
-                    None => {
-                        return CommandResult::error(format!(
-                            "cannot derive schema stem from: {file}"
-                        ))
-                    }
-                };
-
-                // Load grammar from cache
-                let grammar = match self.schema_source(&stem) {
-                    Some(src) => match schema::parse_schema(&src) {
-                        Ok(g) => g,
-                        Err(e) => {
-                            return CommandResult::error(format!("schema parse error: {e:?}"))
-                        }
-                    },
-                    None => return CommandResult::error(format!("no schema for: {stem}")),
-                };
-
-                // Read from in-memory buffer (unsaved editor changes) or fall back to disk
-                let content_src = match self.document_text(&abs_path) {
-                    Some(s) => s,
-                    None => {
-                        return CommandResult::error(format!("cannot read {file}"))
-                    }
-                };
-
-                // Parse, modify, serialize, and write
-                let doc = match content::parse_and_assign(&content_src, &grammar) {
-                    Ok(d) => d,
-                    Err(e) => return CommandResult::error(format!("parse error: {e}")),
-                };
-
-                let grammar_arc = Arc::new(grammar);
-                let transform = match content::InsertSlot::new(Arc::clone(&grammar_arc), &slot, value) {
-                    Ok(t) => t,
-                    Err(e) => return CommandResult::error(e.to_string()),
-                };
-                use content::Transform as _;
-                let doc = match transform.apply(doc) {
-                    Ok(d) => d,
-                    Err(e) => return CommandResult::error(e.to_string()),
-                };
-
-                let new_src = content::serialize_document(&doc);
-                if let Err(e) = std::fs::write(&abs_path, &new_src) {
-                    return CommandResult::error(format!("write error: {e}"));
+                match self.apply_slot_edit(&file, &slot, &value) {
+                    Ok(pages) => CommandResult::ok_with_events(vec![
+                        ConductorEvent::PagesRebuilt { pages, anchor: None },
+                    ]),
+                    Err(e) => CommandResult::error(e),
                 }
-                // Update in-memory state to stay consistent
-                self.doc_sources.write().unwrap().insert(abs_path, new_src);
+            }
+            Command::SuggestSlotValue { file, slot, value, reason, author } => {
+                // Attempt to read the current slot value for conflict detection
+                let abs_path = file.resolve(&self.site_dir);
+                let original_value = self.document_text(&abs_path).and_then(|text| {
+                    let stem = std::path::Path::new(file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
+                    let schema_src = self.schema_source(&stem)?;
+                    let grammar = schema::parse_schema(&schema_src).ok()?;
+                    let doc = content::parse_and_assign(&text, &grammar).ok()?;
+                    let graph = template::build_article_graph(&doc, &grammar);
+                    match graph.resolve(&[slot.as_str()]) {
+                        Some(template::Value::Text(t)) => Some(t.clone()),
+                        _ => None,
+                    }
+                });
 
-                // Broadcast a PagesRebuilt event so connected browsers reload
-                let url = derive_url_from_content_path(&file);
-                CommandResult::ok_with_events(vec![ConductorEvent::PagesRebuilt {
-                    pages: vec![url],
-                    anchor: None,
-                }])
+                let created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string();
+
+                let id = editorial_types::SuggestionId::new();
+                let suggestion = editorial_types::Suggestion {
+                    id: id.clone(),
+                    author,
+                    file,
+                    target: editorial_types::SuggestionTarget::Slot {
+                        slot,
+                        proposed_value: value,
+                    },
+                    reason,
+                    status: editorial_types::SuggestionStatus::Pending,
+                    original_value,
+                    created_at,
+                };
+
+                if let Err(e) = self.persist_suggestion(&suggestion) {
+                    return CommandResult::error(format!("persist error: {e}"));
+                }
+                self.suggestions.write().unwrap().insert(id.clone(), suggestion.clone());
+
+                CommandResult {
+                    response: Response::SuggestionCreated(id),
+                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
+                }
+            }
+            Command::SuggestBodyEdit { file, search, replace, reason, author } => {
+                // Verify the search string exists in the document
+                let abs_path = file.resolve(&self.site_dir);
+                let text = match self.document_text(&abs_path) {
+                    Some(t) => t,
+                    None => return CommandResult::error(format!("cannot read {file}")),
+                };
+                if !text.contains(&search) {
+                    return CommandResult::error(format!("search text not found in {file}: {search:?}"));
+                }
+
+                let original_value = Some(search.clone());
+
+                let created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string();
+
+                let id = editorial_types::SuggestionId::new();
+                let suggestion = editorial_types::Suggestion {
+                    id: id.clone(),
+                    author,
+                    file,
+                    target: editorial_types::SuggestionTarget::BodyText {
+                        search,
+                        replace,
+                    },
+                    reason,
+                    status: editorial_types::SuggestionStatus::Pending,
+                    original_value,
+                    created_at,
+                };
+
+                if let Err(e) = self.persist_suggestion(&suggestion) {
+                    return CommandResult::error(format!("persist error: {e}"));
+                }
+                self.suggestions.write().unwrap().insert(id.clone(), suggestion.clone());
+
+                CommandResult {
+                    response: Response::SuggestionCreated(id),
+                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
+                }
+            }
+            Command::GetSuggestions { file } => {
+                let suggestions = self.suggestions.read().unwrap();
+                let pending: Vec<editorial_types::Suggestion> = suggestions
+                    .values()
+                    .filter(|s| s.file == file && s.status == editorial_types::SuggestionStatus::Pending)
+                    .cloned()
+                    .collect();
+                CommandResult::with_response(Response::Suggestions(pending))
+            }
+            Command::AcceptSuggestion { id } => {
+                // Look up the suggestion
+                let suggestion = {
+                    let suggestions = self.suggestions.read().unwrap();
+                    match suggestions.get(&id) {
+                        Some(s) if s.status == editorial_types::SuggestionStatus::Pending => s.clone(),
+                        Some(_) => return CommandResult::error(format!("suggestion {id} is not pending")),
+                        None => return CommandResult::error(format!("suggestion not found: {id}")),
+                    }
+                };
+
+                // Apply the edit based on target type
+                let pages = match &suggestion.target {
+                    editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
+                        match self.apply_slot_edit(
+                            suggestion.file.as_str(),
+                            slot.as_str(),
+                            proposed_value,
+                        ) {
+                            Ok(pages) => pages,
+                            Err(e) => return CommandResult::error(e),
+                        }
+                    }
+                    editorial_types::SuggestionTarget::BodyText { search, replace } => {
+                        let abs_path = suggestion.file.resolve(&self.site_dir);
+                        let text = match self.document_text(&abs_path) {
+                            Some(t) => t,
+                            None => return CommandResult::error(format!("cannot read {}", suggestion.file)),
+                        };
+                        if !text.contains(search.as_str()) {
+                            return CommandResult::error(format!("search text no longer found in {}: {search:?}", suggestion.file));
+                        }
+                        let new_text = text.replacen(search.as_str(), replace.as_str(), 1);
+                        if let Err(e) = std::fs::write(&abs_path, &new_text) {
+                            return CommandResult::error(format!("write error: {e}"));
+                        }
+                        self.doc_sources.write().unwrap().insert(abs_path, new_text);
+                        let url = derive_url_from_content_path(suggestion.file.as_str());
+                        vec![url]
+                    }
+                };
+
+                // Update status in memory and on disk
+                let mut updated = suggestion.clone();
+                updated.status = editorial_types::SuggestionStatus::Accepted;
+                if let Err(e) = self.persist_suggestion(&updated) {
+                    eprintln!("conductor: failed to persist accepted suggestion: {e}");
+                }
+                self.suggestions.write().unwrap().insert(id.clone(), updated);
+
+                CommandResult::ok_with_events(vec![
+                    ConductorEvent::PagesRebuilt { pages: pages.clone(), anchor: None },
+                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages },
+                ])
+            }
+            Command::RejectSuggestion { id } => {
+                // Look up the suggestion
+                let suggestion = {
+                    let suggestions = self.suggestions.read().unwrap();
+                    match suggestions.get(&id) {
+                        Some(s) if s.status == editorial_types::SuggestionStatus::Pending => s.clone(),
+                        Some(_) => return CommandResult::error(format!("suggestion {id} is not pending")),
+                        None => return CommandResult::error(format!("suggestion not found: {id}")),
+                    }
+                };
+
+                // Update status in memory and on disk
+                let mut updated = suggestion.clone();
+                updated.status = editorial_types::SuggestionStatus::Rejected;
+                if let Err(e) = self.persist_suggestion(&updated) {
+                    eprintln!("conductor: failed to persist rejected suggestion: {e}");
+                }
+                self.suggestions.write().unwrap().insert(id.clone(), updated);
+
+                CommandResult::ok_with_events(vec![
+                    ConductorEvent::SuggestionRejected { id, file: suggestion.file },
+                ])
             }
         }
     }
