@@ -16,7 +16,7 @@ pub use adapters::{
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{ContentElement, Document, DocumentSlot, FlatDocument, LinkOp, LinkTarget, LinkText};
 pub use error::ContentError;
-pub use parser::{byte_to_position, parse_and_assign, parse_document};
+pub use parser::{byte_to_position, parse_and_assign, parse_document, parse_link_target, parse_link_text};
 pub use serializer::serialize_document;
 pub use slot_assignment::assign_slots;
 pub use transform::{

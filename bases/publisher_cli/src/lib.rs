@@ -3,6 +3,7 @@ mod lsp;
 mod serve;
 pub mod template_registry;
 
+use expressions::evaluate_link_expression;
 use rayon::prelude::*;
 
 pub use template_registry::FileTemplateRegistry;
@@ -580,103 +581,6 @@ fn resolve_link_expressions_in_graph(
     }
 }
 
-/// Evaluate a single link expression to a concrete `Value`.
-fn evaluate_link_expression(
-    text: &content::LinkText,
-    target: &content::LinkTarget,
-    url_index: &std::collections::HashMap<String, template::DataGraph>,
-    stem_index: &std::collections::HashMap<String, Vec<(String, template::DataGraph)>>,
-) -> template::Value {
-    match target {
-        content::LinkTarget::PathRef(path) => {
-            if let Some(data) = url_index.get(path) {
-                let mut record = data.clone();
-                // Inject href and text into the resolved record
-                record.insert("href", template::Value::Text(path.clone()));
-                if let content::LinkText::Static(label) = text {
-                    record.insert("text", template::Value::Text(label.clone()));
-                }
-                template::Value::Record(record)
-            } else {
-                eprintln!(
-                    "[presemble] warning: link expression references unknown path '{path}'"
-                );
-                template::Value::Absent
-            }
-        }
-
-        content::LinkTarget::ThreadExpr { source, operations } => {
-            let items = stem_index.get(source).cloned().unwrap_or_default();
-
-            // Build initial list of (url, DataGraph) pairs
-            let mut result: Vec<(String, template::DataGraph)> = items;
-
-            // Apply operations in order
-            for op in operations {
-                match op {
-                    content::LinkOp::SortBy { field, descending } => {
-                        let field = field.clone();
-                        let desc = *descending;
-                        result.sort_by(|(_, a), (_, b)| {
-                            let ak = sort_key_for(a, &field);
-                            let bk = sort_key_for(b, &field);
-                            let ord = ak.cmp(&bk);
-                            if desc { ord.reverse() } else { ord }
-                        });
-                    }
-                    content::LinkOp::Take(n) => {
-                        result.truncate(*n);
-                    }
-                    content::LinkOp::Filter { field, value } => {
-                        let field = field.clone();
-                        let value = value.clone();
-                        result.retain(|(_, data)| {
-                            let field_ref: &str = &field;
-                            data.resolve(&[field_ref])
-                                .and_then(|v| v.display_text())
-                                .map(|t| t == value)
-                                .unwrap_or(false)
-                        });
-                    }
-                }
-            }
-
-            // Convert to Value::List of Records (with href injected)
-            let values: Vec<template::Value> = result
-                .into_iter()
-                .map(|(url, mut data)| {
-                    data.insert("href", template::Value::Text(url));
-                    template::Value::Record(data)
-                })
-                .collect();
-
-            template::Value::List(values)
-        }
-    }
-}
-
-/// Produce a sort key for a DataGraph field.
-/// Returns a `SortKey` enum that compares numeric values numerically
-/// and falls back to string comparison.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum SortKey {
-    Numeric(i64),
-    Text(String),
-    Missing,
-}
-
-fn sort_key_for(data: &template::DataGraph, field: &str) -> SortKey {
-    match data.resolve(&[field]).and_then(|v| v.display_text()) {
-        None => SortKey::Missing,
-        Some(text) => {
-            if let Ok(n) = text.parse::<i64>() {
-                SortKey::Numeric(n)
-            } else {
-                SortKey::Text(text)
-            }
-        }
-    }
-}
 
 /// Resolve cross-content references in a single DataGraph (one level deep).
 ///
