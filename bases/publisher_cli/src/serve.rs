@@ -192,6 +192,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/ws", get(ws_handler))
         .route("/_presemble/lsp", get(lsp_ws_handler))
         .route("/_presemble/edit", post(edit_handler))
+        .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/links", get(links_handler))
         .fallback(get(file_handler))
         .with_state(state);
@@ -252,6 +253,43 @@ async fn edit_handler(
         Ok(()) => axum::Json(EditResponse { ok: true, error: None }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
     }
+}
+
+#[derive(serde::Deserialize)]
+struct EditBodyRequest {
+    file: String,      // content file, e.g. "content/post/building-presemble.md"
+    body_idx: usize,   // zero-based index of the body element to replace
+    content: String,   // new markdown content for the element
+}
+
+async fn edit_body_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<EditBodyRequest>,
+) -> axum::Json<EditResponse> {
+    // Forward through conductor if available
+    if let Some(ref cond) = state.conductor {
+        match cond.send(&conductor::Command::EditBodyElement {
+            file: req.file.clone(),
+            body_idx: req.body_idx,
+            content: req.content.clone(),
+        }) {
+            Ok(conductor::Response::Ok) => {
+                return axum::Json(EditResponse { ok: true, error: None });
+            }
+            Ok(conductor::Response::Error(e)) => {
+                return axum::Json(EditResponse { ok: false, error: Some(e) });
+            }
+            Err(e) => {
+                return axum::Json(EditResponse { ok: false, error: Some(e) });
+            }
+            _ => {} // unexpected response, fall through
+        }
+    }
+
+    axum::Json(EditResponse {
+        ok: false,
+        error: Some("conductor not available — body editing requires conductor".to_string()),
+    })
 }
 
 fn apply_edit(
@@ -597,6 +635,9 @@ const INJECT: &str = concat!(
     "img.presemble-suggestion{min-width:200px;min-height:120px;display:block;}",
     ".presemble-edit-mode [data-presemble-slot]{cursor:pointer;transition:outline 0.15s,background 0.15s;}",
     ".presemble-edit-mode [data-presemble-slot]:hover{outline:2px dashed #5d8a6e;outline-offset:4px;}",
+    ".presemble-edit-mode [data-presemble-slot='body']{cursor:pointer;}",
+    ".presemble-edit-mode [data-presemble-slot='body']:hover{outline:1px dashed #5d8a6e;outline-offset:2px;}",
+    ".presemble-body-editor{display:block;width:100%;box-sizing:border-box;font-family:monospace;font-size:1rem;padding:0.5rem;border:2px solid #5d8a6e;border-radius:0.3rem;background:#fff;resize:vertical;min-height:6rem;}",
     ".presemble-edit-mode [data-presemble-slot].presemble-editing{outline:2px solid #5d8a6e;outline-offset:4px;background:rgba(93,138,110,0.05);position:relative;}",
     ".presemble-suggestion.presemble-editing::before,.presemble-suggestion.presemble-editing::after{display:none;}",
     ".presemble-suggestion.presemble-editing{border:none;font-style:normal;opacity:1;color:inherit !important;}",
@@ -695,7 +736,65 @@ const INJECT: &str = concat!(
     "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
     "var el=e.target.closest('[data-presemble-slot]');",
     "if(!el||el.classList.contains('presemble-editing')){return;}",
-    "if(el.getAttribute('data-presemble-slot')==='body'){return;}",
+    "if(el.getAttribute('data-presemble-slot')==='body'){",
+      "e.preventDefault();",
+      "var bfile=el.getAttribute('data-presemble-file');",
+      "if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}",
+      "var bidxAttr=el.id;",
+      "var bidx=0;",
+      "if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\\d+)/);if(m){bidx=parseInt(m[1],10);}}",
+      "var bmd=el.getAttribute('data-presemble-md')||el.innerText;",
+      "el.style.display='none';",
+      "var ta=document.createElement('textarea');",
+      "ta.className='presemble-body-editor';",
+      "ta.value=bmd;",
+      "el.parentNode.insertBefore(ta,el.nextSibling);",
+      "ta.focus();",
+      "var btoolbar=document.createElement('div');",
+      "btoolbar.className='presemble-edit-toolbar';",
+      "btoolbar.innerHTML='<button class=\"presemble-save\" title=\"Save\">&#10003;</button><button class=\"presemble-undo\" title=\"Undo\">&#8630;</button>';",
+      "ta.after(btoolbar);",
+      "el.classList.add('presemble-editing');",
+      "function bcleanup(){",
+        "el.style.display='';",
+        "el.classList.remove('presemble-editing');",
+        "ta.remove();",
+        "btoolbar.remove();",
+        "var berr=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');",
+        "if(berr){berr.remove();}",
+      "}",
+      "function bsave(){",
+        "var bvalue=ta.value;",
+        "bcleanup();",
+        "fetch('/_presemble/edit-body',{",
+          "method:'POST',",
+          "headers:{'Content-Type':'application/json'},",
+          "body:JSON.stringify({file:bfile,body_idx:bidx,content:bvalue})",
+        "}).then(function(r){return r.json();}).then(function(data){",
+          "if(!data.ok){",
+            "var berr2=document.createElement('div');",
+            "berr2.className='presemble-edit-error';",
+            "berr2.textContent=data.error||'Edit failed';",
+            "el.after(berr2);",
+            "el.style.display='';",
+          "}else{",
+            "setTimeout(function(){location.reload();},500);",
+          "}",
+        "}).catch(function(err){",
+          "var berr3=document.createElement('div');",
+          "berr3.className='presemble-edit-error';",
+          "berr3.textContent='Network error: '+err.message;",
+          "el.after(berr3);",
+          "el.style.display='';",
+        "});",
+      "}",
+      "btoolbar.querySelector('.presemble-save').onclick=function(ev){ev.stopPropagation();bsave();};",
+      "btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};",
+      "ta.addEventListener('keydown',function bkeyHandler(ev){",
+        "if(ev.key==='Escape'){bcleanup();ta.removeEventListener('keydown',bkeyHandler);}",
+      "});",
+      "return;",
+    "}",
     "if(el.tagName==='IMG'){return;}",
     "if(el.tagName==='A'&&!el.getAttribute('data-presemble-source-slot')){",
       "e.preventDefault();",

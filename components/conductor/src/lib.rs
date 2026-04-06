@@ -540,6 +540,101 @@ mod tests {
     }
 
     #[test]
+    fn edit_body_element_replaces_span() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write a content file with a body element we will replace.
+        let content_dir = dir.path().join("content/article");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        // Body is after the separator; body element 0 is "Old body paragraph."
+        let content_src = "# My Title\n\n----\n\nOld body paragraph.\n\nSecond paragraph.\n";
+        let content_file = content_dir.join("edit-test.md");
+        std::fs::write(&content_file, content_src).unwrap();
+
+        // Schema with a title heading slot, plus body allowed.
+        let schema_src = "# Your blog post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+        let template_src = r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert><presemble:insert data="input.body"></presemble:insert></body></html>"#;
+        let repo = site_repository::SiteRepository::builder()
+            .schema("article", schema_src)
+            .item_template("article", template_src, false)
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+
+        // body_idx=0 corresponds to "Old body paragraph."
+        let result = conductor.handle_command(Command::EditBodyElement {
+            file: "content/article/edit-test.md".to_string(),
+            body_idx: 0,
+            content: "New body paragraph.".to_string(),
+        });
+
+        match &result.response {
+            Response::Ok => {}
+            Response::Error(e) => panic!("expected Ok, got Error({e})"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Verify PagesRebuilt event was emitted with an anchor for body element 0
+        assert_eq!(result.events.len(), 1, "expected one PagesRebuilt event");
+        match &result.events[0] {
+            ConductorEvent::PagesRebuilt { pages, anchor } => {
+                assert_eq!(pages, &vec!["/article/edit-test".to_string()]);
+                assert_eq!(anchor.as_deref(), Some("presemble-body-0"));
+            }
+            other => panic!("expected PagesRebuilt, got {other:?}"),
+        }
+
+        // Verify the file was updated with the new content
+        let new_content = std::fs::read_to_string(&content_file).unwrap();
+        assert!(
+            new_content.contains("New body paragraph."),
+            "file should contain new paragraph, got: {new_content}"
+        );
+        assert!(
+            !new_content.contains("Old body paragraph."),
+            "file should no longer contain old paragraph, got: {new_content}"
+        );
+
+        // Second paragraph must remain unchanged
+        assert!(
+            new_content.contains("Second paragraph."),
+            "second paragraph should be unchanged, got: {new_content}"
+        );
+    }
+
+    #[test]
+    fn edit_body_element_out_of_range_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let content_dir = dir.path().join("content/article");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let content_src = "# My Title\n\n----\n\nOnly paragraph.\n";
+        let content_file = content_dir.join("range-test.md");
+        std::fs::write(&content_file, content_src).unwrap();
+
+        let schema_src = "# Your blog post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+        let repo = site_repository::SiteRepository::builder()
+            .schema("article", schema_src)
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+
+        // Index 5 is way out of range for a single-element body.
+        let result = conductor.handle_command(Command::EditBodyElement {
+            file: "content/article/range-test.md".to_string(),
+            body_idx: 5,
+            content: "Replacement".to_string(),
+        });
+
+        assert!(
+            matches!(result.response, Response::Error(_)),
+            "expected Error for out-of-range body_idx, got {:?}", result.response
+        );
+
+        // File should be unchanged
+        let after = std::fs::read_to_string(&content_file).unwrap();
+        assert_eq!(after, content_src, "file should not be modified on error");
+    }
+
+    #[test]
     fn suggest_body_edit_fails_when_search_not_found() {
         let (_dir, conductor) = article_conductor_with_file();
         let file = editorial_types::ContentPath::new("content/article/test.md");

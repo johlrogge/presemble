@@ -187,7 +187,7 @@ impl Conductor {
             .map_err(|e| format!("parse error: {e}"))?;
 
         // Build data graph (suggestion nodes fill missing slots)
-        let mut graph = template::build_article_graph(&doc, &grammar);
+        let mut graph = template::build_article_graph_with_source(&doc, &grammar, text);
 
         // Compute slug and URL path
         let slug = content_path
@@ -395,6 +395,52 @@ impl Conductor {
 
         let url = derive_url_from_content_path(file);
         Ok(vec![url])
+    }
+
+    /// Apply a browser body element edit: replace the markdown source for a body element at
+    /// the given index and write to disk.
+    fn apply_body_element_edit(&self, file: &str, body_idx: usize, new_content: &str) -> Result<Vec<String>, String> {
+        let abs_path = self.site_dir.join(file);
+
+        // Derive schema stem from path component (content/{stem}/file.md)
+        let stem = match std::path::Path::new(file).components().nth(1) {
+            Some(c) => c.as_os_str().to_str()
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?.to_string(),
+            None => return Err(format!("cannot derive schema stem from: {file}")),
+        };
+
+        // Load grammar from cache
+        let grammar = match self.schema_source(&stem) {
+            Some(src) => schema::parse_schema(&src).map_err(|e| format!("schema parse error: {e:?}"))?,
+            None => return Err(format!("no schema for: {stem}")),
+        };
+
+        // Read source from in-memory buffer or disk
+        let source = self.document_text(&abs_path)
+            .ok_or_else(|| format!("cannot read {file}"))?;
+
+        // Parse to get body element spans
+        let doc = content::parse_and_assign(&source, &grammar)
+            .map_err(|e| format!("parse error: {e}"))?;
+
+        // Validate index
+        let element = doc.body.get(body_idx)
+            .ok_or_else(|| format!("body index {body_idx} out of range (have {} elements)", doc.body.len()))?;
+
+        // Replace the span in the source
+        let mut new_source = String::with_capacity(source.len() + new_content.len());
+        new_source.push_str(&source[..element.span.start]);
+        new_source.push_str(new_content);
+        new_source.push_str(&source[element.span.end..]);
+
+        // Write to disk
+        std::fs::write(&abs_path, &new_source).map_err(|e| format!("write error: {e}"))?;
+
+        // Update in-memory state
+        self.doc_sources.write().unwrap().insert(abs_path.clone(), new_source.clone());
+
+        // Rebuild
+        self.rebuild_page(&abs_path, &new_source)
     }
 
     /// Handle a command and return a response plus any events to broadcast.
@@ -618,6 +664,17 @@ impl Conductor {
                 CommandResult::ok_with_events(vec![
                     ConductorEvent::SuggestionRejected { id, file: suggestion.file },
                 ])
+            }
+            Command::EditBodyElement { file, body_idx, content } => {
+                match self.apply_body_element_edit(&file, body_idx, &content) {
+                    Ok(pages) => CommandResult::ok_with_events(vec![
+                        ConductorEvent::PagesRebuilt {
+                            pages,
+                            anchor: Some(format!("presemble-body-{body_idx}")),
+                        },
+                    ]),
+                    Err(e) => CommandResult::error(e),
+                }
             }
         }
     }

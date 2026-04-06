@@ -52,6 +52,12 @@ pub enum Command {
     RejectSuggestion {
         id: editorial_types::SuggestionId,
     },
+    /// Browser edit: replace a body element's markdown source and write to disk.
+    EditBodyElement {
+        file: String,
+        body_idx: usize,
+        content: String,
+    },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.

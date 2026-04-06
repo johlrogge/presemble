@@ -186,6 +186,16 @@ fn max_paragraphs(slot: &schema::Slot) -> usize {
 /// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
 pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
+    build_article_graph_inner(doc, grammar, None)
+}
+
+/// Like `build_article_graph` but attaches a `data-presemble-md` attribute to
+/// every body element containing the original markdown source slice.
+pub fn build_article_graph_with_source(doc: &Document, grammar: &Grammar, source: &str) -> DataGraph {
+    build_article_graph_inner(doc, grammar, Some(source))
+}
+
+fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&str>) -> DataGraph {
     let mut graph = DataGraph::new();
 
     // Iterate grammar preamble slots and map each to its DocumentSlot.
@@ -299,7 +309,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
     }
 
     // Render body elements as HTML.
-    let body_html = render_body_html(&doc.body);
+    let body_html = render_body_html(&doc.body, source);
     if !body_html.is_empty() {
         graph.insert("body", Value::Html(body_html));
     }
@@ -370,30 +380,34 @@ fn render_inline_markdown(text: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -> String {
+pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, source: Option<&str>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (idx, spanned) in elements.iter().enumerate() {
+        let md_attr = source.map(|s| {
+            let raw = &s[spanned.span.start..spanned.span.end];
+            format!(r#" data-presemble-md="{}""#, escape_html(raw))
+        }).unwrap_or_default();
         let html = match &spanned.node {
             ContentElement::Heading { level, text } => {
                 let l = level.value();
                 let inner = render_inline_markdown(text);
-                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</h{l}>")
+                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{inner}</h{l}>")
             }
             ContentElement::Paragraph { text } => {
                 let inner = render_inline_markdown(text);
-                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</p>")
+                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{inner}</p>")
             }
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
                 format!(
-                    "<img id=\"presemble-body-{idx}\" data-presemble-slot=\"body\" src=\"{}\" alt=\"{}\">",
+                    "<img id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr} src=\"{}\" alt=\"{}\">",
                     escape_html(path),
                     escape_html(alt_text)
                 )
             }
             ContentElement::Link { text, href } => {
                 format!(
-                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\" href=\"{}\">{}</a>",
+                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr} href=\"{}\">{}</a>",
                     escape_html(href),
                     escape_html(text)
                 )
@@ -402,27 +416,27 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
                 let escaped = escape_html(code);
                 match language {
                     Some(lang) => format!(
-                        "<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"><code class=\"language-{}\">{}</code></pre>",
+                        "<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}><code class=\"language-{}\">{}</code></pre>",
                         escape_html(lang),
                         escaped
                     ),
-                    None => format!("<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"><code>{}</code></pre>", escaped),
+                    None => format!("<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}><code>{}</code></pre>", escaped),
                 }
             }
             ContentElement::Separator => continue,
             ContentElement::RawHtml { html } => {
                 format!(
-                    "<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>"
+                    "<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{html}</div>"
                 )
             }
             ContentElement::Blockquote { text } => {
                 let inner = render_inline_markdown(text);
-                format!("<blockquote id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{inner}</blockquote>")
+                format!("<blockquote id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{inner}</blockquote>")
             }
             ContentElement::List { source } => {
                 // Render the raw markdown list source to HTML via pulldown-cmark.
                 let html = render_inline_markdown(source);
-                format!("<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\">{html}</div>")
+                format!("<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{html}</div>")
             }
             ContentElement::LinkExpression { text, target } => {
                 use content::{LinkTarget, LinkText};
@@ -436,7 +450,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
                     LinkTarget::ThreadExpr { source, .. } => escape_html(source),
                 };
                 format!(
-                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\" href=\"{}\">{}</a>",
+                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr} href=\"{}\">{}</a>",
                     href, display_text
                 )
             }
@@ -459,7 +473,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>) -
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "<table id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
+                    "<table id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
                     header_cells, body_rows
                 )
             }
@@ -641,7 +655,7 @@ mod tests {
             language: Some("rust".to_string()),
             code: "fn main() {}\n".to_string(),
         });
-        let html = super::render_body_html(&im::vector![code_block]);
+        let html = super::render_body_html(&im::vector![code_block], None);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
@@ -658,7 +672,7 @@ mod tests {
             language: None,
             code: "some code\n".to_string(),
         });
-        let html = super::render_body_html(&im::vector![code_block]);
+        let html = super::render_body_html(&im::vector![code_block], None);
         assert!(
             html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code>"),
             "expected plain pre/code in output; got: {html}"
@@ -675,7 +689,7 @@ mod tests {
             spanned(ContentElement::Paragraph { text: "para".to_string() }),
             spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() }),
         ].into_iter().collect();
-        let html = render_body_html(&elements);
+        let html = render_body_html(&elements, None);
         assert!(
             html.contains("data-presemble-slot=\"body\""),
             "expected data-presemble-slot=\"body\" attribute on body elements; got: {html}"
@@ -692,7 +706,7 @@ mod tests {
             spanned(ContentElement::Separator),
             spanned(ContentElement::Paragraph { text: "second".to_string() }),
         ].into_iter().collect();
-        let html = render_body_html(&elements);
+        let html = render_body_html(&elements, None);
         assert!(html.contains("id=\"presemble-body-0\""), "first paragraph gets id 0");
         assert!(html.contains("id=\"presemble-body-2\""), "element after separator gets id 2");
         assert!(!html.contains("id=\"presemble-body-1\""), "separator produces no HTML");
@@ -1081,7 +1095,7 @@ mod tests {
     fn body_paragraph_with_bold_renders_as_strong() {
         // **bold** in a paragraph stored with markdown syntax should render as <strong>
         let para = spanned(ContentElement::Paragraph { text: "This has **bold** text.".to_string() });
-        let html = render_body_html(&im::vector![para]);
+        let html = render_body_html(&im::vector![para], None);
         assert!(
             html.contains("<strong>bold</strong>"),
             "expected <strong>bold</strong> in body HTML; got: {html}"
@@ -1096,7 +1110,7 @@ mod tests {
     #[test]
     fn body_paragraph_with_italic_renders_as_em() {
         let para = spanned(ContentElement::Paragraph { text: "This has _italic_ text.".to_string() });
-        let html = render_body_html(&im::vector![para]);
+        let html = render_body_html(&im::vector![para], None);
         assert!(
             html.contains("<em>italic</em>"),
             "expected <em>italic</em> in body HTML; got: {html}"
@@ -1106,7 +1120,7 @@ mod tests {
     #[test]
     fn body_blockquote_renders_as_blockquote_tag() {
         let bq = spanned(ContentElement::Blockquote { text: "A wise quote.".to_string() });
-        let html = render_body_html(&im::vector![bq]);
+        let html = render_body_html(&im::vector![bq], None);
         assert!(
             html.contains("<blockquote"),
             "expected <blockquote tag in body HTML; got: {html}"
@@ -1127,7 +1141,7 @@ mod tests {
             level: schema::HeadingLevel::new(3).unwrap(),
             text: "Section with *emphasis*".to_string(),
         });
-        let html = render_body_html(&im::vector![heading]);
+        let html = render_body_html(&im::vector![heading], None);
         assert!(
             html.contains("<h3"),
             "expected h3 tag; got: {html}"
@@ -1136,5 +1150,79 @@ mod tests {
             html.contains("<em>emphasis</em>"),
             "expected <em>emphasis</em> in heading; got: {html}"
         );
+    }
+
+    #[test]
+    fn render_body_html_with_source_adds_data_presemble_md_attr() {
+        // Source where the paragraph text spans bytes 0..5.
+        let source = "Hello world text here";
+        let para = Spanned {
+            node: ContentElement::Paragraph { text: "Hello".to_string() },
+            span: SchemaSpan { start: 0, end: 5 },
+        };
+        let html = render_body_html(&im::vector![para], Some(source));
+        assert!(
+            html.contains("data-presemble-md=\"Hello\""),
+            "expected data-presemble-md attribute with source slice; got: {html}"
+        );
+    }
+
+    #[test]
+    fn render_body_html_with_source_escapes_html_in_md_attr() {
+        let source = "<b>bold</b> text";
+        let para = Spanned {
+            node: ContentElement::Paragraph { text: "bold text".to_string() },
+            span: SchemaSpan { start: 0, end: 16 },
+        };
+        let html = render_body_html(&im::vector![para], Some(source));
+        assert!(
+            html.contains("data-presemble-md=\"&lt;b&gt;bold&lt;/b&gt; text\""),
+            "expected HTML-escaped data-presemble-md attribute; got: {html}"
+        );
+    }
+
+    #[test]
+    fn render_body_html_without_source_has_no_data_presemble_md_attr() {
+        let para = spanned(ContentElement::Paragraph { text: "hello".to_string() });
+        let html = render_body_html(&im::vector![para], None);
+        assert!(
+            !html.contains("data-presemble-md"),
+            "expected no data-presemble-md attribute when source is None; got: {html}"
+        );
+    }
+
+    #[test]
+    fn build_article_graph_with_source_attaches_md_attr() {
+        use content::parse_and_assign;
+        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+
+        let source = "# My Title\n\n---\n\nA body paragraph.\n";
+        let grammar = Grammar {
+            preamble: vec![Slot {
+                name: SlotName::new("title"),
+                element: Element::Heading {
+                    level: HeadingLevelRange {
+                        min: HeadingLevel::new(1).unwrap(),
+                        max: HeadingLevel::new(1).unwrap(),
+                    },
+                },
+                constraints: vec![],
+                hint_text: None,
+                span: Span { start: 0, end: 0 },
+            }],
+            body: Some(BodyRules { heading_range: None }),
+        };
+
+        let doc = parse_and_assign(source, &grammar).expect("document should parse");
+        let graph = super::build_article_graph_with_source(&doc, &grammar, source);
+        match graph.resolve(&["body"]) {
+            Some(Value::Html(html)) => {
+                assert!(
+                    html.contains("data-presemble-md="),
+                    "expected data-presemble-md attribute in body HTML from build_article_graph_with_source; got: {html}"
+                );
+            }
+            other => panic!("expected Some(Html) for body, got {other:?}"),
+        }
     }
 }
