@@ -16,6 +16,7 @@ mcp_server = { workspace = true }
 site_repository = { workspace = true }
 site_index = { workspace = true }
 lsp_capabilities = { workspace = true }
+content_editor = { workspace = true }
 lsp_service = { workspace = true }
 stylesheet = { workspace = true }
 clap = { version = "4", features = ["derive"] }

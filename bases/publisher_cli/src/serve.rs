@@ -194,6 +194,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/links", get(links_handler))
+        .route("/_presemble/schemas", get(schemas_handler))
+        .route("/_presemble/create-content", post(create_content_handler))
         .route("/_presemble/suggestions", get(suggestions_handler))
         .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
         .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
@@ -453,46 +455,7 @@ fn apply_edit(
     slot: &str,
     value: &str,
 ) -> Result<(), String> {
-    // Validate: must start with "content/", no "..", must end with ".md"
-    if !file.starts_with("content/") {
-        return Err(format!("file must start with 'content/': {file}"));
-    }
-    if file.contains("..") {
-        return Err(format!("path traversal detected: {file}"));
-    }
-    if !file.ends_with(".md") {
-        return Err(format!("file must end with '.md': {file}"));
-    }
-
-    // Resolve absolute path and validate it's under content/
-    let content_path = site_dir.join(file);
-    if !content_path.exists() {
-        return Err(format!("content file not found: {file}"));
-    }
-    let canonical = content_path.canonicalize()
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
-    let canonical_content = site_dir.join("content").canonicalize()
-        .map_err(|e| format!("cannot resolve content dir: {e}"))?;
-    if !canonical.starts_with(&canonical_content) {
-        return Err("path traversal detected".to_string());
-    }
-
-    // Derive schema stem from file path: "content/post/building-presemble.md" → "post"
-    let stem = std::path::Path::new(file)
-        .components()
-        .nth(1)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?;
-
-    // Load grammar
-    let schema_path = site_dir.join("schemas").join(format!("{stem}.md"));
-    let schema_src = std::fs::read_to_string(&schema_path)
-        .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
-    let grammar = schema::parse_schema(&schema_src)
-        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
-
-    // Write slot
-    lsp_capabilities::write_slot_to_file(&canonical, slot, &grammar, value)
+    content_editor::apply_slot_edit(site_dir, file, slot, value)
 }
 
 #[derive(serde::Deserialize)]
@@ -501,128 +464,88 @@ struct LinksQuery {
     slot: String,
 }
 
-#[derive(serde::Serialize)]
-struct LinkOption {
-    text: String,
-    href: String,
-}
-
 async fn links_handler(
     State(state): State<AppState>,
     Query(query): Query<LinksQuery>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    match collect_link_options(&state.site_dir, &query.schema, &query.slot) {
-        Ok(options) => {
-            let json = serde_json::to_vec(&options).unwrap_or_default();
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                json,
-            )
-                .into_response()
-        }
-        Err(e) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            )
-                .into_response()
-        }
+    let repo = site_repository::SiteRepository::new(&state.site_dir);
+    let options =
+        content_editor::collect_link_options(&state.site_dir, &repo, &query.schema, &query.slot);
+
+    // Reserialize as {text, href} for JS compatibility
+    #[derive(serde::Serialize)]
+    struct LinkOptionJson {
+        text: String,
+        href: String,
     }
-}
-
-fn collect_link_options(
-    site_dir: &std::path::Path,
-    schema_stem: &str,
-    slot_name: &str,
-) -> Result<Vec<LinkOption>, String> {
-    let schema_path = site_dir.join("schemas").join(format!("{schema_stem}.md"));
-    let schema_src = std::fs::read_to_string(&schema_path)
-        .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
-    let grammar = schema::parse_schema(&schema_src)
-        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
-
-    let slot = grammar
-        .preamble
-        .iter()
-        .find(|s| s.name.as_str() == slot_name)
-        .ok_or_else(|| format!("slot '{slot_name}' not found in schema '{schema_stem}'"))?;
-
-    let pattern = match &slot.element {
-        schema::Element::Link { pattern } => pattern.clone(),
-        _ => return Err(format!("slot '{slot_name}' is not a Link slot")),
-    };
-
-    let content_stem = stem_from_link_pattern(&pattern)
-        .ok_or_else(|| format!("cannot derive content stem from pattern '{pattern}'"))?;
-
-    let content_dir = site_dir.join("content").join(&content_stem);
-    let entries = std::fs::read_dir(&content_dir)
-        .map_err(|e| format!("failed to read content dir {}: {e}", content_dir.display()))?;
-
-    let mut options: Vec<LinkOption> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|ex| ex.to_str()) == Some("md"))
-        .map(|e| {
-            let path = e.path();
-            let file_slug = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let text = read_title_from_md(&path).unwrap_or_else(|| file_slug.clone());
-            let href = url_from_pattern(&pattern, &file_slug);
-            LinkOption { text, href }
+    let mapped: Vec<LinkOptionJson> = options
+        .into_iter()
+        .map(|o| LinkOptionJson {
+            text: o.label,
+            href: o.value,
         })
         .collect();
-
-    options.sort_by(|a, b| a.text.cmp(&b.text));
-    Ok(options)
+    let json = serde_json::to_vec(&mapped).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json,
+    )
+        .into_response()
 }
 
-/// Extract content schema stem from link pattern "/author/<name>" → "author"
-fn stem_from_link_pattern(pattern: &str) -> Option<String> {
-    let s = pattern.trim_start_matches('/');
-    let seg = s.split('/').next()?;
-    let clean = seg.split('<').next()?.trim_end_matches('-').trim();
-    if clean.is_empty() {
-        None
-    } else {
-        Some(clean.to_string())
+#[derive(serde::Deserialize)]
+struct CreateContentRequest {
+    stem: String,
+    slug: String,
+}
+
+#[derive(serde::Serialize)]
+struct CreateContentResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn schemas_handler(State(state): State<AppState>) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let repo = site_repository::SiteRepository::builder()
+        .from_dir(&state.site_dir)
+        .build();
+    let stems = content_editor::list_schemas(&repo);
+    let json = serde_json::to_vec(&stems).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json,
+    )
+        .into_response()
+}
+
+async fn create_content_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<CreateContentRequest>,
+) -> axum::Json<CreateContentResponse> {
+    let repo = site_repository::SiteRepository::builder()
+        .from_dir(&state.site_dir)
+        .build();
+    match content_editor::create_content(&state.site_dir, &repo, &req.stem, &req.slug) {
+        Ok((_path, url)) => axum::Json(CreateContentResponse {
+            ok: true,
+            url: Some(url),
+            error: None,
+        }),
+        Err(e) => axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some(e),
+        }),
     }
-}
-
-/// Read the first H1 heading text from a markdown file.
-fn read_title_from_md(path: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    content
-        .lines()
-        .find(|l| l.starts_with("# "))
-        .map(|l| l.trim_start_matches("# ").trim().to_string())
-}
-
-/// Replace `<variable>` placeholders in a link pattern with the given slug.
-fn url_from_pattern(pattern: &str, slug: &str) -> String {
-    let mut result = String::new();
-    let mut in_angle = false;
-    for ch in pattern.chars() {
-        match ch {
-            '<' => {
-                in_angle = true;
-                result.push_str(slug);
-            }
-            '>' => {
-                in_angle = false;
-            }
-            _ if !in_angle => result.push(ch),
-            _ => {}
-        }
-    }
-    result
 }
 
 async fn ws_handler(
@@ -882,7 +805,8 @@ const INJECT: &str = concat!(
     "var editBtn=document.createElement('button');editBtn.textContent='\u{270F}\u{FE0F} Edit';",
     "var suggestBtn=document.createElement('button');suggestBtn.textContent='\u{1F4AC} Suggest';suggestBtn.style.position='relative';",
     "var suggestBadge=document.createElement('span');suggestBadge.className='presemble-suggest-badge';suggestBadge.style.display='none';suggestBtn.appendChild(suggestBadge);",
-    "menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);",
+    "var createBtn=document.createElement('button');createBtn.textContent='\u{2795} New content';",
+    "menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);menu.appendChild(createBtn);",
     "container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);",
     "document.body.appendChild(container);",
     "function update(){",
@@ -896,6 +820,7 @@ const INJECT: &str = concat!(
       "viewBtn.className=mode==='view'?'active':'';",
       "editBtn.className=mode==='edit'?'active':'';",
       "suggestBtn.className=mode==='suggest'?'active':'';",
+      "createBtn.style.display=mode==='edit'?'block':'none';",
       "if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}else{document.body.classList.remove('presemble-edit-mode');}",
     "}",
     "if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}",
@@ -904,6 +829,53 @@ const INJECT: &str = concat!(
     "document.addEventListener('click',function(){menu.classList.remove('open');});",
     "menu.onclick=function(e){e.stopPropagation();};",
     "function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});}",
+    // Create-content dialog
+    "function _openCreateDialog(){",
+      "menu.classList.remove('open');",
+      "fetch('/_presemble/schemas').then(function(r){return r.json();}).then(function(schemas){",
+        "if(!Array.isArray(schemas)||schemas.length===0){alert('No content schemas found.');return;}",
+        "var overlay=document.createElement('div');",
+        "overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:10001;display:flex;align-items:center;justify-content:center;';",
+        "var dialog=document.createElement('div');",
+        "dialog.style.cssText='background:#fff;border-radius:0.5rem;padding:1.5rem;min-width:20rem;box-shadow:0 4px 16px rgba(0,0,0,0.2);font-family:system-ui,sans-serif;';",
+        "var title=document.createElement('h3');title.textContent='New content';title.style.cssText='margin:0 0 1rem;font-size:1.1rem;';",
+        "dialog.appendChild(title);",
+        "var typeLabel=document.createElement('label');typeLabel.textContent='Type:';typeLabel.style.cssText='display:block;font-size:0.85rem;margin-bottom:0.25rem;';",
+        "var typeSelect=document.createElement('select');typeSelect.style.cssText='display:block;width:100%;padding:0.4rem;border:1px solid #ccc;border-radius:0.3rem;margin-bottom:0.75rem;font-size:1rem;';",
+        "schemas.forEach(function(s){var o=document.createElement('option');o.value=s;o.textContent=s;typeSelect.appendChild(o);});",
+        "var slugLabel=document.createElement('label');slugLabel.textContent='Slug:';slugLabel.style.cssText='display:block;font-size:0.85rem;margin-bottom:0.25rem;';",
+        "var slugInput=document.createElement('input');slugInput.type='text';",
+        "var ts=Date.now().toString(36);slugInput.value=typeSelect.value+'-'+ts;",
+        "slugInput.style.cssText='display:block;width:100%;box-sizing:border-box;padding:0.4rem;border:1px solid #ccc;border-radius:0.3rem;margin-bottom:0.75rem;font-size:1rem;';",
+        "typeSelect.onchange=function(){slugInput.value=typeSelect.value+'-'+Date.now().toString(36);};",
+        "var errDiv=document.createElement('div');errDiv.style.cssText='color:#c00;font-size:0.85rem;margin-bottom:0.5rem;display:none;';",
+        "var btns=document.createElement('div');btns.style.cssText='display:flex;gap:0.5rem;justify-content:flex-end;';",
+        "var cancelBtn=document.createElement('button');cancelBtn.textContent='Cancel';cancelBtn.style.cssText='padding:0.4rem 0.9rem;border:1px solid #ccc;border-radius:0.3rem;background:#fff;cursor:pointer;';",
+        "var submitBtn=document.createElement('button');submitBtn.textContent='Create';submitBtn.style.cssText='padding:0.4rem 0.9rem;border:none;border-radius:0.3rem;background:#5d8a6e;color:#fff;cursor:pointer;';",
+        "btns.appendChild(cancelBtn);btns.appendChild(submitBtn);",
+        "dialog.appendChild(typeLabel);dialog.appendChild(typeSelect);",
+        "dialog.appendChild(slugLabel);dialog.appendChild(slugInput);",
+        "dialog.appendChild(errDiv);dialog.appendChild(btns);",
+        "overlay.appendChild(dialog);document.body.appendChild(overlay);",
+        "slugInput.focus();slugInput.select();",
+        "cancelBtn.onclick=function(){overlay.remove();};",
+        "overlay.onclick=function(e){if(e.target===overlay){overlay.remove();}};",
+        "submitBtn.onclick=function(){",
+          "var stem=typeSelect.value;var slug=slugInput.value.trim();",
+          "if(!slug){errDiv.textContent='Slug is required.';errDiv.style.display='block';return;}",
+          "submitBtn.disabled=true;",
+          "fetch('/_presemble/create-content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stem:stem,slug:slug})})",
+            ".then(function(r){return r.json();})",
+            ".then(function(data){",
+              "if(data.ok&&data.url){overlay.remove();location.href=data.url;}",
+              "else{errDiv.textContent=data.error||'Create failed';errDiv.style.display='block';submitBtn.disabled=false;}",
+            "})",
+            ".catch(function(err){errDiv.textContent='Network error: '+err.message;errDiv.style.display='block';submitBtn.disabled=false;});",
+        "};",
+        "slugInput.addEventListener('keydown',function(e){if(e.key==='Enter'){submitBtn.click();}if(e.key==='Escape'){overlay.remove();}});",
+      "});",
+    "}",
+    "createBtn.onclick=function(){_openCreateDialog();};",
     // Suggest mode state
     "var _suggestions=[];var _suggestIdx=0;var _suggestPreviewState=null;var _suggestActiveEl=null;",
     "var _suggestToolbar=null;",

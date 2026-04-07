@@ -1,6 +1,7 @@
 [implementations]
 site_repository = "components/fs_site_repository"
 bencode = "components/bencode"
+content_editor = "components/content_editor"
 conductor = "components/conductor"
 content = "components/content"
 dep_graph = "components/dep_graph"
