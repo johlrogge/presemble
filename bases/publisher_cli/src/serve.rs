@@ -1006,6 +1006,8 @@ const INJECT: &str = concat!(
       "if(_suggestPreviewState){",
         // Toggle OFF preview: restore the inline diff view
         "el.innerHTML=_suggestPreviewState;",
+        // Re-show any fallback diff that was hidden during preview
+        "var fb=el.querySelector('.presemble-diff-fallback');if(fb){fb.style.display='';}",
         "_suggestPreviewState=null;",
         "el.classList.remove('presemble-suggest-preview-active');",
         "el.classList.add('presemble-suggest-active');",
@@ -1017,13 +1019,20 @@ const INJECT: &str = concat!(
         "if(sug.target_type==='slot'){",
           "el.textContent=sug.proposed_value||'';",
         "}else if(sug.target_type==='body'&&sug.search&&sug.replace){",
-          // Restore original HTML first, then apply the replacement
+          // Try HTML-level replacement first
           "var origHtml=el.getAttribute('data-presemble-original-html')||el.innerHTML;",
           "var searchEsc=sug.search.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
           "var replaceEsc=sug.replace.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
           "var idx=origHtml.indexOf(searchEsc);",
           "if(idx!==-1){",
             "el.innerHTML=origHtml.slice(0,idx)+replaceEsc+origHtml.slice(idx+searchEsc.length);",
+          "}else{",
+            // Fallback: strip markdown and replace in textContent, hide fallback diff
+            "var origText=el.textContent;",
+            "var needle=_stripMd(sug.search);var replacement=_stripMd(sug.replace);",
+            "var tIdx=origText.indexOf(needle);",
+            "if(tIdx!==-1){el.textContent=origText.slice(0,tIdx)+replacement+origText.slice(tIdx+needle.length);}",
+            "var fb=el.querySelector('.presemble-diff-fallback');if(fb){fb.style.display='none';}",
           "}",
         "}",
         "el.classList.add('presemble-suggest-preview-active');",
