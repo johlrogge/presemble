@@ -129,6 +129,10 @@ impl Conductor {
             if let Some(src) = repo.schema_source(&stem) {
                 schema_cache.insert(stem.as_str().to_string(), src);
             }
+            // Collection schemas keyed as "{stem}/index"
+            if let Some(src) = repo.collection_schema_source(&stem) {
+                schema_cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
+            }
         }
 
         let conductor = Self {
@@ -167,13 +171,19 @@ impl Conductor {
     /// Refresh the schema cache by re-scanning the filesystem.
     /// Called after scaffolding or when schema files change on disk.
     fn refresh_schema_cache(&self) {
-        // Re-create the repo to discover new schemas
-        let repo = site_repository::SiteRepository::new(&self.site_dir);
+        // Re-create the repo from filesystem to discover new schemas
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(&self.site_dir)
+            .build();
         let mut cache = self.schema_cache.write().unwrap();
         cache.clear();
         for stem in repo.schema_stems() {
             if let Some(src) = repo.schema_source(&stem) {
                 cache.insert(stem.as_str().to_string(), src);
+            }
+            // Collection schemas keyed as "{stem}/index" (or "/index" for root)
+            if let Some(src) = repo.collection_schema_source(&stem) {
+                cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
             }
         }
     }
@@ -195,8 +205,12 @@ impl Conductor {
     /// only (no collection pages, no site index, no link expression resolution).
     pub fn build_full_graph(&self) -> Result<(), String> {
         let mut graph = site_index::SiteGraph::new();
+        // Use a fresh repo to discover current files (self.repo may be stale after scaffold)
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(&self.site_dir)
+            .build();
 
-        for stem in self.repo.schema_stems() {
+        for stem in repo.schema_stems() {
             let schema_src = match self.schema_source(stem.as_str()) {
                 Some(s) => s,
                 None => continue,
@@ -209,8 +223,8 @@ impl Conductor {
                 }
             };
 
-            for slug in self.repo.content_slugs(&stem) {
-                let content_src = match self.repo.content_source(&stem, &slug) {
+            for slug in repo.content_slugs(&stem) {
+                let content_src = match repo.content_source(&stem, &slug) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -261,8 +275,8 @@ impl Conductor {
                     )),
                 );
 
-                let content_path = self.repo.content_path(&stem, &slug);
-                let schema_path = self.repo.schema_path(&stem);
+                let content_path = repo.content_path(&stem, &slug);
+                let schema_path = repo.schema_path(&stem);
                 let template_path = self
                     .repo
                     .item_template_source(&stem)
@@ -293,8 +307,8 @@ impl Conductor {
                         page_kind: site_index::PageKind::Item,
                         schema_stem: stem.clone(),
                         template_path,
-                        content_path: self.repo.content_path(&stem, &slug),
-                        schema_path: self.repo.schema_path(&stem),
+                        content_path: repo.content_path(&stem, &slug),
+                        schema_path: repo.schema_path(&stem),
                         data,
                     }),
                 };
@@ -343,10 +357,16 @@ impl Conductor {
             _ => return Err(format!("not a content file: {}", content_path.display())),
         };
 
-        // Load grammar from cache
+        // Load grammar from cache — use collection schema for index files
+        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = if slug == "index" {
+            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+        } else {
+            stem.clone()
+        };
         let schema_src = self
-            .schema_source(&stem)
-            .ok_or_else(|| format!("no schema for {stem}"))?;
+            .schema_source(&schema_key)
+            .ok_or_else(|| format!("no schema for {schema_key}"))?;
         let grammar = schema::parse_schema(&schema_src)
             .map_err(|e| format!("schema error: {e:?}"))?;
 
@@ -396,14 +416,22 @@ impl Conductor {
             template::synthesize_link(&title, &url_path),
         ));
 
-        // Load and parse template via repo (try directory-based item template first,
-        // then flat partial convention for backward compatibility)
+        // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
+        let fresh_repo = site_repository::SiteRepository::builder()
+            .from_dir(&self.site_dir)
+            .build();
         let stem_obj = site_index::SchemaStem::new(&stem);
-        let (tmpl_src, is_hiccup) = self
-            .repo
-            .item_template_source(&stem_obj)
-            .or_else(|| self.repo.partial_template_source(&stem))
-            .ok_or_else(|| format!("no template for {stem}"))?;
+        let (tmpl_src, is_hiccup) = if slug == "index" {
+            // Collection page — try collection template first
+            fresh_repo.collection_template_source(&stem_obj)
+                .or_else(|| fresh_repo.item_template_source(&stem_obj))
+                .or_else(|| fresh_repo.partial_template_source(&stem))
+        } else {
+            // Item page
+            fresh_repo.item_template_source(&stem_obj)
+                .or_else(|| fresh_repo.partial_template_source(&stem))
+        }
+        .ok_or_else(|| format!("no template for {stem}"))?;
         let raw_nodes = if is_hiccup {
             template::parse_template_hiccup(&tmpl_src)
                 .map_err(|e| format!("{e}"))?
@@ -413,9 +441,9 @@ impl Conductor {
         };
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
-        // Create render context
+        // Create render context with fresh repo
         let registry = SimpleTemplateRegistry {
-            repo: self.repo.clone(),
+            repo: fresh_repo,
         };
         let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
@@ -562,13 +590,19 @@ impl Conductor {
                 .to_string()
         };
 
-        // Load grammar from cache
-        let grammar = match self.schema_source(&stem) {
+        // Load grammar from cache — use collection schema for index.md, item schema otherwise
+        let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = if slug == "index" {
+            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+        } else {
+            stem.clone()
+        };
+        let grammar = match self.schema_source(&schema_key) {
             Some(src) => match schema::parse_schema(&src) {
                 Ok(g) => g,
                 Err(e) => return Err(format!("schema parse error: {e:?}")),
             },
-            None => return Err(format!("no schema for: {stem}")),
+            None => return Err(format!("no schema for: {schema_key}")),
         };
 
         // Read from in-memory buffer or fall back to disk
@@ -613,10 +647,16 @@ impl Conductor {
                 .to_string()
         };
 
-        // Load grammar from cache
-        let grammar = match self.schema_source(&stem) {
+        // Load grammar from cache — use collection schema for index files
+        let bslug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = if bslug == "index" {
+            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+        } else {
+            stem.clone()
+        };
+        let grammar = match self.schema_source(&schema_key) {
             Some(src) => schema::parse_schema(&src).map_err(|e| format!("schema parse error: {e:?}"))?,
-            None => return Err(format!("no schema for: {stem}")),
+            None => return Err(format!("no schema for: {schema_key}")),
         };
 
         // Read source from in-memory buffer or disk
@@ -878,8 +918,16 @@ impl Conductor {
                 }
             }
             Command::CreateContent { stem, slug } => {
-                match content_editor::create_content(&self.site_dir, &self.repo, &stem, &slug) {
-                    Ok((_path, url)) => CommandResult::with_response(Response::ContentCreated(url)),
+                // Use a fresh repo to find current schemas (self.repo may be stale after scaffold)
+                let fresh_repo = site_repository::SiteRepository::builder()
+                    .from_dir(&self.site_dir)
+                    .build();
+                match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
+                    Ok((_path, url)) => {
+                        // Refresh schema cache for the new content
+                        self.refresh_schema_cache();
+                        CommandResult::with_response(Response::ContentCreated(url))
+                    }
                     Err(e) => CommandResult::error(e),
                 }
             }

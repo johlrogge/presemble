@@ -147,6 +147,14 @@ mod tests {
     #[test]
     fn document_changed_emits_pages_rebuilt_when_site_has_schema_and_template() {
         let dir = tempfile::tempdir().unwrap();
+        // Write schema and template to disk so the fresh repo in rebuild_page finds them
+        let schema_dir = dir.path().join("schemas/post");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(schema_dir.join("item.md"), POST_SCHEMA_SRC).unwrap();
+        let tmpl_dir = dir.path().join("templates/post");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        std::fs::write(tmpl_dir.join("item.html"), POST_TEMPLATE_SRC).unwrap();
+
         let repo = site_repository::SiteRepository::builder()
             .schema("post", POST_SCHEMA_SRC)
             .item_template("post", POST_TEMPLATE_SRC, false)
@@ -552,6 +560,14 @@ mod tests {
         // Schema with a title heading slot, plus body allowed.
         let schema_src = "# Your blog post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
         let template_src = r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert><presemble:insert data="input.body"></presemble:insert></body></html>"#;
+        // Write schema and template to disk so fresh repo in rebuild finds them
+        let schema_dir = dir.path().join("schemas/article");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(schema_dir.join("item.md"), schema_src).unwrap();
+        let tmpl_dir = dir.path().join("templates/article");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        std::fs::write(tmpl_dir.join("item.html"), template_src).unwrap();
+
         let repo = site_repository::SiteRepository::builder()
             .schema("article", schema_src)
             .item_template("article", template_src, false)
