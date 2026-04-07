@@ -98,7 +98,10 @@ fn collect_link_options_inner(
     schema_stem: &str,
     slot_name: &str,
 ) -> Result<Vec<LinkOption>, String> {
-    let schema_path = site_dir.join("schemas").join(format!("{schema_stem}.md"));
+    // Try directory convention first (schemas/{stem}/item.md), then flat (schemas/{stem}.md)
+    let dir_path = site_dir.join("schemas").join(schema_stem).join("item.md");
+    let flat_path = site_dir.join("schemas").join(format!("{schema_stem}.md"));
+    let schema_path = if dir_path.exists() { dir_path } else { flat_path };
     let schema_src = std::fs::read_to_string(&schema_path)
         .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
     let grammar = schema::parse_schema(&schema_src)
