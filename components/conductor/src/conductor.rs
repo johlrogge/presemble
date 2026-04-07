@@ -42,6 +42,7 @@ fn line_to_byte_offset(src: &str, line: u32) -> usize {
 
 /// Derive a URL path from a content-relative file path.
 /// e.g. "content/post/hello.md" → "/post/hello"
+#[allow(dead_code)]
 fn derive_url_from_content_path(file: &str) -> String {
     let stripped = file.strip_prefix("content/").unwrap_or(file);
     let without_ext = stripped.strip_suffix(".md").unwrap_or(stripped);
@@ -534,10 +535,10 @@ impl Conductor {
 
         let new_src = content::serialize_document(&doc);
         // Store in memory only — disk write happens on explicit save
-        self.doc_sources.write().unwrap().insert(abs_path, new_src.clone());
+        self.doc_sources.write().unwrap().insert(abs_path.clone(), new_src.clone());
 
-        let url = derive_url_from_content_path(file);
-        Ok(vec![url])
+        // Rebuild the output HTML from in-memory state so the preview is up to date
+        self.rebuild_page(&abs_path, &new_src)
     }
 
     /// Apply a browser body element edit: replace the markdown source for a body element at

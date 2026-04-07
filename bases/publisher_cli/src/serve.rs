@@ -858,6 +858,8 @@ const INJECT: &str = concat!(
         "return;",
       "}",
       "if(m.anchor){sessionStorage.setItem('presemble-anchor',m.anchor);}",
+      // Don't reload while the user is actively editing — it would discard their changes
+      "if(document.querySelector('.presemble-editing,.presemble-body-editor')){return;}",
       "if(!m.pages||!m.pages.length||m.pages.indexOf(location.pathname)!==-1){location.reload();}",
       "else{location.href=m.primary;}",
     "};",
@@ -1295,7 +1297,9 @@ const INJECT: &str = concat!(
             "el.after(berr2);",
             "el.style.display='';",
           "}else{",
-            "setTimeout(function(){location.reload();},500);",
+            // Don't reload — conductor has the change in memory.
+            // The body element will be shown again with updated content on next rebuild.
+            "_fetchDirtyCount();",
           "}",
         "}).catch(function(err){",
           "var berr3=document.createElement('div');",
