@@ -1,0 +1,12 @@
+[:template {:presemble/define "body"}
+  [:main
+    [:presemble/insert {:data "input.name" :as "h1"}]
+    [:presemble/insert {:data "input.bio" :as "p"}]]]
+
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:title "Author"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]]
+  [:body
+    ((juxt self/body) input)]]

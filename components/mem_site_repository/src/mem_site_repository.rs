@@ -13,12 +13,9 @@ pub struct SiteRepository {
     schemas: HashMap<String, SchemaEntry>,
     content: HashMap<String, HashMap<String, String>>, // stem → {slug → source}
     templates: HashMap<String, (String, bool)>,        // stem → (source, is_hiccup)
-    index_schema: Option<String>,
-    index_content: Option<String>,
-    index_template: Option<(String, bool)>,
-    collection_content: HashMap<String, String>,          // stem → source
-    collection_schemas: HashMap<String, String>,          // stem → source
-    collection_templates: HashMap<String, (String, bool)>,
+    collection_content: HashMap<String, String>,          // stem → source (key "" = root)
+    collection_schemas: HashMap<String, String>,          // stem → source (key "" = root)
+    collection_templates: HashMap<String, (String, bool)>, // stem → (source, is_hiccup) (key "" = root)
     partial_templates: HashMap<String, (String, bool)>,
     /// When set, path accessors return real filesystem paths under this directory.
     /// Used by `SiteRepositoryBuilder::from_dir` so dep_graph entries match the filesystem.
@@ -47,11 +44,16 @@ impl SiteRepository {
     // ---------------------------------------------------------------------------
 
     pub fn schema_stems(&self) -> Vec<SchemaStem> {
-        let mut stems: Vec<SchemaStem> = self
+        let mut stem_set: std::collections::HashSet<String> = self
             .schemas
             .keys()
-            .map(SchemaStem::new)
+            .cloned()
             .collect();
+        // Include root collection stem "" if it has a collection schema or content
+        if self.collection_schemas.contains_key("") || self.schemas.contains_key("") {
+            stem_set.insert(String::new());
+        }
+        let mut stems: Vec<SchemaStem> = stem_set.into_iter().map(SchemaStem::new).collect();
         stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         stems
     }
@@ -80,8 +82,10 @@ impl SiteRepository {
         self.collection_schemas.get(stem.as_str()).cloned()
     }
 
+    /// Returns the root collection schema source (stored under stem "").
+    /// Deprecated: prefer `collection_schema_source(&SchemaStem::new(""))`.
     pub fn index_schema_source(&self) -> Option<String> {
-        self.index_schema.clone()
+        self.collection_schemas.get("").cloned()
     }
 
     // ---------------------------------------------------------------------------
@@ -99,8 +103,10 @@ impl SiteRepository {
         self.collection_content.get(stem.as_str()).cloned()
     }
 
+    /// Returns the root collection content source (stored under stem "").
+    /// Deprecated: prefer `collection_content_source(&SchemaStem::new(""))`.
     pub fn index_content_source(&self) -> Option<String> {
-        self.index_content.clone()
+        self.collection_content.get("").cloned()
     }
 
     // ---------------------------------------------------------------------------
@@ -115,8 +121,10 @@ impl SiteRepository {
         self.collection_templates.get(stem.as_str()).cloned()
     }
 
+    /// Returns the root collection template source (stored under stem "").
+    /// Deprecated: prefer `collection_template_source(&SchemaStem::new(""))`.
     pub fn index_template_source(&self) -> Option<(String, bool)> {
-        self.index_template.clone()
+        self.collection_templates.get("").cloned()
     }
 
     pub fn partial_template_source(&self, name: &str) -> Option<(String, bool)> {
@@ -129,7 +137,13 @@ impl SiteRepository {
 
     pub fn content_path(&self, stem: &SchemaStem, slug: &str) -> PathBuf {
         if let Some(dir) = &self.real_dir {
-            dir.join("content").join(stem.as_str()).join(format!("{slug}.md"))
+            if stem.as_str().is_empty() {
+                dir.join("content").join(format!("{slug}.md"))
+            } else {
+                dir.join("content").join(stem.as_str()).join(format!("{slug}.md"))
+            }
+        } else if stem.as_str().is_empty() {
+            PathBuf::from(format!("memory://content/{slug}.md"))
         } else {
             PathBuf::from(format!("memory://content/{}/{}.md", stem.as_str(), slug))
         }
@@ -137,7 +151,13 @@ impl SiteRepository {
 
     pub fn schema_path(&self, stem: &SchemaStem) -> PathBuf {
         if let Some(dir) = &self.real_dir {
-            dir.join("schemas").join(stem.as_str()).join("item.md")
+            if stem.as_str().is_empty() {
+                dir.join("schemas").join("item.md")
+            } else {
+                dir.join("schemas").join(stem.as_str()).join("item.md")
+            }
+        } else if stem.as_str().is_empty() {
+            PathBuf::from("memory://schemas/item.md")
         } else {
             PathBuf::from(format!("memory://schemas/{}/item.md", stem.as_str()))
         }
@@ -145,7 +165,13 @@ impl SiteRepository {
 
     pub fn collection_content_path(&self, stem: &SchemaStem) -> PathBuf {
         if let Some(dir) = &self.real_dir {
-            dir.join("content").join(stem.as_str()).join("index.md")
+            if stem.as_str().is_empty() {
+                dir.join("content").join("index.md")
+            } else {
+                dir.join("content").join(stem.as_str()).join("index.md")
+            }
+        } else if stem.as_str().is_empty() {
+            PathBuf::from("memory://content/index.md")
         } else {
             PathBuf::from(format!("memory://content/{}/index.md", stem.as_str()))
         }
@@ -153,26 +179,28 @@ impl SiteRepository {
 
     pub fn collection_schema_path(&self, stem: &SchemaStem) -> PathBuf {
         if let Some(dir) = &self.real_dir {
-            dir.join("schemas").join(stem.as_str()).join("index.md")
+            if stem.as_str().is_empty() {
+                dir.join("schemas").join("index.md")
+            } else {
+                dir.join("schemas").join(stem.as_str()).join("index.md")
+            }
+        } else if stem.as_str().is_empty() {
+            PathBuf::from("memory://schemas/index.md")
         } else {
             PathBuf::from(format!("memory://schemas/{}/index.md", stem.as_str()))
         }
     }
 
+    /// Canonical path for the root index content: `content/index.md`.
+    /// Deprecated: prefer `collection_content_path(&SchemaStem::new(""))`.
     pub fn index_content_path(&self) -> PathBuf {
-        if let Some(dir) = &self.real_dir {
-            dir.join("content").join("index.md")
-        } else {
-            PathBuf::from("memory://content/index.md")
-        }
+        self.collection_content_path(&SchemaStem::new(""))
     }
 
+    /// Canonical path for the root index schema: `schemas/index.md`.
+    /// Deprecated: prefer `collection_schema_path(&SchemaStem::new(""))`.
     pub fn index_schema_path(&self) -> PathBuf {
-        if let Some(dir) = &self.real_dir {
-            dir.join("schemas").join("index.md")
-        } else {
-            PathBuf::from("memory://schemas/index.md")
-        }
+        self.collection_schema_path(&SchemaStem::new(""))
     }
 }
 
@@ -226,7 +254,11 @@ impl SiteRepositoryBuilder {
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                     if let Ok(src) = std::fs::read_to_string(&path) {
                         if stem == "index" {
-                            self.repo.index_schema = Some(src);
+                            // schemas/index.md → root collection schema (stem "")
+                            self.repo.collection_schemas.insert(String::new(), src);
+                        } else if stem == "item" {
+                            // schemas/item.md → root item schema (stem "")
+                            self.repo.schemas.entry(String::new()).or_default().item_source = Some(src);
                         } else {
                             self.repo.schemas.entry(stem).or_default().item_source = Some(src);
                         }
@@ -265,9 +297,17 @@ impl SiteRepositoryBuilder {
                 } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                     if stem == "index" {
-                        // Index content
+                        // content/index.md → root collection content (stem "")
                         if let Ok(src) = std::fs::read_to_string(&path) {
-                            self.repo.index_content = Some(src);
+                            self.repo.collection_content.insert(String::new(), src);
+                        }
+                    } else {
+                        // content/{slug}.md → root item content (stem "")
+                        if let Ok(src) = std::fs::read_to_string(&path) {
+                            self.repo.content
+                                .entry(String::new())
+                                .or_default()
+                                .insert(stem, src);
                         }
                     }
                 }
@@ -307,9 +347,9 @@ impl SiteRepositoryBuilder {
                     }
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                     if stem == "index" {
-                        // Index template
+                        // templates/index.{ext} → root collection template (stem "")
                         if let Ok(src) = std::fs::read_to_string(&path) {
-                            self.repo.index_template = Some((src, is_hiccup));
+                            self.repo.collection_templates.insert(String::new(), (src, is_hiccup));
                         }
                     } else {
                         // Partial template
@@ -377,18 +417,24 @@ impl SiteRepositoryBuilder {
         self
     }
 
+    /// Store the root collection schema (served at `/`).
+    /// Stored under stem "" in collection_schemas.
     pub fn index_schema(mut self, source: &str) -> Self {
-        self.repo.index_schema = Some(source.to_string());
+        self.repo.collection_schemas.insert(String::new(), source.to_string());
         self
     }
 
+    /// Store the root collection content (served at `/`).
+    /// Stored under stem "" in collection_content.
     pub fn index_content(mut self, source: &str) -> Self {
-        self.repo.index_content = Some(source.to_string());
+        self.repo.collection_content.insert(String::new(), source.to_string());
         self
     }
 
+    /// Store the root collection template (served at `/`).
+    /// Stored under stem "" in collection_templates.
     pub fn index_template(mut self, source: &str, is_hiccup: bool) -> Self {
-        self.repo.index_template = Some((source.to_string(), is_hiccup));
+        self.repo.collection_templates.insert(String::new(), (source.to_string(), is_hiccup));
         self
     }
 
@@ -425,8 +471,12 @@ mod tests {
         let names: Vec<&str> = stems.iter().map(|s| s.as_str()).collect();
         assert!(names.contains(&"post"), "should find post");
         assert!(names.contains(&"author"), "should find author");
-        assert_eq!(names[0], "author", "stems should be sorted");
-        assert_eq!(names[1], "post");
+        // Root collection stem "" sorts before named stems
+        assert!(names.contains(&""), "should find root collection stem");
+        // All stems should be sorted: "" < "author" < "post"
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "stems should be sorted");
     }
 
     #[test]

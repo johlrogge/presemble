@@ -129,6 +129,10 @@ impl Conductor {
             if let Some(src) = repo.schema_source(&stem) {
                 schema_cache.insert(stem.as_str().to_string(), src);
             }
+            // Collection schemas keyed as "{stem}/index"
+            if let Some(src) = repo.collection_schema_source(&stem) {
+                schema_cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
+            }
         }
 
         let conductor = Self {
@@ -164,6 +168,26 @@ impl Conductor {
         self.schema_cache.read().unwrap().get(stem).cloned()
     }
 
+    /// Refresh the schema cache by re-scanning the filesystem.
+    /// Called after scaffolding or when schema files change on disk.
+    fn refresh_schema_cache(&self) {
+        // Re-create the repo from filesystem to discover new schemas
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(&self.site_dir)
+            .build();
+        let mut cache = self.schema_cache.write().unwrap();
+        cache.clear();
+        for stem in repo.schema_stems() {
+            if let Some(src) = repo.schema_source(&stem) {
+                cache.insert(stem.as_str().to_string(), src);
+            }
+            // Collection schemas keyed as "{stem}/index" (or "/index" for root)
+            if let Some(src) = repo.collection_schema_source(&stem) {
+                cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
+            }
+        }
+    }
+
     /// Replace the site graph with a new one built externally.
     pub fn set_site_graph(&self, graph: site_index::SiteGraph) {
         *self.site_graph.write().unwrap() = graph;
@@ -181,8 +205,12 @@ impl Conductor {
     /// only (no collection pages, no site index, no link expression resolution).
     pub fn build_full_graph(&self) -> Result<(), String> {
         let mut graph = site_index::SiteGraph::new();
+        // Use a fresh repo to discover current files (self.repo may be stale after scaffold)
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(&self.site_dir)
+            .build();
 
-        for stem in self.repo.schema_stems() {
+        for stem in repo.schema_stems() {
             let schema_src = match self.schema_source(stem.as_str()) {
                 Some(s) => s,
                 None => continue,
@@ -195,8 +223,8 @@ impl Conductor {
                 }
             };
 
-            for slug in self.repo.content_slugs(&stem) {
-                let content_src = match self.repo.content_source(&stem, &slug) {
+            for slug in repo.content_slugs(&stem) {
+                let content_src = match repo.content_source(&stem, &slug) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -215,15 +243,24 @@ impl Conductor {
 
                 let mut data = template::build_article_graph_with_source(&doc, &grammar, &content_src);
 
-                let url_path = site_index::UrlPath::new(format!("/{}/{}", stem.as_str(), slug));
+                let url_path = if stem.as_str().is_empty() {
+                    site_index::UrlPath::new(format!("/{slug}"))
+                } else {
+                    site_index::UrlPath::new(format!("/{}/{}", stem.as_str(), slug))
+                };
                 data.insert("url", template::Value::Text(url_path.as_str().to_string()));
                 data.insert(
                     "_presemble_stem",
                     template::Value::Text(stem.as_str().to_string()),
                 );
+                let presemble_file = if stem.as_str().is_empty() {
+                    format!("content/{slug}.md")
+                } else {
+                    format!("content/{}/{}.md", stem.as_str(), slug)
+                };
                 data.insert(
                     "_presemble_file",
-                    template::Value::Text(format!("content/{}/{}.md", stem.as_str(), slug)),
+                    template::Value::Text(presemble_file),
                 );
 
                 let title = match data.resolve(&["title"]) {
@@ -238,8 +275,8 @@ impl Conductor {
                     )),
                 );
 
-                let content_path = self.repo.content_path(&stem, &slug);
-                let schema_path = self.repo.schema_path(&stem);
+                let content_path = repo.content_path(&stem, &slug);
+                let schema_path = repo.schema_path(&stem);
                 let template_path = self
                     .repo
                     .item_template_source(&stem)
@@ -270,8 +307,8 @@ impl Conductor {
                         page_kind: site_index::PageKind::Item,
                         schema_stem: stem.clone(),
                         template_path,
-                        content_path: self.repo.content_path(&stem, &slug),
-                        schema_path: self.repo.schema_path(&stem),
+                        content_path: repo.content_path(&stem, &slug),
+                        schema_path: repo.schema_path(&stem),
                         data,
                     }),
                 };
@@ -320,10 +357,16 @@ impl Conductor {
             _ => return Err(format!("not a content file: {}", content_path.display())),
         };
 
-        // Load grammar from cache
+        // Load grammar from cache — use collection schema for index files
+        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = if slug == "index" {
+            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+        } else {
+            stem.clone()
+        };
         let schema_src = self
-            .schema_source(&stem)
-            .ok_or_else(|| format!("no schema for {stem}"))?;
+            .schema_source(&schema_key)
+            .ok_or_else(|| format!("no schema for {schema_key}"))?;
         let grammar = schema::parse_schema(&schema_src)
             .map_err(|e| format!("schema error: {e:?}"))?;
 
@@ -339,7 +382,13 @@ impl Conductor {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        let url_path = if slug == "index" {
+        let url_path = if stem.is_empty() {
+            if slug == "index" {
+                "/".to_string()
+            } else {
+                format!("/{slug}")
+            }
+        } else if slug == "index" {
             format!("/{stem}/")
         } else {
             format!("/{stem}/{slug}")
@@ -348,9 +397,14 @@ impl Conductor {
         // Add metadata
         graph.insert("url", template::Value::Text(url_path.clone()));
         graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
+        let presemble_file = if stem.is_empty() {
+            format!("content/{slug}.md")
+        } else {
+            format!("content/{stem}/{slug}.md")
+        };
         graph.insert(
             "_presemble_file",
-            template::Value::Text(format!("content/{stem}/{slug}.md")),
+            template::Value::Text(presemble_file),
         );
 
         // Add link record
@@ -362,14 +416,22 @@ impl Conductor {
             template::synthesize_link(&title, &url_path),
         ));
 
-        // Load and parse template via repo (try directory-based item template first,
-        // then flat partial convention for backward compatibility)
+        // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
+        let fresh_repo = site_repository::SiteRepository::builder()
+            .from_dir(&self.site_dir)
+            .build();
         let stem_obj = site_index::SchemaStem::new(&stem);
-        let (tmpl_src, is_hiccup) = self
-            .repo
-            .item_template_source(&stem_obj)
-            .or_else(|| self.repo.partial_template_source(&stem))
-            .ok_or_else(|| format!("no template for {stem}"))?;
+        let (tmpl_src, is_hiccup) = if slug == "index" {
+            // Collection page — try collection template first
+            fresh_repo.collection_template_source(&stem_obj)
+                .or_else(|| fresh_repo.item_template_source(&stem_obj))
+                .or_else(|| fresh_repo.partial_template_source(&stem))
+        } else {
+            // Item page
+            fresh_repo.item_template_source(&stem_obj)
+                .or_else(|| fresh_repo.partial_template_source(&stem))
+        }
+        .ok_or_else(|| format!("no template for {stem}"))?;
         let raw_nodes = if is_hiccup {
             template::parse_template_hiccup(&tmpl_src)
                 .map_err(|e| format!("{e}"))?
@@ -379,9 +441,9 @@ impl Conductor {
         };
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
-        // Create render context
+        // Create render context with fresh repo
         let registry = SimpleTemplateRegistry {
-            repo: self.repo.clone(),
+            repo: fresh_repo,
         };
         let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
@@ -395,7 +457,13 @@ impl Conductor {
         let html = template::serialize_nodes(&transformed);
 
         // Write output
-        let output_path = if slug == "index" {
+        let output_path = if stem.is_empty() {
+            if slug == "index" {
+                self.output_dir.join("index.html")
+            } else {
+                self.output_dir.join(slug).join("index.html")
+            }
+        } else if slug == "index" {
             self.output_dir.join(&stem).join("index.html")
         } else {
             self.output_dir.join(&stem).join(slug).join("index.html")
@@ -414,10 +482,19 @@ impl Conductor {
     ///
     /// Returns `None` if the document cannot be parsed or has no relevant elements.
     fn body_element_anchor_at_line(&self, src: &str, path: &str, line: u32) -> Option<String> {
-        // Derive schema stem from path (e.g., "content/post/my-post.md" → "post")
-        let stem = path
-            .strip_prefix("content/")
-            .and_then(|p| p.split('/').next())?;
+        // Derive schema stem from path.
+        // "content/post/my-post.md" → "post"
+        // "content/index.md" or "content/hello.md" → "" (root collection)
+        let stem = {
+            let rest = path.strip_prefix("content/")?;
+            // If there's another '/' it's a subdir → stem is the part before '/'
+            // Otherwise it's a root-level file → stem is ""
+            if let Some(slash_pos) = rest.find('/') {
+                &rest[..slash_pos]
+            } else {
+                ""
+            }
+        };
 
         // Load grammar from cache
         let schema_src = self.schema_source(stem)?;
@@ -499,22 +576,33 @@ impl Conductor {
     fn apply_slot_edit(&self, file: &str, slot: &str, value: &str) -> Result<Vec<String>, String> {
         let abs_path = self.site_dir.join(file);
 
-        // Derive schema stem from path component (content/{stem}/file.md)
-        let stem = match std::path::Path::new(file).components().nth(1) {
-            Some(c) => match c.as_os_str().to_str() {
-                Some(s) => s.to_string(),
-                None => return Err(format!("cannot derive schema stem from: {file}")),
-            },
-            None => return Err(format!("cannot derive schema stem from: {file}")),
+        // Derive schema stem from path: content/{stem}/file.md or content/file.md (root)
+        let path = std::path::Path::new(file);
+        let components: Vec<_> = path.components().collect();
+        let stem = if components.len() == 2 {
+            // content/file.md → root collection, stem ""
+            String::new()
+        } else {
+            // content/{stem}/file.md → stem is the directory name
+            components.get(1)
+                .and_then(|c| c.as_os_str().to_str())
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+                .to_string()
         };
 
-        // Load grammar from cache
-        let grammar = match self.schema_source(&stem) {
+        // Load grammar from cache — use collection schema for index.md, item schema otherwise
+        let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = if slug == "index" {
+            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+        } else {
+            stem.clone()
+        };
+        let grammar = match self.schema_source(&schema_key) {
             Some(src) => match schema::parse_schema(&src) {
                 Ok(g) => g,
                 Err(e) => return Err(format!("schema parse error: {e:?}")),
             },
-            None => return Err(format!("no schema for: {stem}")),
+            None => return Err(format!("no schema for: {schema_key}")),
         };
 
         // Read from in-memory buffer or fall back to disk
@@ -546,17 +634,29 @@ impl Conductor {
     fn apply_body_element_edit(&self, file: &str, body_idx: usize, new_content: &str) -> Result<Vec<String>, String> {
         let abs_path = self.site_dir.join(file);
 
-        // Derive schema stem from path component (content/{stem}/file.md)
-        let stem = match std::path::Path::new(file).components().nth(1) {
-            Some(c) => c.as_os_str().to_str()
-                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?.to_string(),
-            None => return Err(format!("cannot derive schema stem from: {file}")),
+        // Derive schema stem from path: content/{stem}/file.md or content/file.md (root)
+        let bpath = std::path::Path::new(file);
+        let bcomponents: Vec<_> = bpath.components().collect();
+        let stem = if bcomponents.len() == 2 {
+            // content/file.md → root collection, stem ""
+            String::new()
+        } else {
+            bcomponents.get(1)
+                .and_then(|c| c.as_os_str().to_str())
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+                .to_string()
         };
 
-        // Load grammar from cache
-        let grammar = match self.schema_source(&stem) {
+        // Load grammar from cache — use collection schema for index files
+        let bslug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = if bslug == "index" {
+            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+        } else {
+            stem.clone()
+        };
+        let grammar = match self.schema_source(&schema_key) {
             Some(src) => schema::parse_schema(&src).map_err(|e| format!("schema parse error: {e:?}"))?,
-            None => return Err(format!("no schema for: {stem}")),
+            None => return Err(format!("no schema for: {schema_key}")),
         };
 
         // Read source from in-memory buffer or disk
@@ -567,15 +667,27 @@ impl Conductor {
         let doc = content::parse_and_assign(&source, &grammar)
             .map_err(|e| format!("parse error: {e}"))?;
 
-        // Validate index
-        let element = doc.body.get(body_idx)
-            .ok_or_else(|| format!("body index {body_idx} out of range (have {} elements)", doc.body.len()))?;
-
-        // Replace the span in the source
-        let mut new_source = String::with_capacity(source.len() + new_content.len());
-        new_source.push_str(&source[..element.span.start]);
-        new_source.push_str(new_content);
-        new_source.push_str(&source[element.span.end..]);
+        // Replace the body element span, or append if body is empty
+        let new_source = if let Some(element) = doc.body.get(body_idx) {
+            let mut s = String::with_capacity(source.len() + new_content.len());
+            s.push_str(&source[..element.span.start]);
+            s.push_str(new_content);
+            s.push_str(&source[element.span.end..]);
+            s
+        } else if doc.body.is_empty() {
+            // No body elements — append content after separator (add separator if missing)
+            let mut s = source.to_string();
+            if !s.contains("----") {
+                if !s.ends_with('\n') { s.push('\n'); }
+                s.push_str("\n----\n\n");
+            }
+            if !s.ends_with('\n') { s.push('\n'); }
+            s.push_str(new_content);
+            s.push('\n');
+            s
+        } else {
+            return Err(format!("body index {body_idx} out of range (have {} elements)", doc.body.len()));
+        };
 
         // Store in memory only — disk write happens on explicit save
         self.doc_sources.write().unwrap().insert(abs_path.clone(), new_source.clone());
@@ -818,8 +930,17 @@ impl Conductor {
                 }
             }
             Command::CreateContent { stem, slug } => {
-                match content_editor::create_content(&self.site_dir, &self.repo, &stem, &slug) {
-                    Ok((_path, url)) => CommandResult::with_response(Response::ContentCreated(url)),
+                // Use a fresh repo to find current schemas (self.repo may be stale after scaffold)
+                let fresh_repo = site_repository::SiteRepository::builder()
+                    .from_dir(&self.site_dir)
+                    .build();
+                match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
+                    Ok((_path, url)) => {
+                        // Refresh schema cache and rebuild graph for the new content
+                        self.refresh_schema_cache();
+                        let _ = self.build_full_graph();
+                        CommandResult::with_response(Response::ContentCreated(url))
+                    }
                     Err(e) => CommandResult::error(e),
                 }
             }
@@ -862,6 +983,23 @@ impl Conductor {
                     sources.remove(&path);
                 }
                 CommandResult::ok()
+            }
+            Command::ScaffoldSite { template_name, format } => {
+                match site_templates::template_by_name(&template_name) {
+                    Some(template) => {
+                        match template.scaffold(&self.site_dir, &format) {
+                            Ok(()) => {
+                                // Refresh schema cache — new schemas were written to disk
+                                self.refresh_schema_cache();
+                                // Rebuild the full graph with the new content
+                                let _ = self.build_full_graph();
+                                CommandResult::ok()
+                            }
+                            Err(e) => CommandResult::error(e),
+                        }
+                    }
+                    None => CommandResult::error(format!("unknown template: {template_name}")),
+                }
             }
         }
     }

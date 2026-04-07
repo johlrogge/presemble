@@ -62,7 +62,12 @@ impl SiteRepository {
                 } else if path.extension().and_then(|e| e.to_str()) == Some("md")
                     && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
                 {
-                    stems.insert(stem.to_string());
+                    // schemas/index.md or schemas/item.md → root collection (stem "")
+                    if stem == "index" || stem == "item" {
+                        stems.insert(String::new());
+                    } else {
+                        stems.insert(stem.to_string());
+                    }
                 }
             }
         }
@@ -75,12 +80,18 @@ impl SiteRepository {
     /// List content slugs for a given schema stem. Returns the file stem of each
     /// `.md` file under `content/{stem}/`, excluding `index.md`.
     pub fn content_slugs(&self, stem: &SchemaStem) -> Vec<String> {
-        let content_dir = self.site_dir.join("content").join(stem.as_str());
+        // For empty stem (root collection), list .md files directly in content/
+        let content_dir = if stem.as_str().is_empty() {
+            self.site_dir.join("content")
+        } else {
+            self.site_dir.join("content").join(stem.as_str())
+        };
         let mut slugs = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&content_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("md")
+                if path.is_file()
+                    && path.extension().and_then(|e| e.to_str()) == Some("md")
                     && let Some(file_stem) = path.file_stem().and_then(|s| s.to_str())
                     && file_stem != "index"
                 {
@@ -107,9 +118,10 @@ impl SiteRepository {
         std::fs::read_to_string(self.collection_schema_path(stem)).ok()
     }
 
-    /// Read the top-level index schema source (`schemas/index.md`).
+    /// Read the root collection schema source (`schemas/index.md`).
+    /// Deprecated: prefer `collection_schema_source(&SchemaStem::new(""))`.
     pub fn index_schema_source(&self) -> Option<String> {
-        std::fs::read_to_string(self.index_schema_path()).ok()
+        self.collection_schema_source(&SchemaStem::new(""))
     }
 
     // ---------------------------------------------------------------------------
@@ -126,9 +138,10 @@ impl SiteRepository {
         std::fs::read_to_string(self.collection_content_path(stem)).ok()
     }
 
-    /// Read the top-level index content file (`content/index.md`).
+    /// Read the root collection content file (`content/index.md`).
+    /// Deprecated: prefer `collection_content_source(&SchemaStem::new(""))`.
     pub fn index_content_source(&self) -> Option<String> {
-        std::fs::read_to_string(self.index_content_path()).ok()
+        self.collection_content_source(&SchemaStem::new(""))
     }
 
     // ---------------------------------------------------------------------------
@@ -137,23 +150,33 @@ impl SiteRepository {
 
     /// Read the item template for `{stem}`. Tries `.hiccup` before `.html`.
     /// Checks `templates/{stem}/item.{ext}` (directory-based convention).
+    /// For empty stem (root collection): checks `templates/item.{ext}`.
     pub fn item_template_source(&self, stem: &SchemaStem) -> Option<(String, bool)> {
-        let base = self.site_dir.join("templates").join(stem.as_str()).join("item");
+        let base = if stem.as_str().is_empty() {
+            self.site_dir.join("templates").join("item")
+        } else {
+            self.site_dir.join("templates").join(stem.as_str()).join("item")
+        };
         read_template_source(&base)
     }
 
     /// Read the collection template for `{stem}`.
     /// Checks `templates/{stem}/index.{ext}`.
+    /// For empty stem (root collection): checks `templates/index.{ext}`.
     pub fn collection_template_source(&self, stem: &SchemaStem) -> Option<(String, bool)> {
-        let base = self.site_dir.join("templates").join(stem.as_str()).join("index");
+        let base = if stem.as_str().is_empty() {
+            self.site_dir.join("templates").join("index")
+        } else {
+            self.site_dir.join("templates").join(stem.as_str()).join("index")
+        };
         read_template_source(&base)
     }
 
-    /// Read the top-level index template.
+    /// Read the root collection template.
     /// Checks `templates/index.{ext}`.
+    /// Deprecated: prefer `collection_template_source(&SchemaStem::new(""))`.
     pub fn index_template_source(&self) -> Option<(String, bool)> {
-        let base = self.site_dir.join("templates").join("index");
-        read_template_source(&base)
+        self.collection_template_source(&SchemaStem::new(""))
     }
 
     /// Read a partial template by name.
@@ -168,7 +191,11 @@ impl SiteRepository {
     // ---------------------------------------------------------------------------
 
     /// Canonical path for a content file: `content/{stem}/{slug}.md`.
+    /// For empty stem (root collection): `content/{slug}.md`.
     pub fn content_path(&self, stem: &SchemaStem, slug: &str) -> PathBuf {
+        if stem.as_str().is_empty() {
+            return self.site_dir.join("content").join(format!("{slug}.md"));
+        }
         self.site_dir
             .join("content")
             .join(stem.as_str())
@@ -177,7 +204,11 @@ impl SiteRepository {
 
     /// Canonical path for an item schema. Prefers `schemas/{stem}/item.md`,
     /// falls back to `schemas/{stem}.md`.
+    /// For empty stem (root collection), returns `schemas/item.md`.
     pub fn schema_path(&self, stem: &SchemaStem) -> PathBuf {
+        if stem.as_str().is_empty() {
+            return self.site_dir.join("schemas").join("item.md");
+        }
         let dir_based = self
             .site_dir
             .join("schemas")
@@ -192,29 +223,39 @@ impl SiteRepository {
     }
 
     /// Canonical path for a collection content file: `content/{stem}/index.md`.
+    /// For empty stem (root collection): `content/index.md`.
     pub fn collection_content_path(&self, stem: &SchemaStem) -> PathBuf {
+        if stem.as_str().is_empty() {
+            return self.site_dir.join("content").join("index.md");
+        }
         self.site_dir
             .join("content")
             .join(stem.as_str())
             .join("index.md")
     }
 
-    /// Canonical path for a collection schema: `schemas/{stem}/collection.md`.
+    /// Canonical path for a collection schema: `schemas/{stem}/index.md`.
+    /// For empty stem (root collection): `schemas/index.md`.
     pub fn collection_schema_path(&self, stem: &SchemaStem) -> PathBuf {
+        if stem.as_str().is_empty() {
+            return self.site_dir.join("schemas").join("index.md");
+        }
         self.site_dir
             .join("schemas")
             .join(stem.as_str())
             .join("index.md")
     }
 
-    /// Canonical path for the index content: `content/index.md`.
+    /// Canonical path for the root index content: `content/index.md`.
+    /// Deprecated: prefer `collection_content_path(&SchemaStem::new(""))`.
     pub fn index_content_path(&self) -> PathBuf {
-        self.site_dir.join("content").join("index.md")
+        self.collection_content_path(&SchemaStem::new(""))
     }
 
-    /// Canonical path for the index schema: `schemas/index.md`.
+    /// Canonical path for the root index schema: `schemas/index.md`.
+    /// Deprecated: prefer `collection_schema_path(&SchemaStem::new(""))`.
     pub fn index_schema_path(&self) -> PathBuf {
-        self.site_dir.join("schemas").join("index.md")
+        self.collection_schema_path(&SchemaStem::new(""))
     }
 }
 

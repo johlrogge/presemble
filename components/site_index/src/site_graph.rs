@@ -11,9 +11,8 @@ pub enum PageKind {
     /// A content item: content/post/hello-world.md → /post/hello-world
     Item,
     /// A collection index: content/post/index.md → /post/
+    /// The root collection (stem "") uses content/index.md → /
     Collection,
-    /// The site root index: content/index.md → /
-    SiteIndex,
 }
 
 /// Data specific to page nodes.
@@ -195,16 +194,13 @@ mod tests {
         graph.insert(make_page_node(PageKind::Item, "post", "/post/a"));
         graph.insert(make_page_node(PageKind::Item, "post", "/post/b"));
         graph.insert(make_page_node(PageKind::Collection, "post", "/post/"));
-        graph.insert(make_page_node(PageKind::SiteIndex, "index", "/"));
+        graph.insert(make_page_node(PageKind::Collection, "", "/"));
 
         let items: Vec<_> = graph.iter_pages_by_kind(PageKind::Item).collect();
         assert_eq!(items.len(), 2, "should return 2 items");
 
         let collections: Vec<_> = graph.iter_pages_by_kind(PageKind::Collection).collect();
-        assert_eq!(collections.len(), 1, "should return 1 collection");
-
-        let site_indices: Vec<_> = graph.iter_pages_by_kind(PageKind::SiteIndex).collect();
-        assert_eq!(site_indices.len(), 1, "should return 1 site index");
+        assert_eq!(collections.len(), 2, "should return 2 collections (post + root)");
     }
 
     #[test]

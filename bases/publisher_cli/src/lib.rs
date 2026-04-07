@@ -91,10 +91,20 @@ fn page_address(site_dir: &std::path::Path, schema_stem: &str, content_path: &st
         .and_then(|s| s.to_str())
         .unwrap_or("index")
         .to_string();
+    // When stem is empty (root collection), files are at content/ root.
     // When the file is named `index.md`, it acts as the directory index for the schema.
-    // Output to `{schema}/index.html` directly (served at `/{schema}/`), not
-    // `{schema}/index/index.html` (which would be served at `/{schema}/index/`).
-    let (url_path, output_path) = if slug == "index" {
+    let (url_path, output_path) = if schema_stem.is_empty() {
+        // Root collection
+        if slug == "index" {
+            let url = "/".to_string();
+            let path = output_dir(site_dir).join("index.html");
+            (url, path)
+        } else {
+            let url = format!("/{slug}");
+            let path = output_dir(site_dir).join(&slug).join("index.html");
+            (url, path)
+        }
+    } else if slug == "index" {
         let url = format!("/{schema_stem}/");
         let path = output_dir(site_dir)
             .join(schema_stem)
@@ -460,9 +470,12 @@ pub fn build_content_page(
 
     // Add metadata for browser editing: schema stem identifies the content type
     slot_graph.insert("_presemble_stem", template::Value::Text(schema_stem.to_string()));
-    slot_graph.insert("_presemble_file", template::Value::Text(
-        format!("content/{schema_stem}/{}.md", addr.slug),
-    ));
+    let presemble_file = if schema_stem.is_empty() {
+        format!("content/{}.md", addr.slug)
+    } else {
+        format!("content/{schema_stem}/{}.md", addr.slug)
+    };
+    slot_graph.insert("_presemble_file", template::Value::Text(presemble_file));
 
     // Add url and link to the article graph
     slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
@@ -837,11 +850,8 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         // filesystem when the templates directory is present.
         let mut template_sources: Vec<(String, String, bool)> = Vec::new(); // (stem, src, is_hiccup)
 
-        // Item and collection templates from repo
+        // Item and collection templates from repo (including empty stem for root collection)
         for stem in &schema_stems_list {
-            if stem.as_str() == "index" {
-                continue;
-            }
             if let Some((src, is_hiccup)) = repo.item_template_source(stem) {
                 template_sources.push((stem.as_str().to_string(), src, is_hiccup));
             }
@@ -849,9 +859,12 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 template_sources.push((stem.as_str().to_string(), src, is_hiccup));
             }
         }
-        // Index template from repo
-        if let Some((src, is_hiccup)) = repo.index_template_source() {
-            template_sources.push(("index".to_string(), src, is_hiccup));
+        // Index template for root collection (backward compat: also check via index_template_source
+        // for sites that don't have schemas/index.md in schema_stems)
+        if !schema_stems_list.iter().any(|s| s.as_str().is_empty())
+            && let Some((src, is_hiccup)) = repo.index_template_source()
+        {
+            template_sources.push(("".to_string(), src, is_hiccup));
         }
         // Flat partial templates from filesystem (not discoverable through the repo API)
         if let Ok(entries) = std::fs::read_dir(&templates_dir) {
@@ -930,12 +943,6 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     for stem in &schema_stems_list {
         let schema_stem: &str = stem.as_str();
 
-        // The "index" schema is reserved for feeding data into the index template.
-        // It does not generate standalone content pages and is handled separately below.
-        if schema_stem == "index" {
-            continue;
-        }
-
         let schema_path = repo.schema_path(stem);
 
         // Track schema stem for unused-source warnings
@@ -945,9 +952,15 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         all_schema_paths.push(schema_path.clone());
 
         // Read and parse the schema via repo
+        // For stem "", if there's no item schema (schemas/item.md), skip silently —
+        // the root collection (schemas/index.md) is handled by Phase 1b.
         let schema_source = match repo.schema_source(stem) {
             Some(s) => s,
             None => {
+                if schema_stem.is_empty() {
+                    // Root stem with no item schema: skip Phase 1a, Phase 1b handles it
+                    continue;
+                }
                 eprintln!("schema error: could not read {}", schema_path.display());
                 files_failed += 1;
                 continue;
@@ -1081,11 +1094,9 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     }
 
     // Phase 1b: Build collection entries (content/{stem}/index.md)
+    // For empty stem (root collection), this builds the site root page (content/index.md → /)
     for stem in repo.schema_stems() {
         let schema_stem = stem.as_str();
-        if schema_stem == "index" {
-            continue;
-        }
         let collection_content_path = repo.collection_content_path(&stem);
         if repo.collection_content_source(&stem).is_none() {
             continue;
@@ -1149,10 +1160,23 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 eprintln!("{}/index.md: {:?}: {}", schema_stem, diag.severity, diag.message);
             }
         }
-        let collection_graph = template::build_article_graph(&collection_doc, &collection_grammar);
-        let url_path_str = format!("/{schema_stem}/");
-        let out_dir_col = output_dir(site_dir).join(schema_stem);
-        let output_path_col = out_dir_col.join("index.html");
+        let mut collection_graph = template::build_article_graph(&collection_doc, &collection_grammar);
+        // Add metadata for browser editing
+        let coll_file = if schema_stem.is_empty() {
+            "content/index.md".to_string()
+        } else {
+            format!("content/{schema_stem}/index.md")
+        };
+        collection_graph.insert("_presemble_file", template::Value::Text(coll_file));
+        collection_graph.insert("_presemble_stem", template::Value::Text(schema_stem.to_string()));
+        let (url_path_str, output_path_col) = if schema_stem.is_empty() {
+            // Root collection: url "/" and output/index.html
+            ("/".to_string(), output_dir(site_dir).join("index.html"))
+        } else {
+            let url = format!("/{schema_stem}/");
+            let path = output_dir(site_dir).join(schema_stem).join("index.html");
+            (url, path)
+        };
         let mut deps_col: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
         deps_col.insert(collection_template_path.clone());
         deps_col.insert(collection_content_path.clone());
@@ -1178,50 +1202,52 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         site_graph.insert(node);
     }
 
-    // Phase 1c: Build site index entry.
-    // Always insert a SiteIndex entry if an index template exists.
-    // If content/index.md also exists, populate the entry's data from it.
-    let index_stem = SchemaStem::new("index");
-    let index_schema_path = repo.index_schema_path();
-    let index_content_path = repo.index_content_path();
-    {
-        // Resolve the index template path via repo. The repo tries
-        // `templates/index.hiccup` then `templates/index.html`.
-        let index_tmpl = {
+    // Phase 1c (legacy fallback): Build root page from templates/index.{ext} when
+    // there is no schemas/index.md (so stem "" was not in schema_stems()).
+    // This preserves backward compat for sites that have templates/index.html
+    // but no root collection schema or content.
+    let root_url = site_index::UrlPath::new("/");
+    if site_graph.get(&root_url).is_none() {
+        let root_stem = SchemaStem::new("");
+        if let Some((_, is_hiccup)) = repo.collection_template_source(&root_stem) {
             let base = repo.site_dir().join("templates").join("index");
-            repo.index_template_source().map(|(_, is_hiccup)| {
-                if is_hiccup {
-                    base.with_extension("hiccup")
-                } else {
-                    base.with_extension("html")
-                }
-            })
-        };
-        if let Some(index_tmpl_path) = index_tmpl {
-            let mut index_graph = template::DataGraph::new();
-            // Populate from content/index.md if schema and content exist in repo
-            if let Some(schema_src) = repo.index_schema_source()
+            let index_tmpl_path = if is_hiccup {
+                base.with_extension("hiccup")
+            } else {
+                base.with_extension("html")
+            };
+            let mut root_graph = template::DataGraph::new();
+            // Populate from content/index.md + schemas/index.md if both exist
+            if let Some(schema_src) = repo.collection_schema_source(&root_stem)
                 && let Ok(grammar) = schema::parse_schema(&schema_src)
-                && let Some(content_src) = repo.index_content_source()
+                && let Some(content_src) = repo.collection_content_source(&root_stem)
                 && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
             {
-                index_graph = template::build_article_graph(&doc, &grammar);
-                index_graph.insert("_presemble_file", template::Value::Text("content/index.md".to_string()));
-                index_graph.insert("_presemble_stem", template::Value::Text("index".to_string()));
+                root_graph = template::build_article_graph(&doc, &grammar);
+                root_graph.insert("_presemble_file", template::Value::Text("content/index.md".to_string()));
+                root_graph.insert("_presemble_stem", template::Value::Text(String::new()));
             }
-            let index_output_path = output_dir(site_dir).join("index.html");
+            let root_output_path = output_dir(site_dir).join("index.html");
+            let root_content_path = repo.collection_content_path(&root_stem);
+            let mut root_deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+            root_deps.insert(index_tmpl_path.clone());
+            root_deps.extend(all_content_paths.iter().cloned());
+            root_deps.extend(all_schema_paths.iter().cloned());
+            root_deps.insert(repo.collection_schema_path(&root_stem));
+            root_deps.insert(root_content_path.clone());
+            dep_graph.register(root_output_path.clone(), root_deps.clone());
             let node = SiteNode {
-                url_path: UrlPath::new("/"),
-                output_path: index_output_path,
-                source_path: index_content_path.clone(),
-                deps: std::collections::HashSet::new(),
+                url_path: root_url.clone(),
+                output_path: root_output_path,
+                source_path: root_content_path.clone(),
+                deps: root_deps,
                 role: NodeRole::Page(PageData {
-                    page_kind: PageKind::SiteIndex,
-                    schema_stem: index_stem,
+                    page_kind: PageKind::Collection,
+                    schema_stem: root_stem,
                     template_path: index_tmpl_path,
-                    content_path: index_content_path.clone(),
-                    schema_path: index_schema_path.clone(),
-                    data: index_graph,
+                    content_path: root_content_path,
+                    schema_path: repo.collection_schema_path(&SchemaStem::new("")),
+                    data: root_graph,
                 }),
             };
             site_graph.insert(node);
@@ -1380,26 +1406,8 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             }
         }
 
-        // Register dep_graph for index
-        let index_template_path_opt: Option<std::path::PathBuf> = {
-            let idx_url = UrlPath::new("/");
-            site_graph.get(&idx_url).and_then(|n| n.page_data().map(|pd| pd.template_path.clone()))
-        };
-        if let Some(index_template_path) = index_template_path_opt {
-            let index_output = output_dir(site_dir).join("index.html");
-            let mut index_deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-            index_deps.insert(index_template_path);
-            index_deps.extend(all_content_paths.iter().cloned());
-            index_deps.extend(all_schema_paths.iter().cloned());
-            let index_schema_path_reg = repo.index_schema_path();
-            let index_content_path_reg = repo.index_content_path();
-            index_deps.insert(index_schema_path_reg);
-            index_deps.insert(index_content_path_reg);
-            dep_graph.register(index_output, index_deps);
-        }
-
-        // Register collection dep_graphs for items that already have them
-        // (already done in Phase 1b above for collection entries)
+        // Dep graph for the root collection and other collections is registered
+        // in Phase 1b above for all collection entries (including empty stem).
     }
 
     // Collect all built URL paths for link validation
@@ -1872,6 +1880,7 @@ fn warn_unused_sources(
     for stem in all_template_stems {
         let is_used = schema_stems.iter().any(|s| s == stem)
             || stem == "index"
+            || stem.is_empty() // root collection template (templates/index.{ext})
             || included_template_stems.contains(stem);
         if !is_used {
             // Reconstruct the display path: prefer new convention, fall back to flat

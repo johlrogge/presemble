@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to Presemble</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 3rem auto; padding: 0 1rem; color: #333; }
+    h1 { color: #1a1a1a; }
+    .templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 1rem; margin: 2rem 0; }
+    .template-card { border: 1px solid #ddd; border-radius: 0.5rem; padding: 1.5rem; cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; }
+    .template-card:hover { border-color: #5d8a6e; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .template-card h3 { margin: 0 0 0.5rem; color: #1a1a1a; }
+    .template-card p { margin: 0; color: #666; font-size: 0.9rem; }
+    .format-select { margin: 1rem 0; }
+    .format-select label { margin-right: 1rem; }
+    .format-select input { margin-right: 0.3rem; }
+    .status { margin: 1rem 0; color: #5d8a6e; font-style: italic; }
+  </style>
+</head>
+<body>
+  <h1>Welcome to Presemble</h1>
+  <p>This directory is empty. Choose a site template to get started:</p>
+  <div class="format-select">
+    <label><input type="radio" name="format" value="hiccup" checked> Hiccup (recommended)</label>
+    <label><input type="radio" name="format" value="html"> HTML</label>
+  </div>
+  <div class="templates" id="templates"></div>
+  <div class="status" id="status"></div>
+  <script>
+    fetch('/_presemble/templates')
+      .then(function(r) { return r.json(); })
+      .then(function(templates) {
+        var container = document.getElementById('templates');
+        templates.forEach(function(t) {
+          var card = document.createElement('div');
+          card.className = 'template-card';
+          card.innerHTML = '<h3>' + t.name + '</h3><p>' + t.description + '</p>';
+          card.onclick = function() {
+            var format = document.querySelector('input[name="format"]:checked').value;
+            document.getElementById('status').textContent = 'Creating site...';
+            fetch('/_presemble/scaffold', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ template: t.name, format: format })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+              if (data.ok) {
+                document.getElementById('status').textContent = 'Site created! Reloading...';
+                setTimeout(function() { location.reload(); }, 1000);
+              } else {
+                document.getElementById('status').textContent = 'Error: ' + (data.error || 'Unknown error');
+              }
+            });
+          };
+          container.appendChild(card);
+        });
+      });
+  </script>
+</body>
+</html>

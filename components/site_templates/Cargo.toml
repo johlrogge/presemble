@@ -1,0 +1,13 @@
+[package]
+name = "site_templates"
+version = "0.27.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "site_templates"
+
+[dependencies]
+include_dir = "0.7"
+
+[dev-dependencies]
+tempfile = "3"

@@ -91,10 +91,17 @@ impl SiteIndex {
         };
         match first {
             "content" => {
-                // content/{stem}/file.md
-                if let Some(stem_component) = components.next() {
-                    let stem = stem_component.as_os_str().to_str().unwrap_or("").to_string();
-                    FileKind::Content { schema_stem: SchemaStem::new(stem) }
+                // content/file.md → root content, stem ""
+                // content/{stem}/file.md → stem is directory name
+                if let Some(second_component) = components.next() {
+                    let second_str = second_component.as_os_str().to_str().unwrap_or("").to_string();
+                    if components.next().is_some() {
+                        // content/{stem}/file.md — stem is the directory name (second_str)
+                        FileKind::Content { schema_stem: SchemaStem::new(second_str) }
+                    } else {
+                        // content/file.md — root-level file, stem ""
+                        FileKind::Content { schema_stem: SchemaStem::new("") }
+                    }
                 } else {
                     FileKind::Unknown
                 }
@@ -116,13 +123,19 @@ impl SiteIndex {
                         }
                     } else {
                         // Flat: templates/{stem}.html — stem is the file stem
+                        // Special case: templates/index.{ext} or templates/item.{ext} → root, stem ""
                         let file_path = Path::new(first_component.as_os_str());
-                        let stem = file_path
+                        let file_stem = file_path
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("")
                             .to_string();
-                        FileKind::Template { schema_stem: SchemaStem::new(stem) }
+                        let schema_stem = if file_stem == "index" || file_stem == "item" {
+                            String::new()
+                        } else {
+                            file_stem
+                        };
+                        FileKind::Template { schema_stem: SchemaStem::new(schema_stem) }
                     }
                 } else {
                     FileKind::Unknown
@@ -144,12 +157,18 @@ impl SiteIndex {
                         }
                     } else {
                         // Flat: schemas/{stem}.md — stem is the file stem
+                        // Special case: schemas/index.md or schemas/item.md → root collection, stem ""
                         let file_path = Path::new(first_component.as_os_str());
-                        let stem = file_path
+                        let file_stem = file_path
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("")
                             .to_string();
+                        let stem = if file_stem == "index" || file_stem == "item" {
+                            String::new()
+                        } else {
+                            file_stem
+                        };
                         FileKind::Schema { stem: SchemaStem::new(stem) }
                     }
                 } else {
@@ -176,7 +195,16 @@ impl SiteIndex {
     /// Given a schema stem, return the schema file path.
     /// Prefers the new directory-based convention (`schemas/{stem}/item.md`)
     /// and falls back to the legacy flat convention (`schemas/{stem}.md`).
+    /// For empty stem (root collection), tries `schemas/item.md` first,
+    /// then `schemas/index.md`.
     pub fn schema_path(&self, stem: &str) -> PathBuf {
+        if stem.is_empty() {
+            let item_path = self.site_dir.join("schemas").join("item.md");
+            if item_path.exists() {
+                return item_path;
+            }
+            return self.site_dir.join("schemas").join("index.md");
+        }
         let dir_based = self.site_dir.join("schemas").join(stem).join("item.md");
         if dir_based.exists() {
             return dir_based;
@@ -184,9 +212,14 @@ impl SiteIndex {
         self.site_dir.join("schemas").join(format!("{stem}.md"))
     }
 
-    /// Given a schema stem, discover all content files for it
+    /// Given a schema stem, discover all content files for it.
+    /// For empty stem (root collection), lists `.md` files directly in `content/`.
     pub fn content_files(&self, stem: &str) -> Vec<PathBuf> {
-        let content_dir = self.site_dir.join("content").join(stem);
+        let content_dir = if stem.is_empty() {
+            self.site_dir.join("content")
+        } else {
+            self.site_dir.join("content").join(stem)
+        };
         let mut files = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&content_dir) {
             for entry in entries.flatten() {
@@ -205,8 +238,21 @@ impl SiteIndex {
     /// Given a schema stem, find the matching template (html first, then hiccup).
     /// Prefers the new directory-based convention (`templates/{stem}/item.html`)
     /// and falls back to the legacy flat convention (`templates/{stem}.html`).
+    /// For empty stem (root collection), uses `templates/index.{ext}`.
     pub fn template_for(&self, stem: &str) -> Option<PathBuf> {
         let templates_dir = self.site_dir.join("templates");
+        if stem.is_empty() {
+            // Root collection uses templates/index.{ext}
+            let html = templates_dir.join("index.html");
+            if html.exists() {
+                return Some(html);
+            }
+            let hiccup = templates_dir.join("index.hiccup");
+            if hiccup.exists() {
+                return Some(hiccup);
+            }
+            return None;
+        }
         // New directory-based convention
         let dir_html = templates_dir.join(stem).join("item.html");
         if dir_html.exists() {
@@ -250,7 +296,12 @@ impl SiteIndex {
                     && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
                 {
                     // Legacy flat convention: schemas/{stem}.md
-                    stems.insert(stem.to_string());
+                    // schemas/index.md or schemas/item.md → root collection, stem ""
+                    if stem == "index" || stem == "item" {
+                        stems.insert(String::new());
+                    } else {
+                        stems.insert(stem.to_string());
+                    }
                 }
             }
         }
@@ -343,10 +394,10 @@ mod tests {
     #[test]
     fn classify_template_file_legacy_flat() {
         let idx = index();
-        // Legacy flat convention: templates/{stem}.html — still supported (e.g. index.html, partials)
+        // Legacy flat convention: templates/index.html → root collection, stem ""
         let path = idx.site_dir().join("templates/index.html");
         match idx.classify(&path) {
-            FileKind::Template { schema_stem } => assert_eq!(schema_stem.as_str(), "index"),
+            FileKind::Template { schema_stem } => assert_eq!(schema_stem.as_str(), ""),
             other => panic!("expected Template, got {:?}", other),
         }
     }

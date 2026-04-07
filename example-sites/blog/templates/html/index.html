@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>My Blog</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<main>
+  <presemble:insert data="input.tagline" as="h1"></presemble:insert>
+  <section>
+    <h2>Latest Posts</h2>
+    <template data-each="input.post">
+      <article>
+        <presemble:insert data="item.link" as="h3"></presemble:insert>
+        <presemble:insert data="item.summary" as="p"></presemble:insert>
+      </article>
+    </template>
+  </section>
+</main>
+</body>
+</html>
