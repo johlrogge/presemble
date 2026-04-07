@@ -667,15 +667,27 @@ impl Conductor {
         let doc = content::parse_and_assign(&source, &grammar)
             .map_err(|e| format!("parse error: {e}"))?;
 
-        // Validate index
-        let element = doc.body.get(body_idx)
-            .ok_or_else(|| format!("body index {body_idx} out of range (have {} elements)", doc.body.len()))?;
-
-        // Replace the span in the source
-        let mut new_source = String::with_capacity(source.len() + new_content.len());
-        new_source.push_str(&source[..element.span.start]);
-        new_source.push_str(new_content);
-        new_source.push_str(&source[element.span.end..]);
+        // Replace the body element span, or append if body is empty
+        let new_source = if let Some(element) = doc.body.get(body_idx) {
+            let mut s = String::with_capacity(source.len() + new_content.len());
+            s.push_str(&source[..element.span.start]);
+            s.push_str(new_content);
+            s.push_str(&source[element.span.end..]);
+            s
+        } else if doc.body.is_empty() {
+            // No body elements — append content after separator (add separator if missing)
+            let mut s = source.to_string();
+            if !s.contains("----") {
+                if !s.ends_with('\n') { s.push('\n'); }
+                s.push_str("\n----\n\n");
+            }
+            if !s.ends_with('\n') { s.push('\n'); }
+            s.push_str(new_content);
+            s.push('\n');
+            s
+        } else {
+            return Err(format!("body index {body_idx} out of range (have {} elements)", doc.body.len()));
+        };
 
         // Store in memory only — disk write happens on explicit save
         self.doc_sources.write().unwrap().insert(abs_path.clone(), new_source.clone());
