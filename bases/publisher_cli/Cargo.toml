@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 schema = { workspace = true }
+serve_ui = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 expressions = { workspace = true }
