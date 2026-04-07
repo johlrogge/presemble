@@ -1287,6 +1287,9 @@ const INJECT: &str = concat!(
       "function bsave(){",
         "var bvalue=ta.value;",
         "bcleanup();",
+        // Don't send if unchanged or empty
+        "if(bvalue===bmd){return;}",
+        "if(!bvalue.trim()){return;}",
         "fetch('/_presemble/edit-body',{",
           "method:'POST',",
           "headers:{'Content-Type':'application/json'},",
@@ -1384,6 +1387,9 @@ const INJECT: &str = concat!(
     "function save(){",
       "var value=el.innerText.trim();",
       "cleanup();",
+      // Don't send if unchanged or empty
+      "if(value===original){return;}",
+      "if(!value){return;}",
       "fetch('/_presemble/edit',{",
         "method:'POST',",
         "headers:{'Content-Type':'application/json'},",
