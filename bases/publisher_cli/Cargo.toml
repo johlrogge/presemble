@@ -1,6 +1,6 @@
 [package]
 name = "publisher_cli"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2024"
 
 [dependencies]
@@ -10,6 +10,7 @@ template = { workspace = true }
 expressions = { workspace = true }
 dep_graph = { workspace = true }
 conductor = { workspace = true }
+editorial_types = { workspace = true }
 editor_server = { workspace = true }
 mcp_server = { workspace = true }
 site_repository = { workspace = true }

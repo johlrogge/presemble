@@ -194,6 +194,9 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/links", get(links_handler))
+        .route("/_presemble/suggestions", get(suggestions_handler))
+        .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
+        .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -290,6 +293,158 @@ async fn edit_body_handler(
         ok: false,
         error: Some("conductor not available — body editing requires conductor".to_string()),
     })
+}
+
+/// Browser-friendly representation of a suggestion.
+#[derive(serde::Serialize)]
+struct SuggestionJson {
+    id: String,
+    author: String,
+    target_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposed_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replace: Option<String>,
+    reason: String,
+}
+
+impl From<editorial_types::Suggestion> for SuggestionJson {
+    fn from(s: editorial_types::Suggestion) -> Self {
+        match s.target {
+            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => SuggestionJson {
+                id: s.id.to_string(),
+                author: s.author.to_string(),
+                target_type: "slot",
+                slot: Some(slot.to_string()),
+                proposed_value: Some(proposed_value),
+                search: None,
+                replace: None,
+                reason: s.reason,
+            },
+            editorial_types::SuggestionTarget::BodyText { search, replace } => SuggestionJson {
+                id: s.id.to_string(),
+                author: s.author.to_string(),
+                target_type: "body",
+                slot: None,
+                proposed_value: None,
+                search: Some(search),
+                replace: Some(replace),
+                reason: s.reason,
+            },
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionsQuery {
+    file: String,
+}
+
+async fn suggestions_handler(
+    State(state): State<AppState>,
+    Query(query): Query<SuggestionsQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let Some(ref cond) = state.conductor else {
+        let body = r#"{"error":"conductor not available"}"#.to_string();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            body.into_bytes(),
+        ).into_response();
+    };
+
+    match cond.send(&conductor::Command::GetSuggestions {
+        file: editorial_types::ContentPath::new(&query.file),
+    }) {
+        Ok(conductor::Response::Suggestions(suggestions)) => {
+            let browser: Vec<SuggestionJson> = suggestions.into_iter().map(Into::into).collect();
+            let json = serde_json::to_vec(&browser).unwrap_or_default();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        _ => {
+            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionActionRequest {
+    id: String,
+}
+
+/// Mark a suggestion as accepted. The browser JS applies the actual edit
+/// via /_presemble/edit or /_presemble/edit-body before calling this.
+async fn accept_suggestion_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestionActionRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::AcceptSuggestion {
+        id: editorial_types::SuggestionId::from(req.id),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+async fn reject_suggestion_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestionActionRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::RejectSuggestion {
+        id: editorial_types::SuggestionId::from(req.id),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
 }
 
 fn apply_edit(
@@ -658,6 +813,22 @@ const INJECT: &str = concat!(
     ".presemble-mascot-menu button:disabled{opacity:0.4;cursor:default;}",
     ".presemble-mascot-menu button:disabled:hover{background:none;}",
     ".presemble-link-picker{font-size:1rem;padding:0.4rem;border:2px solid #5d8a6e;border-radius:0.4rem;background:#fff;margin:0.3rem 0;display:block;min-width:15rem;}",
+    ".presemble-suggest-indicator{position:relative;}",
+    ".presemble-suggest-indicator::after{content:'\\1F4AC';position:absolute;top:-0.5rem;right:-0.5rem;font-size:0.8rem;cursor:pointer;}",
+    ".presemble-suggest-active{outline:none;border-left:4px solid #e8a838;padding-left:0.5rem;background:rgba(232,168,56,0.05);}",
+    ".presemble-suggest-badge{position:absolute;top:-4px;right:-4px;background:#e8a838;color:#fff;border-radius:50%;width:18px;height:18px;font-size:11px;display:flex;align-items:center;justify-content:center;pointer-events:none;}",
+    ".presemble-diff-del{color:#a33;text-decoration:line-through;background:rgba(163,51,51,0.08);padding:0 0.1rem;}",
+    ".presemble-diff-ins{color:#2d7a3a;text-decoration:none;font-weight:bold;background:rgba(45,122,58,0.08);padding:0 0.1rem;}",
+    ".presemble-suggest-preview-active{outline:2px solid #5d8a6e;outline-offset:4px;background:rgba(93,138,110,0.05);}",
+    ".presemble-suggest-toolbar{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:0.5rem;padding:0.5rem 1rem;box-shadow:0 2px 8px rgba(0,0,0,0.15);display:flex;align-items:center;gap:0.75rem;z-index:10000;font-family:system-ui,sans-serif;font-size:0.9rem;}",
+    ".presemble-suggest-toolbar button{background:none;border:1px solid #ccc;border-radius:0.3rem;padding:0.3rem 0.6rem;cursor:pointer;font-size:1rem;}",
+    ".presemble-suggest-toolbar button:hover{background:#f0f0f0;}",
+    ".presemble-suggest-accept{color:#2d7a3a;border-color:#2d7a3a !important;}",
+    ".presemble-suggest-reject{color:#a33;border-color:#a33 !important;}",
+    ".presemble-suggest-preview{color:#5d8a6e;border-color:#5d8a6e !important;}",
+    ".presemble-suggest-preview.active{background:#5d8a6e;color:#fff;}",
+    ".presemble-suggest-author{font-weight:bold;}",
+    ".presemble-suggest-counter{color:#888;margin-left:0.5rem;}",
     "</style>",
     "<script>(function(){",
     "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
@@ -701,25 +872,30 @@ const INJECT: &str = concat!(
     "})();",
     "(function(){",
     "var mode=sessionStorage.getItem('presemble-mode')||'view';",
+    "var _editorialSuggestCount=0;",
     "function countSuggestions(){return document.querySelectorAll('.presemble-suggestion').length;}",
     "var container=document.createElement('div');container.className='presemble-mascot';",
     "var icon=document.createElement('button');icon.className='presemble-mascot-icon';",
     "var badge=document.createElement('span');badge.className='presemble-mascot-badge';",
     "var menu=document.createElement('div');menu.className='presemble-mascot-menu';",
-    "var viewBtn=document.createElement('button');viewBtn.textContent='\\uD83D\\uDC41 View';",
-    "var editBtn=document.createElement('button');editBtn.textContent='\\u270F Edit';",
-    "var suggestBtn=document.createElement('button');suggestBtn.textContent='\\uD83D\\uDCAC Suggest';suggestBtn.disabled=true;suggestBtn.title='Coming soon';",
+    "var viewBtn=document.createElement('button');viewBtn.textContent='\u{1F441} View';",
+    "var editBtn=document.createElement('button');editBtn.textContent='\u{270F}\u{FE0F} Edit';",
+    "var suggestBtn=document.createElement('button');suggestBtn.textContent='\u{1F4AC} Suggest';suggestBtn.style.position='relative';",
+    "var suggestBadge=document.createElement('span');suggestBadge.className='presemble-suggest-badge';suggestBadge.style.display='none';suggestBtn.appendChild(suggestBadge);",
     "menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);",
     "container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);",
     "document.body.appendChild(container);",
     "function update(){",
       "var count=countSuggestions();",
-      "if(count>0){badge.textContent=count;badge.style.display='block';}else{badge.style.display='none';}",
-      "if(mode==='edit'){icon.textContent='\\u270F';icon.title='Edit mode \\u2014 click to change';}",
-      "else if(count===0){icon.textContent='\\uD83D\\uDC4D';icon.title='All clear \\u2014 ready to publish';}",
-      "else{icon.textContent='\\uD83E\\uDD17';icon.title=count+' suggestion'+(count===1?'':'s')+' \\u2014 click to edit';}",
+      "var totalBadge=count+_editorialSuggestCount;",
+      "if(totalBadge>0){badge.textContent=totalBadge;badge.style.display='block';}else{badge.style.display='none';}",
+      "if(mode==='edit'){icon.textContent='\u{270F}\u{FE0F}';icon.title='Edit mode \u{2014} click to change';}",
+      "else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';}",
+      "else if(totalBadge===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}",
+      "else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+' \u{2014} click to edit';}",
       "viewBtn.className=mode==='view'?'active':'';",
       "editBtn.className=mode==='edit'?'active':'';",
+      "suggestBtn.className=mode==='suggest'?'active':'';",
       "if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}else{document.body.classList.remove('presemble-edit-mode');}",
     "}",
     "if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}",
@@ -728,9 +904,237 @@ const INJECT: &str = concat!(
     "document.addEventListener('click',function(){menu.classList.remove('open');});",
     "menu.onclick=function(e){e.stopPropagation();};",
     "function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});}",
-    "function setMode(m){if(m!=='edit'){cleanupEditing();}mode=m;sessionStorage.setItem('presemble-mode',m);menu.classList.remove('open');update();}",
+    // Suggest mode state
+    "var _suggestions=[];var _suggestIdx=0;var _suggestPreviewState=null;var _suggestActiveEl=null;",
+    "var _suggestToolbar=null;",
+    "function _suggestCleanup(){",
+      // Restore any inline-diffed elements
+      "document.querySelectorAll('[data-presemble-original-html]').forEach(function(el){",
+        "el.innerHTML=el.getAttribute('data-presemble-original-html');",
+        "el.removeAttribute('data-presemble-original-html');",
+      "});",
+      "document.querySelectorAll('.presemble-suggest-indicator,.presemble-suggest-active').forEach(function(el){",
+        "el.classList.remove('presemble-suggest-indicator','presemble-suggest-active','presemble-suggest-preview-active');",
+      "});",
+      "if(_suggestToolbar){_suggestToolbar.remove();_suggestToolbar=null;}",
+      "_suggestPreviewState=null;_suggestActiveEl=null;",
+      "_suggestions=[];_suggestIdx=0;",
+    "}",
+    "function _stripMd(s){return s.replace(/`/g,'').replace(/\\*\\*/g,'').replace(/\\*/g,'').replace(/_/g,'');}",
+    "function _suggestFindTarget(sug){",
+      "if(sug.target_type==='slot'){",
+        "return document.querySelector('[data-presemble-slot=\"'+sug.slot+'\"]');",
+      "}",
+      "if(sug.target_type==='body'&&sug.search){",
+        "var needle=_stripMd(sug.search);",
+        "var els=document.querySelectorAll('[data-presemble-slot=\"body\"]');",
+        "for(var i=0;i<els.length;i++){if(els[i].textContent.indexOf(needle)!==-1){return els[i];}}",
+      "}",
+      "return null;",
+    "}",
+    "function _suggestRenderToolbar(){",
+      "if(_suggestions.length===0){if(_suggestToolbar){_suggestToolbar.remove();_suggestToolbar=null;}return;}",
+      "if(!_suggestToolbar){",
+        "_suggestToolbar=document.createElement('div');",
+        "_suggestToolbar.className='presemble-suggest-toolbar';",
+        "_suggestToolbar.innerHTML='<button class=\"presemble-suggest-prev\" title=\"Previous\">&#9664;</button>'",
+          "+'<span class=\"presemble-suggest-info\"><span class=\"presemble-suggest-author\"></span>: <span class=\"presemble-suggest-reason\"></span><span class=\"presemble-suggest-counter\"></span></span>'",
+          "+'<button class=\"presemble-suggest-accept\" title=\"Accept\">&#10003;</button>'",
+          "+'<button class=\"presemble-suggest-preview\" title=\"Preview\">\u{1F441}</button>'",
+          "+'<button class=\"presemble-suggest-reject\" title=\"Reject\">&#10007;</button>'",
+          "+'<button class=\"presemble-suggest-next\" title=\"Next\">&#9654;</button>';",
+        "document.body.appendChild(_suggestToolbar);",
+        "_suggestToolbar.querySelector('.presemble-suggest-prev').onclick=function(){_suggestNavigate(-1);};",
+        "_suggestToolbar.querySelector('.presemble-suggest-next').onclick=function(){_suggestNavigate(1);};",
+        "_suggestToolbar.querySelector('.presemble-suggest-accept').onclick=function(){_suggestAccept();};",
+        "_suggestToolbar.querySelector('.presemble-suggest-reject').onclick=function(){_suggestReject();};",
+        "_suggestToolbar.querySelector('.presemble-suggest-preview').onclick=function(){_suggestTogglePreview();};",
+      "}",
+      "var sug=_suggestions[_suggestIdx];",
+      "_suggestToolbar.querySelector('.presemble-suggest-author').textContent=sug.author||'';",
+      "_suggestToolbar.querySelector('.presemble-suggest-reason').textContent=sug.reason||'';",
+      "var targetText=sug.target_type==='slot'?sug.slot:(sug.search?'\"'+sug.search.substring(0,30)+'...\"':'');",
+      "_suggestToolbar.querySelector('.presemble-suggest-counter').textContent='('+(_suggestIdx+1)+'/'+_suggestions.length+') '+targetText;",
+    "}",
+    "function _suggestHighlight(){",
+      "document.querySelectorAll('.presemble-suggest-active').forEach(function(el){el.classList.remove('presemble-suggest-active','presemble-suggest-preview-active');});",
+      // Restore any inline-diffed elements to their original HTML
+      "document.querySelectorAll('[data-presemble-original-html]').forEach(function(el){",
+        "el.innerHTML=el.getAttribute('data-presemble-original-html');",
+        "el.removeAttribute('data-presemble-original-html');",
+      "});",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "var el=_suggestFindTarget(sug);",
+      "_suggestActiveEl=el;",
+      "if(el){",
+        "el.classList.add('presemble-suggest-active');",
+        "el.scrollIntoView({behavior:'smooth',block:'center'});",
+        // Inline diff: show strikethrough + proposed INSIDE the element
+        "el.setAttribute('data-presemble-original-html',el.innerHTML);",
+        "if(sug.target_type==='slot'){",
+          "el.innerHTML='<del class=\"presemble-diff-del\">'+el.textContent+'</del> <ins class=\"presemble-diff-ins\">'+(sug.proposed_value||'')+'</ins>';",
+        "}else if(sug.target_type==='body'&&sug.search){",
+          "var html=el.innerHTML;",
+          "var searchEsc=sug.search.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+          "var replaceEsc=(sug.replace||'').replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+          "var idx=html.indexOf(searchEsc);",
+          "if(idx!==-1){",
+            "el.innerHTML=html.slice(0,idx)+'<del class=\"presemble-diff-del\">'+searchEsc+'</del><ins class=\"presemble-diff-ins\">'+replaceEsc+'</ins>'+html.slice(idx+searchEsc.length);",
+          "}else{",
+            // Fallback: match on textContent (strips HTML), show inline diff
+            "var txt=el.textContent;",
+            "var needle=_stripMd(sug.search);",
+            "var tidx=txt.indexOf(needle);",
+            "if(tidx!==-1){",
+              "var before=txt.slice(0,tidx).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+              "var after=txt.slice(tidx+needle.length).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+              "var needleEsc=needle.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+              "el.innerHTML=before+'<del class=\"presemble-diff-del\">'+needleEsc+'</del><ins class=\"presemble-diff-ins\">'+replaceEsc+'</ins>'+after;",
+            "}",
+          "}",
+        "}",
+      "}",
+      "_suggestRenderToolbar();",
+    "}",
+    "function _suggestNavigate(dir){",
+      "if(_suggestions.length===0){return;}",
+      "if(_suggestPreviewState){_suggestTogglePreview();}",
+      "_suggestIdx=(_suggestIdx+dir+_suggestions.length)%_suggestions.length;",
+      "_suggestHighlight();",
+    "}",
+    "function _suggestTogglePreview(){",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "var el=_suggestActiveEl||_suggestFindTarget(sug);",
+      "if(!el){return;}",
+      "var previewBtn=_suggestToolbar?_suggestToolbar.querySelector('.presemble-suggest-preview'):null;",
+      "if(_suggestPreviewState){",
+        // Toggle OFF preview: restore the inline diff view
+        "el.innerHTML=_suggestPreviewState;",
+        "_suggestPreviewState=null;",
+        "el.classList.remove('presemble-suggest-preview-active');",
+        "el.classList.add('presemble-suggest-active');",
+        "if(previewBtn){previewBtn.classList.remove('active');}",
+      "}else{",
+        // Toggle ON preview: show ONLY the proposed value (no diff marks)
+        // Save current innerHTML (which has the inline diff) so we can restore it
+        "_suggestPreviewState=el.innerHTML;",
+        "if(sug.target_type==='slot'){",
+          "el.textContent=sug.proposed_value||'';",
+        "}else if(sug.target_type==='body'&&sug.search&&sug.replace){",
+          // Try HTML-level replacement first
+          "var origHtml=el.getAttribute('data-presemble-original-html')||el.innerHTML;",
+          "var searchEsc=sug.search.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+          "var replaceEsc=sug.replace.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+          "var idx=origHtml.indexOf(searchEsc);",
+          "if(idx!==-1){",
+            "el.innerHTML=origHtml.slice(0,idx)+replaceEsc+origHtml.slice(idx+searchEsc.length);",
+          "}else{",
+            // Fallback: strip markdown and replace in textContent, hide fallback diff
+            "var origText=el.textContent;",
+            "var needle=_stripMd(sug.search);var replacement=_stripMd(sug.replace);",
+            "var tIdx=origText.indexOf(needle);",
+            "if(tIdx!==-1){el.textContent=origText.slice(0,tIdx)+replacement+origText.slice(tIdx+needle.length);}",
+          "}",
+        "}",
+        "el.classList.add('presemble-suggest-preview-active');",
+        "el.classList.remove('presemble-suggest-active');",
+        "if(previewBtn){previewBtn.classList.add('active');}",
+      "}",
+    "}",
+    "function _suggestAccept(){",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "if(_suggestPreviewState){_suggestTogglePreview();}",
+      "var fileEl=document.querySelector('[data-presemble-file]');",
+      "var bfile=fileEl?fileEl.getAttribute('data-presemble-file'):'';",
+      // Step 1: Apply the edit (writes to disk, triggers rebuild)
+      "var editPromise;",
+      "if(sug.target_type==='slot'&&sug.slot&&sug.proposed_value){",
+        "editPromise=fetch('/_presemble/edit',{method:'POST',headers:{'Content-Type':'application/json'},",
+          "body:JSON.stringify({file:bfile,slot:sug.slot,value:sug.proposed_value})});",
+      "}else if(sug.target_type==='body'&&sug.search&&sug.replace){",
+        // For body edits, find the body element index
+        "var bodyEl=_suggestFindTarget(sug);",
+        "var bodyIdx=0;",
+        "if(bodyEl&&bodyEl.id){var m=bodyEl.id.match(/presemble-body-(\\d+)/);if(m){bodyIdx=parseInt(m[1],10);}}",
+        "editPromise=fetch('/_presemble/edit-body',{method:'POST',headers:{'Content-Type':'application/json'},",
+          "body:JSON.stringify({file:bfile,body_idx:bodyIdx,",
+            // Replace the search text with the replacement in the body element's markdown
+            "content:(bodyEl&&bodyEl.getAttribute('data-presemble-md')||'').replace(sug.search,sug.replace)})});",
+      "}else{editPromise=Promise.resolve({json:function(){return{ok:true};}});}",
+      // Step 2: After edit applied, mark suggestion as accepted
+      "editPromise.then(function(r){return r.json();}).then(function(data){",
+        "if(!data.ok){alert(data.error||'Edit failed');return;}",
+        "return fetch('/_presemble/accept-suggestion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})});",
+      "}).then(function(r){if(r)return r.json();}).then(function(data){",
+        "if(data&&!data.ok){alert(data.error||'Accept failed');}",
+      "});",
+      // The page will reload via WebSocket after the conductor rebuilds
+    "}",
+    "function _suggestReject(){",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "if(_suggestPreviewState){_suggestTogglePreview();}",
+      "var el=_suggestFindTarget(sug);",
+      "if(el){el.classList.remove('presemble-suggest-indicator','presemble-suggest-active');}",
+      "fetch('/_presemble/reject-suggestion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})",
+        ".then(function(r){return r.json();})",
+        ".then(function(data){if(!data.ok){alert(data.error||'Reject failed');}});",
+      "_suggestions.splice(_suggestIdx,1);",
+      "if(_suggestIdx>=_suggestions.length&&_suggestions.length>0){_suggestIdx=_suggestions.length-1;}",
+      "_suggestHighlight();",
+    "}",
+    "function _fetchSuggestionCount(){",
+      "var fileEl=document.querySelector('[data-presemble-file]');",
+      "if(!fileEl){return;}",
+      "var file=fileEl.getAttribute('data-presemble-file');",
+      "if(!file){return;}",
+      "fetch('/_presemble/suggestions?file='+encodeURIComponent(file))",
+        ".then(function(r){return r.json();})",
+        ".then(function(data){",
+          "if(!Array.isArray(data)){return;}",
+          "var cnt=data.length;",
+          "_editorialSuggestCount=cnt;",
+          "if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}",
+          "update();",
+        "});",
+    "}",
+    "function _suggestEnter(){",
+      "var fileEl=document.querySelector('[data-presemble-file]');",
+      "if(!fileEl){return;}",
+      "var file=fileEl.getAttribute('data-presemble-file');",
+      "if(!file){return;}",
+      "fetch('/_presemble/suggestions?file='+encodeURIComponent(file))",
+        ".then(function(r){return r.json();})",
+        ".then(function(data){",
+          "if(!Array.isArray(data)){return;}",
+          "_suggestions=data;",
+          "_suggestIdx=0;",
+          "var cnt=data.length;",
+          "_editorialSuggestCount=cnt;",
+          "if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}",
+          "data.forEach(function(sug){",
+            "var el=_suggestFindTarget(sug);",
+            "if(el){el.classList.add('presemble-suggest-indicator');}",
+          "});",
+          "_suggestHighlight();",
+        "});",
+    "}",
+    "function setMode(m){",
+      "if(m!=='edit'){cleanupEditing();}",
+      "if(m!=='suggest'){_suggestCleanup();}",
+      "mode=m;",
+      "sessionStorage.setItem('presemble-mode',m);",
+      "menu.classList.remove('open');",
+      "update();",
+      "if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}",
+    "}",
+    "if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}",
     "viewBtn.onclick=function(){setMode('view');};",
     "editBtn.onclick=function(){setMode('edit');};",
+    "suggestBtn.onclick=function(){setMode('suggest');};",
     "})();",
     "document.addEventListener('click',function(e){",
     "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
