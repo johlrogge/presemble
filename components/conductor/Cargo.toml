@@ -9,6 +9,7 @@ interface = "conductor"
 [dependencies]
 dep_graph = { workspace = true }
 editorial_types = { workspace = true }
+content_editor = { workspace = true }
 site_repository = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }

@@ -820,6 +820,12 @@ impl Conductor {
                     Err(e) => CommandResult::error(e),
                 }
             }
+            Command::CreateContent { stem, slug } => {
+                match content_editor::create_content(&self.site_dir, &self.repo, &stem, &slug) {
+                    Ok((_path, url)) => CommandResult::with_response(Response::ContentCreated(url)),
+                    Err(e) => CommandResult::error(e),
+                }
+            }
         }
     }
 }

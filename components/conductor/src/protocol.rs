@@ -58,6 +58,11 @@ pub enum Command {
         body_idx: usize,
         content: String,
     },
+    /// Create a new empty content file.
+    CreateContent {
+        stem: String,
+        slug: String,
+    },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -73,6 +78,8 @@ pub enum Response {
     SuggestionCreated(editorial_types::SuggestionId),
     /// List of pending suggestions for a file.
     Suggestions(Vec<editorial_types::Suggestion>),
+    /// Content file created successfully. Returns the URL path.
+    ContentCreated(String),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.

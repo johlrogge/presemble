@@ -234,29 +234,21 @@ async fn edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
-    // Forward through conductor if available
-    if let Some(ref cond) = state.conductor {
-        match cond.send(&conductor::Command::EditSlot {
-            file: req.file.clone(),
-            slot: req.slot.clone(),
-            value: req.value.clone(),
-        }) {
-            Ok(conductor::Response::Ok) => {
-                return axum::Json(EditResponse { ok: true, error: None });
-            }
-            Ok(conductor::Response::Error(e)) => {
-                return axum::Json(EditResponse { ok: false, error: Some(e) });
-            }
-            Err(e) => {
-                return axum::Json(EditResponse { ok: false, error: Some(e) });
-            }
-            _ => {} // unexpected response, fall through to local handling
-        }
-    }
-    // Fall back to local apply_edit
-    match apply_edit(&state.site_dir, &req.file, &req.slot, &req.value) {
-        Ok(()) => axum::Json(EditResponse { ok: true, error: None }),
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::EditSlot {
+        file: req.file.clone(),
+        slot: req.slot.clone(),
+        value: req.value.clone(),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected response".to_string()) }),
     }
 }
 
@@ -449,6 +441,8 @@ async fn reject_suggestion_handler(
     }
 }
 
+/// Test helper — delegates to content_editor. Used only in serve.rs tests.
+#[cfg(test)]
 fn apply_edit(
     site_dir: &std::path::Path,
     file: &str,
@@ -531,19 +525,36 @@ async fn create_content_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<CreateContentRequest>,
 ) -> axum::Json<CreateContentResponse> {
-    let repo = site_repository::SiteRepository::builder()
-        .from_dir(&state.site_dir)
-        .build();
-    match content_editor::create_content(&state.site_dir, &repo, &req.stem, &req.slug) {
-        Ok((_path, url)) => axum::Json(CreateContentResponse {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::CreateContent {
+        stem: req.stem.clone(),
+        slug: req.slug.clone(),
+    }) {
+        Ok(conductor::Response::ContentCreated(url)) => axum::Json(CreateContentResponse {
             ok: true,
             url: Some(url),
             error: None,
+        }),
+        Ok(conductor::Response::Error(e)) => axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some(e),
         }),
         Err(e) => axum::Json(CreateContentResponse {
             ok: false,
             url: None,
             error: Some(e),
+        }),
+        _ => axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some("unexpected response".to_string()),
         }),
     }
 }
