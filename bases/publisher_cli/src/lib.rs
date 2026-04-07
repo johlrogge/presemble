@@ -1160,7 +1160,15 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 eprintln!("{}/index.md: {:?}: {}", schema_stem, diag.severity, diag.message);
             }
         }
-        let collection_graph = template::build_article_graph(&collection_doc, &collection_grammar);
+        let mut collection_graph = template::build_article_graph(&collection_doc, &collection_grammar);
+        // Add metadata for browser editing
+        let coll_file = if schema_stem.is_empty() {
+            "content/index.md".to_string()
+        } else {
+            format!("content/{schema_stem}/index.md")
+        };
+        collection_graph.insert("_presemble_file", template::Value::Text(coll_file));
+        collection_graph.insert("_presemble_stem", template::Value::Text(schema_stem.to_string()));
         let (url_path_str, output_path_col) = if schema_stem.is_empty() {
             // Root collection: url "/" and output/index.html
             ("/".to_string(), output_dir(site_dir).join("index.html"))
