@@ -129,15 +129,17 @@ fn builtin_sort_by(
     args: &[Form],
     cond: &conductor::Conductor,
 ) -> Result<template::Value, String> {
+    // (sort-by :field coll) or (sort-by :field :desc coll)
+    // Collection is always the LAST argument (works with ->> threading)
     if args.len() < 2 {
-        return Err("sort-by requires at least 2 arguments: collection and field".into());
+        return Err("sort-by requires at least 2 arguments: field and collection".into());
     }
-    let collection = eval_expanded(&args[0], cond)?;
-    let field = args[1]
+    let collection = eval_expanded(args.last().unwrap(), cond)?;
+    let field = args[0]
         .as_keyword_name()
         .ok_or_else(|| "sort-by field must be a keyword".to_string())?
         .to_string();
-    let descending = args.get(2).map(|f| f.is_keyword("desc")).unwrap_or(false);
+    let descending = args.len() > 2 && args[1].is_keyword("desc");
 
     let mut items = match collection {
         template::Value::List(items) => items,
@@ -171,16 +173,17 @@ fn builtin_sort_by(
 
 fn builtin_take(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.len() < 2 {
-        return Err("take requires 2 arguments: collection and count".into());
+        return Err("take requires 2 arguments: count and collection (Clojure convention)".into());
     }
-    let collection = eval_expanded(&args[0], cond)?;
-    let n_val = eval_expanded(&args[1], cond)?;
+    // Clojure convention: (take n coll) — count first, collection second
+    let n_val = eval_expanded(&args[0], cond)?;
     let n: usize = match &n_val {
         template::Value::Text(s) => s
             .parse::<usize>()
             .map_err(|_| format!("take count must be a number, got: {s}"))?,
         _ => return Err("take count must be a number".into()),
     };
+    let collection = eval_expanded(&args[1], cond)?;
 
     match collection {
         template::Value::List(items) => {
@@ -191,15 +194,16 @@ fn builtin_take(args: &[Form], cond: &conductor::Conductor) -> Result<template::
 }
 
 fn builtin_filter(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+    // (filter :field "value" coll) — collection is LAST (works with ->> threading)
     if args.len() < 3 {
-        return Err("filter requires 3 arguments: collection, field, value".into());
+        return Err("filter requires 3 arguments: field, value, collection".into());
     }
-    let collection = eval_expanded(&args[0], cond)?;
-    let field = args[1]
+    let collection = eval_expanded(args.last().unwrap(), cond)?;
+    let field = args[0]
         .as_keyword_name()
         .ok_or_else(|| "filter field must be a keyword".to_string())?
         .to_string();
-    let target = eval_expanded(&args[2], cond)?;
+    let target = eval_expanded(&args[1], cond)?;
     let target_str = value_to_string(&target);
 
     match collection {
