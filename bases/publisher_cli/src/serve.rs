@@ -194,6 +194,9 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/links", get(links_handler))
+        .route("/_presemble/suggestions", get(suggestions_handler))
+        .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
+        .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -290,6 +293,156 @@ async fn edit_body_handler(
         ok: false,
         error: Some("conductor not available — body editing requires conductor".to_string()),
     })
+}
+
+/// Browser-friendly representation of a suggestion.
+#[derive(serde::Serialize)]
+struct SuggestionJson {
+    id: String,
+    author: String,
+    target_type: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposed_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replace: Option<String>,
+    reason: String,
+}
+
+impl From<editorial_types::Suggestion> for SuggestionJson {
+    fn from(s: editorial_types::Suggestion) -> Self {
+        match s.target {
+            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => SuggestionJson {
+                id: s.id.to_string(),
+                author: s.author.to_string(),
+                target_type: "slot",
+                slot: Some(slot.to_string()),
+                proposed_value: Some(proposed_value),
+                search: None,
+                replace: None,
+                reason: s.reason,
+            },
+            editorial_types::SuggestionTarget::BodyText { search, replace } => SuggestionJson {
+                id: s.id.to_string(),
+                author: s.author.to_string(),
+                target_type: "body",
+                slot: None,
+                proposed_value: None,
+                search: Some(search),
+                replace: Some(replace),
+                reason: s.reason,
+            },
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionsQuery {
+    file: String,
+}
+
+async fn suggestions_handler(
+    State(state): State<AppState>,
+    Query(query): Query<SuggestionsQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let Some(ref cond) = state.conductor else {
+        let body = r#"{"error":"conductor not available"}"#.to_string();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            body.into_bytes(),
+        ).into_response();
+    };
+
+    match cond.send(&conductor::Command::GetSuggestions {
+        file: editorial_types::ContentPath::new(&query.file),
+    }) {
+        Ok(conductor::Response::Suggestions(suggestions)) => {
+            let browser: Vec<SuggestionJson> = suggestions.into_iter().map(Into::into).collect();
+            let json = serde_json::to_vec(&browser).unwrap_or_default();
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        _ => {
+            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestionActionRequest {
+    id: String,
+}
+
+async fn accept_suggestion_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestionActionRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::AcceptSuggestion {
+        id: editorial_types::SuggestionId::from(req.id),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+async fn reject_suggestion_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestionActionRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::RejectSuggestion {
+        id: editorial_types::SuggestionId::from(req.id),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
 }
 
 fn apply_edit(
@@ -658,6 +811,18 @@ const INJECT: &str = concat!(
     ".presemble-mascot-menu button:disabled{opacity:0.4;cursor:default;}",
     ".presemble-mascot-menu button:disabled:hover{background:none;}",
     ".presemble-link-picker{font-size:1rem;padding:0.4rem;border:2px solid #5d8a6e;border-radius:0.4rem;background:#fff;margin:0.3rem 0;display:block;min-width:15rem;}",
+    ".presemble-suggest-indicator{position:relative;}",
+    ".presemble-suggest-indicator::after{content:'\\uD83D\\uDCAC';position:absolute;top:-0.5rem;right:-0.5rem;font-size:0.8rem;cursor:pointer;}",
+    ".presemble-suggest-active{outline:2px solid #e8a838;outline-offset:4px;}",
+    ".presemble-suggest-preview-active{outline:2px solid #5d8a6e;outline-offset:4px;background:rgba(93,138,110,0.05);}",
+    ".presemble-suggest-toolbar{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:0.5rem;padding:0.5rem 1rem;box-shadow:0 2px 8px rgba(0,0,0,0.15);display:flex;align-items:center;gap:0.75rem;z-index:10000;font-family:system-ui,sans-serif;font-size:0.9rem;}",
+    ".presemble-suggest-toolbar button{background:none;border:1px solid #ccc;border-radius:0.3rem;padding:0.3rem 0.6rem;cursor:pointer;font-size:1rem;}",
+    ".presemble-suggest-toolbar button:hover{background:#f0f0f0;}",
+    ".presemble-suggest-accept{color:#2d7a3a;border-color:#2d7a3a !important;}",
+    ".presemble-suggest-reject{color:#a33;border-color:#a33 !important;}",
+    ".presemble-suggest-preview{color:#5d8a6e;border-color:#5d8a6e !important;}",
+    ".presemble-suggest-author{font-weight:bold;}",
+    ".presemble-suggest-counter{color:#888;margin-left:0.5rem;}",
     "</style>",
     "<script>(function(){",
     "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
@@ -708,7 +873,7 @@ const INJECT: &str = concat!(
     "var menu=document.createElement('div');menu.className='presemble-mascot-menu';",
     "var viewBtn=document.createElement('button');viewBtn.textContent='\\uD83D\\uDC41 View';",
     "var editBtn=document.createElement('button');editBtn.textContent='\\u270F Edit';",
-    "var suggestBtn=document.createElement('button');suggestBtn.textContent='\\uD83D\\uDCAC Suggest';suggestBtn.disabled=true;suggestBtn.title='Coming soon';",
+    "var suggestBtn=document.createElement('button');suggestBtn.textContent='\\uD83D\\uDCAC Suggest';",
     "menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);",
     "container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);",
     "document.body.appendChild(container);",
@@ -716,10 +881,12 @@ const INJECT: &str = concat!(
       "var count=countSuggestions();",
       "if(count>0){badge.textContent=count;badge.style.display='block';}else{badge.style.display='none';}",
       "if(mode==='edit'){icon.textContent='\\u270F';icon.title='Edit mode \\u2014 click to change';}",
+      "else if(mode==='suggest'){icon.textContent='\\uD83D\\uDCAC';icon.title='Suggest mode \\u2014 click to change';}",
       "else if(count===0){icon.textContent='\\uD83D\\uDC4D';icon.title='All clear \\u2014 ready to publish';}",
       "else{icon.textContent='\\uD83E\\uDD17';icon.title=count+' suggestion'+(count===1?'':'s')+' \\u2014 click to edit';}",
       "viewBtn.className=mode==='view'?'active':'';",
       "editBtn.className=mode==='edit'?'active':'';",
+      "suggestBtn.className=mode==='suggest'?'active':'';",
       "if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}else{document.body.classList.remove('presemble-edit-mode');}",
     "}",
     "if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}",
@@ -728,9 +895,146 @@ const INJECT: &str = concat!(
     "document.addEventListener('click',function(){menu.classList.remove('open');});",
     "menu.onclick=function(e){e.stopPropagation();};",
     "function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});}",
-    "function setMode(m){if(m!=='edit'){cleanupEditing();}mode=m;sessionStorage.setItem('presemble-mode',m);menu.classList.remove('open');update();}",
+    // Suggest mode state
+    "var _suggestions=[];var _suggestIdx=0;var _suggestPreviewState=null;",
+    "var _suggestToolbar=null;",
+    "function _suggestCleanup(){",
+      "document.querySelectorAll('.presemble-suggest-indicator,.presemble-suggest-active').forEach(function(el){",
+        "el.classList.remove('presemble-suggest-indicator','presemble-suggest-active','presemble-suggest-preview-active');",
+      "});",
+      "if(_suggestToolbar){_suggestToolbar.remove();_suggestToolbar=null;}",
+      "_suggestPreviewState=null;",
+      "_suggestions=[];_suggestIdx=0;",
+    "}",
+    "function _suggestFindTarget(sug){",
+      "if(sug.target_type==='slot'){",
+        "return document.querySelector('[data-presemble-slot=\"'+sug.slot+'\"]');",
+      "}",
+      "if(sug.target_type==='body'&&sug.search){",
+        "var els=document.querySelectorAll('[data-presemble-slot=\"body\"]');",
+        "for(var i=0;i<els.length;i++){if(els[i].textContent.indexOf(sug.search)!==-1){return els[i];}}",
+      "}",
+      "return null;",
+    "}",
+    "function _suggestRenderToolbar(){",
+      "if(_suggestions.length===0){if(_suggestToolbar){_suggestToolbar.remove();_suggestToolbar=null;}return;}",
+      "if(!_suggestToolbar){",
+        "_suggestToolbar=document.createElement('div');",
+        "_suggestToolbar.className='presemble-suggest-toolbar';",
+        "_suggestToolbar.innerHTML='<button class=\"presemble-suggest-prev\" title=\"Previous\">&#9664;</button>'",
+          "+'<span class=\"presemble-suggest-info\"><span class=\"presemble-suggest-author\"></span>: <span class=\"presemble-suggest-reason\"></span><span class=\"presemble-suggest-counter\"></span></span>'",
+          "+'<button class=\"presemble-suggest-accept\" title=\"Accept\">&#10003;</button>'",
+          "+'<button class=\"presemble-suggest-preview\" title=\"Preview\">\\uD83D\\uDC41</button>'",
+          "+'<button class=\"presemble-suggest-reject\" title=\"Reject\">&#10007;</button>'",
+          "+'<button class=\"presemble-suggest-next\" title=\"Next\">&#9654;</button>';",
+        "document.body.appendChild(_suggestToolbar);",
+        "_suggestToolbar.querySelector('.presemble-suggest-prev').onclick=function(){_suggestNavigate(-1);};",
+        "_suggestToolbar.querySelector('.presemble-suggest-next').onclick=function(){_suggestNavigate(1);};",
+        "_suggestToolbar.querySelector('.presemble-suggest-accept').onclick=function(){_suggestAccept();};",
+        "_suggestToolbar.querySelector('.presemble-suggest-reject').onclick=function(){_suggestReject();};",
+        "_suggestToolbar.querySelector('.presemble-suggest-preview').onclick=function(){_suggestTogglePreview();};",
+      "}",
+      "var sug=_suggestions[_suggestIdx];",
+      "_suggestToolbar.querySelector('.presemble-suggest-author').textContent=sug.author||'';",
+      "_suggestToolbar.querySelector('.presemble-suggest-reason').textContent=sug.reason||'';",
+      "_suggestToolbar.querySelector('.presemble-suggest-counter').textContent=(_suggestIdx+1)+' / '+_suggestions.length;",
+    "}",
+    "function _suggestHighlight(){",
+      "document.querySelectorAll('.presemble-suggest-active').forEach(function(el){el.classList.remove('presemble-suggest-active','presemble-suggest-preview-active');});",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "var el=_suggestFindTarget(sug);",
+      "if(el){",
+        "el.classList.add('presemble-suggest-active');",
+        "el.scrollIntoView({behavior:'smooth',block:'center'});",
+      "}",
+      "_suggestRenderToolbar();",
+    "}",
+    "function _suggestNavigate(dir){",
+      "if(_suggestions.length===0){return;}",
+      "if(_suggestPreviewState){_suggestTogglePreview();}",
+      "_suggestIdx=(_suggestIdx+dir+_suggestions.length)%_suggestions.length;",
+      "_suggestHighlight();",
+    "}",
+    "function _suggestTogglePreview(){",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "var el=_suggestFindTarget(sug);",
+      "if(!el){return;}",
+      "if(_suggestPreviewState){",
+        "if(sug.target_type==='slot'){el.textContent=_suggestPreviewState;}",
+        "else if(sug.target_type==='body'){el.innerHTML=_suggestPreviewState;}",
+        "_suggestPreviewState=null;",
+        "el.classList.remove('presemble-suggest-preview-active');",
+        "el.classList.add('presemble-suggest-active');",
+      "}else{",
+        "if(sug.target_type==='slot'){",
+          "_suggestPreviewState=el.textContent;",
+          "el.textContent=sug.proposed_value||'';",
+        "}else if(sug.target_type==='body'&&sug.search&&sug.replace){",
+          "_suggestPreviewState=el.innerHTML;",
+          "var txt=el.textContent;",
+          "var idx=txt.indexOf(sug.search);",
+          "if(idx!==-1){",
+            "el.textContent=txt.slice(0,idx)+sug.replace+txt.slice(idx+sug.search.length);",
+          "}",
+        "}",
+        "el.classList.add('presemble-suggest-preview-active');",
+        "el.classList.remove('presemble-suggest-active');",
+      "}",
+    "}",
+    "function _suggestAccept(){",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "if(_suggestPreviewState){_suggestTogglePreview();}",
+      "fetch('/_presemble/accept-suggestion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})",
+        ".then(function(r){return r.json();})",
+        ".then(function(data){if(!data.ok){alert(data.error||'Accept failed');}});",
+    "}",
+    "function _suggestReject(){",
+      "if(_suggestions.length===0){return;}",
+      "var sug=_suggestions[_suggestIdx];",
+      "if(_suggestPreviewState){_suggestTogglePreview();}",
+      "var el=_suggestFindTarget(sug);",
+      "if(el){el.classList.remove('presemble-suggest-indicator','presemble-suggest-active');}",
+      "fetch('/_presemble/reject-suggestion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})",
+        ".then(function(r){return r.json();})",
+        ".then(function(data){if(!data.ok){alert(data.error||'Reject failed');}});",
+      "_suggestions.splice(_suggestIdx,1);",
+      "if(_suggestIdx>=_suggestions.length&&_suggestions.length>0){_suggestIdx=_suggestions.length-1;}",
+      "_suggestHighlight();",
+    "}",
+    "function _suggestEnter(){",
+      "var fileEl=document.querySelector('[data-presemble-file]');",
+      "if(!fileEl){return;}",
+      "var file=fileEl.getAttribute('data-presemble-file');",
+      "if(!file){return;}",
+      "fetch('/_presemble/suggestions?file='+encodeURIComponent(file))",
+        ".then(function(r){return r.json();})",
+        ".then(function(data){",
+          "if(!Array.isArray(data)){return;}",
+          "_suggestions=data;",
+          "_suggestIdx=0;",
+          "data.forEach(function(sug){",
+            "var el=_suggestFindTarget(sug);",
+            "if(el){el.classList.add('presemble-suggest-indicator');}",
+          "});",
+          "_suggestHighlight();",
+        "});",
+    "}",
+    "function setMode(m){",
+      "if(m!=='edit'){cleanupEditing();}",
+      "if(m!=='suggest'){_suggestCleanup();}",
+      "mode=m;",
+      "sessionStorage.setItem('presemble-mode',m);",
+      "menu.classList.remove('open');",
+      "update();",
+      "if(m==='suggest'){_suggestEnter();}",
+    "}",
+    "if(mode==='suggest'){_suggestEnter();}",
     "viewBtn.onclick=function(){setMode('view');};",
     "editBtn.onclick=function(){setMode('edit');};",
+    "suggestBtn.onclick=function(){setMode('suggest');};",
     "})();",
     "document.addEventListener('click',function(e){",
     "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
