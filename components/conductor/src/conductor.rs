@@ -229,15 +229,24 @@ impl Conductor {
 
                 let mut data = template::build_article_graph_with_source(&doc, &grammar, &content_src);
 
-                let url_path = site_index::UrlPath::new(format!("/{}/{}", stem.as_str(), slug));
+                let url_path = if stem.as_str().is_empty() {
+                    site_index::UrlPath::new(format!("/{slug}"))
+                } else {
+                    site_index::UrlPath::new(format!("/{}/{}", stem.as_str(), slug))
+                };
                 data.insert("url", template::Value::Text(url_path.as_str().to_string()));
                 data.insert(
                     "_presemble_stem",
                     template::Value::Text(stem.as_str().to_string()),
                 );
+                let presemble_file = if stem.as_str().is_empty() {
+                    format!("content/{slug}.md")
+                } else {
+                    format!("content/{}/{}.md", stem.as_str(), slug)
+                };
                 data.insert(
                     "_presemble_file",
-                    template::Value::Text(format!("content/{}/{}.md", stem.as_str(), slug)),
+                    template::Value::Text(presemble_file),
                 );
 
                 let title = match data.resolve(&["title"]) {
@@ -353,7 +362,13 @@ impl Conductor {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        let url_path = if slug == "index" {
+        let url_path = if stem.is_empty() {
+            if slug == "index" {
+                "/".to_string()
+            } else {
+                format!("/{slug}")
+            }
+        } else if slug == "index" {
             format!("/{stem}/")
         } else {
             format!("/{stem}/{slug}")
@@ -362,9 +377,14 @@ impl Conductor {
         // Add metadata
         graph.insert("url", template::Value::Text(url_path.clone()));
         graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
+        let presemble_file = if stem.is_empty() {
+            format!("content/{slug}.md")
+        } else {
+            format!("content/{stem}/{slug}.md")
+        };
         graph.insert(
             "_presemble_file",
-            template::Value::Text(format!("content/{stem}/{slug}.md")),
+            template::Value::Text(presemble_file),
         );
 
         // Add link record
@@ -409,7 +429,13 @@ impl Conductor {
         let html = template::serialize_nodes(&transformed);
 
         // Write output
-        let output_path = if slug == "index" {
+        let output_path = if stem.is_empty() {
+            if slug == "index" {
+                self.output_dir.join("index.html")
+            } else {
+                self.output_dir.join(slug).join("index.html")
+            }
+        } else if slug == "index" {
             self.output_dir.join(&stem).join("index.html")
         } else {
             self.output_dir.join(&stem).join(slug).join("index.html")
@@ -428,10 +454,19 @@ impl Conductor {
     ///
     /// Returns `None` if the document cannot be parsed or has no relevant elements.
     fn body_element_anchor_at_line(&self, src: &str, path: &str, line: u32) -> Option<String> {
-        // Derive schema stem from path (e.g., "content/post/my-post.md" → "post")
-        let stem = path
-            .strip_prefix("content/")
-            .and_then(|p| p.split('/').next())?;
+        // Derive schema stem from path.
+        // "content/post/my-post.md" → "post"
+        // "content/index.md" or "content/hello.md" → "" (root collection)
+        let stem = {
+            let rest = path.strip_prefix("content/")?;
+            // If there's another '/' it's a subdir → stem is the part before '/'
+            // Otherwise it's a root-level file → stem is ""
+            if let Some(slash_pos) = rest.find('/') {
+                &rest[..slash_pos]
+            } else {
+                ""
+            }
+        };
 
         // Load grammar from cache
         let schema_src = self.schema_source(stem)?;
@@ -513,14 +548,12 @@ impl Conductor {
     fn apply_slot_edit(&self, file: &str, slot: &str, value: &str) -> Result<Vec<String>, String> {
         let abs_path = self.site_dir.join(file);
 
-        // Derive schema stem from path: content/{stem}/file.md or content/index.md
+        // Derive schema stem from path: content/{stem}/file.md or content/file.md (root)
         let path = std::path::Path::new(file);
         let components: Vec<_> = path.components().collect();
         let stem = if components.len() == 2 {
-            // content/index.md → stem is the filename without extension
-            path.file_stem().and_then(|s| s.to_str())
-                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
-                .to_string()
+            // content/file.md → root collection, stem ""
+            String::new()
         } else {
             // content/{stem}/file.md → stem is the directory name
             components.get(1)
@@ -567,13 +600,12 @@ impl Conductor {
     fn apply_body_element_edit(&self, file: &str, body_idx: usize, new_content: &str) -> Result<Vec<String>, String> {
         let abs_path = self.site_dir.join(file);
 
-        // Derive schema stem from path: content/{stem}/file.md or content/index.md
+        // Derive schema stem from path: content/{stem}/file.md or content/file.md (root)
         let bpath = std::path::Path::new(file);
         let bcomponents: Vec<_> = bpath.components().collect();
         let stem = if bcomponents.len() == 2 {
-            bpath.file_stem().and_then(|s| s.to_str())
-                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
-                .to_string()
+            // content/file.md → root collection, stem ""
+            String::new()
         } else {
             bcomponents.get(1)
                 .and_then(|c| c.as_os_str().to_str())
