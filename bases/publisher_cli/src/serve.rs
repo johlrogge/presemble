@@ -194,9 +194,13 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/links", get(links_handler))
+        .route("/_presemble/schemas", get(schemas_handler))
+        .route("/_presemble/create-content", post(create_content_handler))
         .route("/_presemble/suggestions", get(suggestions_handler))
         .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
         .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
+        .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
+        .route("/_presemble/save-all", post(save_all_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -232,29 +236,21 @@ async fn edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
-    // Forward through conductor if available
-    if let Some(ref cond) = state.conductor {
-        match cond.send(&conductor::Command::EditSlot {
-            file: req.file.clone(),
-            slot: req.slot.clone(),
-            value: req.value.clone(),
-        }) {
-            Ok(conductor::Response::Ok) => {
-                return axum::Json(EditResponse { ok: true, error: None });
-            }
-            Ok(conductor::Response::Error(e)) => {
-                return axum::Json(EditResponse { ok: false, error: Some(e) });
-            }
-            Err(e) => {
-                return axum::Json(EditResponse { ok: false, error: Some(e) });
-            }
-            _ => {} // unexpected response, fall through to local handling
-        }
-    }
-    // Fall back to local apply_edit
-    match apply_edit(&state.site_dir, &req.file, &req.slot, &req.value) {
-        Ok(()) => axum::Json(EditResponse { ok: true, error: None }),
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::EditSlot {
+        file: req.file.clone(),
+        slot: req.slot.clone(),
+        value: req.value.clone(),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected response".to_string()) }),
     }
 }
 
@@ -447,52 +443,83 @@ async fn reject_suggestion_handler(
     }
 }
 
+async fn dirty_buffers_handler(
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let Some(ref cond) = state.conductor else {
+        let body = b"[]".to_vec();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        ).into_response();
+    };
+
+    match cond.send(&conductor::Command::GetDirtyBuffers) {
+        Ok(conductor::Response::DirtyBuffers(paths)) => {
+            let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        _ => {
+            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+    }
+}
+
+async fn save_all_handler(
+    State(state): State<AppState>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::SaveAllBuffers) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+/// Test helper — delegates to content_editor. Used only in serve.rs tests.
+#[cfg(test)]
 fn apply_edit(
     site_dir: &std::path::Path,
     file: &str,
     slot: &str,
     value: &str,
 ) -> Result<(), String> {
-    // Validate: must start with "content/", no "..", must end with ".md"
-    if !file.starts_with("content/") {
-        return Err(format!("file must start with 'content/': {file}"));
-    }
-    if file.contains("..") {
-        return Err(format!("path traversal detected: {file}"));
-    }
-    if !file.ends_with(".md") {
-        return Err(format!("file must end with '.md': {file}"));
-    }
-
-    // Resolve absolute path and validate it's under content/
-    let content_path = site_dir.join(file);
-    if !content_path.exists() {
-        return Err(format!("content file not found: {file}"));
-    }
-    let canonical = content_path.canonicalize()
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
-    let canonical_content = site_dir.join("content").canonicalize()
-        .map_err(|e| format!("cannot resolve content dir: {e}"))?;
-    if !canonical.starts_with(&canonical_content) {
-        return Err("path traversal detected".to_string());
-    }
-
-    // Derive schema stem from file path: "content/post/building-presemble.md" → "post"
-    let stem = std::path::Path::new(file)
-        .components()
-        .nth(1)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?;
-
-    // Load grammar
-    let schema_path = site_dir.join("schemas").join(format!("{stem}.md"));
-    let schema_src = std::fs::read_to_string(&schema_path)
-        .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
-    let grammar = schema::parse_schema(&schema_src)
-        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
-
-    // Write slot
-    lsp_capabilities::write_slot_to_file(&canonical, slot, &grammar, value)
+    content_editor::apply_slot_edit(site_dir, file, slot, value)
 }
 
 #[derive(serde::Deserialize)]
@@ -501,128 +528,105 @@ struct LinksQuery {
     slot: String,
 }
 
-#[derive(serde::Serialize)]
-struct LinkOption {
-    text: String,
-    href: String,
-}
-
 async fn links_handler(
     State(state): State<AppState>,
     Query(query): Query<LinksQuery>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    match collect_link_options(&state.site_dir, &query.schema, &query.slot) {
-        Ok(options) => {
-            let json = serde_json::to_vec(&options).unwrap_or_default();
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                json,
-            )
-                .into_response()
-        }
-        Err(e) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            )
-                .into_response()
-        }
+    let repo = site_repository::SiteRepository::new(&state.site_dir);
+    let options =
+        content_editor::collect_link_options(&state.site_dir, &repo, &query.schema, &query.slot);
+
+    // Reserialize as {text, href} for JS compatibility
+    #[derive(serde::Serialize)]
+    struct LinkOptionJson {
+        text: String,
+        href: String,
     }
-}
-
-fn collect_link_options(
-    site_dir: &std::path::Path,
-    schema_stem: &str,
-    slot_name: &str,
-) -> Result<Vec<LinkOption>, String> {
-    let schema_path = site_dir.join("schemas").join(format!("{schema_stem}.md"));
-    let schema_src = std::fs::read_to_string(&schema_path)
-        .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
-    let grammar = schema::parse_schema(&schema_src)
-        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
-
-    let slot = grammar
-        .preamble
-        .iter()
-        .find(|s| s.name.as_str() == slot_name)
-        .ok_or_else(|| format!("slot '{slot_name}' not found in schema '{schema_stem}'"))?;
-
-    let pattern = match &slot.element {
-        schema::Element::Link { pattern } => pattern.clone(),
-        _ => return Err(format!("slot '{slot_name}' is not a Link slot")),
-    };
-
-    let content_stem = stem_from_link_pattern(&pattern)
-        .ok_or_else(|| format!("cannot derive content stem from pattern '{pattern}'"))?;
-
-    let content_dir = site_dir.join("content").join(&content_stem);
-    let entries = std::fs::read_dir(&content_dir)
-        .map_err(|e| format!("failed to read content dir {}: {e}", content_dir.display()))?;
-
-    let mut options: Vec<LinkOption> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|ex| ex.to_str()) == Some("md"))
-        .map(|e| {
-            let path = e.path();
-            let file_slug = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let text = read_title_from_md(&path).unwrap_or_else(|| file_slug.clone());
-            let href = url_from_pattern(&pattern, &file_slug);
-            LinkOption { text, href }
+    let mapped: Vec<LinkOptionJson> = options
+        .into_iter()
+        .map(|o| LinkOptionJson {
+            text: o.label,
+            href: o.value,
         })
         .collect();
-
-    options.sort_by(|a, b| a.text.cmp(&b.text));
-    Ok(options)
+    let json = serde_json::to_vec(&mapped).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json,
+    )
+        .into_response()
 }
 
-/// Extract content schema stem from link pattern "/author/<name>" → "author"
-fn stem_from_link_pattern(pattern: &str) -> Option<String> {
-    let s = pattern.trim_start_matches('/');
-    let seg = s.split('/').next()?;
-    let clean = seg.split('<').next()?.trim_end_matches('-').trim();
-    if clean.is_empty() {
-        None
-    } else {
-        Some(clean.to_string())
+#[derive(serde::Deserialize)]
+struct CreateContentRequest {
+    stem: String,
+    slug: String,
+}
+
+#[derive(serde::Serialize)]
+struct CreateContentResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn schemas_handler(State(state): State<AppState>) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let repo = site_repository::SiteRepository::builder()
+        .from_dir(&state.site_dir)
+        .build();
+    let stems = content_editor::list_schemas(&repo);
+    let json = serde_json::to_vec(&stems).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json,
+    )
+        .into_response()
+}
+
+async fn create_content_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<CreateContentRequest>,
+) -> axum::Json<CreateContentResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::CreateContent {
+        stem: req.stem.clone(),
+        slug: req.slug.clone(),
+    }) {
+        Ok(conductor::Response::ContentCreated(url)) => axum::Json(CreateContentResponse {
+            ok: true,
+            url: Some(url),
+            error: None,
+        }),
+        Ok(conductor::Response::Error(e)) => axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some(e),
+        }),
+        Err(e) => axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some(e),
+        }),
+        _ => axum::Json(CreateContentResponse {
+            ok: false,
+            url: None,
+            error: Some("unexpected response".to_string()),
+        }),
     }
-}
-
-/// Read the first H1 heading text from a markdown file.
-fn read_title_from_md(path: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    content
-        .lines()
-        .find(|l| l.starts_with("# "))
-        .map(|l| l.trim_start_matches("# ").trim().to_string())
-}
-
-/// Replace `<variable>` placeholders in a link pattern with the given slug.
-fn url_from_pattern(pattern: &str, slug: &str) -> String {
-    let mut result = String::new();
-    let mut in_angle = false;
-    for ch in pattern.chars() {
-        match ch {
-            '<' => {
-                in_angle = true;
-                result.push_str(slug);
-            }
-            '>' => {
-                in_angle = false;
-            }
-            _ if !in_angle => result.push(ch),
-            _ => {}
-        }
-    }
-    result
 }
 
 async fn ws_handler(
@@ -829,6 +833,9 @@ const INJECT: &str = concat!(
     ".presemble-suggest-preview.active{background:#5d8a6e;color:#fff;}",
     ".presemble-suggest-author{font-weight:bold;}",
     ".presemble-suggest-counter{color:#888;margin-left:0.5rem;}",
+    ".presemble-edit-toolbar-bar{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:0.5rem;padding:0.5rem 1rem;box-shadow:0 2px 8px rgba(0,0,0,0.15);display:flex;align-items:center;gap:0.75rem;z-index:10000;font-family:system-ui,sans-serif;}",
+    ".presemble-edit-toolbar-bar button{background:none;border:1px solid #ccc;border-radius:0.3rem;padding:0.4rem 0.8rem;cursor:pointer;font-size:1rem;}",
+    ".presemble-edit-toolbar-bar button:hover{background:#f0f0f0;}",
     "</style>",
     "<script>(function(){",
     "var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');",
@@ -851,6 +858,8 @@ const INJECT: &str = concat!(
         "return;",
       "}",
       "if(m.anchor){sessionStorage.setItem('presemble-anchor',m.anchor);}",
+      // Don't reload while the user is actively editing — it would discard their changes
+      "if(document.querySelector('.presemble-editing,.presemble-body-editor')){return;}",
       "if(!m.pages||!m.pages.length||m.pages.indexOf(location.pathname)!==-1){location.reload();}",
       "else{location.href=m.primary;}",
     "};",
@@ -873,6 +882,7 @@ const INJECT: &str = concat!(
     "(function(){",
     "var mode=sessionStorage.getItem('presemble-mode')||'view';",
     "var _editorialSuggestCount=0;",
+    "var _dirtyCount=0;",
     "function countSuggestions(){return document.querySelectorAll('.presemble-suggestion').length;}",
     "var container=document.createElement('div');container.className='presemble-mascot';",
     "var icon=document.createElement('button');icon.className='presemble-mascot-icon';",
@@ -886,13 +896,18 @@ const INJECT: &str = concat!(
     "container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);",
     "document.body.appendChild(container);",
     "function update(){",
-      "var count=countSuggestions();",
-      "var totalBadge=count+_editorialSuggestCount;",
-      "if(totalBadge>0){badge.textContent=totalBadge;badge.style.display='block';}else{badge.style.display='none';}",
-      "if(mode==='edit'){icon.textContent='\u{270F}\u{FE0F}';icon.title='Edit mode \u{2014} click to change';}",
-      "else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';}",
-      "else if(totalBadge===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}",
-      "else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+' \u{2014} click to edit';}",
+      "var totalBadge=_editorialSuggestCount+_dirtyCount;",
+      "if(totalBadge>0){badge.textContent=totalBadge;badge.style.display='block';}",
+      "else{badge.style.display='none';}",
+      "if(mode==='edit'){icon.textContent='\u{270F}\u{FE0F}';icon.title='Edit mode \u{2014} click to change';",
+        "if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}",
+      "}",
+      "else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';",
+        "if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}",
+      "}",
+      "else if(totalBadge===0&&_dirtyCount===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}",
+      "else if(_dirtyCount>0&&totalBadge===0){icon.textContent='\u{1F4BE}';icon.title=_dirtyCount+' unsaved change'+(_dirtyCount===1?'':'s')+' \u{2014} click to change';}",
+      "else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+(_dirtyCount>0?' ('+_dirtyCount+' unsaved)':'')+' \u{2014} click to edit';}",
       "viewBtn.className=mode==='view'?'active':'';",
       "editBtn.className=mode==='edit'?'active':'';",
       "suggestBtn.className=mode==='suggest'?'active':'';",
@@ -904,6 +919,73 @@ const INJECT: &str = concat!(
     "document.addEventListener('click',function(){menu.classList.remove('open');});",
     "menu.onclick=function(e){e.stopPropagation();};",
     "function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});}",
+    // Edit mode toolbar
+    "var _editToolbar=null;",
+    "function _editEnter(){",
+      "if(_editToolbar){return;}",
+      "_editToolbar=document.createElement('div');",
+      "_editToolbar.className='presemble-edit-toolbar-bar';",
+      "_editToolbar.innerHTML='<button class=\"presemble-edit-save\" style=\"display:none\" title=\"Save all changes\">\u{1F4BE} Save</button>'",
+        "+'<button class=\"presemble-edit-new\" title=\"New content\">\u{2795}</button>';",
+      "document.body.appendChild(_editToolbar);",
+      "_editToolbar.querySelector('.presemble-edit-new').onclick=function(){_openCreateDialog();};",
+      "_editToolbar.querySelector('.presemble-edit-save').onclick=function(){",
+        "fetch('/_presemble/save-all',{method:'POST'})",
+          ".then(function(r){return r.json();})",
+          ".then(function(data){",
+            "if(data.ok){_fetchDirtyCount();}",
+            "else{alert(data.error||'Save failed');}",
+          "});",
+      "};",
+    "}",
+    "function _editCleanup(){",
+      "if(_editToolbar){_editToolbar.remove();_editToolbar=null;}",
+    "}",
+    // Create-content dialog
+    "function _openCreateDialog(){",
+      "fetch('/_presemble/schemas').then(function(r){return r.json();}).then(function(schemas){",
+        "if(!Array.isArray(schemas)||schemas.length===0){alert('No content schemas found.');return;}",
+        "var overlay=document.createElement('div');",
+        "overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:10001;display:flex;align-items:center;justify-content:center;';",
+        "var dialog=document.createElement('div');",
+        "dialog.style.cssText='background:#fff;border-radius:0.5rem;padding:1.5rem;min-width:20rem;box-shadow:0 4px 16px rgba(0,0,0,0.2);font-family:system-ui,sans-serif;';",
+        "var title=document.createElement('h3');title.textContent='New content';title.style.cssText='margin:0 0 1rem;font-size:1.1rem;';",
+        "dialog.appendChild(title);",
+        "var typeLabel=document.createElement('label');typeLabel.textContent='Type:';typeLabel.style.cssText='display:block;font-size:0.85rem;margin-bottom:0.25rem;';",
+        "var typeSelect=document.createElement('select');typeSelect.style.cssText='display:block;width:100%;padding:0.4rem;border:1px solid #ccc;border-radius:0.3rem;margin-bottom:0.75rem;font-size:1rem;';",
+        "schemas.forEach(function(s){var o=document.createElement('option');o.value=s;o.textContent=s;typeSelect.appendChild(o);});",
+        "var slugLabel=document.createElement('label');slugLabel.textContent='Slug:';slugLabel.style.cssText='display:block;font-size:0.85rem;margin-bottom:0.25rem;';",
+        "var slugInput=document.createElement('input');slugInput.type='text';",
+        "var ts=Date.now().toString(36);slugInput.value=typeSelect.value+'-'+ts;",
+        "slugInput.style.cssText='display:block;width:100%;box-sizing:border-box;padding:0.4rem;border:1px solid #ccc;border-radius:0.3rem;margin-bottom:0.75rem;font-size:1rem;';",
+        "typeSelect.onchange=function(){slugInput.value=typeSelect.value+'-'+Date.now().toString(36);};",
+        "var errDiv=document.createElement('div');errDiv.style.cssText='color:#c00;font-size:0.85rem;margin-bottom:0.5rem;display:none;';",
+        "var btns=document.createElement('div');btns.style.cssText='display:flex;gap:0.5rem;justify-content:flex-end;';",
+        "var cancelBtn=document.createElement('button');cancelBtn.textContent='Cancel';cancelBtn.style.cssText='padding:0.4rem 0.9rem;border:1px solid #ccc;border-radius:0.3rem;background:#fff;cursor:pointer;';",
+        "var submitBtn=document.createElement('button');submitBtn.textContent='Create';submitBtn.style.cssText='padding:0.4rem 0.9rem;border:none;border-radius:0.3rem;background:#5d8a6e;color:#fff;cursor:pointer;';",
+        "btns.appendChild(cancelBtn);btns.appendChild(submitBtn);",
+        "dialog.appendChild(typeLabel);dialog.appendChild(typeSelect);",
+        "dialog.appendChild(slugLabel);dialog.appendChild(slugInput);",
+        "dialog.appendChild(errDiv);dialog.appendChild(btns);",
+        "overlay.appendChild(dialog);document.body.appendChild(overlay);",
+        "slugInput.focus();slugInput.select();",
+        "cancelBtn.onclick=function(){overlay.remove();};",
+        "overlay.onclick=function(e){if(e.target===overlay){overlay.remove();}};",
+        "submitBtn.onclick=function(){",
+          "var stem=typeSelect.value;var slug=slugInput.value.trim();",
+          "if(!slug){errDiv.textContent='Slug is required.';errDiv.style.display='block';return;}",
+          "submitBtn.disabled=true;",
+          "fetch('/_presemble/create-content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stem:stem,slug:slug})})",
+            ".then(function(r){return r.json();})",
+            ".then(function(data){",
+              "if(data.ok){overlay.remove();}",
+              "else{errDiv.textContent=data.error||'Create failed';errDiv.style.display='block';submitBtn.disabled=false;}",
+            "})",
+            ".catch(function(err){errDiv.textContent='Network error: '+err.message;errDiv.style.display='block';submitBtn.disabled=false;});",
+        "};",
+        "slugInput.addEventListener('keydown',function(e){if(e.key==='Enter'){submitBtn.click();}if(e.key==='Escape'){overlay.remove();}});",
+      "});",
+    "}",
     // Suggest mode state
     "var _suggestions=[];var _suggestIdx=0;var _suggestPreviewState=null;var _suggestActiveEl=null;",
     "var _suggestToolbar=null;",
@@ -1101,6 +1183,24 @@ const INJECT: &str = concat!(
           "update();",
         "});",
     "}",
+    "function _fetchDirtyCount(){",
+      "fetch('/_presemble/dirty-buffers')",
+        ".then(function(r){return r.json();})",
+        ".then(function(paths){",
+          "if(!Array.isArray(paths)){return;}",
+          "_dirtyCount=paths.length;",
+          "update();",
+          "if(_editToolbar){",
+            "var saveBtn=_editToolbar.querySelector('.presemble-edit-save');",
+            "if(saveBtn){",
+              "saveBtn.style.display=_dirtyCount>0?'':'none';",
+              "saveBtn.textContent='\u{1F4BE} Save ('+_dirtyCount+')';",
+            "}",
+          "}",
+        "})",
+        ".catch(function(){});",
+    "}",
+    "setInterval(_fetchDirtyCount,2000);",
     "function _suggestEnter(){",
       "var fileEl=document.querySelector('[data-presemble-file]');",
       "if(!fileEl){return;}",
@@ -1123,23 +1223,40 @@ const INJECT: &str = concat!(
         "});",
     "}",
     "function setMode(m){",
-      "if(m!=='edit'){cleanupEditing();}",
+      "if(m!=='edit'){cleanupEditing();_editCleanup();}",
       "if(m!=='suggest'){_suggestCleanup();}",
       "mode=m;",
       "sessionStorage.setItem('presemble-mode',m);",
       "menu.classList.remove('open');",
       "update();",
+      "if(m==='edit'){_editEnter();}",
       "if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}",
     "}",
+    "if(mode==='edit'){_editEnter();}",
     "if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}",
     "viewBtn.onclick=function(){setMode('view');};",
     "editBtn.onclick=function(){setMode('edit');};",
     "suggestBtn.onclick=function(){setMode('suggest');};",
+    // Expose _fetchDirtyCount globally so the edit click handler (outside IIFE) can call it
+    "window._fetchDirtyCount=_fetchDirtyCount;",
     "})();",
     "document.addEventListener('click',function(e){",
     "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
     "var el=e.target.closest('[data-presemble-slot]');",
     "if(!el||el.classList.contains('presemble-editing')){return;}",
+    // Auto-save any currently editing element before starting a new edit
+    "var editing=document.querySelector('.presemble-editing');",
+    "if(editing){",
+      "var saveBtn=editing.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');",
+      "if(saveBtn){saveBtn.click();}",
+    "}",
+    // Also auto-save any open body textarea
+    "var openTa=document.querySelector('.presemble-body-editor');",
+    "if(openTa){",
+      "var bSaveBtn=openTa.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');",
+      "if(!bSaveBtn){bSaveBtn=openTa.nextElementSibling;if(bSaveBtn){bSaveBtn=bSaveBtn.querySelector('.presemble-save');}}",
+      "if(bSaveBtn){bSaveBtn.click();}",
+    "}",
     "if(el.getAttribute('data-presemble-slot')==='body'){",
       "e.preventDefault();",
       "var bfile=el.getAttribute('data-presemble-file');",
@@ -1170,6 +1287,9 @@ const INJECT: &str = concat!(
       "function bsave(){",
         "var bvalue=ta.value;",
         "bcleanup();",
+        // Don't send if unchanged or empty
+        "if(bvalue===bmd){return;}",
+        "if(!bvalue.trim()){return;}",
         "fetch('/_presemble/edit-body',{",
           "method:'POST',",
           "headers:{'Content-Type':'application/json'},",
@@ -1182,7 +1302,8 @@ const INJECT: &str = concat!(
             "el.after(berr2);",
             "el.style.display='';",
           "}else{",
-            "setTimeout(function(){location.reload();},500);",
+            // Don't reload — conductor has the change in memory.
+            "if(window._fetchDirtyCount){window._fetchDirtyCount();}",
           "}",
         "}).catch(function(err){",
           "var berr3=document.createElement('div');",
@@ -1266,6 +1387,9 @@ const INJECT: &str = concat!(
     "function save(){",
       "var value=el.innerText.trim();",
       "cleanup();",
+      // Don't send if unchanged or empty
+      "if(value===original){return;}",
+      "if(!value){return;}",
       "fetch('/_presemble/edit',{",
         "method:'POST',",
         "headers:{'Content-Type':'application/json'},",
@@ -1277,9 +1401,10 @@ const INJECT: &str = concat!(
           "err.textContent=data.error||'Edit failed';",
           "el.after(err);",
           "el.innerText=original;",
-        "}else{",
-          "setTimeout(function(){location.reload();},500);",
         "}",
+        // On success: don't reload — conductor has the change in memory,
+        // and the browser already shows the new text. Just update dirty count.
+        "if(window._fetchDirtyCount){window._fetchDirtyCount();}",
       "}).catch(function(e){",
         "var err=document.createElement('div');",
         "err.className='presemble-edit-error';",

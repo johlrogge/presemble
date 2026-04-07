@@ -1,0 +1,19 @@
+[package]
+name = "content_editor"
+version = "0.26.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "content_editor"
+
+[dependencies]
+content = { workspace = true }
+schema = { workspace = true }
+site_repository = { workspace = true }
+site_index = { workspace = true }
+lsp_capabilities = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

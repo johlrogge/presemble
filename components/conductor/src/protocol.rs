@@ -58,6 +58,17 @@ pub enum Command {
         body_idx: usize,
         content: String,
     },
+    /// Create a new empty content file.
+    CreateContent {
+        stem: String,
+        slug: String,
+    },
+    /// List all dirty (unsaved) buffers.
+    GetDirtyBuffers,
+    /// Write a dirty buffer to disk.
+    SaveBuffer { path: String },
+    /// Write all dirty buffers to disk.
+    SaveAllBuffers,
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -73,6 +84,10 @@ pub enum Response {
     SuggestionCreated(editorial_types::SuggestionId),
     /// List of pending suggestions for a file.
     Suggestions(Vec<editorial_types::Suggestion>),
+    /// Content file created successfully. Returns the URL path.
+    ContentCreated(String),
+    /// List of dirty (unsaved) buffer paths.
+    DirtyBuffers(Vec<String>),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.
