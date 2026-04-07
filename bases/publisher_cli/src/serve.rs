@@ -1237,6 +1237,8 @@ const INJECT: &str = concat!(
     "viewBtn.onclick=function(){setMode('view');};",
     "editBtn.onclick=function(){setMode('edit');};",
     "suggestBtn.onclick=function(){setMode('suggest');};",
+    // Expose _fetchDirtyCount globally so the edit click handler (outside IIFE) can call it
+    "window._fetchDirtyCount=_fetchDirtyCount;",
     "})();",
     "document.addEventListener('click',function(e){",
     "if(!document.body.classList.contains('presemble-edit-mode')){return;}",
@@ -1298,8 +1300,7 @@ const INJECT: &str = concat!(
             "el.style.display='';",
           "}else{",
             // Don't reload — conductor has the change in memory.
-            // The body element will be shown again with updated content on next rebuild.
-            "_fetchDirtyCount();",
+            "if(window._fetchDirtyCount){window._fetchDirtyCount();}",
           "}",
         "}).catch(function(err){",
           "var berr3=document.createElement('div');",
@@ -1397,7 +1398,7 @@ const INJECT: &str = concat!(
         "}",
         // On success: don't reload — conductor has the change in memory,
         // and the browser already shows the new text. Just update dirty count.
-        "_fetchDirtyCount();",
+        "if(window._fetchDirtyCount){window._fetchDirtyCount();}",
       "}).catch(function(e){",
         "var err=document.createElement('div');",
         "err.className='presemble-edit-error';",
