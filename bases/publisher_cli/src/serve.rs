@@ -403,6 +403,8 @@ struct SuggestionActionRequest {
     id: String,
 }
 
+/// Mark a suggestion as accepted. The browser JS applies the actual edit
+/// via /_presemble/edit or /_presemble/edit-body before calling this.
 async fn accept_suggestion_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestionActionRequest>,
@@ -1011,9 +1013,31 @@ const INJECT: &str = concat!(
       "if(_suggestions.length===0){return;}",
       "var sug=_suggestions[_suggestIdx];",
       "if(_suggestPreviewState){_suggestTogglePreview();}",
-      "fetch('/_presemble/accept-suggestion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})",
-        ".then(function(r){return r.json();})",
-        ".then(function(data){if(!data.ok){alert(data.error||'Accept failed');}});",
+      "var fileEl=document.querySelector('[data-presemble-file]');",
+      "var bfile=fileEl?fileEl.getAttribute('data-presemble-file'):'';",
+      // Step 1: Apply the edit (writes to disk, triggers rebuild)
+      "var editPromise;",
+      "if(sug.target_type==='slot'&&sug.slot&&sug.proposed_value){",
+        "editPromise=fetch('/_presemble/edit',{method:'POST',headers:{'Content-Type':'application/json'},",
+          "body:JSON.stringify({file:bfile,slot:sug.slot,value:sug.proposed_value})});",
+      "}else if(sug.target_type==='body'&&sug.search&&sug.replace){",
+        // For body edits, find the body element index
+        "var bodyEl=_suggestFindTarget(sug);",
+        "var bodyIdx=0;",
+        "if(bodyEl&&bodyEl.id){var m=bodyEl.id.match(/presemble-body-(\\d+)/);if(m){bodyIdx=parseInt(m[1],10);}}",
+        "editPromise=fetch('/_presemble/edit-body',{method:'POST',headers:{'Content-Type':'application/json'},",
+          "body:JSON.stringify({file:bfile,body_idx:bodyIdx,",
+            // Replace the search text with the replacement in the body element's markdown
+            "content:(bodyEl&&bodyEl.getAttribute('data-presemble-md')||'').replace(sug.search,sug.replace)})});",
+      "}else{editPromise=Promise.resolve({json:function(){return{ok:true};}});}",
+      // Step 2: After edit applied, mark suggestion as accepted
+      "editPromise.then(function(r){return r.json();}).then(function(data){",
+        "if(!data.ok){alert(data.error||'Edit failed');return;}",
+        "return fetch('/_presemble/accept-suggestion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})});",
+      "}).then(function(r){if(r)return r.json();}).then(function(data){",
+        "if(data&&!data.ok){alert(data.error||'Accept failed');}",
+      "});",
+      // The page will reload via WebSocket after the conductor rebuilds
     "}",
     "function _suggestReject(){",
       "if(_suggestions.length===0){return;}",
