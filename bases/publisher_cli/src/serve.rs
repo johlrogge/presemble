@@ -1390,9 +1390,10 @@ const INJECT: &str = concat!(
           "err.textContent=data.error||'Edit failed';",
           "el.after(err);",
           "el.innerText=original;",
-        "}else{",
-          "setTimeout(function(){location.reload();},500);",
         "}",
+        // On success: don't reload — conductor has the change in memory,
+        // and the browser already shows the new text. Just update dirty count.
+        "_fetchDirtyCount();",
       "}).catch(function(e){",
         "var err=document.createElement('div');",
         "err.className='presemble-edit-error';",
