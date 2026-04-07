@@ -9,6 +9,8 @@ serve_ui = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 expressions = { workspace = true }
+forms = { workspace = true }
+reader = { workspace = true }
 dep_graph = { workspace = true }
 conductor = { workspace = true }
 editorial_types = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "evaluator"
+version = "0.27.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "evaluator"
+
+[dependencies]
+forms = { workspace = true }
+macros = { workspace = true }
+template = { workspace = true }
+content = { workspace = true }
+conductor = { workspace = true }
+site_index = { workspace = true }
+editorial_types = { workspace = true }
+reader = { workspace = true }
+edn = { workspace = true }
+
+[dev-dependencies]
+site_repository = { workspace = true }
+tempfile = "3"
