@@ -924,8 +924,9 @@ impl Conductor {
                     .build();
                 match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
                     Ok((_path, url)) => {
-                        // Refresh schema cache for the new content
+                        // Refresh schema cache and rebuild graph for the new content
                         self.refresh_schema_cache();
+                        let _ = self.build_full_graph();
                         CommandResult::with_response(Response::ContentCreated(url))
                     }
                     Err(e) => CommandResult::error(e),

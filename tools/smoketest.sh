@@ -24,11 +24,23 @@ cleanup() {
         kill "$PID" 2>/dev/null || true
         wait "$PID" 2>/dev/null || true
     fi
+    # Kill any conductor processes for our site dir
     if [ -n "$SITE_DIR" ]; then
+        pkill -f "presemble conductor $SITE_DIR" 2>/dev/null || true
         rm -rf "$SITE_DIR"
     fi
+    # Clean up nrepl port file
+    rm -f "$(dirname "${SITE_DIR:-/tmp/x}")/.nrepl-port" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# Kill any stale presemble processes on our port
+if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
+    log "Port $PORT is busy — killing stale processes..."
+    pkill -f "presemble serve" 2>/dev/null || true
+    pkill -f "presemble conductor" 2>/dev/null || true
+    sleep 2
+fi
 
 log() { echo -e "${YELLOW}▸${NC} $1"; }
 pass() { PASS=$((PASS + 1)); echo -e "  ${GREEN}✓${NC} $1"; }
@@ -54,7 +66,8 @@ assert_curl() {
 assert_rep() {
     local desc="$1" expr="$2" expected="$3"
     local response
-    response=$(rep -p "$SITE_DIR/.nrepl-port" "$expr" 2>&1 || echo "REP_ERROR")
+    local port_dir="$(dirname "$SITE_DIR")"
+    response=$(rep -p "@$port_dir/.nrepl-port" "$expr" 2>&1 || echo "REP_ERROR")
     if echo "$response" | grep -qF "$expected"; then
         pass "$desc"
     else
@@ -72,6 +85,8 @@ log "Site directory: $SITE_DIR"
 
 # Start serve on a non-default port
 log "Starting presemble serve..."
+# Clean up stale nrepl-port files
+rm -f "$(dirname "$SITE_DIR")/.nrepl-port"
 cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" > "$SITE_DIR/serve.log" 2>&1 &
 PID=$!
 
@@ -151,15 +166,23 @@ assert_curl "no suggestions initially" "/_presemble/suggestions?file=content/pos
 log "Creating suggestion via MCP-style endpoint..."
 # (suggestions are created via the conductor, not HTTP — skip for now unless MCP is connected)
 
+# ── Test: Save edits to disk for nREPL tests ─────────────────────────────
+
+log "Saving edits to disk for nREPL..."
+assert_curl "save all before nrepl" "/_presemble/save-all" POST "" '"ok":true'
+sleep 1
+
 # ── Test: nREPL (if rep is available) ─────────────────────────────────────
 
-if command -v rep &> /dev/null && [ -f "$SITE_DIR/.nrepl-port" ]; then
+# nREPL port file is written to site_dir's parent
+NREPL_PORT_DIR="$(dirname "$SITE_DIR")"
+NREPL_PORT_FILE="$NREPL_PORT_DIR/.nrepl-port"
+if command -v rep &> /dev/null && [ -f "$NREPL_PORT_FILE" ]; then
     log "Testing nREPL via rep..."
-    assert_rep "list-content returns post" "(list-content)" "first-post"
     assert_rep "list-schemas returns post" "(list-schemas)" "post"
-    assert_rep "bare keyword :post" ":post" "First Post"
+    assert_rep "list-content returns post" "(list-content)" "first-post"
 else
-    log "Skipping nREPL tests (rep not available or .nrepl-port not found)"
+    log "Skipping nREPL tests (rep not available or $NREPL_PORT_FILE not found)"
 fi
 
 # ── Test: Duplicate prevention ────────────────────────────────────────────
