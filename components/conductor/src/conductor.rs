@@ -513,13 +513,20 @@ impl Conductor {
     fn apply_slot_edit(&self, file: &str, slot: &str, value: &str) -> Result<Vec<String>, String> {
         let abs_path = self.site_dir.join(file);
 
-        // Derive schema stem from path component (content/{stem}/file.md)
-        let stem = match std::path::Path::new(file).components().nth(1) {
-            Some(c) => match c.as_os_str().to_str() {
-                Some(s) => s.to_string(),
-                None => return Err(format!("cannot derive schema stem from: {file}")),
-            },
-            None => return Err(format!("cannot derive schema stem from: {file}")),
+        // Derive schema stem from path: content/{stem}/file.md or content/index.md
+        let path = std::path::Path::new(file);
+        let components: Vec<_> = path.components().collect();
+        let stem = if components.len() == 2 {
+            // content/index.md → stem is the filename without extension
+            path.file_stem().and_then(|s| s.to_str())
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+                .to_string()
+        } else {
+            // content/{stem}/file.md → stem is the directory name
+            components.get(1)
+                .and_then(|c| c.as_os_str().to_str())
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+                .to_string()
         };
 
         // Load grammar from cache
@@ -560,11 +567,18 @@ impl Conductor {
     fn apply_body_element_edit(&self, file: &str, body_idx: usize, new_content: &str) -> Result<Vec<String>, String> {
         let abs_path = self.site_dir.join(file);
 
-        // Derive schema stem from path component (content/{stem}/file.md)
-        let stem = match std::path::Path::new(file).components().nth(1) {
-            Some(c) => c.as_os_str().to_str()
-                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?.to_string(),
-            None => return Err(format!("cannot derive schema stem from: {file}")),
+        // Derive schema stem from path: content/{stem}/file.md or content/index.md
+        let bpath = std::path::Path::new(file);
+        let bcomponents: Vec<_> = bpath.components().collect();
+        let stem = if bcomponents.len() == 2 {
+            bpath.file_stem().and_then(|s| s.to_str())
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+                .to_string()
+        } else {
+            bcomponents.get(1)
+                .and_then(|c| c.as_os_str().to_str())
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+                .to_string()
         };
 
         // Load grammar from cache
