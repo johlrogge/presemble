@@ -199,6 +199,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/suggestions", get(suggestions_handler))
         .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
         .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
+        .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
+        .route("/_presemble/save-all", post(save_all_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -434,6 +436,74 @@ async fn reject_suggestion_handler(
     match cond.send(&conductor::Command::RejectSuggestion {
         id: editorial_types::SuggestionId::from(req.id),
     }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+async fn dirty_buffers_handler(
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let Some(ref cond) = state.conductor else {
+        let body = b"[]".to_vec();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        ).into_response();
+    };
+
+    match cond.send(&conductor::Command::GetDirtyBuffers) {
+        Ok(conductor::Response::DirtyBuffers(paths)) => {
+            let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        _ => {
+            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+    }
+}
+
+async fn save_all_handler(
+    State(state): State<AppState>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::SaveAllBuffers) {
         Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
@@ -810,6 +880,7 @@ const INJECT: &str = concat!(
     "(function(){",
     "var mode=sessionStorage.getItem('presemble-mode')||'view';",
     "var _editorialSuggestCount=0;",
+    "var _dirtyCount=0;",
     "function countSuggestions(){return document.querySelectorAll('.presemble-suggestion').length;}",
     "var container=document.createElement('div');container.className='presemble-mascot';",
     "var icon=document.createElement('button');icon.className='presemble-mascot-icon';",
@@ -826,10 +897,15 @@ const INJECT: &str = concat!(
       "var count=countSuggestions();",
       "var totalBadge=count+_editorialSuggestCount;",
       "if(totalBadge>0){badge.textContent=totalBadge;badge.style.display='block';}else{badge.style.display='none';}",
-      "if(mode==='edit'){icon.textContent='\u{270F}\u{FE0F}';icon.title='Edit mode \u{2014} click to change';}",
-      "else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';}",
-      "else if(totalBadge===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}",
-      "else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+' \u{2014} click to edit';}",
+      "if(mode==='edit'){icon.textContent='\u{270F}\u{FE0F}';icon.title='Edit mode \u{2014} click to change';",
+        "if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}",
+      "}",
+      "else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';",
+        "if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}",
+      "}",
+      "else if(totalBadge===0&&_dirtyCount===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}",
+      "else if(_dirtyCount>0&&totalBadge===0){icon.textContent='\u{1F4BE}';icon.title=_dirtyCount+' unsaved change'+(_dirtyCount===1?'':'s')+' \u{2014} click to change';}",
+      "else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+(_dirtyCount>0?' ('+_dirtyCount+' unsaved)':'')+' \u{2014} click to edit';}",
       "viewBtn.className=mode==='view'?'active':'';",
       "editBtn.className=mode==='edit'?'active':'';",
       "suggestBtn.className=mode==='suggest'?'active':'';",
@@ -847,9 +923,18 @@ const INJECT: &str = concat!(
       "if(_editToolbar){return;}",
       "_editToolbar=document.createElement('div');",
       "_editToolbar.className='presemble-edit-toolbar-bar';",
-      "_editToolbar.innerHTML='<button class=\"presemble-edit-new\" title=\"New content\">\u{2795}</button>';",
+      "_editToolbar.innerHTML='<button class=\"presemble-edit-save\" style=\"display:none\" title=\"Save all changes\">\u{1F4BE} Save</button>'",
+        "+'<button class=\"presemble-edit-new\" title=\"New content\">\u{2795}</button>';",
       "document.body.appendChild(_editToolbar);",
       "_editToolbar.querySelector('.presemble-edit-new').onclick=function(){_openCreateDialog();};",
+      "_editToolbar.querySelector('.presemble-edit-save').onclick=function(){",
+        "fetch('/_presemble/save-all',{method:'POST'})",
+          ".then(function(r){return r.json();})",
+          ".then(function(data){",
+            "if(data.ok){_fetchDirtyCount();}",
+            "else{alert(data.error||'Save failed');}",
+          "});",
+      "};",
     "}",
     "function _editCleanup(){",
       "if(_editToolbar){_editToolbar.remove();_editToolbar=null;}",
@@ -1096,6 +1181,24 @@ const INJECT: &str = concat!(
           "update();",
         "});",
     "}",
+    "function _fetchDirtyCount(){",
+      "fetch('/_presemble/dirty-buffers')",
+        ".then(function(r){return r.json();})",
+        ".then(function(paths){",
+          "if(!Array.isArray(paths)){return;}",
+          "_dirtyCount=paths.length;",
+          "update();",
+          "if(_editToolbar){",
+            "var saveBtn=_editToolbar.querySelector('.presemble-edit-save');",
+            "if(saveBtn){",
+              "saveBtn.style.display=_dirtyCount>0?'':'none';",
+              "saveBtn.textContent='\u{1F4BE} Save ('+_dirtyCount+')';",
+            "}",
+          "}",
+        "})",
+        ".catch(function(){});",
+    "}",
+    "setInterval(_fetchDirtyCount,2000);",
     "function _suggestEnter(){",
       "var fileEl=document.querySelector('[data-presemble-file]');",
       "if(!fileEl){return;}",

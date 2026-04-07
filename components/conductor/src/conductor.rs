@@ -533,9 +533,8 @@ impl Conductor {
         let doc = transform.apply(doc).map_err(|e| e.to_string())?;
 
         let new_src = content::serialize_document(&doc);
-        std::fs::write(&abs_path, &new_src).map_err(|e| format!("write error: {e}"))?;
-        // Update in-memory state to stay consistent
-        self.doc_sources.write().unwrap().insert(abs_path, new_src);
+        // Store in memory only — disk write happens on explicit save
+        self.doc_sources.write().unwrap().insert(abs_path, new_src.clone());
 
         let url = derive_url_from_content_path(file);
         Ok(vec![url])
@@ -577,10 +576,7 @@ impl Conductor {
         new_source.push_str(new_content);
         new_source.push_str(&source[element.span.end..]);
 
-        // Write to disk
-        std::fs::write(&abs_path, &new_source).map_err(|e| format!("write error: {e}"))?;
-
-        // Update in-memory state
+        // Store in memory only — disk write happens on explicit save
         self.doc_sources.write().unwrap().insert(abs_path.clone(), new_source.clone());
 
         // Rebuild
@@ -825,6 +821,46 @@ impl Conductor {
                     Ok((_path, url)) => CommandResult::with_response(Response::ContentCreated(url)),
                     Err(e) => CommandResult::error(e),
                 }
+            }
+            Command::GetDirtyBuffers => {
+                let sources = self.doc_sources.read().unwrap();
+                let paths: Vec<String> = sources.keys()
+                    .filter_map(|p| p.strip_prefix(&self.site_dir).ok())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                CommandResult::with_response(Response::DirtyBuffers(paths))
+            }
+            Command::SaveBuffer { path } => {
+                let abs_path = self.site_dir.join(&path);
+                let sources = self.doc_sources.read().unwrap();
+                if let Some(text) = sources.get(&abs_path) {
+                    let text = text.clone();
+                    drop(sources);
+                    if let Err(e) = std::fs::write(&abs_path, &text) {
+                        return CommandResult::error(format!("write error: {e}"));
+                    }
+                    self.doc_sources.write().unwrap().remove(&abs_path);
+                    CommandResult::ok()
+                } else {
+                    CommandResult::error(format!("buffer not dirty: {path}"))
+                }
+            }
+            Command::SaveAllBuffers => {
+                let sources = self.doc_sources.read().unwrap();
+                let buffers: Vec<(PathBuf, String)> = sources.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                drop(sources);
+                for (path, text) in &buffers {
+                    if let Err(e) = std::fs::write(path, text) {
+                        return CommandResult::error(format!("write error for {}: {e}", path.display()));
+                    }
+                }
+                let mut sources = self.doc_sources.write().unwrap();
+                for (path, _) in buffers {
+                    sources.remove(&path);
+                }
+                CommandResult::ok()
             }
         }
     }
