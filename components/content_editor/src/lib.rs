@@ -183,17 +183,8 @@ pub fn create_content(
         ));
     }
 
-    // Capitalize stem for title
-    let title = stem
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default()
-        + &stem[1..];
-
-    // Write minimal scaffold
-    let content = format!("# New {title}\n\n----\n\n");
-    std::fs::write(&file_path, &content).map_err(|e| format!("write: {e}"))?;
+    // Write empty file — suggestion placeholders will fill in all slots
+    std::fs::write(&file_path, "").map_err(|e| format!("write: {e}"))?;
 
     let url_path = format!("/{stem}/{slug}");
     Ok((file_path, url_path))
@@ -339,7 +330,7 @@ mod tests {
         assert!(path.exists());
         assert_eq!(url, "/post/my-first-post");
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("# New Post"));
+        assert!(contents.is_empty(), "new content file should be empty");
     }
 
     #[test]
