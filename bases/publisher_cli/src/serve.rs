@@ -201,6 +201,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
         .route("/_presemble/save-all", post(save_all_handler))
+        .route("/_presemble/templates", get(templates_handler))
+        .route("/_presemble/scaffold", post(scaffold_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -511,6 +513,61 @@ async fn save_all_handler(
     }
 }
 
+/// Return available site templates as JSON: `[{name, description}]`.
+async fn templates_handler() -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    #[derive(serde::Serialize)]
+    struct TemplateInfo {
+        name: &'static str,
+        description: &'static str,
+    }
+
+    let items: Vec<TemplateInfo> = site_templates::available_templates()
+        .into_iter()
+        .map(|t| TemplateInfo { name: t.name, description: t.description })
+        .collect();
+
+    let json = serde_json::to_vec(&items).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json,
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ScaffoldRequest {
+    template: String,
+    format: String,
+}
+
+/// Scaffold a new site from a template. Delegates to conductor `ScaffoldSite`.
+async fn scaffold_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<ScaffoldRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::ScaffoldSite {
+        template_name: req.template.clone(),
+        format: req.format.clone(),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse {
+            ok: false,
+            error: Some("unexpected conductor response".to_string()),
+        }),
+    }
+}
+
 /// Test helper — delegates to content_editor. Used only in serve.rs tests.
 #[cfg(test)]
 fn apply_edit(
@@ -774,9 +831,24 @@ async fn file_handler(
         }
     }
 
-    // For root, generate an auto-index
+    // For root, check if the output directory has any HTML output.
+    // If not, serve the welcome page so the user can scaffold a site.
     if path == "/" || path.is_empty() {
-        return serve_auto_index(&state.output_dir).into_response();
+        let mut has_output = false;
+        let mut pages = Vec::new();
+        collect_html_files(&state.output_dir, &state.output_dir, &mut pages);
+        if !pages.is_empty() {
+            has_output = true;
+        }
+        if has_output {
+            return serve_auto_index(&state.output_dir).into_response();
+        }
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            serve_ui::WELCOME_HTML.as_bytes().to_vec(),
+        )
+            .into_response();
     }
 
     // 404

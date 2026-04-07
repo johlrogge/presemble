@@ -863,6 +863,20 @@ impl Conductor {
                 }
                 CommandResult::ok()
             }
+            Command::ScaffoldSite { template_name, format } => {
+                match site_templates::template_by_name(&template_name) {
+                    Some(template) => {
+                        match template.scaffold(&self.site_dir, &format) {
+                            Ok(()) => {
+                                let _ = self.build_full_graph();
+                                CommandResult::ok()
+                            }
+                            Err(e) => CommandResult::error(e),
+                        }
+                    }
+                    None => CommandResult::error(format!("unknown template: {template_name}")),
+                }
+            }
         }
     }
 }

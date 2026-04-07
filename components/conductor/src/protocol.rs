@@ -69,6 +69,12 @@ pub enum Command {
     SaveBuffer { path: String },
     /// Write all dirty buffers to disk.
     SaveAllBuffers,
+    /// Scaffold a new site from a template.
+    ScaffoldSite {
+        template_name: String,
+        /// Template format: "hiccup" or "html".
+        format: String,
+    },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.

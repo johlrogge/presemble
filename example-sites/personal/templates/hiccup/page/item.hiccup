@@ -1,0 +1,16 @@
+[:template {:presemble/define "body"}
+  [:main
+    [:presemble/insert {:data "input.title" :as "h1"}]
+    [:template {:data-slot "input.description"}
+      [:p {:class "description"}
+        [:presemble/insert {:data "input.description"}]]]
+    [:presemble/insert {:data "input.body"}]]]
+
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Page"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]]
+  [:body
+    ((juxt self/body) input)]]

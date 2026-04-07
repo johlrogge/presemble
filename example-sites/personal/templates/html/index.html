@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>My Site</title>
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+<main>
+  <presemble:insert data="input.title" as="h1"></presemble:insert>
+  <presemble:insert data="input.intro" as="p"></presemble:insert>
+  <nav>
+    <h2>Pages</h2>
+    <template data-each="input.page">
+      <p><presemble:insert data="item.link" as="a"></presemble:insert></p>
+    </template>
+  </nav>
+</main>
+</body>
+</html>

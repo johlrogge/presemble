@@ -1,0 +1,18 @@
+[:template {:presemble/define "body"}
+  [:main
+    [:presemble/insert {:data "input.title" :as "h1"}]
+    [:presemble/insert {:data "input.intro" :as "p"}]
+    [:nav
+      [:h2 "Pages"]
+      [:template {:data-each "input.page"}
+        [:p
+          [:presemble/insert {:data "item.link" :as "a"}]]]]]]
+
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "My Site"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]]
+  [:body
+    ((juxt self/body) input)]]

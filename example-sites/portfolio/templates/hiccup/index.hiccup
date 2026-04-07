@@ -1,0 +1,20 @@
+[:template {:presemble/define "body"}
+  [:main
+    [:header
+      [:presemble/insert {:data "input.title" :as "h1"}]
+      [:presemble/insert {:data "input.tagline" :as "p"}]]
+    [:section
+      [:h2 "Projects"]
+      [:template {:data-each "input.project"}
+        [:article
+          [:presemble/insert {:data "item.link" :as "h3"}]
+          [:presemble/insert {:data "item.description" :as "p"}]]]]]]
+
+[:html {:lang "en"}
+  [:head
+    [:meta {:charset "utf-8"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:title "Portfolio"]
+    [:link {:rel "stylesheet" :href "/assets/style.css"}]]
+  [:body
+    ((juxt self/body) input)]]
