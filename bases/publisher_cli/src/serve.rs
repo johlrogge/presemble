@@ -982,10 +982,16 @@ const INJECT: &str = concat!(
           "if(idx!==-1){",
             "el.innerHTML=html.slice(0,idx)+'<del class=\"presemble-diff-del\">'+searchEsc+'</del><ins class=\"presemble-diff-ins\">'+replaceEsc+'</ins>'+html.slice(idx+searchEsc.length);",
           "}else{",
-            // Fallback: markdown formatting differs from HTML — show diff below the element
-            "var fallback=document.createElement('div');fallback.className='presemble-diff-fallback';",
-            "fallback.innerHTML='<del class=\"presemble-diff-del\">'+searchEsc+'</del> <ins class=\"presemble-diff-ins\">'+replaceEsc+'</ins>';",
-            "el.appendChild(fallback);",
+            // Fallback: match on textContent (strips HTML), show inline diff
+            "var txt=el.textContent;",
+            "var needle=_stripMd(sug.search);",
+            "var tidx=txt.indexOf(needle);",
+            "if(tidx!==-1){",
+              "var before=txt.slice(0,tidx).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+              "var after=txt.slice(tidx+needle.length).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+              "var needleEsc=needle.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});",
+              "el.innerHTML=before+'<del class=\"presemble-diff-del\">'+needleEsc+'</del><ins class=\"presemble-diff-ins\">'+replaceEsc+'</ins>'+after;",
+            "}",
           "}",
         "}",
       "}",
@@ -1006,8 +1012,6 @@ const INJECT: &str = concat!(
       "if(_suggestPreviewState){",
         // Toggle OFF preview: restore the inline diff view
         "el.innerHTML=_suggestPreviewState;",
-        // Re-show any fallback diff that was hidden during preview
-        "var fb=el.querySelector('.presemble-diff-fallback');if(fb){fb.style.display='';}",
         "_suggestPreviewState=null;",
         "el.classList.remove('presemble-suggest-preview-active');",
         "el.classList.add('presemble-suggest-active');",
@@ -1032,7 +1036,6 @@ const INJECT: &str = concat!(
             "var needle=_stripMd(sug.search);var replacement=_stripMd(sug.replace);",
             "var tIdx=origText.indexOf(needle);",
             "if(tIdx!==-1){el.textContent=origText.slice(0,tIdx)+replacement+origText.slice(tIdx+needle.length);}",
-            "var fb=el.querySelector('.presemble-diff-fallback');if(fb){fb.style.display='none';}",
           "}",
         "}",
         "el.classList.add('presemble-suggest-preview-active');",
