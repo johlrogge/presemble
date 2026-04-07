@@ -558,7 +558,23 @@ async fn scaffold_handler(
         template_name: req.template.clone(),
         format: req.format.clone(),
     }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Ok) => {
+            // After scaffolding, trigger a full build so output HTML exists.
+            // The conductor refreshed its graph, but we need rendered pages.
+            let url_config = crate::UrlConfig::default();
+            if let Err(e) = crate::build_for_serve(&state.site_dir, &url_config) {
+                return axum::Json(EditResponse {
+                    ok: false,
+                    error: Some(format!("scaffold succeeded but build failed: {e}")),
+                });
+            }
+            // Notify browser to reload
+            let _ = state.reload_tx.send(BrowserMessage::Reload {
+                pages: vec![],
+                anchor: None,
+            });
+            axum::Json(EditResponse { ok: true, error: None })
+        }
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         _ => axum::Json(EditResponse {

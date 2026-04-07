@@ -164,6 +164,20 @@ impl Conductor {
         self.schema_cache.read().unwrap().get(stem).cloned()
     }
 
+    /// Refresh the schema cache by re-scanning the filesystem.
+    /// Called after scaffolding or when schema files change on disk.
+    fn refresh_schema_cache(&self) {
+        // Re-create the repo to discover new schemas
+        let repo = site_repository::SiteRepository::new(&self.site_dir);
+        let mut cache = self.schema_cache.write().unwrap();
+        cache.clear();
+        for stem in repo.schema_stems() {
+            if let Some(src) = repo.schema_source(&stem) {
+                cache.insert(stem.as_str().to_string(), src);
+            }
+        }
+    }
+
     /// Replace the site graph with a new one built externally.
     pub fn set_site_graph(&self, graph: site_index::SiteGraph) {
         *self.site_graph.write().unwrap() = graph;
@@ -868,6 +882,9 @@ impl Conductor {
                     Some(template) => {
                         match template.scaffold(&self.site_dir, &format) {
                             Ok(()) => {
+                                // Refresh schema cache — new schemas were written to disk
+                                self.refresh_schema_cache();
+                                // Rebuild the full graph with the new content
                                 let _ = self.build_full_graph();
                                 CommandResult::ok()
                             }
