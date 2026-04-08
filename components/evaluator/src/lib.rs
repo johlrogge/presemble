@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn take_from_vector() {
         let cond = empty_conductor();
-        let result = eval_str("(take [1 2 3 4 5] 3)", &cond).unwrap();
+        let result = eval_str("(take 3 [1 2 3 4 5])", &cond).unwrap();
         assert!(matches!(&result, template::Value::List(items) if items.len() == 3));
     }
 
