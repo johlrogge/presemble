@@ -186,6 +186,63 @@ fn sort_key_for_field(data: &template::DataGraph, field: &str) -> SortKeyLocal {
     }
 }
 
+/// Resolve cross-content references: when a `Value::Record` has an `href` that
+/// matches a page in the url_index, merge the referenced page's data into the record.
+/// This enriches link slots (e.g., highlight links to features) with the target page's
+/// title, summary, etc.
+fn resolve_cross_references(
+    graph: &mut template::DataGraph,
+    url_index: &HashMap<String, template::DataGraph>,
+) {
+    // Top-level Records with href matching a built page
+    let to_resolve: Vec<(String, String)> = graph
+        .iter()
+        .filter_map(|(key, value)| {
+            if let template::Value::Record(sub) = value
+                && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
+                && url_index.contains_key(href)
+            {
+                Some((key.clone(), href.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for (key, href) in to_resolve {
+        if let Some(referenced) = url_index.get(&href)
+            && let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key])
+        {
+            sub.merge_from(referenced, &["href", "text"]);
+        }
+    }
+
+    // Also resolve records inside lists (multi-occurrence link slots)
+    let list_keys: Vec<String> = graph
+        .iter()
+        .filter_map(|(key, value)| {
+            if matches!(value, template::Value::List(_)) { Some(key.clone()) } else { None }
+        })
+        .collect();
+
+    for key in list_keys {
+        if let Some(template::Value::List(items)) = graph.resolve_mut(&[&key]) {
+            for item in items.iter_mut() {
+                if let template::Value::Record(sub) = item {
+                    let href = sub.resolve(&["href"]).and_then(|v| {
+                        if let template::Value::Text(s) = v { Some(s.clone()) } else { None }
+                    });
+                    if let Some(href) = href
+                        && let Some(referenced) = url_index.get(&href)
+                    {
+                        sub.merge_from(referenced, &["href", "text"]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A simple TemplateRegistry backed by the site repository (no caching).
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
@@ -571,6 +628,8 @@ impl Conductor {
                 }
             }
             resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+            // Phase 2: resolve cross-content references (link Records with href matching a page)
+            resolve_cross_references(&mut graph, &url_index);
         }
 
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
