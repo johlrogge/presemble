@@ -143,11 +143,9 @@ unfoldAllBtn.onclick=function(){_unfoldAll();};
 _editToolbar.appendChild(foldAllBtn);
 _editToolbar.appendChild(unfoldAllBtn);
 }
-_foldRestoreState();
 }
 function _foldTeardown(){
 if(!_sectionMap){return;}
-_foldSaveState();
 document.querySelectorAll('.presemble-fold-toggle').forEach(function(btn){btn.remove();});
 document.querySelectorAll('.presemble-fold-summary').forEach(function(el){el.remove();});
 document.querySelectorAll('.presemble-folded-content').forEach(function(el){el.classList.remove('presemble-folded-content');});
@@ -204,27 +202,6 @@ headings.reverse().forEach(function(h){if(!h.classList.contains('presemble-headi
 function _unfoldAll(){
 if(!_sectionMap){return;}
 _sectionMap.forEach(function(info,id){if(info.heading.classList.contains('presemble-heading-folded')){_foldToggle(info.heading);}});
-}
-function _foldSaveState(){
-if(!_sectionMap){return;}
-var folded=[];
-_sectionMap.forEach(function(info,id){if(info.heading.classList.contains('presemble-heading-folded')){folded.push(id);}});
-var st={};
-try{st=JSON.parse(sessionStorage.getItem('presemble-fold-state')||'{}');}catch(ex){}
-st[location.pathname]=folded;
-sessionStorage.setItem('presemble-fold-state',JSON.stringify(st));
-}
-function _foldRestoreState(){
-var st={};
-try{st=JSON.parse(sessionStorage.getItem('presemble-fold-state')||'{}');}catch(ex){}
-var folded=st[location.pathname];
-if(!folded||!folded.length){return;}
-folded.forEach(function(id){
-if(_sectionMap&&_sectionMap.has(id)){
-var info=_sectionMap.get(id);
-if(!info.heading.classList.contains('presemble-heading-folded')){_foldToggle(info.heading);}
-}
-});
 }
 function _openCreateDialog(){
 fetch('/_presemble/schemas').then(function(r){return r.json();}).then(function(schemas){
