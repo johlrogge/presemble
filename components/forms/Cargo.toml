@@ -1,10 +1,10 @@
 [package]
-name = "nrepl"
+name = "forms"
 version = "0.28.0"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "nrepl"
+interface = "forms"
 
 [dependencies]
-bencode = { workspace = true }
+serde = { workspace = true }

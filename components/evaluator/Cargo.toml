@@ -1,16 +1,21 @@
 [package]
-name = "expressions"
+name = "evaluator"
 version = "0.28.0"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "expressions"
+interface = "evaluator"
 
 [dependencies]
-content = { workspace = true }
+forms = { workspace = true }
+macros = { workspace = true }
 template = { workspace = true }
+content = { workspace = true }
 conductor = { workspace = true }
 site_index = { workspace = true }
+editorial_types = { workspace = true }
+reader = { workspace = true }
+edn = { workspace = true }
 
 [dev-dependencies]
 site_repository = { workspace = true }

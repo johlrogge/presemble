@@ -12,7 +12,7 @@ struct PresembleNreplHandler {
 
 impl nrepl::NreplHandler for PresembleNreplHandler {
     fn eval(&self, _session: &str, code: &str) -> Result<String, String> {
-        let value = expressions::eval_repl(code, &self.conductor)?;
+        let value = evaluator::eval_str(code, &self.conductor)?;
         Ok(edn::value_to_edn(&value))
     }
 }
