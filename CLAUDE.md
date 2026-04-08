@@ -14,15 +14,29 @@ The name: *pre-* (the upstream collaborative phase) + *semble* (ensemble — the
 
 ## Workflow
 
-For any non-trivial code change, follow the multi-agent workflow:
+**CRITICAL: The orchestrator MUST NOT edit source files (.rs, .toml, .js, .css, .hiccup, .html).**
 
-1. **architect** — reviews design and produces a task list; never writes code
-2. **code-minion** — implements based on architect's task list
-3. **You (orchestrator)** — delegate; do NOT implement directly
+ALL changes — no matter how small — go through the architect first:
 
-When you reach for Edit or Write on source files: stop. Spawn a code-minion instead.
-Small, isolated, obviously-safe changes (config values, typos, comments) may be done directly.
-Everything else goes through the workflow.
+1. **architect** — reviews the request, decides scope, produces task list for minions
+2. **Orchestrator** — dispatches tasks to code-minions (parallel when possible)
+3. **code-minion(s)** — implement the tasks, return results
+4. **Orchestrator** — sends results back to **architect** for review
+5. **architect** — approves (says COMMIT) or requests fixes
+6. If fixes needed → orchestrator dispatches minions again with fix instructions
+7. Loop until architect approves
+8. **commit** agent — commits the approved changes
+
+The orchestrator coordinates: reads code, asks questions, dispatches agents,
+routes results. It NEVER decides what is trivial and it NEVER writes code.
+The architect decides scope. The minions implement. The orchestrator routes.
+
+The orchestrator MAY edit directly ONLY:
+- Memory files: .claude/memory/*
+- Plan files: .claude/plans/*
+
+**Releases:** Before any release, run `/release`. This reads RELEASING.md and
+executes the full checklist. Do NOT skip steps.
 
 ## Environment
 

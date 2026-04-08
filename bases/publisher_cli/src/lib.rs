@@ -3,7 +3,6 @@ mod lsp;
 mod serve;
 pub mod template_registry;
 
-use expressions::evaluate_link_expression;
 use rayon::prelude::*;
 
 pub use template_registry::FileTemplateRegistry;
@@ -543,56 +542,10 @@ fn resolve_link_expressions(site_graph: &mut SiteGraph) {
         if let Some(node) = site_graph.get_mut(url)
             && let Some(pd) = node.page_data_mut()
         {
-            resolve_link_expressions_in_graph(&mut pd.data, &url_index, &stem_index);
+            expressions::resolve_link_expressions_in_graph(&mut pd.data, &url_index, &stem_index);
         }
     }
 }
-
-/// Resolve all `Value::LinkExpression` entries in a single `DataGraph`.
-/// Also resolves `LinkExpression` values inside `Value::List` items.
-fn resolve_link_expressions_in_graph(
-    graph: &mut template::DataGraph,
-    url_index: &expressions::UrlIndex,
-    stem_index: &expressions::StemIndex,
-) {
-    // Collect all top-level keys first (avoids borrow conflicts)
-    let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
-
-    for key in keys {
-        let resolved = match graph.resolve(&[key.as_str()]) {
-            Some(template::Value::LinkExpression { text, target }) => {
-                let text = text.clone();
-                let target = target.clone();
-                Some(evaluate_link_expression(&text, &target, url_index, stem_index))
-            }
-            Some(template::Value::List(items)) => {
-                // Resolve any LinkExpression items inside a list
-                let new_items: Vec<template::Value> = items
-                    .iter()
-                    .flat_map(|item| match item {
-                        template::Value::LinkExpression { text, target } => {
-                            let resolved =
-                                evaluate_link_expression(text, target, url_index, stem_index);
-                            // A ThreadExpr inside a list may expand to a List — flatten it
-                            match resolved {
-                                template::Value::List(inner) => inner,
-                                other => vec![other],
-                            }
-                        }
-                        other => vec![other.clone()],
-                    })
-                    .collect();
-                Some(template::Value::List(new_items))
-            }
-            _ => None,
-        };
-
-        if let Some(value) = resolved {
-            graph.insert(key, value);
-        }
-    }
-}
-
 
 /// Resolve cross-content references in a single DataGraph (one level deep).
 ///

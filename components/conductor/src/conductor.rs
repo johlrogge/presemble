@@ -52,6 +52,140 @@ fn derive_url_from_content_path(file: &str) -> String {
     format!("/{without_ext}")
 }
 
+/// Resolve all `Value::LinkExpression` entries in a single `DataGraph`.
+/// Also resolves `LinkExpression` values inside `Value::List` items.
+fn resolve_link_expressions_in_graph(
+    graph: &mut template::DataGraph,
+    url_index: &HashMap<String, template::DataGraph>,
+    stem_index: &HashMap<String, Vec<(String, template::DataGraph)>>,
+) {
+    // Collect all top-level keys first (avoids borrow conflicts)
+    let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
+
+    for key in keys {
+        let resolved = match graph.resolve(&[key.as_str()]) {
+            Some(template::Value::LinkExpression { text, target }) => {
+                let text = text.clone();
+                let target = target.clone();
+                Some(evaluate_link_expression_local(&text, &target, url_index, stem_index))
+            }
+            Some(template::Value::List(items)) => {
+                let new_items: Vec<template::Value> = items
+                    .iter()
+                    .flat_map(|item| match item {
+                        template::Value::LinkExpression { text, target } => {
+                            let resolved = evaluate_link_expression_local(
+                                text, target, url_index, stem_index,
+                            );
+                            match resolved {
+                                template::Value::List(inner) => inner,
+                                other => vec![other],
+                            }
+                        }
+                        other => vec![other.clone()],
+                    })
+                    .collect();
+                Some(template::Value::List(new_items))
+            }
+            _ => None,
+        };
+
+        if let Some(value) = resolved {
+            graph.insert(key, value);
+        }
+    }
+}
+
+/// Evaluate a single link expression to a concrete `Value`.
+fn evaluate_link_expression_local(
+    text: &content::LinkText,
+    target: &content::LinkTarget,
+    url_index: &HashMap<String, template::DataGraph>,
+    stem_index: &HashMap<String, Vec<(String, template::DataGraph)>>,
+) -> template::Value {
+    match target {
+        content::LinkTarget::PathRef(path) => {
+            if let Some(data) = url_index.get(path) {
+                let mut record = data.clone();
+                record.insert("href", template::Value::Text(path.clone()));
+                if let content::LinkText::Static(label) = text {
+                    record.insert("text", template::Value::Text(label.clone()));
+                }
+                template::Value::Record(record)
+            } else {
+                eprintln!(
+                    "[presemble] warning: link expression references unknown path '{path}'"
+                );
+                template::Value::Absent
+            }
+        }
+        content::LinkTarget::ThreadExpr { source, operations } => {
+            let items = stem_index.get(source).cloned().unwrap_or_default();
+            let mut result: Vec<(String, template::DataGraph)> = items;
+
+            for op in operations {
+                match op {
+                    content::LinkOp::SortBy { field, descending } => {
+                        let field = field.clone();
+                        let desc = *descending;
+                        result.sort_by(|(_, a), (_, b)| {
+                            let ak = sort_key_for_field(a, &field);
+                            let bk = sort_key_for_field(b, &field);
+                            let ord = ak.cmp(&bk);
+                            if desc { ord.reverse() } else { ord }
+                        });
+                    }
+                    content::LinkOp::Take(n) => {
+                        result.truncate(*n);
+                    }
+                    content::LinkOp::Filter { field, value } => {
+                        let field = field.clone();
+                        let value = value.clone();
+                        result.retain(|(_, data)| {
+                            let field_ref: &str = &field;
+                            data.resolve(&[field_ref])
+                                .and_then(|v| v.display_text())
+                                .map(|t| t == value)
+                                .unwrap_or(false)
+                        });
+                    }
+                }
+            }
+
+            let values: Vec<template::Value> = result
+                .into_iter()
+                .map(|(url, mut data)| {
+                    data.insert("href", template::Value::Text(url));
+                    template::Value::Record(data)
+                })
+                .collect();
+
+            template::Value::List(values)
+        }
+    }
+}
+
+/// Sort key for link expression ordering.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum SortKeyLocal {
+    Numeric(i64),
+    Text(String),
+    Missing,
+}
+
+fn sort_key_for_field(data: &template::DataGraph, field: &str) -> SortKeyLocal {
+    match data.resolve(&[field]).and_then(|v| v.display_text()) {
+        None => SortKeyLocal::Missing,
+        Some(text) => {
+            if let Ok(n) = text.parse::<i64>() {
+                SortKeyLocal::Numeric(n)
+            } else {
+                SortKeyLocal::Text(text)
+            }
+        }
+    }
+}
+
 /// A simple TemplateRegistry backed by the site repository (no caching).
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
@@ -415,6 +549,29 @@ impl Conductor {
         graph.insert("link", template::Value::Record(
             template::synthesize_link(&title, &url_path),
         ));
+
+        // Resolve link expressions using the current site graph as index
+        {
+            let site_graph = self.site_graph.read().unwrap();
+            let url_index: HashMap<String, template::DataGraph> = site_graph
+                .iter_pages_by_kind(site_index::PageKind::Item)
+                .filter_map(|n| {
+                    n.page_data()
+                        .map(|pd| (n.url_path.as_str().to_string(), pd.data.clone()))
+                })
+                .collect();
+            let mut stem_index: HashMap<String, Vec<(String, template::DataGraph)>> =
+                HashMap::new();
+            for node in site_graph.iter_pages_by_kind(site_index::PageKind::Item) {
+                if let Some(pd) = node.page_data() {
+                    stem_index
+                        .entry(pd.schema_stem.as_str().to_string())
+                        .or_default()
+                        .push((node.url_path.as_str().to_string(), pd.data.clone()));
+                }
+            }
+            resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+        }
 
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
         let fresh_repo = site_repository::SiteRepository::builder()
@@ -1002,5 +1159,112 @@ impl Conductor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod link_resolution_tests {
+    use super::*;
+
+    /// Verify that `resolve_link_expressions_in_graph` resolves a PathRef link
+    /// expression to a record from the url_index.
+    #[test]
+    fn resolve_path_ref_replaces_link_expression_with_record() {
+        let mut graph = template::DataGraph::new();
+
+        // A link expression targeting /post/hello
+        let link_expr = template::Value::LinkExpression {
+            text: content::LinkText::Static("Hello Post".to_string()),
+            target: content::LinkTarget::PathRef("/post/hello".to_string()),
+        };
+        graph.insert("highlight", link_expr);
+
+        // Build url_index with the target page
+        let mut target_data = template::DataGraph::new();
+        target_data.insert("title", template::Value::Text("Hello Post Title".to_string()));
+        let mut url_index = HashMap::new();
+        url_index.insert("/post/hello".to_string(), target_data);
+        let stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+
+        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+
+        // After resolution, "highlight" should be a Record with title and href
+        match graph.resolve(&["highlight"]) {
+            Some(template::Value::Record(rec)) => {
+                assert!(
+                    matches!(rec.resolve(&["title"]), Some(template::Value::Text(t)) if t == "Hello Post Title"),
+                    "resolved record should contain title"
+                );
+                assert!(
+                    matches!(rec.resolve(&["href"]), Some(template::Value::Text(h)) if h == "/post/hello"),
+                    "resolved record should contain href"
+                );
+            }
+            other => panic!("expected Record after resolution, got {other:?}"),
+        }
+    }
+
+    /// Verify that `resolve_link_expressions_in_graph` resolves a ThreadExpr
+    /// to a list of records from the stem_index.
+    #[test]
+    fn resolve_thread_expr_produces_list() {
+        let mut graph = template::DataGraph::new();
+
+        // A thread expression collecting all "post" items
+        let link_expr = template::Value::LinkExpression {
+            text: content::LinkText::Empty,
+            target: content::LinkTarget::ThreadExpr {
+                source: "post".to_string(),
+                operations: vec![],
+            },
+        };
+        graph.insert("posts", link_expr);
+
+        // Build stem_index with two post items
+        let mut post1 = template::DataGraph::new();
+        post1.insert("title", template::Value::Text("Post One".to_string()));
+        let mut post2 = template::DataGraph::new();
+        post2.insert("title", template::Value::Text("Post Two".to_string()));
+
+        let url_index: HashMap<String, template::DataGraph> = HashMap::new();
+        let mut stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+        stem_index.insert(
+            "post".to_string(),
+            vec![
+                ("/post/one".to_string(), post1),
+                ("/post/two".to_string(), post2),
+            ],
+        );
+
+        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+
+        match graph.resolve(&["posts"]) {
+            Some(template::Value::List(items)) => {
+                assert_eq!(items.len(), 2, "expected 2 items in resolved list");
+            }
+            other => panic!("expected List after resolution, got {other:?}"),
+        }
+    }
+
+    /// Verify that link expressions with unknown paths resolve to Absent.
+    #[test]
+    fn resolve_unknown_path_ref_becomes_absent() {
+        let mut graph = template::DataGraph::new();
+        graph.insert(
+            "link",
+            template::Value::LinkExpression {
+                text: content::LinkText::Empty,
+                target: content::LinkTarget::PathRef("/not/found".to_string()),
+            },
+        );
+
+        let url_index: HashMap<String, template::DataGraph> = HashMap::new();
+        let stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+
+        assert!(
+            matches!(graph.resolve(&["link"]), Some(template::Value::Absent) | None),
+            "unknown path ref should resolve to Absent"
+        );
     }
 }

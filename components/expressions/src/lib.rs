@@ -84,6 +84,51 @@ pub fn evaluate_link_expression(
     }
 }
 
+/// Resolve all `Value::LinkExpression` entries in a single `DataGraph`.
+/// Also resolves `LinkExpression` values inside `Value::List` items.
+pub fn resolve_link_expressions_in_graph(
+    graph: &mut template::DataGraph,
+    url_index: &UrlIndex,
+    stem_index: &StemIndex,
+) {
+    // Collect all top-level keys first (avoids borrow conflicts)
+    let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
+
+    for key in keys {
+        let resolved = match graph.resolve(&[key.as_str()]) {
+            Some(template::Value::LinkExpression { text, target }) => {
+                let text = text.clone();
+                let target = target.clone();
+                Some(evaluate_link_expression(&text, &target, url_index, stem_index))
+            }
+            Some(template::Value::List(items)) => {
+                // Resolve any LinkExpression items inside a list
+                let new_items: Vec<template::Value> = items
+                    .iter()
+                    .flat_map(|item| match item {
+                        template::Value::LinkExpression { text, target } => {
+                            let resolved =
+                                evaluate_link_expression(text, target, url_index, stem_index);
+                            // A ThreadExpr inside a list may expand to a List — flatten it
+                            match resolved {
+                                template::Value::List(inner) => inner,
+                                other => vec![other],
+                            }
+                        }
+                        other => vec![other.clone()],
+                    })
+                    .collect();
+                Some(template::Value::List(new_items))
+            }
+            _ => None,
+        };
+
+        if let Some(value) = resolved {
+            graph.insert(key, value);
+        }
+    }
+}
+
 /// Produce a sort key for a DataGraph field.
 /// Returns a `SortKey` enum that compares numeric values numerically
 /// and falls back to string comparison.
@@ -359,6 +404,49 @@ mod tests {
         if let template::Value::List(items) = result {
             assert_eq!(items.len(), 2);
         }
+    }
+
+    // ── resolve_link_expressions_in_graph ───────────────────────────────────
+
+    #[test]
+    fn resolve_link_expressions_in_graph_replaces_path_ref() {
+        let mut url_index: UrlIndex = HashMap::new();
+        let mut data = template::DataGraph::new();
+        data.insert("title", template::Value::Text("Hello".to_string()));
+        url_index.insert(site_index::UrlPath::new("/post/hello"), data);
+        let stem_index: StemIndex = HashMap::new();
+
+        let mut graph = template::DataGraph::new();
+        graph.insert(
+            "link",
+            template::Value::LinkExpression {
+                text: content::LinkText::Static("Read more".to_string()),
+                target: content::LinkTarget::PathRef("/post/hello".to_string()),
+            },
+        );
+
+        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+
+        assert!(
+            matches!(graph.resolve(&["link"]), Some(template::Value::Record(_))),
+            "expected LinkExpression to be resolved to a Record"
+        );
+    }
+
+    #[test]
+    fn resolve_link_expressions_in_graph_leaves_non_link_values() {
+        let url_index: UrlIndex = HashMap::new();
+        let stem_index: StemIndex = HashMap::new();
+
+        let mut graph = template::DataGraph::new();
+        graph.insert("title", template::Value::Text("Static title".to_string()));
+
+        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+
+        assert!(
+            matches!(graph.resolve(&["title"]), Some(template::Value::Text(s)) if s == "Static title"),
+            "non-link values should be unchanged"
+        );
     }
 
     // ── eval_repl ────────────────────────────────────────────────────────────
