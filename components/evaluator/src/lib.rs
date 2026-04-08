@@ -76,6 +76,26 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
         // Lists are function calls
         Form::List(items) if !items.is_empty() => {
             let func_form = &items[0];
+
+            // Keywords in function position act as get: (:title record) → (get record :title)
+            if let Form::Keyword { namespace: None, name } = func_form {
+                if items.len() < 2 {
+                    return Err(format!("keyword as function requires an argument: (:{name} map)"));
+                }
+                let map_val = eval_expanded(&items[1], conductor)?;
+                let default = if items.len() > 2 {
+                    eval_expanded(&items[2], conductor)?
+                } else {
+                    template::Value::Absent
+                };
+                return match map_val {
+                    template::Value::Record(ref r) => {
+                        Ok(r.resolve(&[name]).cloned().unwrap_or(default))
+                    }
+                    _ => Ok(default),
+                };
+            }
+
             let func_name = match func_form {
                 Form::Symbol(s) => s.as_str(),
                 _ => return Err(format!("expected function name, got: {func_form}")),
