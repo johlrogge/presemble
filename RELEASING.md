@@ -91,6 +91,120 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.28.0
+
+Unified root collection, performance, and smoke testing.
+
+**Unified root collection**
+Root is not special. The stem `""` is treated identically to any other collection stem. `index.md` stem derivation in the conductor follows the same rules as all other content types, and the `_presemble_file` metadata field is present on collection pages consistently.
+
+**`im::HashMap` for DataGraph**
+The data graph's internal maps use `im::HashMap` throughout. Clone is O(1) structural sharing instead of a full copy. Large sites with many concurrent renders see proportionally lower allocation pressure.
+
+**Rayon parallelization**
+Content building, schema validation, and page rendering all use rayon work-stealing. Build times on multi-core machines scale with core count.
+
+**Criterion benchmarks**
+Parameterized build benchmarks cover 10, 100, 1K, and 10K pages. Run `cargo bench` to measure.
+
+**Smoke test**
+`tools/smoketest.sh` exercises the full workflow end-to-end via `curl` and `rep`: start the server, push content via the conductor API, evaluate REPL expressions, verify output pages.
+
+---
+
+### v0.27.0
+
+Site wizard and `site_templates` component.
+
+**Site wizard**
+`presemble serve` on an empty directory serves a browser-based welcome page. The author picks a starter template (blog, personal, or portfolio) and chooses Hiccup or HTML syntax. The conductor scaffolds the site from the embedded template, writes files to disk, and redirects the browser to the new homepage.
+
+**`site_templates` component**
+Embedded starter sites for the wizard. Each starter includes schemas, example content, templates in both Hiccup and HTML, and a stylesheet. Adding a new starter is a matter of adding files to this component.
+
+---
+
+### v0.26.0
+
+nREPL server and Presemble Lisp.
+
+**nREPL server**
+`presemble nrepl <site-dir>` starts an nREPL server on the default port. Calva, CIDER, and `rep` can connect and evaluate Presemble Lisp expressions against the live site graph.
+
+**Presemble Lisp**
+A small Lisp built into the publisher with four components: `forms` (EDN form types), `reader` (EDN-based tokenizer and parser), `macros` (macro expander, including `->` and `->>` threading macros), and `evaluator` (tree-walking interpreter). 20+ built-in functions cover collection operations (`sort-by`, `take`, `drop`, `filter`, `map`, `count`, `first`, `last`) and string transforms. Keywords act as accessor functions.
+
+**`bencode` and `edn` components**
+`bencode` implements the bencode codec for the nREPL wire protocol. `edn` is the EDN parser used by the reader and the Hiccup template parser.
+
+**`expressions` component**
+Evaluates link expressions embedded in content files. A link expression is a parenthesised threading form inside a link literal. The expression is evaluated at build time against the site graph; the result is a validated collection.
+
+---
+
+### v0.25.0
+
+MCP server and Claude editorial integration.
+
+**MCP server base**
+`presemble mcp <site-dir>` starts an MCP server exposing the site to Claude Code. Tools: `get_content`, `get_schema`, `list_content`, and `suggest`. The `suggest` tool pushes a structured change to a named slot in a content file, with a required rationale field.
+
+**Editorial suggestion protocol**
+`editorial_types` component defines the shared types for suggestions: target file, slot name, proposed value, rationale, and status. The conductor receives suggestions from the MCP server, stores them in memory, and forwards them to the LSP as diagnostics. Accepted suggestions go to the dirty buffer; rejected suggestions are discarded.
+
+**Browser suggestion preview**
+The serve UI shows pending suggestions as inline diffs. A toolbar counts pending suggestions and offers accept-all and reject-all. Individual suggestions can be accepted or rejected. A preview toggle switches between current and fully-accepted states.
+
+---
+
+### v0.24.0
+
+Browser editing and dirty buffer tracking.
+
+**Inline body editing**
+Clicking any rendered body element in serve mode opens an inline textarea containing the raw markdown source. Save triggers a live rebuild.
+
+**Browser edit toolbar**
+A "+" button in the serve toolbar opens a form to create a new content file. Select a type, enter a slug, submit — the conductor scaffolds the file and the browser navigates to it immediately.
+
+**Dirty buffer tracking**
+The conductor holds pending edits in memory until an explicit save. Edits from browser interactions and accepted suggestions accumulate in the dirty buffer. The mascot badge indicates unsaved changes.
+
+**`content_editor` component**
+Business logic for browser editing, content scaffold, and dirty buffer management extracted from `serve.rs` into a dedicated component.
+
+**`serve_ui` component**
+The browser overlay JavaScript and CSS extracted from `serve.rs` into resource files in a dedicated component.
+
+---
+
+### v0.23.0
+
+Suggest mode and mascot overlay.
+
+**Suggest mode**
+The mascot popover exposes three modes: View, Edit, and Suggest. In Suggest mode, missing slots render as inline suggestion nodes guided by the schema's hint text. Clicking a node opens an editing form pre-filled with the hint text; saving writes the value to the content file.
+
+**Mascot overlay polish**
+The mascot badge shows a count of pending suggestions. State transitions (all-clear, suggestions present, edit active, unsaved changes) are reflected immediately without a page reload.
+
+---
+
+### v0.22.0
+
+Pure template composition and scoped input model.
+
+**Pure template composition**
+Templates are function files. The composition expression at the bottom is the template's return value. `juxt` fans the same input to multiple templates and concatenates their DOM outputs: `((juxt header self/body footer) input)`. Local definitions at the top of a template file are reusable named fragments referenced as `self/<name>`. File-qualified references use `/` notation.
+
+**Scoped input model**
+Templates reference all data through `input.*`. The name `input` is the canonical binding for the current page's data graph entry. The `:input` directive renames the binding for a specific template; `item` remains the loop-item binding inside `data-each`.
+
+**Link expressions in content**
+Content files can include Presemble Lisp expressions that assemble collections at build time. A link expression is a parenthesised threading form inside a link literal: `[]((->> :post (sort-by :published :desc) (take 5)))`. The result is a validated list that satisfies the collection schema for that type.
+
+---
+
 ### v0.18.0
 
 Polylith interface wiring and in-memory test repository.

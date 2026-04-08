@@ -1,6 +1,6 @@
 # Getting Started
 
-scaffold and build a Presemble site in two commands.
+Scaffold and build a Presemble site in two commands.
 
 ----
 
@@ -12,17 +12,26 @@ Presemble is built with Rust. Install from source:
 cargo install --path projects/publisher
 ```
 
-Once the project reaches its first release, `cargo install presemble` will work directly.
+## Start with the site wizard
 
-## Scaffold a site
+The fastest way to start is to point `presemble serve` at an empty directory:
 
-Run `presemble init my-site/` to generate a working hello-world site:
+```
+mkdir my-site
+presemble serve my-site/
+```
+
+The browser opens a welcome page. Pick a starter template — blog, personal site, or portfolio — and choose Hiccup or HTML for your template syntax. The wizard scaffolds a complete working site and navigates the browser to your new homepage.
+
+## Or scaffold from the command line
+
+Run `presemble init my-site/` to generate a hello-world site without the browser wizard:
 
 ```
 presemble init my-site/
 ```
 
-This creates the following files:
+This creates:
 
 - `schemas/note/item.md` — defines the "note" content type with a title and body. See [schemas](/feature/schemas-as-contracts) for details.
 - `content/note/hello-world.md` — your first note, validated against the schema at build time.
@@ -44,7 +53,7 @@ Output goes to `output/my-site/` (a sibling of your site directory). The publish
 presemble serve my-site/
 ```
 
-Starts a local server with file watching and live rebuild on every change. The browser reloads automatically — and navigates directly to the changed page if you were on a different one.
+Starts a local server with file watching and live rebuild on every change. The browser reloads automatically — and navigates directly to the changed page if you were on a different one. Click any body element to edit it inline.
 
 ## Editor support
 
@@ -58,10 +67,23 @@ files from a single process.
 
 See [Editor LSP Support](/feature/editor-lsp-support) for setup instructions.
 
+## Claude integration
+
+```
+presemble mcp my-site/
+```
+
+Starts an MCP server for Claude Code integration. Claude can read your schemas, read your content, and push editorial suggestions to specific slots. Each suggestion appears as an LSP diagnostic in your editor with an accept/reject code action.
+
+See [Editorial Collaboration](/feature/editorial-collaboration) for details.
+
 ## Next steps
 
 - [Schemas](/feature/schemas-as-contracts) — learn the schema grammar and compile-time content safety
 - [Templates](/feature/templates-are-data) — data-bound HTML templates without a template language
 - [The Data Graph](/feature/the-data-graph) — how content is structured and accessed in templates
 - [Editor LSP Support](/feature/editor-lsp-support) — completions and diagnostics in your editor
+- [Editorial Collaboration](/feature/editorial-collaboration) — Claude and human editorial suggestions
+- [Browser Editing](/feature/browser-editing) — edit content directly in the browser
+- [The Presemble REPL](/feature/the-presemble-repl) — evaluate expressions against live content
 - [User Guide](/guide/user-guide) — full reference for all Presemble features
