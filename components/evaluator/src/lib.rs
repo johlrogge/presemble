@@ -103,6 +103,7 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
 
             match func_name {
                 // Collection operations
+                "map" => builtin_map(&items[1..], conductor),
                 "sort-by" => builtin_sort_by(&items[1..], conductor),
                 "take" => builtin_take(&items[1..], conductor),
                 "filter" => builtin_filter(&items[1..], conductor),
@@ -150,6 +151,52 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
 }
 
 // ── Built-in functions ───────────────────────────────────────────────────────
+
+/// (map f coll) — apply f to each item. f can be a keyword or function name.
+/// (map :title posts) → list of titles
+/// (->> :post (map :title)) → same with threading
+fn builtin_map(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.len() < 2 {
+        return Err("map requires 2 arguments: function and collection".into());
+    }
+    let func = &args[0];
+    let collection = eval_expanded(args.last().unwrap(), cond)?;
+
+    let items = match collection {
+        template::Value::List(items) => items,
+        _ => return Err("map expects a list as the last argument".into()),
+    };
+
+    let results: Vec<template::Value> = items
+        .into_iter()
+        .map(|item| apply_to_value(func, &item, cond))
+        .collect::<Result<_, _>>()?;
+
+    Ok(template::Value::List(results))
+}
+
+/// Apply a form (keyword or function name) to a Value directly.
+/// For keywords: (:title record) → get the field.
+/// For symbols: (first items) → call the function.
+fn apply_to_value(func: &Form, val: &template::Value, _cond: &conductor::Conductor) -> Result<template::Value, String> {
+    match func {
+        Form::Keyword { namespace: None, name } => {
+            // Keyword as accessor: (:title record) → get the field
+            match val {
+                template::Value::Record(r) => {
+                    Ok(r.resolve(&[name]).cloned().unwrap_or(template::Value::Absent))
+                }
+                _ => Ok(template::Value::Absent),
+            }
+        }
+        Form::Symbol(fname) => {
+            // For simple functions like count, str, etc — evaluate with the value
+            // We'd need to thread the value through. For now, support keyword access only.
+            Err(format!("map with function '{fname}' not yet supported — use a keyword like :title"))
+        }
+        _ => Err(format!("map function must be a keyword or symbol, got: {func}")),
+    }
+}
 
 fn builtin_sort_by(
     args: &[Form],
@@ -636,6 +683,7 @@ fn builtin_println(
 const DOCS: &[(&str, &str, &str)] = &[
     // (name, signature, description)
     // Collections
+    ("map", "(map :field coll)", "Apply a keyword accessor to each item. (->> :post (map :title)) → list of titles."),
     ("sort-by", "(sort-by :field coll) or (sort-by :field :desc coll)", "Sort a collection by a field. Optional :desc for descending."),
     ("take", "(take n coll)", "Take the first n items from a collection."),
     ("filter", "(filter :field \"value\" coll)", "Keep items where field matches value."),
