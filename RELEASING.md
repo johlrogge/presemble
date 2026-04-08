@@ -91,6 +91,21 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.29.0
+
+Header folding in edit mode, conductor link resolution, and internal refactor.
+
+**Header folding in edit mode**
+In Edit mode, headings in the served page display a fold toggle. Click the toggle to collapse or expand the section beneath that heading. Two toolbar buttons collapse all sections or expand them all at once. Clicking anywhere inside a collapsed section unfolds it. Fold state is not persisted across page reloads.
+
+**Conductor link resolution**
+The conductor's `rebuild_page` now resolves link expressions and cross-content references in the rebuilt page. Feature cards, author links, and any content that depends on linked documents render correctly after a browser edit without restarting the server.
+
+**Internal refactor**
+Dead code removed, methods extracted, magic strings replaced with constants, types unified (`SlotName`, `Severity`, `CountRange` methods, HTML escape consolidation, `output_dir` extraction, Mutex poisoning recovery).
+
+---
+
 ### v0.28.0
 
 Unified root collection, performance, and smoke testing.

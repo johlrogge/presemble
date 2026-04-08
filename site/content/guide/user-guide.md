@@ -539,6 +539,10 @@ Clicking the mascot opens a popover menu with three mode options: View, Edit, an
 
 In Edit mode, click any rendered body element to open an inline textarea for that element. The textarea contains the raw markdown source. Save closes the textarea and triggers a live rebuild. The updated content appears in the browser within a second.
 
+### Header folding in edit mode
+
+In Edit mode, headings in the served page display a fold toggle. Click the toggle to collapse or expand the section beneath that heading. Two toolbar buttons collapse all sections or expand them all at once. Clicking anywhere inside a collapsed section unfolds it. Fold state is not persisted across page reloads.
+
 ### Suggest mode
 
 In Suggest mode, missing slots render as suggestion nodes guided by schema hint text. Click a suggestion node to open an editing form for that slot. When a collaborator or Claude pushes a suggestion via the MCP server or conductor API, the browser shows the proposed value as an inline diff alongside the current content. A toolbar offers "Accept all" and "Reject all"; individual suggestions can be accepted or rejected from the diff view.
@@ -552,6 +556,8 @@ The "+" button in the serve toolbar opens a form to create a new content file. S
 ### Dirty buffer tracking
 
 Edits made in the browser and accepted suggestions are held in the conductor's dirty buffer until explicitly saved. The mascot badge shows unsaved changes. Save writes the dirty buffer to disk and clears it. This lets you review several changes before committing any of them to the filesystem.
+
+After a browser edit triggers a rebuild, the conductor resolves link expressions and cross-content references in the rebuilt page. Feature cards, author links, and any content that depends on linked documents render correctly without restarting the server.
 
 ### File watcher coverage
 
