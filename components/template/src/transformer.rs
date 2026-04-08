@@ -39,10 +39,10 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
         match node {
             Node::Text(_) => output.push(node),
             Node::Element(el) => {
-                if el.is_presemble() && el.name == "presemble:insert" {
+                if el.is_presemble() && el.name == crate::constants::ELEM_INSERT {
                     let mut rendered = render_insert(&el, graph)?;
                     output.append(&mut rendered);
-                } else if el.is_presemble() && el.name == "presemble:include" {
+                } else if el.is_presemble() && el.name == crate::constants::ELEM_INCLUDE {
                     if ctx.is_too_deep() {
                         return Err(RenderError::Render(
                             format!("template include depth limit ({}) exceeded", ctx.max_depth)
@@ -63,10 +63,10 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
                             ));
                         }
                     }
-                } else if el.is_presemble() && el.name == "presemble:apply" {
+                } else if el.is_presemble() && el.name == crate::constants::ELEM_APPLY {
                     let mut rendered = render_apply(&el, graph, ctx)?;
                     output.append(&mut rendered);
-                } else if el.is_presemble() && el.name == "presemble:juxt" {
+                } else if el.is_presemble() && el.name == crate::constants::ELEM_JUXT {
                     // Juxt: transform each child against the same data graph,
                     // concatenating results. Children are synthetic presemble:include
                     // or presemble:apply nodes produced by the hiccup parser.
@@ -134,7 +134,7 @@ fn apply_presemble_class(
     graph: &DataGraph,
 ) -> Vec<(String, Form)> {
     // Find and remove the `presemble:class` attribute.
-    let presemble_class_pos = attrs.iter().position(|(k, _)| k == "presemble:class");
+    let presemble_class_pos = attrs.iter().position(|(k, _)| k == crate::constants::ELEM_CLASS);
     let presemble_class_value = presemble_class_pos.map(|i| attrs.remove(i).1);
 
     if let Some(expr_form) = presemble_class_value {
@@ -389,14 +389,15 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
     // Each page's graph carries _presemble_file. For "index.tagline", look in graph["index"]["_presemble_file"].
     // For relative paths like "title" (inside data-each), look in graph["_presemble_file"].
     let presemble_file = {
+        let key_file = crate::constants::KEY_PRESEMBLE_FILE;
         let mut file_path_segments: Vec<&str> = path_segments.to_vec();
         if let Some(last) = file_path_segments.last_mut() {
-            *last = "_presemble_file";
+            *last = key_file;
         }
         graph.resolve(&file_path_segments)
             .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
             // Fallback: try direct lookup (for relative paths inside data-each)
-            .or_else(|| graph.resolve(&["_presemble_file"])
+            .or_else(|| graph.resolve(&[key_file])
                 .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None }))
             .unwrap_or_default()
     };
@@ -417,14 +418,14 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                 let tag = as_tag.unwrap_or("span").to_string();
                 let mut attrs = vec![
                     ("class".to_string(), Form::Str(class)),
-                    ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
-                    ("data-presemble-file".to_string(), Form::Str(presemble_file)),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file)),
                 ];
                 // Preserve _source_slot from record values for browser editing
                 if let Some(Value::Record(sub_graph)) = value
-                    && let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"])
+                    && let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT])
                 {
-                    attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
+                    attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
                 }
                 let element = Element {
                     name: tag,
@@ -446,8 +447,8 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                 name: tag,
                 attrs: vec![
                     ("class".to_string(), Form::Str(class)),
-                    ("data-presemble-slot".to_string(), Form::Str(slot_name_from_path(data_path))),
-                    ("data-presemble-file".to_string(), Form::Str(presemble_file.clone())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
                 ],
                 children: vec![Node::Text(text.clone())],
             };
@@ -506,9 +507,9 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             // The element content is empty — the user starts with a clean slate.
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(combined_class)),
-                ("data-presemble-slot".to_string(), Form::Str(slot_name.clone())),
-                ("data-presemble-file".to_string(), Form::Str(presemble_file.clone())),
-                ("data-presemble-hint".to_string(), Form::Str(hint.clone())),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name.clone())),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+                (crate::constants::ATTR_HINT.to_string(), Form::Str(hint.clone())),
             ];
             if effective_tag == "img" {
                 attrs.push(("alt".to_string(), Form::Str(String::new())));
@@ -589,11 +590,11 @@ fn record_attrs(
 ) -> Vec<(String, Form)> {
     let mut attrs = vec![
         ("class".to_string(), Form::Str(class.to_string())),
-        ("data-presemble-slot".to_string(), Form::Str(slot.to_string())),
-        ("data-presemble-file".to_string(), Form::Str(file.to_string())),
+        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+        (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
     ];
-    if let Some(Value::Text(source)) = sub_graph.resolve(&["_source_slot"]) {
-        attrs.push(("data-presemble-source-slot".to_string(), Form::Str(source.clone())));
+    if let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT]) {
+        attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
     }
     attrs
 }
@@ -703,8 +704,8 @@ fn render_list_item(
                 name: tag.to_string(),
                 attrs: vec![
                     ("class".to_string(), Form::Str(class.to_string())),
-                    ("data-presemble-slot".to_string(), Form::Str(slot.to_string())),
-                    ("data-presemble-file".to_string(), Form::Str(file.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
                 ],
                 children: vec![Node::Text(text.clone())],
             };

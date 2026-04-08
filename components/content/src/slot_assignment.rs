@@ -1,5 +1,5 @@
 use crate::document::{ContentElement, Document, DocumentSlot};
-use schema::{Constraint, CountRange, Element, Grammar, Slot, Span, Spanned};
+use schema::{Element, Grammar, Slot, Span, Spanned};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -46,7 +46,7 @@ pub fn assign_slots(
             break 'slots;
         }
 
-        let max = max_count_for_slot(slot);
+        let max = slot.max_count();
         let mut slot_elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
         let mut count = 0usize;
 
@@ -119,20 +119,6 @@ fn push_empty_slot(preamble: &mut im::Vector<DocumentSlot>, slot: &Slot) {
         name: slot.name.clone(),
         elements: im::Vector::new(),
     });
-}
-
-fn max_count_for_slot(slot: &Slot) -> usize {
-    for constraint in &slot.constraints {
-        if let Constraint::Occurs(count_range) = constraint {
-            return match count_range {
-                CountRange::Exactly(n) => *n,
-                CountRange::AtLeast(_) => usize::MAX,
-                CountRange::AtMost(n) => *n,
-                CountRange::Between { max, .. } => *max,
-            };
-        }
-    }
-    1
 }
 
 fn element_matches_slot(element: &ContentElement, slot_element: &Element) -> bool {

@@ -11,7 +11,8 @@ pub use template_registry::FileTemplateRegistry;
 pub use dep_graph::DependencyGraph;
 pub use error::CliError;
 
-use site_index::{NodeRole, PageData, PageKind, SchemaStem, SiteGraph, SiteNode, UrlPath};
+use site_index::{DIR_ASSETS, DIR_CONTENT, DIR_SCHEMAS, DIR_TEMPLATES, NodeRole, PageData, PageKind, SchemaStem, SiteGraph, SiteNode, UrlPath};
+use template::constants::KEY_PRESEMBLE_FILE;
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
@@ -60,8 +61,7 @@ struct PageAddress {
 /// Compute the output directory for a site: `<parent-of-site-dir>/output/<site-dir-name>/`
 /// e.g. `presemble build site/` → `output/site/`
 pub fn output_dir(site_dir: &Path) -> std::path::PathBuf {
-    let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
-    site_dir.parent().unwrap_or(site_dir).join("output").join(name)
+    site_index::output_dir(site_dir)
 }
 
 /// Find a template for the given schema stem, trying extensions in order.
@@ -133,7 +133,7 @@ pub struct BuiltPage {
 pub struct PageBuildResult {
     pub built: BuiltPage,
     pub output_path: std::path::PathBuf,
-    pub schema_stem: String,
+    pub schema_stem: SchemaStem,
     /// Source files this page was built from (schema, content, template)
     pub deps: std::collections::HashSet<std::path::PathBuf>,
     pub template_path: Option<std::path::PathBuf>,
@@ -456,7 +456,7 @@ pub fn build_content_page(
     let addr = page_address(site_dir, schema_stem, content_path);
 
     // Look up template path — rendering is deferred until after reference resolution
-    let templates_dir = site_dir.join("templates");
+    let templates_dir = site_dir.join(DIR_TEMPLATES);
     let template_path = find_template(&templates_dir, schema_stem);
 
     // Build data graph (always — suggestion nodes fill missing slots)
@@ -475,7 +475,7 @@ pub fn build_content_page(
     } else {
         format!("content/{schema_stem}/{}.md", addr.slug)
     };
-    slot_graph.insert("_presemble_file", template::Value::Text(presemble_file));
+    slot_graph.insert(KEY_PRESEMBLE_FILE, template::Value::Text(presemble_file));
 
     // Add url and link to the article graph
     slot_graph.insert("url", template::Value::Text(addr.url_path.clone()));
@@ -496,7 +496,7 @@ pub fn build_content_page(
             data: slot_graph,
         },
         output_path: addr.output_path,
-        schema_stem: schema_stem.to_string(),
+        schema_stem: SchemaStem::new(schema_stem),
         deps,
         template_path,
     };
@@ -520,20 +520,19 @@ pub fn build_content_page(
 /// The resolved value replaces the `LinkExpression` in the data graph.
 fn resolve_link_expressions(site_graph: &mut SiteGraph) {
     // Build a URL → DataGraph index for PathRef lookups
-    let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
+    let url_index: expressions::UrlIndex = site_graph
         .iter_pages_by_kind(PageKind::Item)
-        .filter_map(|n| n.page_data().map(|pd| (n.url_path.as_str().to_string(), pd.data.clone())))
+        .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
         .collect();
 
     // Build a stem → Vec<DataGraph> index for ThreadExpr lookups
-    let mut stem_index: std::collections::HashMap<String, Vec<(String, template::DataGraph)>> =
-        std::collections::HashMap::new();
+    let mut stem_index: expressions::StemIndex = std::collections::HashMap::new();
     for node in site_graph.iter_pages_by_kind(PageKind::Item) {
         if let Some(pd) = node.page_data() {
             stem_index
-                .entry(pd.schema_stem.as_str().to_string())
+                .entry(pd.schema_stem.clone())
                 .or_default()
-                .push((node.url_path.as_str().to_string(), pd.data.clone()));
+                .push((node.url_path.clone(), pd.data.clone()));
         }
     }
 
@@ -553,8 +552,8 @@ fn resolve_link_expressions(site_graph: &mut SiteGraph) {
 /// Also resolves `LinkExpression` values inside `Value::List` items.
 fn resolve_link_expressions_in_graph(
     graph: &mut template::DataGraph,
-    url_index: &std::collections::HashMap<String, template::DataGraph>,
-    stem_index: &std::collections::HashMap<String, Vec<(String, template::DataGraph)>>,
+    url_index: &expressions::UrlIndex,
+    stem_index: &expressions::StemIndex,
 ) {
     // Collect all top-level keys first (avoids borrow conflicts)
     let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
@@ -838,7 +837,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     let schema_stems_list = repo.schema_stems();
 
     // Discover and copy referenced assets from templates
-    let templates_dir = site_dir.join("templates");
+    let templates_dir = site_dir.join(DIR_TEMPLATES);
     let registry = FileTemplateRegistry::new(repo.clone());
     let mut all_asset_paths = std::collections::BTreeSet::new();
     let mut all_template_stems: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1116,7 +1115,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         // Resolve the collection template via repo. The repo tries
         // `templates/{stem}/index.hiccup` then `templates/{stem}/index.html`.
         let collection_template_path = {
-            let base = repo.site_dir().join("templates").join(schema_stem).join("index");
+            let base = repo.site_dir().join(DIR_TEMPLATES).join(schema_stem).join("index");
             repo.collection_template_source(&stem).map(|(_, is_hiccup)| {
                 if is_hiccup {
                     base.with_extension("hiccup")
@@ -1167,7 +1166,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
         } else {
             format!("content/{schema_stem}/index.md")
         };
-        collection_graph.insert("_presemble_file", template::Value::Text(coll_file));
+        collection_graph.insert(KEY_PRESEMBLE_FILE, template::Value::Text(coll_file));
         collection_graph.insert("_presemble_stem", template::Value::Text(schema_stem.to_string()));
         let (url_path_str, output_path_col) = if schema_stem.is_empty() {
             // Root collection: url "/" and output/index.html
@@ -1210,7 +1209,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
     if site_graph.get(&root_url).is_none() {
         let root_stem = SchemaStem::new("");
         if let Some((_, is_hiccup)) = repo.collection_template_source(&root_stem) {
-            let base = repo.site_dir().join("templates").join("index");
+            let base = repo.site_dir().join(DIR_TEMPLATES).join("index");
             let index_tmpl_path = if is_hiccup {
                 base.with_extension("hiccup")
             } else {
@@ -1224,7 +1223,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
             {
                 root_graph = template::build_article_graph(&doc, &grammar);
-                root_graph.insert("_presemble_file", template::Value::Text("content/index.md".to_string()));
+                root_graph.insert(KEY_PRESEMBLE_FILE, template::Value::Text("content/index.md".to_string()));
                 root_graph.insert("_presemble_stem", template::Value::Text(String::new()));
             }
             let root_output_path = output_dir(site_dir).join("index.html");
@@ -1852,7 +1851,7 @@ fn warn_unused_sources(
     site_graph: &site_index::SiteGraph,
 ) {
     // A. Unused assets
-    let assets_dir = site_dir.join("assets");
+    let assets_dir = site_dir.join(DIR_ASSETS);
     if assets_dir.exists() {
         let mut asset_files = Vec::new();
         collect_files_recursive(&assets_dir, &mut asset_files);
@@ -1884,7 +1883,7 @@ fn warn_unused_sources(
             || included_template_stems.contains(stem);
         if !is_used {
             // Reconstruct the display path: prefer new convention, fall back to flat
-            let templates_dir = site_dir.join("templates");
+            let templates_dir = site_dir.join(DIR_TEMPLATES);
             let display = if templates_dir.join(stem).join("item.html").exists() {
                 format!("{stem}/item.html")
             } else if templates_dir.join(stem).join("item.hiccup").exists() {
@@ -1900,7 +1899,7 @@ fn warn_unused_sources(
 
     // C. Schemas with no content
     for stem in schema_stems {
-        let content_dir = site_dir.join("content").join(stem);
+        let content_dir = site_dir.join(DIR_CONTENT).join(stem);
         let has_md = if content_dir.exists() {
             let mut files = Vec::new();
             collect_files_recursive(&content_dir, &mut files);
@@ -1911,7 +1910,7 @@ fn warn_unused_sources(
         if !has_md {
             // Display the actual schema path (new or legacy convention)
             let schema_display =
-                if site_dir.join("schemas").join(stem).join("item.md").exists() {
+                if site_dir.join(DIR_SCHEMAS).join(stem).join("item.md").exists() {
                     format!("{stem}/item.md")
                 } else {
                     format!("{stem}.md")
@@ -1921,7 +1920,7 @@ fn warn_unused_sources(
     }
 
     // D. Content dirs with no schema
-    let content_root = site_dir.join("content");
+    let content_root = site_dir.join(DIR_CONTENT);
     if content_root.exists() && let Ok(entries) = std::fs::read_dir(&content_root) {
         let mut dirs: Vec<_> = entries
             .filter_map(|e| e.ok())

@@ -1,4 +1,5 @@
 mod ast;
+pub mod constants;
 pub mod data;
 pub mod dom;
 mod error;
@@ -13,7 +14,7 @@ pub use data::{build_article_graph, build_article_graph_with_source, synthesize_
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};
-pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes, Form};
+pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes, Form, html_escape_text, html_escape_attr};
 pub use hiccup::parse_template_hiccup;
 pub use hiccup_serializer::serialize_to_hiccup;
 pub use registry::{extract_definitions, NullRegistry, RenderContext, TemplateRegistry};

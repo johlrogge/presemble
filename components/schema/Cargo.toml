@@ -7,3 +7,4 @@ edition = "2024"
 interface = "schema"
 
 [dependencies]
+serde = { workspace = true }

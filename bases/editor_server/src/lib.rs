@@ -1,7 +1,3 @@
-mod error;
-
-pub use error::ServerError;
-
 use conductor::{socket_url, Command, Conductor, Response}; // Response kept for parse-error path
 use std::path::Path;
 use std::sync::Arc;
@@ -105,6 +101,6 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
 }
 
 /// Legacy stub — kept so existing callers continue to compile.
-pub fn serve() -> Result<(), ServerError> {
+pub fn serve() -> Result<(), String> {
     todo!()
 }

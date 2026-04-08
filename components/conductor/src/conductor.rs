@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use site_index::DIR_TEMPLATES;
+use template::constants::KEY_PRESEMBLE_FILE;
+
 use crate::protocol::{Command, ConductorEvent, Response};
 
 /// The result of handling a command: a response to send back, plus
@@ -118,10 +121,7 @@ impl Conductor {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
 
-        let output_dir = {
-            let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
-            site_dir.parent().unwrap_or(&site_dir).join("output").join(name)
-        };
+        let output_dir = site_index::output_dir(&site_dir);
 
         // Populate schema cache via repo
         let mut schema_cache = HashMap::new();
@@ -149,7 +149,7 @@ impl Conductor {
 
         // Load persisted pending suggestions from disk
         let suggestions = conductor.load_suggestions();
-        *conductor.suggestions.write().unwrap() = suggestions;
+        *conductor.suggestions.write().unwrap_or_else(|e| e.into_inner()) = suggestions;
 
         // Build the site graph from all known content
         if let Err(e) = conductor.build_full_graph() {
@@ -165,7 +165,7 @@ impl Conductor {
 
     /// Get cached schema source for a stem.
     pub fn schema_source(&self, stem: &str) -> Option<String> {
-        self.schema_cache.read().unwrap().get(stem).cloned()
+        self.schema_cache.read().unwrap_or_else(|e| e.into_inner()).get(stem).cloned()
     }
 
     /// Refresh the schema cache by re-scanning the filesystem.
@@ -175,7 +175,7 @@ impl Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(&self.site_dir)
             .build();
-        let mut cache = self.schema_cache.write().unwrap();
+        let mut cache = self.schema_cache.write().unwrap_or_else(|e| e.into_inner());
         cache.clear();
         for stem in repo.schema_stems() {
             if let Some(src) = repo.schema_source(&stem) {
@@ -190,12 +190,12 @@ impl Conductor {
 
     /// Replace the site graph with a new one built externally.
     pub fn set_site_graph(&self, graph: site_index::SiteGraph) {
-        *self.site_graph.write().unwrap() = graph;
+        *self.site_graph.write().unwrap_or_else(|e| e.into_inner()) = graph;
     }
 
     /// Read access to the site graph.
     pub fn site_graph(&self) -> std::sync::RwLockReadGuard<'_, site_index::SiteGraph> {
-        self.site_graph.read().unwrap()
+        self.site_graph.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Build the full site graph by iterating all schema stems and content slugs.
@@ -259,7 +259,7 @@ impl Conductor {
                     format!("content/{}/{}.md", stem.as_str(), slug)
                 };
                 data.insert(
-                    "_presemble_file",
+                    KEY_PRESEMBLE_FILE,
                     template::Value::Text(presemble_file),
                 );
 
@@ -282,13 +282,13 @@ impl Conductor {
                     .item_template_source(&stem)
                     .map(|_| {
                         self.site_dir
-                            .join("templates")
+                            .join(DIR_TEMPLATES)
                             .join(stem.as_str())
                             .join("item")
                     })
                     .unwrap_or_else(|| {
                         self.site_dir
-                            .join("templates")
+                            .join(DIR_TEMPLATES)
                             .join(format!("{}.html", stem.as_str()))
                     });
 
@@ -317,7 +317,7 @@ impl Conductor {
             }
         }
 
-        *self.site_graph.write().unwrap() = graph;
+        *self.site_graph.write().unwrap_or_else(|e| e.into_inner()) = graph;
         Ok(())
     }
 
@@ -325,7 +325,7 @@ impl Conductor {
     ///
     /// Returns a vec of `(url_path, data_graph)` pairs, one per item page.
     pub fn query_items_for_stem(&self, stem: &str) -> Vec<(String, template::DataGraph)> {
-        let graph = self.site_graph.read().unwrap();
+        let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
         let schema_stem = site_index::SchemaStem::new(stem);
         graph
             .items_for_stem(&schema_stem)
@@ -340,7 +340,7 @@ impl Conductor {
 
     /// Get in-memory document text, falling back to disk.
     pub fn document_text(&self, path: &Path) -> Option<String> {
-        if let Some(text) = self.doc_sources.read().unwrap().get(path) {
+        if let Some(text) = self.doc_sources.read().unwrap_or_else(|e| e.into_inner()).get(path) {
             return Some(text.clone());
         }
         std::fs::read_to_string(path).ok()
@@ -403,7 +403,7 @@ impl Conductor {
             format!("content/{stem}/{slug}.md")
         };
         graph.insert(
-            "_presemble_file",
+            KEY_PRESEMBLE_FILE,
             template::Value::Text(presemble_file),
         );
 
@@ -623,7 +623,7 @@ impl Conductor {
 
         let new_src = content::serialize_document(&doc);
         // Store in memory only — disk write happens on explicit save
-        self.doc_sources.write().unwrap().insert(abs_path.clone(), new_src.clone());
+        self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(abs_path.clone(), new_src.clone());
 
         // Rebuild the output HTML from in-memory state so the preview is up to date
         self.rebuild_page(&abs_path, &new_src)
@@ -690,7 +690,7 @@ impl Conductor {
         };
 
         // Store in memory only — disk write happens on explicit save
-        self.doc_sources.write().unwrap().insert(abs_path.clone(), new_source.clone());
+        self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(abs_path.clone(), new_source.clone());
 
         // Rebuild
         self.rebuild_page(&abs_path, &new_source)
@@ -715,7 +715,7 @@ impl Conductor {
                 let path_buf = PathBuf::from(&path);
                 // Store in memory — do NOT write to disk.
                 // Disk writes happen on explicit save (DocumentSaved) or browser edit (EditSlot).
-                self.doc_sources.write().unwrap().insert(path_buf.clone(), text.clone());
+                self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(path_buf.clone(), text.clone());
 
                 // Rebuild the page from in-memory text and broadcast PagesRebuilt.
                 match self.rebuild_page(&path_buf, &text) {
@@ -732,14 +732,14 @@ impl Conductor {
             Command::DocumentSaved { path } => {
                 let path = PathBuf::from(&path);
                 // Clear in-memory version — disk is now authoritative
-                self.doc_sources.write().unwrap().remove(&path);
+                self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
                 CommandResult::ok()
             }
             Command::FileChanged { paths } => {
                 for p in &paths {
                     let path = PathBuf::from(p);
                     // Clear in-memory version
-                    self.doc_sources.write().unwrap().remove(&path);
+                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
                 }
                 // Refresh schema cache for changed schemas
                 for p in &paths {
@@ -747,7 +747,7 @@ impl Conductor {
                     if let site_index::FileKind::Schema { stem } = self.site_index.classify(path)
                         && let Some(src) = self.repo.schema_source(&stem)
                     {
-                        self.schema_cache.write().unwrap().insert(stem.as_str().to_string(), src);
+                        self.schema_cache.write().unwrap_or_else(|e| e.into_inner()).insert(stem.as_str().to_string(), src);
                     }
                 }
                 CommandResult::ok()
@@ -810,7 +810,7 @@ impl Conductor {
                 if let Err(e) = self.persist_suggestion(&suggestion) {
                     return CommandResult::error(format!("persist error: {e}"));
                 }
-                self.suggestions.write().unwrap().insert(id.clone(), suggestion.clone());
+                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), suggestion.clone());
 
                 CommandResult {
                     response: Response::SuggestionCreated(id),
@@ -854,7 +854,7 @@ impl Conductor {
                 if let Err(e) = self.persist_suggestion(&suggestion) {
                     return CommandResult::error(format!("persist error: {e}"));
                 }
-                self.suggestions.write().unwrap().insert(id.clone(), suggestion.clone());
+                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), suggestion.clone());
 
                 CommandResult {
                     response: Response::SuggestionCreated(id),
@@ -862,7 +862,7 @@ impl Conductor {
                 }
             }
             Command::GetSuggestions { file } => {
-                let suggestions = self.suggestions.read().unwrap();
+                let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
                 let pending: Vec<editorial_types::Suggestion> = suggestions
                     .values()
                     .filter(|s| s.file == file && s.status == editorial_types::SuggestionStatus::Pending)
@@ -873,7 +873,7 @@ impl Conductor {
             Command::AcceptSuggestion { id } => {
                 // Look up the suggestion
                 let suggestion = {
-                    let suggestions = self.suggestions.read().unwrap();
+                    let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
                     match suggestions.get(&id) {
                         Some(s) if s.status == editorial_types::SuggestionStatus::Pending => s.clone(),
                         Some(_) => return CommandResult::error(format!("suggestion {id} is not pending")),
@@ -889,7 +889,7 @@ impl Conductor {
                 if let Err(e) = self.persist_suggestion(&updated) {
                     eprintln!("conductor: failed to persist accepted suggestion: {e}");
                 }
-                self.suggestions.write().unwrap().insert(id.clone(), updated);
+                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
 
                 CommandResult::ok_with_events(vec![
                     ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages: vec![] },
@@ -898,7 +898,7 @@ impl Conductor {
             Command::RejectSuggestion { id } => {
                 // Look up the suggestion
                 let suggestion = {
-                    let suggestions = self.suggestions.read().unwrap();
+                    let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
                     match suggestions.get(&id) {
                         Some(s) if s.status == editorial_types::SuggestionStatus::Pending => s.clone(),
                         Some(_) => return CommandResult::error(format!("suggestion {id} is not pending")),
@@ -912,7 +912,7 @@ impl Conductor {
                 if let Err(e) = self.persist_suggestion(&updated) {
                     eprintln!("conductor: failed to persist rejected suggestion: {e}");
                 }
-                self.suggestions.write().unwrap().insert(id.clone(), updated);
+                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
 
                 CommandResult::ok_with_events(vec![
                     ConductorEvent::SuggestionRejected { id, file: suggestion.file },
@@ -945,7 +945,7 @@ impl Conductor {
                 }
             }
             Command::GetDirtyBuffers => {
-                let sources = self.doc_sources.read().unwrap();
+                let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
                 let paths: Vec<String> = sources.keys()
                     .filter_map(|p| p.strip_prefix(&self.site_dir).ok())
                     .map(|p| p.to_string_lossy().to_string())
@@ -954,21 +954,21 @@ impl Conductor {
             }
             Command::SaveBuffer { path } => {
                 let abs_path = self.site_dir.join(&path);
-                let sources = self.doc_sources.read().unwrap();
+                let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(text) = sources.get(&abs_path) {
                     let text = text.clone();
                     drop(sources);
                     if let Err(e) = std::fs::write(&abs_path, &text) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
-                    self.doc_sources.write().unwrap().remove(&abs_path);
+                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&abs_path);
                     CommandResult::ok()
                 } else {
                     CommandResult::error(format!("buffer not dirty: {path}"))
                 }
             }
             Command::SaveAllBuffers => {
-                let sources = self.doc_sources.read().unwrap();
+                let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
                 let buffers: Vec<(PathBuf, String)> = sources.iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
@@ -978,7 +978,7 @@ impl Conductor {
                         return CommandResult::error(format!("write error for {}: {e}", path.display()));
                     }
                 }
-                let mut sources = self.doc_sources.write().unwrap();
+                let mut sources = self.doc_sources.write().unwrap_or_else(|e| e.into_inner());
                 for (path, _) in buffers {
                     sources.remove(&path);
                 }

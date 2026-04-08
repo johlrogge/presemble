@@ -134,33 +134,15 @@ impl ExpectedCount {
     fn min(&self) -> usize {
         match self {
             ExpectedCount::Exactly(n) => *n,
-            ExpectedCount::FromRange(cr) => count_range_min(cr),
+            ExpectedCount::FromRange(cr) => cr.min(),
         }
     }
 
     fn max(&self) -> Option<usize> {
         match self {
             ExpectedCount::Exactly(n) => Some(*n),
-            ExpectedCount::FromRange(cr) => count_range_max(cr),
+            ExpectedCount::FromRange(cr) => cr.max(),
         }
-    }
-}
-
-fn count_range_min(cr: &CountRange) -> usize {
-    match cr {
-        CountRange::Exactly(n) => *n,
-        CountRange::AtLeast(n) => *n,
-        CountRange::AtMost(_) => 0,
-        CountRange::Between { min, .. } => *min,
-    }
-}
-
-fn count_range_max(cr: &CountRange) -> Option<usize> {
-    match cr {
-        CountRange::Exactly(n) => Some(*n),
-        CountRange::AtLeast(_) => None,
-        CountRange::AtMost(n) => Some(*n),
-        CountRange::Between { max, .. } => Some(*max),
     }
 }
 
