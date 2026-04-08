@@ -96,9 +96,135 @@ if(data.ok){_fetchDirtyCount();}
 else{alert(data.error||'Save failed');}
 });
 };
+_foldSetup();
 }
 function _editCleanup(){
+_foldTeardown();
 if(_editToolbar){_editToolbar.remove();_editToolbar=null;}
+}
+var _sectionMap=null;
+var _foldSummaries={};
+function _foldBuildSectionMap(){
+var allBody=Array.prototype.slice.call(document.querySelectorAll('[data-presemble-slot="body"]'));
+var map=new Map();
+for(var i=0;i<allBody.length;i++){
+var el=allBody[i];
+if(!/^H[1-6]$/.test(el.tagName)){continue;}
+var level=parseInt(el.tagName.charAt(1),10);
+var section=[];
+for(var j=i+1;j<allBody.length;j++){
+var next=allBody[j];
+if(/^H[1-6]$/.test(next.tagName)&&parseInt(next.tagName.charAt(1),10)<=level){break;}
+section.push(next);
+}
+if(section.length>0){map.set(el.id,{level:level,elements:section,heading:el});}
+}
+return map;
+}
+function _foldSetup(){
+_sectionMap=_foldBuildSectionMap();
+_sectionMap.forEach(function(info,headingId){
+var headingEl=info.heading;
+var btn=document.createElement('button');
+btn.className='presemble-fold-toggle';
+btn.textContent='\u25BC';
+btn.onclick=function(e){e.stopPropagation();_foldToggle(headingEl);};
+headingEl.insertBefore(btn,headingEl.firstChild);
+});
+if(_editToolbar){
+var foldAllBtn=document.createElement('button');
+foldAllBtn.className='presemble-fold-all';
+foldAllBtn.textContent='Fold All';
+foldAllBtn.onclick=function(){_foldAll();};
+var unfoldAllBtn=document.createElement('button');
+unfoldAllBtn.className='presemble-unfold-all';
+unfoldAllBtn.textContent='Unfold All';
+unfoldAllBtn.onclick=function(){_unfoldAll();};
+_editToolbar.appendChild(foldAllBtn);
+_editToolbar.appendChild(unfoldAllBtn);
+}
+_foldRestoreState();
+}
+function _foldTeardown(){
+if(!_sectionMap){return;}
+_foldSaveState();
+document.querySelectorAll('.presemble-fold-toggle').forEach(function(btn){btn.remove();});
+document.querySelectorAll('.presemble-fold-summary').forEach(function(el){el.remove();});
+document.querySelectorAll('.presemble-folded-content').forEach(function(el){el.classList.remove('presemble-folded-content');});
+document.querySelectorAll('.presemble-heading-folded').forEach(function(el){el.classList.remove('presemble-heading-folded');});
+if(_editToolbar){
+var faBtns=_editToolbar.querySelectorAll('.presemble-fold-all,.presemble-unfold-all');
+faBtns.forEach(function(b){b.remove();});
+}
+_sectionMap=null;
+_foldSummaries={};
+}
+function _foldToggle(headingEl){
+if(!_sectionMap){return;}
+var info=_sectionMap.get(headingEl.id);
+if(!info){return;}
+var isFolded=headingEl.classList.contains('presemble-heading-folded');
+var btn=headingEl.querySelector('.presemble-fold-toggle');
+if(isFolded){
+info.elements.forEach(function(el){el.classList.remove('presemble-folded-content');});
+var summary=_foldSummaries[headingEl.id];
+if(summary){summary.remove();delete _foldSummaries[headingEl.id];}
+if(btn){btn.textContent='\u25BC';}
+headingEl.classList.remove('presemble-heading-folded');
+// Re-apply folds for nested headings that were independently folded
+info.elements.forEach(function(el){
+if(/^H[1-6]$/.test(el.tagName)&&el.classList.contains('presemble-heading-folded')&&_sectionMap.has(el.id)){
+var nestedInfo=_sectionMap.get(el.id);
+if(nestedInfo){nestedInfo.elements.forEach(function(ne){ne.classList.add('presemble-folded-content');});}
+}
+});
+}else{
+var hasActive=info.elements.some(function(el){
+return el.classList.contains('presemble-editing')||
+(el.parentNode&&el.parentNode.querySelector('.presemble-body-editor'));
+});
+if(hasActive){return;}
+info.elements.forEach(function(el){el.classList.add('presemble-folded-content');});
+var foldSummary=document.createElement('div');
+foldSummary.className='presemble-fold-summary';
+foldSummary.textContent='\u2026 '+info.elements.length+' element'+(info.elements.length===1?'':'s')+' hidden';
+foldSummary.onclick=function(){_foldToggle(headingEl);};
+headingEl.after(foldSummary);
+_foldSummaries[headingEl.id]=foldSummary;
+if(btn){btn.textContent='\u25B6';}
+headingEl.classList.add('presemble-heading-folded');
+}
+}
+function _foldAll(){
+if(!_sectionMap){return;}
+var headings=[];
+_sectionMap.forEach(function(info,id){headings.push(info.heading);});
+headings.reverse().forEach(function(h){if(!h.classList.contains('presemble-heading-folded')){_foldToggle(h);}});
+}
+function _unfoldAll(){
+if(!_sectionMap){return;}
+_sectionMap.forEach(function(info,id){if(info.heading.classList.contains('presemble-heading-folded')){_foldToggle(info.heading);}});
+}
+function _foldSaveState(){
+if(!_sectionMap){return;}
+var folded=[];
+_sectionMap.forEach(function(info,id){if(info.heading.classList.contains('presemble-heading-folded')){folded.push(id);}});
+var st={};
+try{st=JSON.parse(sessionStorage.getItem('presemble-fold-state')||'{}');}catch(ex){}
+st[location.pathname]=folded;
+sessionStorage.setItem('presemble-fold-state',JSON.stringify(st));
+}
+function _foldRestoreState(){
+var st={};
+try{st=JSON.parse(sessionStorage.getItem('presemble-fold-state')||'{}');}catch(ex){}
+var folded=st[location.pathname];
+if(!folded||!folded.length){return;}
+folded.forEach(function(id){
+if(_sectionMap&&_sectionMap.has(id)){
+var info=_sectionMap.get(id);
+if(!info.heading.classList.contains('presemble-heading-folded')){_foldToggle(info.heading);}
+}
+});
 }
 function _openCreateDialog(){
 fetch('/_presemble/schemas').then(function(r){return r.json();}).then(function(schemas){
@@ -381,6 +507,7 @@ viewBtn.onclick=function(){setMode('view');};
 editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
 window._fetchDirtyCount=_fetchDirtyCount;
+window._foldToggle=function(el){_foldToggle(el);};
 })();
 document.addEventListener('click',function(e){
 if(!document.body.classList.contains('presemble-edit-mode')){return;}
@@ -398,6 +525,7 @@ if(!bSaveBtn){bSaveBtn=openTa.nextElementSibling;if(bSaveBtn){bSaveBtn=bSaveBtn.
 if(bSaveBtn){bSaveBtn.click();}
 }
 if(el.getAttribute('data-presemble-slot')==='body'){
+if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(window._foldToggle){window._foldToggle(el);}return;}
 e.preventDefault();
 var bfile=el.getAttribute('data-presemble-file');
 if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}

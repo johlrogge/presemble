@@ -49,3 +49,9 @@ img.presemble-suggestion{min-width:200px;min-height:120px;display:block;}
 .presemble-edit-toolbar-bar{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:#fff;border:1px solid #ddd;border-radius:0.5rem;padding:0.5rem 1rem;box-shadow:0 2px 8px rgba(0,0,0,0.15);display:flex;align-items:center;gap:0.75rem;z-index:10000;font-family:system-ui,sans-serif;}
 .presemble-edit-toolbar-bar button{background:none;border:1px solid #ccc;border-radius:0.3rem;padding:0.4rem 0.8rem;cursor:pointer;font-size:1rem;}
 .presemble-edit-toolbar-bar button:hover{background:#f0f0f0;}
+.presemble-fold-toggle{display:inline-block;background:none;border:none;cursor:pointer;font-size:0.7em;color:#5d8a6e;padding:0 0.3rem 0 0;vertical-align:middle;opacity:0.6;transition:opacity 0.15s;}
+.presemble-fold-toggle:hover{opacity:1;}
+.presemble-heading-folded{opacity:0.7;border-bottom:1px dashed #5d8a6e;padding-bottom:0.2rem;}
+.presemble-folded-content{display:none !important;}
+.presemble-fold-summary{color:#888;font-size:0.85rem;font-style:italic;padding:0.3rem 0 0.3rem 1.5rem;border-left:2px dashed #ccc;margin:0.3rem 0;cursor:pointer;}
+.presemble-fold-summary:hover{color:#5d8a6e;}
