@@ -1,10 +1,10 @@
-# Content is data. Templates are data. Schemas are the data is the contract between them.
+# Content is data. Templates are data. Schemas are the contract between them.
 
-Presemble is a site publisher that knows what your content should look like — and helps you get there. You describe each page type once, and Presemble guides you through filling it in: completions in your editor, friendly nudges when something is missing, and warm placeholders where content still needs to go. When everything is ready, it publishes. Not before.
+Presemble is a site publisher focused on editorial collaboration and semantic content safety. You describe each page type once, and Presemble guides you through filling it in: completions in your editor, friendly nudges when something is missing, warm placeholders where content still needs to go, and Claude as a collaborator who can suggest improvements and have them appear as LSP diagnostics. When everything is ready, it publishes. Not before.
 
 You never wonder "did I forget something?" Presemble tells you — in the editor while you type, in the browser while you preview, and at build time before anything goes live. Missing fields, broken links, incomplete pages — they all surface as helpful suggestions, not cryptic errors.
 
-Start a new page and Presemble shows you exactly what it needs. Fill in the blanks, save, and watch the site update in your browser. That is the workflow. No surprises, no guesswork, no broken deploys.
+Start a new site with the browser wizard: point `presemble serve` at an empty directory, pick a starter template, and scaffold a working site in seconds. Or open an existing content file and let Claude push improvements as structured suggestions while you accept or reject each one.
 
 [Schemas As Contracts](/feature/schemas-as-contracts)
 
@@ -22,11 +22,11 @@ In Hugo, Jekyll, Eleventy, and Astro, content is a text file with an optional fr
 
 In Presemble, a schema defines the exact sequence of elements a content document must contain — each position named, typed, and constrained. The publisher parses every content file into a typed data graph and validates it against the schema. A missing required slot is a build error with the slot name and the constraint that failed. The template cannot reference a field that is not declared; the compiler verifies this before output is written.
 
-### Templates are data, not text with holes
+### Templates are pure functions
 
 Go templates, Liquid, and Jinja2 are string interpolation engines. The template is a text file. The engine finds markers and replaces them with values. Structural errors — unclosed tags, invalid nesting, data-path typos — are silent until rendered.
 
-Presemble parses templates into DOM trees and transforms them structurally. presemble:insert directives are replaced with typed nodes from the data graph, not with raw strings. The publisher walks the tree to discover every asset reference without regex. Mismatched tags fail at parse time. Unknown data paths fail at compile time.
+Presemble parses templates into DOM trees and transforms them structurally. Templates are written in Hiccup (EDN) as the primary format and compose using `juxt` and pipe combinators. `((juxt header self/body footer) input)` fans the same content tree to three template functions and concatenates their DOM outputs. No string interpolation occurs at any point.
 
 ### Schemas are contracts, not suggestions
 
@@ -36,7 +36,23 @@ Presemble schemas are enforced. If a content file violates its schema, the build
 
 ### Your editor knows your content
 
-presemble lsp classifies every open file by its path within the site directory. Content files under content/post/ receive completions for every slot declared in the post schema, diagnostics for every violation, and link completions that enumerate the actual content directory. Template files receive data-path completions derived from the schema. Schema files receive keyword completions and parse-error diagnostics. One server process, one configuration, the whole site.
+`presemble lsp` classifies every open file by its path within the site directory. Content files under `content/post/` receive completions for every slot declared in the post schema, diagnostics for every violation, and link completions that enumerate the actual content directory. Template files receive data-path completions derived from the schema. Schema files receive keyword completions and parse-error diagnostics. One server process, one configuration, the whole site.
+
+### Claude as editorial collaborator
+
+`presemble mcp site/` exposes the site to Claude Code. Claude reads your schemas to understand your content model, reads your content files to understand what exists, and pushes targeted suggestions to specific slots with a rationale. Each suggestion appears as an LSP diagnostic in your editor with an accept/reject code action. Claude uses the same suggestion protocol as a human editor — there is no special AI path.
+
+The same suggestions appear as inline diffs in the browser preview with a toolbar to accept or reject them individually or in bulk.
+
+### Content assembles itself
+
+Content files can include Presemble Lisp expressions that assemble collections at build time:
+
+```markdown
+[]((->> :post (sort-by :published :desc) (take 5)))
+```
+
+The expression evaluates against the site graph and produces a validated list. The homepage decides what appears and in what order; the template decides how it looks. Neither can override the other's responsibility.
 
 ### The page always renders
 

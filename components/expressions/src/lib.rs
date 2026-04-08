@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
+use site_index::{SchemaStem, UrlPath};
+
 /// URL path → DataGraph index for PathRef lookups.
-pub type UrlIndex = HashMap<String, template::DataGraph>;
+pub type UrlIndex = HashMap<UrlPath, template::DataGraph>;
 /// Schema stem → Vec of (url, DataGraph) for ThreadExpr lookups.
-pub type StemIndex = HashMap<String, Vec<(String, template::DataGraph)>>;
+pub type StemIndex = HashMap<SchemaStem, Vec<(UrlPath, template::DataGraph)>>;
 
 // ── Extracted evaluator (moved from publisher_cli) ───────────────────────────
 
@@ -16,7 +18,7 @@ pub fn evaluate_link_expression(
 ) -> template::Value {
     match target {
         content::LinkTarget::PathRef(path) => {
-            if let Some(data) = url_index.get(path) {
+            if let Some(data) = url_index.get(&UrlPath::new(path)) {
                 let mut record = data.clone();
                 // Inject href and text into the resolved record
                 record.insert("href", template::Value::Text(path.clone()));
@@ -33,10 +35,10 @@ pub fn evaluate_link_expression(
         }
 
         content::LinkTarget::ThreadExpr { source, operations } => {
-            let items = stem_index.get(source).cloned().unwrap_or_default();
+            let items = stem_index.get(&SchemaStem::new(source)).cloned().unwrap_or_default();
 
             // Build initial list of (url, DataGraph) pairs
-            let mut result: Vec<(String, template::DataGraph)> = items;
+            let mut result: Vec<(UrlPath, template::DataGraph)> = items;
 
             // Apply operations in order
             for op in operations {
@@ -72,12 +74,57 @@ pub fn evaluate_link_expression(
             let values: Vec<template::Value> = result
                 .into_iter()
                 .map(|(url, mut data)| {
-                    data.insert("href", template::Value::Text(url));
+                    data.insert("href", template::Value::Text(url.as_str().to_string()));
                     template::Value::Record(data)
                 })
                 .collect();
 
             template::Value::List(values)
+        }
+    }
+}
+
+/// Resolve all `Value::LinkExpression` entries in a single `DataGraph`.
+/// Also resolves `LinkExpression` values inside `Value::List` items.
+pub fn resolve_link_expressions_in_graph(
+    graph: &mut template::DataGraph,
+    url_index: &UrlIndex,
+    stem_index: &StemIndex,
+) {
+    // Collect all top-level keys first (avoids borrow conflicts)
+    let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
+
+    for key in keys {
+        let resolved = match graph.resolve(&[key.as_str()]) {
+            Some(template::Value::LinkExpression { text, target }) => {
+                let text = text.clone();
+                let target = target.clone();
+                Some(evaluate_link_expression(&text, &target, url_index, stem_index))
+            }
+            Some(template::Value::List(items)) => {
+                // Resolve any LinkExpression items inside a list
+                let new_items: Vec<template::Value> = items
+                    .iter()
+                    .flat_map(|item| match item {
+                        template::Value::LinkExpression { text, target } => {
+                            let resolved =
+                                evaluate_link_expression(text, target, url_index, stem_index);
+                            // A ThreadExpr inside a list may expand to a List — flatten it
+                            match resolved {
+                                template::Value::List(inner) => inner,
+                                other => vec![other],
+                            }
+                        }
+                        other => vec![other.clone()],
+                    })
+                    .collect();
+                Some(template::Value::List(new_items))
+            }
+            _ => None,
+        };
+
+        if let Some(value) = resolved {
+            graph.insert(key, value);
         }
     }
 }
@@ -196,21 +243,21 @@ pub fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<templat
 fn build_indexes(conductor: &conductor::Conductor) -> (UrlIndex, StemIndex) {
     let graph = conductor.site_graph();
 
-    let url_index: HashMap<String, template::DataGraph> = graph
+    let url_index: HashMap<UrlPath, template::DataGraph> = graph
         .iter_pages_by_kind(site_index::PageKind::Item)
         .filter_map(|n| {
             n.page_data()
-                .map(|pd| (n.url_path.as_str().to_string(), pd.data.clone()))
+                .map(|pd| (n.url_path.clone(), pd.data.clone()))
         })
         .collect();
 
-    let mut stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+    let mut stem_index: HashMap<SchemaStem, Vec<(UrlPath, template::DataGraph)>> = HashMap::new();
     for node in graph.iter_pages_by_kind(site_index::PageKind::Item) {
         if let Some(pd) = node.page_data() {
             stem_index
-                .entry(pd.schema_stem.as_str().to_string())
+                .entry(pd.schema_stem.clone())
                 .or_default()
-                .push((node.url_path.as_str().to_string(), pd.data.clone()));
+                .push((node.url_path.clone(), pd.data.clone()));
         }
     }
 
@@ -296,11 +343,11 @@ mod tests {
 
     #[test]
     fn evaluate_link_expression_path_ref_found() {
-        let mut url_index: HashMap<String, template::DataGraph> = HashMap::new();
+        let mut url_index: UrlIndex = HashMap::new();
         let mut data = template::DataGraph::new();
         data.insert("title", template::Value::Text("Hello".to_string()));
-        url_index.insert("/post/hello".to_string(), data);
-        let stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+        url_index.insert(UrlPath::new("/post/hello"), data);
+        let stem_index: StemIndex = HashMap::new();
 
         let text = content::LinkText::Static("Read more".to_string());
         let target = content::LinkTarget::PathRef("/post/hello".to_string());
@@ -319,8 +366,8 @@ mod tests {
 
     #[test]
     fn evaluate_link_expression_path_ref_missing() {
-        let url_index: HashMap<String, template::DataGraph> = HashMap::new();
-        let stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+        let url_index: UrlIndex = HashMap::new();
+        let stem_index: StemIndex = HashMap::new();
 
         let text = content::LinkText::Empty;
         let target = content::LinkTarget::PathRef("/nonexistent".to_string());
@@ -331,18 +378,18 @@ mod tests {
 
     #[test]
     fn evaluate_link_expression_thread_expr_returns_list() {
-        let url_index: HashMap<String, template::DataGraph> = HashMap::new();
-        let mut stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+        let url_index: UrlIndex = HashMap::new();
+        let mut stem_index: StemIndex = HashMap::new();
 
         let mut d1 = template::DataGraph::new();
         d1.insert("title", template::Value::Text("Alpha".to_string()));
         let mut d2 = template::DataGraph::new();
         d2.insert("title", template::Value::Text("Beta".to_string()));
         stem_index.insert(
-            "post".to_string(),
+            SchemaStem::new("post"),
             vec![
-                ("/post/alpha".to_string(), d1),
-                ("/post/beta".to_string(), d2),
+                (UrlPath::new("/post/alpha"), d1),
+                (UrlPath::new("/post/beta"), d2),
             ],
         );
 
@@ -357,6 +404,49 @@ mod tests {
         if let template::Value::List(items) = result {
             assert_eq!(items.len(), 2);
         }
+    }
+
+    // ── resolve_link_expressions_in_graph ───────────────────────────────────
+
+    #[test]
+    fn resolve_link_expressions_in_graph_replaces_path_ref() {
+        let mut url_index: UrlIndex = HashMap::new();
+        let mut data = template::DataGraph::new();
+        data.insert("title", template::Value::Text("Hello".to_string()));
+        url_index.insert(site_index::UrlPath::new("/post/hello"), data);
+        let stem_index: StemIndex = HashMap::new();
+
+        let mut graph = template::DataGraph::new();
+        graph.insert(
+            "link",
+            template::Value::LinkExpression {
+                text: content::LinkText::Static("Read more".to_string()),
+                target: content::LinkTarget::PathRef("/post/hello".to_string()),
+            },
+        );
+
+        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+
+        assert!(
+            matches!(graph.resolve(&["link"]), Some(template::Value::Record(_))),
+            "expected LinkExpression to be resolved to a Record"
+        );
+    }
+
+    #[test]
+    fn resolve_link_expressions_in_graph_leaves_non_link_values() {
+        let url_index: UrlIndex = HashMap::new();
+        let stem_index: StemIndex = HashMap::new();
+
+        let mut graph = template::DataGraph::new();
+        graph.insert("title", template::Value::Text("Static title".to_string()));
+
+        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+
+        assert!(
+            matches!(graph.resolve(&["title"]), Some(template::Value::Text(s)) if s == "Static title"),
+            "non-link values should be unchanged"
+        );
     }
 
     // ── eval_repl ────────────────────────────────────────────────────────────

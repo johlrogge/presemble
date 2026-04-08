@@ -1,12 +1,13 @@
 [package]
 name = "editorial_types"
-version = "0.28.0"
+version = "0.29.0"
 edition = "2024"
 
 [package.metadata.polylith]
 interface = "editorial_types"
 
 [dependencies]
+schema = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

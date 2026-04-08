@@ -3,7 +3,7 @@ use lsp_capabilities::{
     link_completions,
     schema_completions, slot_position, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
-    DiagnosticSeverity, SlotAction, TemplateDefinitionTarget,
+    Severity, SlotAction, TemplateDefinitionTarget,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -91,8 +91,8 @@ impl PresembleLsp {
             .iter()
             .map(|p| {
                 let severity = match p.severity {
-                    DiagnosticSeverity::Error => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
-                    DiagnosticSeverity::Warning => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
+                    Severity::Error => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
+                    Severity::Warning => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
                 };
                 let lsp_diag = Diagnostic {
                     range: Range {
@@ -184,8 +184,8 @@ impl PresembleLsp {
             .iter()
             .map(|p| {
                 let severity = match p.severity {
-                    DiagnosticSeverity::Error => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
-                    DiagnosticSeverity::Warning => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
+                    Severity::Error => tower_lsp::lsp_types::DiagnosticSeverity::ERROR,
+                    Severity::Warning => tower_lsp::lsp_types::DiagnosticSeverity::WARNING,
                 };
                 Diagnostic {
                     range: Range {

@@ -234,7 +234,7 @@ fn serialize_node(node: &Node, out: &mut String) {
     }
 }
 
-fn html_escape_text(s: &str) -> String {
+pub fn html_escape_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -295,7 +295,7 @@ fn is_void_element(name: &str) -> bool {
     )
 }
 
-fn html_escape_attr(s: &str) -> String {
+pub fn html_escape_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")
@@ -455,7 +455,7 @@ pub fn extract_include_names(nodes: &[Node]) -> Vec<String> {
 fn extract_include_names_recursive(nodes: &[Node], found: &mut std::collections::HashSet<String>) {
     for node in nodes {
         if let Node::Element(el) = node {
-            if el.name == "presemble:include"
+            if el.name == crate::constants::ELEM_INCLUDE
                 && let Some(src) = el.attr("src")
             {
                 let stem = if let Some(pos) = src.find("::") {
@@ -521,7 +521,7 @@ fn extract_apply_template_names_recursive(
 ) {
     for node in nodes {
         if let Node::Element(el) = node {
-            if el.name == "presemble:apply"
+            if el.name == crate::constants::ELEM_APPLY
                 && let Some(template_attr) = el.attr("template")
             {
                 // Only file-qualified names (with "::") contribute a file stem

@@ -18,8 +18,24 @@ pub struct Slot {
     pub span: crate::span::Span,
 }
 
+impl Slot {
+    /// Returns the maximum number of elements allowed for this slot.
+    ///
+    /// Looks for an `Occurs` constraint and returns its upper bound.
+    /// Returns `usize::MAX` for unbounded (`AtLeast`) ranges and `1` if no
+    /// `Occurs` constraint is present.
+    pub fn max_count(&self) -> usize {
+        for constraint in &self.constraints {
+            if let Constraint::Occurs(cr) = constraint {
+                return cr.max().unwrap_or(usize::MAX);
+            }
+        }
+        1
+    }
+}
+
 /// A semantic name for a slot, used for template references (e.g. `${article.title}`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SlotName(String);
 
 impl SlotName {
@@ -84,6 +100,26 @@ pub enum CountRange {
     AtLeast(usize),
     AtMost(usize),
     Between { min: usize, max: usize },
+}
+
+impl CountRange {
+    pub fn min(&self) -> usize {
+        match self {
+            CountRange::Exactly(n) => *n,
+            CountRange::AtLeast(n) => *n,
+            CountRange::AtMost(_) => 0,
+            CountRange::Between { min, .. } => *min,
+        }
+    }
+
+    pub fn max(&self) -> Option<usize> {
+        match self {
+            CountRange::Exactly(n) => Some(*n),
+            CountRange::AtLeast(_) => None,
+            CountRange::AtMost(n) => Some(*n),
+            CountRange::Between { max, .. } => Some(*max),
+        }
+    }
 }
 
 /// A constraint applied to a slot.

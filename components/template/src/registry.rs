@@ -94,12 +94,12 @@ pub fn extract_definitions(nodes: Vec<Node>) -> (Vec<Node>, HashMap<String, Vec<
         match node {
             Node::Element(el)
                 if el.name == "template"
-                    && (el.attr("presemble:define").is_some() || el.attr("name").is_some()) =>
+                    && (el.attr(crate::constants::ELEM_DEFINE).is_some() || el.attr("name").is_some()) =>
             {
                 // This is a callable template definition — extract it.
                 // presemble:define takes precedence over the legacy name attribute.
                 let name = el
-                    .attr("presemble:define")
+                    .attr(crate::constants::ELEM_DEFINE)
                     .or_else(|| el.attr("name"))
                     .unwrap()
                     .to_string();

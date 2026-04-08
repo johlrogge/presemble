@@ -159,29 +159,13 @@ pub fn synthesize_link(title: &str, url_path: &str) -> DataGraph {
     let mut link = DataGraph::new();
     link.insert("href", Value::Text(url_path.to_string()));
     link.insert("text", Value::Text(title.to_string()));
-    link.insert("_source_slot", Value::Text("title".to_string()));
+    link.insert(crate::constants::KEY_SOURCE_SLOT, Value::Text("title".to_string()));
     link
 }
 
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
-
-/// Returns the maximum number of paragraphs to consume for this slot,
-/// based on its `occurs` constraint. Defaults to 1 if no constraint.
-fn max_paragraphs(slot: &schema::Slot) -> usize {
-    for constraint in &slot.constraints {
-        if let schema::Constraint::Occurs(count_range) = constraint {
-            return match count_range {
-                schema::CountRange::Exactly(n) => *n,
-                schema::CountRange::AtLeast(_) => usize::MAX,
-                schema::CountRange::AtMost(n) => *n,
-                schema::CountRange::Between { max, .. } => *max,
-            };
-        }
-    }
-    1 // default: consume exactly 1
-}
 
 /// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
@@ -219,7 +203,7 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
             }
 
             Element::Paragraph => {
-                let max = max_paragraphs(slot);
+                let max = slot.max_count();
                 let paragraphs: Vec<Value> = elements
                     .iter()
                     .filter_map(|s| {
@@ -243,7 +227,7 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
             }
 
             Element::Link { .. } => {
-                let max = max_paragraphs(slot); // reuse count logic
+                let max = slot.max_count();
                 let links: Vec<Value> = elements
                     .iter()
                     .filter_map(|s| match &s.node {
@@ -360,13 +344,6 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
     graph
 }
 
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 /// Render a single paragraph's markdown text to inline HTML, stripping the outer `<p>` wrapper.
 fn render_inline_markdown(text: &str) -> String {
     let parser = pulldown_cmark::Parser::new(text);
@@ -381,83 +358,85 @@ fn render_inline_markdown(text: &str) -> String {
 }
 
 pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, source: Option<&str>) -> String {
+    let attr_slot = crate::constants::ATTR_SLOT;
+    let attr_md = crate::constants::ATTR_MD;
     let mut parts: Vec<String> = Vec::new();
     for (idx, spanned) in elements.iter().enumerate() {
         let md_attr = source.map(|s| {
             let raw = &s[spanned.span.start..spanned.span.end];
-            format!(r#" data-presemble-md="{}""#, escape_html(raw))
+            format!(r#" {attr_md}="{}""#, crate::dom::html_escape_attr(raw))
         }).unwrap_or_default();
         let html = match &spanned.node {
             ContentElement::Heading { level, text } => {
                 let l = level.value();
                 let inner = render_inline_markdown(text);
-                format!("<h{l} id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{inner}</h{l}>")
+                format!("<h{l} id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{inner}</h{l}>")
             }
             ContentElement::Paragraph { text } => {
                 let inner = render_inline_markdown(text);
-                format!("<p id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{inner}</p>")
+                format!("<p id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{inner}</p>")
             }
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
                 format!(
-                    "<img id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr} src=\"{}\" alt=\"{}\">",
-                    escape_html(path),
-                    escape_html(alt_text)
+                    "<img id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr} src=\"{}\" alt=\"{}\">",
+                    crate::dom::html_escape_text(path),
+                    crate::dom::html_escape_text(alt_text)
                 )
             }
             ContentElement::Link { text, href } => {
                 format!(
-                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr} href=\"{}\">{}</a>",
-                    escape_html(href),
-                    escape_html(text)
+                    "<a id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
+                    crate::dom::html_escape_text(href),
+                    crate::dom::html_escape_text(text)
                 )
             }
             ContentElement::CodeBlock { language, code } => {
-                let escaped = escape_html(code);
+                let escaped = crate::dom::html_escape_text(code);
                 match language {
                     Some(lang) => format!(
-                        "<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}><code class=\"language-{}\">{}</code></pre>",
-                        escape_html(lang),
+                        "<pre id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}><code class=\"language-{}\">{}</code></pre>",
+                        crate::dom::html_escape_text(lang),
                         escaped
                     ),
-                    None => format!("<pre id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}><code>{}</code></pre>", escaped),
+                    None => format!("<pre id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}><code>{}</code></pre>", escaped),
                 }
             }
             ContentElement::Separator => continue,
             ContentElement::RawHtml { html } => {
                 format!(
-                    "<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{html}</div>"
+                    "<div id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{html}</div>"
                 )
             }
             ContentElement::Blockquote { text } => {
                 let inner = render_inline_markdown(text);
-                format!("<blockquote id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{inner}</blockquote>")
+                format!("<blockquote id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{inner}</blockquote>")
             }
             ContentElement::List { source } => {
                 // Render the raw markdown list source to HTML via pulldown-cmark.
                 let html = render_inline_markdown(source);
-                format!("<div id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}>{html}</div>")
+                format!("<div id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{html}</div>")
             }
             ContentElement::LinkExpression { text, target } => {
                 use content::{LinkTarget, LinkText};
                 let display_text = match text {
                     LinkText::Empty => String::new(),
-                    LinkText::Static(s) => escape_html(s),
-                    LinkText::Binding(b) => escape_html(b),
+                    LinkText::Static(s) => crate::dom::html_escape_text(s),
+                    LinkText::Binding(b) => crate::dom::html_escape_text(b),
                 };
                 let href = match target {
-                    LinkTarget::PathRef(path) => escape_html(path),
-                    LinkTarget::ThreadExpr { source, .. } => escape_html(source),
+                    LinkTarget::PathRef(path) => crate::dom::html_escape_text(path),
+                    LinkTarget::ThreadExpr { source, .. } => crate::dom::html_escape_text(source),
                 };
                 format!(
-                    "<a id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr} href=\"{}\">{}</a>",
+                    "<a id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
                     href, display_text
                 )
             }
             ContentElement::Table { headers, rows } => {
                 let header_cells = headers
                     .iter()
-                    .map(|h| format!("<th>{}</th>", escape_html(h)))
+                    .map(|h| format!("<th>{}</th>", crate::dom::html_escape_text(h)))
                     .collect::<Vec<_>>()
                     .join("");
                 let body_rows = rows
@@ -473,7 +452,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "<table id=\"presemble-body-{idx}\" data-presemble-slot=\"body\"{md_attr}><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
+                    "<table id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
                     header_cells, body_rows
                 )
             }
@@ -714,14 +693,14 @@ mod tests {
 
     #[test]
     fn escape_html_replaces_special_characters() {
-        assert_eq!(escape_html("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+        assert_eq!(crate::dom::html_escape_text("a < b & c > d"), "a &lt; b &amp; c &gt; d");
         assert_eq!(
-            escape_html("<presemble:insert>"),
+            crate::dom::html_escape_text("<presemble:insert>"),
             "&lt;presemble:insert&gt;"
         );
-        assert_eq!(escape_html("say \"hi\""), "say &quot;hi&quot;");
+        assert_eq!(crate::dom::html_escape_text("say \"hi\""), "say &quot;hi&quot;");
         // & must be replaced first to avoid double-escaping
-        assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(crate::dom::html_escape_text("a & b"), "a &amp; b");
     }
 
     #[test]

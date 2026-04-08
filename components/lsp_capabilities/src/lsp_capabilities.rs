@@ -3,6 +3,7 @@ use content::{
     Capitalize, InsertSlot, InsertSeparator, Transform,
 };
 use schema::{Element, Grammar};
+use site_index::{DIR_CONTENT, DIR_TEMPLATES};
 use std::sync::Arc;
 use template::Expr;
 
@@ -42,13 +43,6 @@ impl SlotCompletion {
     }
 }
 
-/// Severity level for a positioned diagnostic.
-#[derive(Debug, Clone)]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-}
-
 /// A code action that operates at the Document level.
 #[derive(Debug, Clone)]
 pub enum SlotAction {
@@ -85,7 +79,7 @@ pub enum SlotAction {
 #[derive(Debug, Clone)]
 pub struct PositionedDiagnostic {
     pub message: String,
-    pub severity: DiagnosticSeverity,
+    pub severity: validation::Severity,
     pub start: (u32, u32),
     pub end: (u32, u32),
     pub action: Option<SlotAction>,
@@ -482,14 +476,6 @@ pub fn schema_completions(src: &str, cursor_line: u32) -> Vec<SlotCompletion> {
     ]
 }
 
-/// Map a `validation::Severity` to `DiagnosticSeverity`.
-fn map_severity(s: &validation::Severity) -> DiagnosticSeverity {
-    match s {
-        validation::Severity::Error => DiagnosticSeverity::Error,
-        validation::Severity::Warning => DiagnosticSeverity::Warning,
-    }
-}
-
 /// Convert an optional byte `Range<usize>` to `((line, col), (line, col))` positions.
 /// Falls back to `(0,0)..(0,0)` when no span is provided.
 fn span_to_positions(src: &str, span: Option<&std::ops::Range<usize>>) -> ((u32, u32), (u32, u32)) {
@@ -531,20 +517,20 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
     let mut positioned = Vec::new();
 
     for diag in &raw_diagnostics {
-        let severity = map_severity(&diag.severity);
+        let severity = diag.severity.clone();
         let (start, end) = span_to_positions(src, diag.span.as_ref());
 
         let action = if diag.message.contains("uppercase") {
-            diag.slot.as_ref().map(|s| SlotAction::Capitalize { slot_name: s.clone() })
+            diag.slot.as_ref().map(|s| SlotAction::Capitalize { slot_name: s.as_str().to_string() })
         } else if diag.message.contains("missing body separator") {
             Some(SlotAction::InsertSeparator)
         } else if diag.message.contains("missing") {
             if let Some(slot_name) = &diag.slot {
-                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name);
+                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name.as_str());
                 slot.map(|s| {
                     let placeholder = template_for_slot(s);
                     SlotAction::InsertSlot {
-                        slot_name: slot_name.clone(),
+                        slot_name: slot_name.as_str().to_string(),
                         placeholder_value: placeholder,
                     }
                 })
@@ -588,12 +574,12 @@ pub fn definition_for_position(
     // Map href like "/author/johlrogge" to site_dir/content/author/johlrogge.md
     let path = href.trim_start_matches('/');
     // Try direct .md file
-    let candidate = site_dir.join("content").join(path).with_extension("md");
+    let candidate = site_dir.join(DIR_CONTENT).join(path).with_extension("md");
     if candidate.exists() {
         return Some(candidate);
     }
     // Try clean URL directory: site_dir/content/author/johlrogge/index.md
-    let candidate2 = site_dir.join("content").join(path).join("index.md");
+    let candidate2 = site_dir.join(DIR_CONTENT).join(path).join("index.md");
     if candidate2.exists() {
         return Some(candidate2);
     }
@@ -800,7 +786,7 @@ pub fn validate_template_paths(
     validation::validate_template(src, grammar, stem)
         .into_iter()
         .map(|d| {
-            let severity = map_severity(&d.severity);
+            let severity = d.severity.clone();
             let (start, end) = span_to_positions(src, d.span.as_ref());
             PositionedDiagnostic {
                 message: d.message,
@@ -845,7 +831,7 @@ pub fn template_definition(
     // 1. File-qualified names containing `::`
     if name.contains("::") {
         let file_part = name.split("::").next()?;
-        let path = site_dir.join("templates").join(format!("{file_part}.html"));
+        let path = site_dir.join(DIR_TEMPLATES).join(format!("{file_part}.html"));
         return Some(TemplateDefinitionTarget::File(path));
     }
 
@@ -872,11 +858,11 @@ pub fn template_definition(
     }
 
     // 3. External template file — check new directory-based convention first, then flat
-    let dir_path = site_dir.join("templates").join(&name).join("item.html");
+    let dir_path = site_dir.join(DIR_TEMPLATES).join(&name).join("item.html");
     if dir_path.exists() {
         return Some(TemplateDefinitionTarget::File(dir_path));
     }
-    let flat_path = site_dir.join("templates").join(format!("{name}.html"));
+    let flat_path = site_dir.join(DIR_TEMPLATES).join(format!("{name}.html"));
     if flat_path.exists() {
         return Some(TemplateDefinitionTarget::File(flat_path));
     }
@@ -900,7 +886,7 @@ pub fn validate_schema_with_positions(src: &str) -> Vec<PositionedDiagnostic> {
     validation::validate_schema(src)
         .into_iter()
         .map(|d| {
-            let severity = map_severity(&d.severity);
+            let severity = d.severity.clone();
             let (start, end) = span_to_positions(src, d.span.as_ref());
             PositionedDiagnostic {
                 message: d.message,
@@ -1525,7 +1511,7 @@ mod tests {
         assert_eq!(diags.len(), 1, "invalid schema should produce exactly one diagnostic: {diags:#?}");
         let diag = &diags[0];
         assert!(
-            matches!(diag.severity, DiagnosticSeverity::Error),
+            matches!(diag.severity, validation::Severity::Error),
             "diagnostic should be an error: {diag:#?}"
         );
         assert!(!diag.message.is_empty(), "error message should not be empty");

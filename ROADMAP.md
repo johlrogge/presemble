@@ -323,8 +323,9 @@ structural diff, and browser adapter defined there.
 - Not git-dependent — works with plain folders too
 
 **Deliverables:**
-- [ ] Presemble mascot overlay with mode toggle
+- [x] Presemble mascot overlay with mode toggle (shipped v0.21.0)
 - [x] Edit mode: inline editing of simple content fields (Phase A: suggestion nodes interactive)
+- [x] Edit mode: header folding — collapse/expand sections under headings (shipped v0.29.0)
 - [ ] Suggest mode: mark-for-correction and suggest-changes
 - [ ] Suggestion persistence in `.presemble/suggestions/`
 - [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol

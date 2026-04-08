@@ -525,7 +525,7 @@ Suggestion nodes are interactive: clicking one in the browser opens an inline ed
 
 ### Mascot overlay
 
-The serve UI includes a mascot overlay (M5 Phase B) in the corner of every served page. It indicates the current editorial state at a glance:
+The serve UI includes a mascot overlay in the corner of every served page. It indicates the current editorial state at a glance:
 
 | State | Indicator | Meaning |
 |---|---|---|
@@ -533,7 +533,31 @@ The serve UI includes a mascot overlay (M5 Phase B) in the corner of every serve
 | All clear | Thumbs up | No suggestions — all slots are filled |
 | Edit mode | Pencil | Inline editing is active |
 
-Clicking the mascot opens a popover menu with three mode options: View, Edit, and Suggest. Suggest mode is visible in the menu but not yet enabled (coming in a future release).
+Clicking the mascot opens a popover menu with three mode options: View, Edit, and Suggest.
+
+### Inline body editing
+
+In Edit mode, click any rendered body element to open an inline textarea for that element. The textarea contains the raw markdown source. Save closes the textarea and triggers a live rebuild. The updated content appears in the browser within a second.
+
+### Header folding in edit mode
+
+In Edit mode, headings in the served page display a fold toggle. Click the toggle to collapse or expand the section beneath that heading. Two toolbar buttons collapse all sections or expand them all at once. Clicking anywhere inside a collapsed section unfolds it. Fold state is not persisted across page reloads.
+
+### Suggest mode
+
+In Suggest mode, missing slots render as suggestion nodes guided by schema hint text. Click a suggestion node to open an editing form for that slot. When a collaborator or Claude pushes a suggestion via the MCP server or conductor API, the browser shows the proposed value as an inline diff alongside the current content. A toolbar offers "Accept all" and "Reject all"; individual suggestions can be accepted or rejected from the diff view.
+
+The preview toggle switches between the current state and a preview of the page with all suggestions applied.
+
+### Creating new content from the browser
+
+The "+" button in the serve toolbar opens a form to create a new content file. Select a content type, enter a slug, and submit. The conductor scaffolds the file and the browser navigates to the new page immediately, with all required slots present as suggestion nodes.
+
+### Dirty buffer tracking
+
+Edits made in the browser and accepted suggestions are held in the conductor's dirty buffer until explicitly saved. The mascot badge shows unsaved changes. Save writes the dirty buffer to disk and clears it. This lets you review several changes before committing any of them to the filesystem.
+
+After a browser edit triggers a rebuild, the conductor resolves link expressions and cross-content references in the rebuilt page. Feature cards, author links, and any content that depends on linked documents render correctly without restarting the server.
 
 ### File watcher coverage
 
@@ -654,3 +678,144 @@ Presemble validates at every stage:
 Validation failures are build failures. There is no runtime state where invalid content reaches a browser.
 
 See [validated at every level](/feature/validated-at-every-level) for the validation model.
+
+## Template composition
+
+Templates are function files. A template file has two parts: optional local definitions at the top and a composition expression at the bottom. The composition expression is the template's return value — a DOM tree.
+
+### juxt
+
+`juxt` fans the same input to multiple templates and concatenates their DOM outputs in order:
+
+```clojure
+((juxt header self/body footer) input)
+```
+
+`header`, `self/body`, and `footer` all receive the full content tree. Their outputs are assembled into a single page DOM. `self/body` refers to the body of the current template file (the local definitions section, referenced as a named fragment).
+
+File-qualified template references use `/` notation: `/fragments/structure#header` refers to the `header` definition inside `templates/fragments/structure.hiccup`. Unqualified references look up local definitions first, then the template file system.
+
+### Pipe
+
+`->` threads a value through a sequence of transforms as the first argument:
+
+```clojure
+(-> input :title upcase)
+```
+
+`->>` threads as the last argument — the standard idiom for collection pipelines:
+
+```clojure
+(->> input :tags (map :text) (str/join ", "))
+```
+
+### Local definitions
+
+Local definitions at the top of a template file are reusable fragments:
+
+```clojure
+[:template "byline"
+  [:p.byline
+    [:presemble/insert {:data "input.author" :as "span"}]]]
+
+((juxt /header self/byline self/body /footer) input)
+```
+
+The local `byline` fragment is referenced as `self/byline` in the composition expression.
+
+## Link expressions in content
+
+Content files can include link expressions that assemble collections at build time. A link expression is a parenthesised threading form inside a link:
+
+```markdown
+[]((->> :post (sort-by :published :desc) (take 5)))
+```
+
+The expression evaluates against the site graph. The result is a validated list satisfying the collection schema for that type. The template receives the assembled list ready to iterate.
+
+Link expressions make content the place where assembly decisions live. The homepage content file decides which collections appear and in what order; the template decides how they look.
+
+### Expression syntax
+
+Expressions use Presemble Lisp — a small EDN-based language with threading macros and built-in functions for the operations content assembly needs:
+
+| Expression | Effect |
+|---|---|
+| `(->> :post (sort-by :published :desc) (take 5))` | Latest 5 posts |
+| `(->> :feature (sort-by :title :asc))` | Features sorted by title |
+| `(->> :post (filter #(= :pinned (:status %))))` | Pinned posts only |
+
+Keywords act as accessor functions: `:title item` extracts the `:title` field from `item`.
+
+## MCP server
+
+```
+presemble mcp <site-dir>
+```
+
+Starts an MCP server that exposes the site to Claude Code and other MCP-capable clients. The server provides tools for reading and modifying site content through the editorial suggestion protocol.
+
+### Available tools
+
+| Tool | Description |
+|---|---|
+| `get_content` | Read a content file by type and slug |
+| `get_schema` | Read the schema for a content type |
+| `list_content` | List all content files for a type |
+| `suggest` | Push a suggestion for a named slot in a content file |
+
+### Workflow with Claude Code
+
+1. Start `presemble mcp site/` in a terminal
+2. Add the server to Claude Code's MCP configuration
+3. Ask Claude to review and improve content. Claude reads schemas to understand the content model, reads content files to understand what exists, and pushes suggestions for specific slots with rationale.
+4. Each suggestion appears as an LSP diagnostic in your editor. Accept or reject with a code action. The suggestion also appears as an inline diff in the browser preview.
+
+Claude uses the same suggestion API as a human editor. There is no special path for AI collaboration.
+
+## nREPL
+
+```
+presemble nrepl <site-dir>
+```
+
+Starts an nREPL server that Calva, CIDER, or `rep` can connect to. Evaluate Presemble Lisp expressions against the live content graph interactively.
+
+### Connecting with rep
+
+```
+rep '(->> :post (sort-by :published :desc) (take 3))'
+```
+
+### Connecting with Calva
+
+Run "Connect to a Running REPL Server" in VS Code and select nREPL. The default port is printed when the server starts.
+
+### Connecting with CIDER
+
+`M-x cider-connect` in Emacs.
+
+### What you can do in the REPL
+
+- Evaluate collection queries and inspect results
+- Call suggestion operations programmatically
+- Inspect the site graph's data model
+- Prototype link expressions before adding them to content files
+
+## Site wizard
+
+Point `presemble serve` at an empty directory and the browser opens a welcome page. Pick a starter template and choose Hiccup or HTML. The wizard scaffolds the site and the browser navigates to the homepage.
+
+### Starter templates
+
+| Template | Contents |
+|---|---|
+| Blog | Post schema, author schema, homepage with recent posts |
+| Personal | About page, project schema, homepage |
+| Portfolio | Project schema with image slots, contact page, homepage |
+
+### After scaffolding
+
+The wizard writes files to disk and the file watcher picks them up. Edit content files, see changes in the browser, use the LSP for completions and diagnostics. The normal serve workflow applies immediately.
+
+`presemble init <dir>` is still available for scripted setups — it produces a hello-world `note` site without the browser wizard.

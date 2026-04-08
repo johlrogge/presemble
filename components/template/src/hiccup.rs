@@ -232,7 +232,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
 fn keyword_to_tag_name(namespace: &Option<String>, name: &str) -> Result<String, TemplateError> {
     match namespace.as_deref() {
         None => Ok(name.to_string()),
-        Some("presemble") => Ok(format!("presemble:{name}")),
+        Some("presemble") => Ok(format!("presemble:{name}")), // namespace always "presemble"
         Some(other) => Err(TemplateError::ParseError(format!(
             "unknown namespace '{other}' in element keyword"
         ))),

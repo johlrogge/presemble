@@ -3,11 +3,7 @@ use std::ops::Range;
 use content::Document;
 use schema::{Grammar, SlotName};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Severity {
-    Error,
-    Warning,
-}
+pub use content::Severity;
 
 /// A validation diagnostic with an optional byte-range span in the source.
 /// This is the shared type — both the publisher and the LSP consume it.
@@ -16,7 +12,7 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     /// The slot name related to this diagnostic, if any.
-    pub slot: Option<String>,
+    pub slot: Option<SlotName>,
     /// Byte range in the source, if available.
     pub span: Option<Range<usize>>,
 }
@@ -48,12 +44,9 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
         .map(|vd| {
             let span = find_span_for_diagnostic(vd.slot.as_ref(), &doc);
             Diagnostic {
-                severity: match vd.severity {
-                    content::Severity::Error => Severity::Error,
-                    content::Severity::Warning => Severity::Warning,
-                },
+                severity: vd.severity.clone(),
                 message: vd.message.clone(),
-                slot: vd.slot.as_ref().map(|s| s.to_string()),
+                slot: vd.slot.clone(),
                 span,
             }
         })
@@ -187,7 +180,7 @@ pub fn validate_template(src: &str, grammar: &Grammar, stem: &str) -> Vec<Diagno
                                     "unknown field '{}' in {} schema",
                                     field, stem
                                 ),
-                                slot: Some(field.clone()),
+                                slot: Some(SlotName::new(field.clone())),
                                 span: Some(value_start..value_end),
                             });
                         }
@@ -256,7 +249,7 @@ mod tests {
         );
         let title_error = diagnostics
             .iter()
-            .find(|d| d.slot.as_deref() == Some("title"));
+            .find(|d| d.slot.as_ref().map(|s| s.as_str()) == Some("title"));
         assert!(
             title_error.is_some(),
             "expected a 'title' slot error, got: {:#?}",

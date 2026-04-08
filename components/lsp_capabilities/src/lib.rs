@@ -8,6 +8,8 @@ pub use lsp_capabilities::{
     validate_template_paths,
     validate_with_positions, write_slot_to_file, write_slot_to_string,
     slot_position,
-    DiagnosticSeverity, PositionedDiagnostic,
+    PositionedDiagnostic,
     SlotAction, SlotCompletion, TemplateDefinitionTarget,
 };
+
+pub use validation::Severity;

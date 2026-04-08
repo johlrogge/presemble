@@ -174,11 +174,11 @@
     "metadev": {
       "flake": false,
       "locked": {
-        "lastModified": 1775163831,
-        "narHash": "sha256-VRMf4rJu2jRlWXAPHFPSi+zqEqM8BtqaPxRAiLNJtvc=",
+        "lastModified": 1775666778,
+        "narHash": "sha256-G3cZr58wy8l+NfmOdKgni2D4p6QWUFDrQx8BN/224Es=",
         "owner": "johlrogge",
         "repo": "metadev",
-        "rev": "bc67de890870b037ba6e29e3c5702042bec1e54a",
+        "rev": "a6f3c9e28bf4c97efccf453507aa652f15a130b9",
         "type": "github"
       },
       "original": {

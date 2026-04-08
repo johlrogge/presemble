@@ -14,6 +14,7 @@ use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::Path;
+use site_index::DIR_CONTENT;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -96,8 +97,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         Arc::new(Mutex::new(HashMap::new()));
     match build_for_serve(site_dir, url_config) {
         Ok(outcome) => {
-            *current_graph.lock().unwrap() = outcome.dep_graph;
-            *build_errors.lock().unwrap() = outcome.build_errors;
+            *current_graph.lock().unwrap_or_else(|e| e.into_inner()) = outcome.dep_graph;
+            *build_errors.lock().unwrap_or_else(|e| e.into_inner()) = outcome.build_errors;
             if outcome.files_failed > 0 {
                 eprintln!("Build completed with {} error(s)", outcome.files_failed);
             } else {
@@ -113,11 +114,11 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
 
     let snapshot: ContentSnapshot = Arc::new(Mutex::new(HashMap::new()));
     {
-        let content_dir = site_dir.join("content");
+        let content_dir = site_dir.join(DIR_CONTENT);
         if content_dir.exists() {
             let mut files = Vec::new();
             collect_content_md_files(&content_dir, &mut files);
-            let mut snap = snapshot.lock().unwrap();
+            let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
             for path in files {
                 if let Some(elems) = body_elements_from_path(&path) {
                     snap.insert(path, elems);
@@ -809,7 +810,7 @@ async fn file_handler(
     // Check for build errors before attempting to serve from disk.
     // Normalise: look up with and without trailing slash.
     {
-        let errors = state.build_errors.lock().unwrap();
+        let errors = state.build_errors.lock().unwrap_or_else(|e| e.into_inner());
         let bare = path.trim_end_matches('/');
         let key = if bare.is_empty() { "/" } else { bare };
         if let Some(messages) = errors.get(key).or_else(|| errors.get(&format!("{key}/"))) {
@@ -1071,7 +1072,7 @@ fn watch_and_rebuild(
             continue;
         }
 
-        let current = graph.lock().unwrap().clone();
+        let current = graph.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let affected_count = dirty
             .iter()
             .flat_map(|p| current.affected_outputs(p))
@@ -1081,14 +1082,14 @@ fn watch_and_rebuild(
         // failed pages are not in the dep_graph, so affected_count would be 0 for them,
         // but we still need to rebuild to clear (or re-record) the error.
         let has_errored_content = {
-            let errors = build_errors.lock().unwrap();
+            let errors = build_errors.lock().unwrap_or_else(|e| e.into_inner());
             !errors.is_empty() && dirty.iter().any(|p| {
                 p.extension().and_then(|e| e.to_str()) == Some("md")
-                    && p.starts_with(site_dir.join("content"))
+                    && p.starts_with(site_dir.join(DIR_CONTENT))
             })
         };
 
-        let content_base = site_dir.join("content");
+        let content_base = site_dir.join(DIR_CONTENT);
         let new_content_files: Vec<std::path::PathBuf> = dirty.iter()
             .filter(|p| {
                 p.starts_with(&content_base)
@@ -1115,13 +1116,13 @@ fn watch_and_rebuild(
             trigger_files.join(", "));
         match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, &BuildPolicy::lenient()) {
             Ok(outcome) => {
-                let mut g = graph.lock().unwrap();
+                let mut g = graph.lock().unwrap_or_else(|e| e.into_inner());
                 g.merge(outcome.dep_graph);
 
                 // Update the shared error map: clear errors for successfully rebuilt pages,
                 // then record errors for newly failed pages.
                 {
-                    let mut errors = build_errors.lock().unwrap();
+                    let mut errors = build_errors.lock().unwrap_or_else(|e| e.into_inner());
                     for entry in outcome.site_graph.iter() {
                         let bare = entry.url_path.as_str().trim_end_matches('/').to_string();
                         errors.remove(&bare);
@@ -1145,7 +1146,7 @@ fn watch_and_rebuild(
                         .collect();
                     pages.sort();
 
-                    let content_base = site_dir.join("content");
+                    let content_base = site_dir.join(DIR_CONTENT);
                     let dirty_content: Vec<std::path::PathBuf> = dirty
                         .iter()
                         .filter(|p| p.starts_with(&content_base) && p.extension().and_then(|e| e.to_str()) == Some("md"))
@@ -1154,7 +1155,7 @@ fn watch_and_rebuild(
 
                     let anchor: Option<String> = if dirty_content.len() == 1 {
                         let changed_path = &dirty_content[0];
-                        let old_elements = snapshot.lock().unwrap().get(changed_path).cloned();
+                        let old_elements = snapshot.lock().unwrap_or_else(|e| e.into_inner()).get(changed_path).cloned();
                         let new_elements = body_elements_from_path(changed_path);
                         match (old_elements, new_elements) {
                             (Some(old), Some(new)) => first_changed_body_idx(&old, &new).map(|idx| format!("presemble-body-{idx}")),
@@ -1167,7 +1168,7 @@ fn watch_and_rebuild(
 
                     // Update snapshot
                     {
-                        let mut snap = snapshot.lock().unwrap();
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
                         for path in &dirty_content {
                             if let Some(elems) = body_elements_from_path(path) {
                                 snap.insert(path.clone(), elems);
@@ -1182,10 +1183,10 @@ fn watch_and_rebuild(
                 eprintln!("Rebuild failed: {e} — falling back to full rebuild");
                 match build_for_serve(site_dir, url_config) {
                     Ok(outcome) => {
-                        let mut g = graph.lock().unwrap();
+                        let mut g = graph.lock().unwrap_or_else(|e| e.into_inner());
                         *g = outcome.dep_graph;
                         // Update error map from full rebuild
-                        *build_errors.lock().unwrap() = outcome.build_errors;
+                        *build_errors.lock().unwrap_or_else(|e| e.into_inner()) = outcome.build_errors;
                         println!("Full rebuild complete");
                         let _ = reload_tx.send(BrowserMessage::Reload { pages: Vec::new(), anchor: None });
                     }
@@ -1196,17 +1197,10 @@ fn watch_and_rebuild(
     }
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 fn render_error_page(url_path: &str, messages: &[String]) -> String {
     let items = messages
         .iter()
-        .map(|m| format!("<li>{}</li>", html_escape(m)))
+        .map(|m| format!("<li>{}</li>", template::html_escape_text(m)))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1233,7 +1227,7 @@ p.hint{{color:#666;font-size:.9em;margin-top:2rem}}
 {inject}
 </body>
 </html>"#,
-        url = html_escape(url_path),
+        url = template::html_escape_text(url_path),
         items = items,
         inject = serve_ui::build_inject_html(),
     )
@@ -1320,16 +1314,6 @@ mod tests {
     }
 
     #[test]
-    fn html_escape_replaces_special_chars() {
-        assert_eq!(html_escape("<script>alert(\"xss\")&amp;</script>"), "&lt;script&gt;alert(&quot;xss&quot;)&amp;amp;&lt;/script&gt;");
-    }
-
-    #[test]
-    fn html_escape_passthrough_plain_text() {
-        assert_eq!(html_escape("hello world"), "hello world");
-    }
-
-    #[test]
     fn render_error_page_contains_url_and_messages() {
         let html = render_error_page("/article/foo", &["[ERROR] title must be capitalized".to_string()]);
         assert!(html.contains("/article/foo"), "should contain url path");
@@ -1369,16 +1353,17 @@ mod tests {
     #[test]
     fn apply_edit_writes_to_content_file() {
         let dir = tempfile::tempdir().unwrap();
-        let schemas_dir = dir.path().join("schemas");
+        use site_index::DIR_SCHEMAS;
+        let schemas_dir = dir.path().join(DIR_SCHEMAS);
         std::fs::create_dir_all(&schemas_dir).unwrap();
-        std::fs::create_dir_all(dir.path().join("content").join("article")).unwrap();
+        std::fs::create_dir_all(dir.path().join(DIR_CONTENT).join("article")).unwrap();
 
         std::fs::write(
             schemas_dir.join("article.md"),
             "# Article Title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n",
         ).unwrap();
 
-        let content_path = dir.path().join("content").join("article").join("hello.md");
+        let content_path = dir.path().join(DIR_CONTENT).join("article").join("hello.md");
         std::fs::write(&content_path, "# Old Title\n").unwrap();
 
         apply_edit(dir.path(), "content/article/hello.md", "title", "New Title").unwrap();

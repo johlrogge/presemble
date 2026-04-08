@@ -91,12 +91,13 @@ mod tests {
     #[test]
     fn thread_last_basic() {
         // (->> :post (sort-by :published :desc) (take 3))
-        // → (take (sort-by :post :published :desc) 3)
+        // Step 1: (sort-by :published :desc :post)
+        // Step 2: (take 3 (sort-by :published :desc :post))
         let form = read("(->> :post (sort-by :published :desc) (take 3))").unwrap();
         let expanded = macroexpand(form);
         assert_eq!(
             expanded.to_string(),
-            "(take (sort-by :post :published :desc) 3)"
+            "(take 3 (sort-by :published :desc :post))"
         );
     }
 

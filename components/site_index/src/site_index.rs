@@ -1,5 +1,11 @@
 use std::path::{Path, PathBuf};
 
+/// Conventional directory names within a site.
+pub const DIR_SCHEMAS: &str = "schemas";
+pub const DIR_CONTENT: &str = "content";
+pub const DIR_TEMPLATES: &str = "templates";
+pub const DIR_ASSETS: &str = "assets";
+
 /// A content type identifier derived from the directory name (e.g., "post", "feature", "author").
 ///
 /// Used as HashMap keys, path segments, and data graph keys. A newtype prevents
@@ -356,6 +362,13 @@ impl SiteIndex {
     }
 }
 
+/// Compute the output directory for a site: `<parent-of-site-dir>/output/<site-dir-name>/`
+/// e.g. `presemble build site/` → `output/site/`
+pub fn output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
+    let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
+    site_dir.parent().unwrap_or(site_dir).join("output").join(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +381,21 @@ mod tests {
 
     fn index() -> SiteIndex {
         SiteIndex::new(fixture_site())
+    }
+
+    #[test]
+    fn output_dir_computes_correct_path() {
+        let site_dir = std::path::Path::new("/projects/mysite/site");
+        let out = super::output_dir(site_dir);
+        assert_eq!(out, std::path::PathBuf::from("/projects/mysite/output/site"));
+    }
+
+    #[test]
+    fn output_dir_fallback_on_no_parent() {
+        // A path with no parent (e.g., "site") — parent() returns Some("") which is ""
+        let site_dir = std::path::Path::new("site");
+        let out = super::output_dir(site_dir);
+        assert_eq!(out, std::path::PathBuf::from("output/site"));
     }
 
     #[test]
