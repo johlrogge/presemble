@@ -92,11 +92,14 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
                 "reverse" => builtin_reverse(&items[1..], conductor),
 
                 // Data access
+                "get" => builtin_get(&items[1..], conductor),
+                "get-in" => builtin_get_in(&items[1..], conductor),
                 "get-content" => builtin_get_content(&items[1..], conductor),
                 "get-schema" => builtin_get_schema(&items[1..], conductor),
                 "list-content" => builtin_list_content(conductor),
                 "list-schemas" => builtin_list_schemas(conductor),
-                "get-in" => builtin_get_in(&items[1..], conductor),
+                "keys" => builtin_keys(&items[1..], conductor),
+                "vals" => builtin_vals(&items[1..], conductor),
 
                 // Editorial
                 "suggest" => builtin_suggest(&items[1..], conductor),
@@ -343,6 +346,66 @@ fn builtin_list_schemas(cond: &conductor::Conductor) -> Result<template::Value, 
             .map(template::Value::Text)
             .collect(),
     ))
+}
+
+/// (get map :key) or (get map :key default)
+fn builtin_get(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.len() < 2 {
+        return Err("get requires at least 2 arguments: map and key".into());
+    }
+    let value = eval_expanded(&args[0], cond)?;
+    let key = args[1]
+        .as_keyword_name()
+        .ok_or_else(|| "get key must be a keyword".to_string())?;
+    let default = if args.len() > 2 {
+        eval_expanded(&args[2], cond)?
+    } else {
+        template::Value::Absent
+    };
+    match value {
+        template::Value::Record(ref r) => {
+            Ok(r.resolve(&[key]).cloned().unwrap_or(default))
+        }
+        _ => Ok(default),
+    }
+}
+
+/// (keys map) — return all keys of a record as a list of strings
+fn builtin_keys(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.is_empty() {
+        return Err("keys requires 1 argument".into());
+    }
+    let value = eval_expanded(&args[0], cond)?;
+    match value {
+        template::Value::Record(ref r) => {
+            let keys: Vec<template::Value> = r
+                .iter()
+                .filter(|(k, _)| !k.starts_with('_'))
+                .map(|(k, _)| template::Value::Text(k.clone()))
+                .collect();
+            Ok(template::Value::List(keys))
+        }
+        _ => Err("keys expects a map/record".into()),
+    }
+}
+
+/// (vals map) — return all values of a record as a list
+fn builtin_vals(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.is_empty() {
+        return Err("vals requires 1 argument".into());
+    }
+    let value = eval_expanded(&args[0], cond)?;
+    match value {
+        template::Value::Record(ref r) => {
+            let vals: Vec<template::Value> = r
+                .iter()
+                .filter(|(k, _)| !k.starts_with('_'))
+                .map(|(_, v)| v.clone())
+                .collect();
+            Ok(template::Value::List(vals))
+        }
+        _ => Err("vals expects a map/record".into()),
+    }
 }
 
 fn builtin_get_in(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
