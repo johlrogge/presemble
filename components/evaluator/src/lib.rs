@@ -117,6 +117,9 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
                 "str" => builtin_str(&items[1..], conductor),
                 "println" => builtin_println(&items[1..], conductor),
 
+                // Help
+                "doc" => builtin_doc(&items[1..]),
+
                 _ => Err(format!("unknown function: {func_name}")),
             }
         }
@@ -606,6 +609,71 @@ fn builtin_println(
     }
     eprintln!("{}", parts.join(" "));
     Ok(template::Value::Absent)
+}
+
+// ── Documentation ───────────────────────────────────────────────────────────
+
+const DOCS: &[(&str, &str, &str)] = &[
+    // (name, signature, description)
+    // Collections
+    ("sort-by", "(sort-by :field coll) or (sort-by :field :desc coll)", "Sort a collection by a field. Optional :desc for descending."),
+    ("take", "(take n coll)", "Take the first n items from a collection."),
+    ("filter", "(filter :field \"value\" coll)", "Keep items where field matches value."),
+    ("first", "(first coll)", "Return the first item of a collection."),
+    ("rest", "(rest coll)", "Return all items except the first."),
+    ("count", "(count coll)", "Return the number of items in a collection or characters in a string."),
+    ("reverse", "(reverse coll)", "Reverse a collection."),
+    // Data access
+    ("get", "(get map :key) or (get map :key default)", "Get a value from a record by keyword."),
+    ("get-in", "(get-in map :key1 :key2 ...)", "Get a nested value from a record."),
+    ("keys", "(keys map)", "Return all keys of a record."),
+    ("vals", "(vals map)", "Return all values of a record."),
+    ("get-content", "(get-content \"content/post/hello.md\")", "Get the live content of a file (includes unsaved editor changes)."),
+    ("get-schema", "(get-schema :post)", "Get the schema source for a content type."),
+    ("list-content", "(list-content)", "List all content page URLs."),
+    ("list-schemas", "(list-schemas)", "List all schema stem names."),
+    // Editorial
+    ("suggest", "(suggest \"file\" \"slot\" \"value\" \"reason\")", "Create an editorial suggestion."),
+    ("get-suggestions", "(get-suggestions \"file\")", "Get pending suggestions for a file."),
+    // Arithmetic
+    ("+", "(+ a b ...)", "Add numbers."),
+    ("-", "(- a b ...)", "Subtract numbers. (- a) negates."),
+    ("*", "(* a b ...)", "Multiply numbers."),
+    // Comparison
+    ("=", "(= a b ...)", "Check equality."),
+    // String
+    ("str", "(str a b ...)", "Concatenate values as strings."),
+    ("println", "(println a b ...)", "Print values to stderr."),
+    // Help
+    ("doc", "(doc) or (doc fn-name)", "Show documentation for a function, or list all functions."),
+    // Macros
+    ("->", "(-> x (f a) (g b))", "Thread-first: insert x as first argument in each form."),
+    ("->>", "(->> x (f a) (g b))", "Thread-last: insert x as last argument in each form."),
+    // Keywords
+    (":keyword", ":post", "A bare keyword evaluates to all items for that schema stem."),
+];
+
+fn builtin_doc(args: &[Form]) -> Result<template::Value, String> {
+    if args.is_empty() {
+        // List all functions
+        let mut help = String::from("Available functions:\n\n");
+        for (name, sig, desc) in DOCS {
+            help.push_str(&format!("  {name:<16} {desc}\n"));
+            help.push_str(&format!("  {:<16} {sig}\n\n", ""));
+        }
+        return Ok(template::Value::Text(help));
+    }
+    let name = match &args[0] {
+        Form::Symbol(s) => s.as_str(),
+        Form::Str(s) => s.as_str(),
+        other => return Err(format!("doc expects a symbol or string, got: {other}")),
+    };
+    for (doc_name, sig, desc) in DOCS {
+        if *doc_name == name {
+            return Ok(template::Value::Text(format!("{doc_name}\n  {sig}\n  {desc}")));
+        }
+    }
+    Err(format!("no documentation for: {name}"))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
