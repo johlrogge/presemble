@@ -5,32 +5,16 @@ use template::DataGraph;
 
 use crate::site_index::{SchemaStem, UrlPath};
 
-/// A directed edge in the site graph.
+/// A directed edge between two pages in the site graph.
+///
+/// Edges capture link expressions: `source` is the page that holds the
+/// link expression and `target` is the URL it points at.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Edge {
-    /// The page that contains the reference
+    /// The page that contains the link expression.
     pub source: UrlPath,
-    /// The page being referenced
+    /// The URL the link expression points at.
     pub target: UrlPath,
-    /// The DataGraph slot name where this reference lives (e.g., "author", "related")
-    pub slot: String,
-    /// What kind of edge this is
-    pub kind: EdgeKind,
-}
-
-/// Classification of edges in the site graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EdgeKind {
-    /// A direct link reference: [text](/author/alice)
-    PathRef,
-    /// A computed collection result: (->> :post (sort-by ...) (take 3))
-    ThreadResult,
-    /// Item belongs to a collection stem
-    CollectionMember,
-    /// Stylesheet @import
-    StylesheetImport,
-    /// Stylesheet url() asset reference
-    StylesheetAssetRef,
 }
 
 /// The kind of page.
@@ -108,7 +92,6 @@ impl SiteNode {
 #[derive(Debug, Default)]
 pub struct SiteGraph {
     entries: HashMap<UrlPath, SiteNode>,
-    edges: Vec<Edge>,
 }
 
 impl SiteGraph {
@@ -181,31 +164,6 @@ impl SiteGraph {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-
-    /// Add an edge to the graph.
-    pub fn add_edge(&mut self, edge: Edge) {
-        self.edges.push(edge);
-    }
-
-    /// Remove all edges originating from the given source URL.
-    pub fn remove_edges_from(&mut self, source: &UrlPath) {
-        self.edges.retain(|e| &e.source != source);
-    }
-
-    /// All edges originating from the given URL.
-    pub fn edges_from(&self, url: &UrlPath) -> Vec<&Edge> {
-        self.edges.iter().filter(|e| &e.source == url).collect()
-    }
-
-    /// All edges pointing to the given URL.
-    pub fn edges_to(&self, url: &UrlPath) -> Vec<&Edge> {
-        self.edges.iter().filter(|e| &e.target == url).collect()
-    }
-
-    /// All edges in the graph.
-    pub fn edges(&self) -> &[Edge] {
-        &self.edges
     }
 }
 
@@ -320,45 +278,6 @@ mod tests {
         let pd = node.page_data().expect("page_data should be Some for Page node");
         assert_eq!(pd.schema_stem.as_str(), "post");
         assert_eq!(pd.page_kind, PageKind::Item);
-    }
-
-    #[test]
-    fn add_and_query_edges() {
-        let mut graph = SiteGraph::new();
-        let source = UrlPath::new("/post/hello");
-        let target = UrlPath::new("/author/alice");
-        graph.add_edge(Edge {
-            source: source.clone(),
-            target: target.clone(),
-            slot: "author".to_string(),
-            kind: EdgeKind::PathRef,
-        });
-        assert_eq!(graph.edges_from(&source).len(), 1);
-        assert_eq!(graph.edges_to(&target).len(), 1);
-        assert_eq!(graph.edges_from(&target).len(), 0);
-        assert_eq!(graph.edges_to(&source).len(), 0);
-    }
-
-    #[test]
-    fn remove_edges_from_source() {
-        let mut graph = SiteGraph::new();
-        let s1 = UrlPath::new("/post/a");
-        let s2 = UrlPath::new("/post/b");
-        let t = UrlPath::new("/author/alice");
-        graph.add_edge(Edge { source: s1.clone(), target: t.clone(), slot: "author".to_string(), kind: EdgeKind::PathRef });
-        graph.add_edge(Edge { source: s2.clone(), target: t.clone(), slot: "author".to_string(), kind: EdgeKind::PathRef });
-        assert_eq!(graph.edges_to(&t).len(), 2);
-        graph.remove_edges_from(&s1);
-        assert_eq!(graph.edges_to(&t).len(), 1);
-        assert_eq!(graph.edges_to(&t)[0].source, s2);
-    }
-
-    #[test]
-    fn edges_returns_all() {
-        let mut graph = SiteGraph::new();
-        graph.add_edge(Edge { source: UrlPath::new("/a"), target: UrlPath::new("/b"), slot: "x".to_string(), kind: EdgeKind::PathRef });
-        graph.add_edge(Edge { source: UrlPath::new("/c"), target: UrlPath::new("/d"), slot: "y".to_string(), kind: EdgeKind::ThreadResult });
-        assert_eq!(graph.edges().len(), 2);
     }
 
     #[test]

@@ -8,7 +8,7 @@
     [:section
       [:h2 "Posts by this author"]
       [:ul
-        [:template {:data-each "input._refs_post"}
+        [:template {:data-each "input.posts"}
           [:li
             [:presemble/insert {:data "item.link" :as "h3"}]]]]]]]
 

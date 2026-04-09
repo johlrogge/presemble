@@ -535,6 +535,15 @@ fn resolve_link_expressions(site_graph: &mut SiteGraph) {
         }
     }
 
+    // Build an edge index from all unresolved link expressions (PathRef only)
+    let mut all_edges = Vec::new();
+    for node in site_graph.iter_pages_by_kind(PageKind::Item) {
+        if let Some(pd) = node.page_data() {
+            all_edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
+        }
+    }
+    let edge_index = expressions::build_edge_index(&all_edges);
+
     // Collect all page URLs to iterate over (avoids borrow conflicts)
     let urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
 
@@ -542,7 +551,13 @@ fn resolve_link_expressions(site_graph: &mut SiteGraph) {
         if let Some(node) = site_graph.get_mut(url)
             && let Some(pd) = node.page_data_mut()
         {
-            expressions::resolve_link_expressions_in_graph(&mut pd.data, &url_index, &stem_index);
+            expressions::resolve_link_expressions_in_graph(
+                &mut pd.data,
+                &url_index,
+                &stem_index,
+                url,
+                &edge_index,
+            );
         }
     }
 }
@@ -660,28 +675,6 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
             .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
             .collect();
         page_data.insert(stem.as_str(), template::Value::List(items));
-    }
-
-    // Inject reverse references — group incoming edges by source stem
-    let incoming = graph.edges_to(&node.url_path);
-    let mut refs_by_stem: std::collections::HashMap<String, Vec<template::Value>> =
-        std::collections::HashMap::new();
-    for edge in incoming {
-        if let Some(source_node) = graph.get(&edge.source)
-            && let Some(source_data) = source_node.page_data()
-        {
-            let stem = source_data.schema_stem.as_str().to_string();
-            refs_by_stem
-                .entry(stem)
-                .or_default()
-                .push(template::Value::Record(source_data.data.clone()));
-        }
-    }
-    for (stem, items) in refs_by_stem {
-        let key = format!("_refs_{stem}");
-        if page_data.resolve(&[&key]).is_none() {
-            page_data.insert(&key, template::Value::List(items));
-        }
     }
 
     // Page's own data (plus injected collections) under "input"
@@ -1323,18 +1316,6 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
             if policy.link_policy == LinkDisposition::HardError {
                 files_failed += link_errors.len();
             }
-        }
-    }
-
-    // Phase 2.5: Extract edges from resolved DataGraphs
-    {
-        let all_edges: Vec<site_index::Edge> = site_graph
-            .iter()
-            .filter_map(|node| node.page_data().map(|pd| (node.url_path.clone(), pd.data.clone())))
-            .flat_map(|(url, data)| expressions::extract_edges(&url, &data))
-            .collect();
-        for edge in all_edges {
-            site_graph.add_edge(edge);
         }
     }
 
