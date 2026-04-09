@@ -40,7 +40,7 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 else{tryScroll(10);}
 })();
 (function(){
-var mode='view';
+var mode=sessionStorage.getItem('presemble-mode')||'view';
 var _editorialSuggestCount=0;
 var _dirtyCount=0;
 function countSuggestions(){return document.querySelectorAll('.presemble-suggestion').length;}
@@ -477,7 +477,8 @@ update();
 if(m==='edit'){_editEnter();}
 if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
 }
-_fetchSuggestionCount();
+if(mode==='edit'){_editEnter();}
+if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
 viewBtn.onclick=function(){setMode('view');};
 editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
