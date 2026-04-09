@@ -1120,6 +1120,12 @@ impl Conductor {
                     let graph = template::build_article_graph(&doc, &grammar);
                     match graph.resolve(&[slot.as_str()]) {
                         Some(template::Value::Text(t)) => Some(t.clone()),
+                        Some(template::Value::List(items)) => {
+                            let texts: Vec<String> = items.iter().filter_map(|v| {
+                                if let template::Value::Text(t) = v { Some(t.clone()) } else { None }
+                            }).collect();
+                            if texts.is_empty() { None } else { Some(texts.join("\n\n")) }
+                        }
                         _ => None,
                     }
                 });

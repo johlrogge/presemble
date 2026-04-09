@@ -583,76 +583,6 @@ window._fetchSuggestionCount=_fetchSuggestionCount;
 window._fetchSuggestionFiles=_fetchSuggestionFiles;
 window._foldToggle=function(el){_foldToggle(el);};
 })();
-document.addEventListener('click',function(e){
-if(!document.body.classList.contains('presemble-edit-mode')){return;}
-var el=e.target.closest('[data-presemble-slot]');
-if(!el||el.classList.contains('presemble-editing')){return;}
-var editing=document.querySelector('.presemble-editing');
-if(editing){
-var saveBtn=editing.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');
-if(saveBtn){saveBtn.click();}
-}
-var openTa=document.querySelector('.presemble-body-editor');
-if(openTa){
-var bSaveBtn=openTa.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');
-if(!bSaveBtn){bSaveBtn=openTa.nextElementSibling;if(bSaveBtn){bSaveBtn=bSaveBtn.querySelector('.presemble-save');}}
-if(bSaveBtn){bSaveBtn.click();}
-}
-if(el.getAttribute('data-presemble-slot')==='body'){
-if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(window._foldToggle){window._foldToggle(el);}return;}
-e.preventDefault();
-var bfile=el.getAttribute('data-presemble-file');
-if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-var bidxAttr=el.id;
-var bidx=0;
-if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\d+)/);if(m){bidx=parseInt(m[1],10);}}
-var bmd=el.getAttribute('data-presemble-md')||el.innerText;
-el.style.display='none';
-var ta=document.createElement('textarea');
-ta.className='presemble-body-editor';
-ta.value=bmd;
-el.parentNode.insertBefore(ta,el.nextSibling);
-ta.focus();
-var btoolbar=document.createElement('div');
-btoolbar.className='presemble-edit-toolbar';
-btoolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
-ta.after(btoolbar);
-el.classList.add('presemble-editing');
-function bcleanup(){
-el.style.display='';
-el.classList.remove('presemble-editing');
-ta.remove();
-btoolbar.remove();
-var berr=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
-if(berr){berr.remove();}
-}
-function bsave(){
-var bvalue=ta.value;
-bcleanup();
-if(bvalue===bmd){return;}
-if(!bvalue.trim()){return;}
-fetch('/_presemble/edit-body',{
-method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,body_idx:bidx,content:bvalue})
-}).then(function(r){return r.json();}).then(function(data){
-if(!data.ok){
-var berr2=document.createElement('div');
-berr2.className='presemble-edit-error';
-berr2.textContent=data.error||'Edit failed';
-el.after(berr2);
-el.style.display='';
-}else{
-if(window._fetchDirtyCount){window._fetchDirtyCount();}
-}
-}).catch(function(err){
-var berr3=document.createElement('div');
-berr3.className='presemble-edit-error';
-berr3.textContent='Network error: '+err.message;
-el.after(berr3);
-el.style.display='';
-});
-}
 function minimalDiff(original, edited) {
 if (original === edited) return null;
 
@@ -724,24 +654,77 @@ var replace = edited.slice(finalStart, edited.length - suffixLen + ctxRight);
 
 return { search: search, replace: replace };
 }
-function bsuggest(){
+document.addEventListener('click',function(e){
+if(!document.body.classList.contains('presemble-edit-mode')){return;}
+var el=e.target.closest('[data-presemble-slot]');
+if(!el||el.classList.contains('presemble-editing')){return;}
+var editing=document.querySelector('.presemble-editing');
+if(editing){
+var saveBtn=editing.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');
+if(saveBtn){saveBtn.click();}
+}
+var openTa=document.querySelector('.presemble-body-editor');
+if(openTa){
+var bSaveBtn=openTa.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');
+if(!bSaveBtn){bSaveBtn=openTa.nextElementSibling;if(bSaveBtn){bSaveBtn=bSaveBtn.querySelector('.presemble-save');}}
+if(bSaveBtn){bSaveBtn.click();}
+}
+if(el.getAttribute('data-presemble-slot')==='body'){
+if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(window._foldToggle){window._foldToggle(el);}return;}
+e.preventDefault();
+var bfile=el.getAttribute('data-presemble-file');
+if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
+var bidxAttr=el.id;
+var bidx=0;
+if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\d+)/);if(m){bidx=parseInt(m[1],10);}}
+var bmd=el.getAttribute('data-presemble-md')||el.innerText;
+el.style.display='none';
+var ta=document.createElement('textarea');
+ta.className='presemble-body-editor';
+ta.value=bmd;
+el.parentNode.insertBefore(ta,el.nextSibling);
+ta.focus();
+var btoolbar=document.createElement('div');
+btoolbar.className='presemble-edit-toolbar';
+btoolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
+ta.after(btoolbar);
+el.classList.add('presemble-editing');
+function bcleanup(){
+el.style.display='';
+el.classList.remove('presemble-editing');
+ta.remove();
+btoolbar.remove();
+var berr=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
+if(berr){berr.remove();}
+}
+function bsave(){
 var bvalue=ta.value;
-var origMd=bmd;
 bcleanup();
-var diff = minimalDiff(origMd, bvalue);
-if (!diff || !bvalue.trim()) { return; }
-fetch('/_presemble/suggest-body',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,body_idx:bidx,search:diff.search,replace:diff.replace})
+if(bvalue===bmd){return;}
+if(!bvalue.trim()){return;}
+fetch('/_presemble/edit-body',{
+method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:bfile,body_idx:bidx,content:bvalue})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){
-var berr=document.createElement('div');berr.className='presemble-edit-error';
-berr.textContent=data.error||'Suggest failed';el.after(berr);
+var berr2=document.createElement('div');
+berr2.className='presemble-edit-error';
+berr2.textContent=data.error||'Edit failed';
+el.after(berr2);
+el.style.display='';
+}else{
+if(window._fetchDirtyCount){window._fetchDirtyCount();}
 }
-if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
-}).catch(function(e){});
+}).catch(function(err){
+var berr3=document.createElement('div');
+berr3.className='presemble-edit-error';
+berr3.textContent='Network error: '+err.message;
+el.after(berr3);
+el.style.display='';
+});
 }
 btoolbar.querySelector('.presemble-save').onclick=function(ev){ev.stopPropagation();bsave();};
-btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
 btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};
 ta.addEventListener('keydown',function bkeyHandler(ev){
 if(ev.key==='Escape'){bcleanup();ta.removeEventListener('keydown',bkeyHandler);}
@@ -803,7 +786,7 @@ el.focus();
 if(!el.textContent.trim()){var r=document.createRange();r.selectNodeContents(el);r.collapse(true);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}
 var toolbar=document.createElement('div');
 toolbar.className='presemble-edit-toolbar';
-toolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
+toolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
 el.after(toolbar);
 function cleanup(){
 el.contentEditable='false';
@@ -838,41 +821,56 @@ el.after(err);
 el.innerText=original;
 });
 }
-function suggest(){
-var value=el.innerText.trim().replace(/\u00a0/g,' ');
-var origText=original.replace(/\u00a0/g,' ');
-cleanup();
-var diff=minimalDiff(origText,value);
-if(!diff){return;}
-fetch('/_presemble/suggest-slot-edit',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,slot:editSlot,search:diff.search,replace:diff.replace})
-}).then(function(r){return r.json();}).then(function(data){
-if(!data.ok){
-var err=document.createElement('div');err.className='presemble-edit-error';
-err.textContent=data.error||'Suggest failed';el.after(err);
-}
-el.innerText=original;
-if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
-}).catch(function(e){
-el.innerText=original;
-});
-}
 toolbar.querySelector('.presemble-save').onclick=function(e){e.stopPropagation();save();};
-toolbar.querySelector('.presemble-suggest-inline').onclick=function(e){e.stopPropagation();suggest();};
 toolbar.querySelector('.presemble-undo').onclick=function(e){e.stopPropagation();el.innerText=original;cleanup();};
 el.addEventListener('keydown',function handler(e){
 if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();el.removeEventListener('keydown',handler);}
 if(e.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('keydown',handler);}
 });
 });
-})();
 document.addEventListener('click',function(e){
 var suggestMode=sessionStorage.getItem('presemble-mode')==='suggest';
 if(!suggestMode){return;}
 var el=e.target.closest('[data-presemble-slot]');
 if(!el||el.classList.contains('presemble-editing')){return;}
 var slot=el.getAttribute('data-presemble-slot');
-if(!slot||slot==='body'){return;}
+if(!slot){return;}
+if(slot==='body'){
+e.preventDefault();
+var bfile=el.getAttribute('data-presemble-file');
+if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
+var bidxAttr=el.id;
+var bidx=0;
+if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\d+)/);if(m){bidx=parseInt(m[1],10);}}
+var bmd=el.getAttribute('data-presemble-md')||el.innerText;
+el.style.display='none';
+var ta=document.createElement('textarea');
+ta.className='presemble-body-editor';
+ta.value=bmd;
+el.parentNode.insertBefore(ta,el.nextSibling);
+ta.focus();
+var btoolbar=document.createElement('div');
+btoolbar.className='presemble-edit-toolbar';
+btoolbar.innerHTML='<button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Cancel">&#8630;</button>';
+ta.after(btoolbar);
+function bcleanup(){ta.remove();btoolbar.remove();el.style.display='';}
+function bsuggest(){
+var bvalue=ta.value;
+bcleanup();
+var diff=minimalDiff(bmd,bvalue);
+if(!diff){return;}
+fetch('/_presemble/suggest-body',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:bfile,body_idx:bidx,search:diff.search,replace:diff.replace})
+}).then(function(r){return r.json();}).then(function(data){
+if(!data.ok){var berr=document.createElement('div');berr.className='presemble-edit-error';berr.textContent=data.error||'Suggest failed';el.after(berr);}
+if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+}).catch(function(){});
+}
+btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
+btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};
+ta.addEventListener('keydown',function(ev){if(ev.key==='Escape'){bcleanup();}});
+return;
+}
 var pfile=el.getAttribute('data-presemble-file');
 var editSlot=el.getAttribute('data-presemble-source-slot')||slot;
 if(!pfile||!editSlot){return;}
@@ -919,3 +917,4 @@ if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();suggest();el.removeEventL
 if(ev.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('keydown',handler);}
 });
 });
+})();

@@ -852,6 +852,73 @@ mod tests {
         }
     }
 
+    /// Build a conductor with a multi-paragraph summary slot (Value::List case).
+    fn multi_paragraph_conductor() -> (tempfile::TempDir, Conductor) {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Content file with two summary paragraphs (occurs: 1..3 produces Value::List)
+        let content_dir = dir.path().join("content/article");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(
+            content_dir.join("multi.md"),
+            "# Multi Para Title\n\nFirst summary paragraph.\n\nSecond summary paragraph.\n",
+        )
+        .unwrap();
+
+        let repo = site_repository::SiteRepository::builder()
+            .schema("article", ARTICLE_SCHEMA_SRC)
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+        (dir, conductor)
+    }
+
+    #[test]
+    fn suggest_slot_value_captures_list_original_value() {
+        // Regression test: when a slot resolves to Value::List (multi-occurrence),
+        // SuggestSlotValue must join the list items with "\n\n" and store them
+        // as the original_value for conflict detection.
+        let (_dir, conductor) = multi_paragraph_conductor();
+
+        let file = editorial_types::ContentPath::new("content/article/multi.md");
+        let slot = editorial_types::SlotName::new("summary");
+
+        let result = conductor.handle_command(Command::SuggestSlotValue {
+            file: file.clone(),
+            slot,
+            value: "A single improved summary.".to_string(),
+            reason: "Consolidate paragraphs".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // The original_value must capture both paragraphs joined by "\n\n"
+        let suggestions_result = conductor.handle_command(Command::GetSuggestions { file });
+        match suggestions_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(suggestions.len(), 1);
+                assert_eq!(suggestions[0].id, id);
+                let orig = suggestions[0].original_value.as_deref().unwrap_or("");
+                assert!(
+                    orig.contains("First summary paragraph."),
+                    "original_value should contain first paragraph, got: {orig:?}"
+                );
+                assert!(
+                    orig.contains("Second summary paragraph."),
+                    "original_value should contain second paragraph, got: {orig:?}"
+                );
+                assert!(
+                    orig.contains("\n\n"),
+                    "original_value should join paragraphs with \\n\\n, got: {orig:?}"
+                );
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
     #[test]
     fn suggest_slot_edit_fails_when_search_not_in_slot() {
         let (_dir, conductor) = article_conductor_with_file();
