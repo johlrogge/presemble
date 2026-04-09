@@ -196,8 +196,15 @@ fn collect_edges_from_value(
             }
         }
         template::Value::Record(inner) => {
-            for (_, v) in inner.iter() {
-                collect_edges_from_value(source_url, v, edges);
+            // A resolved link expression becomes a Record with an "href" field.
+            // Extract the edge from href without recursing further into the record,
+            // to avoid treating every nested record as a potential edge.
+            if let Some(template::Value::Text(href)) = inner.resolve(&["href"]) {
+                edges.push(Edge { source: source_url.clone(), target: UrlPath::new(href.as_str()) });
+            } else {
+                for (_, v) in inner.iter() {
+                    collect_edges_from_value(source_url, v, edges);
+                }
             }
         }
         _ => {}

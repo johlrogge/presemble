@@ -10,6 +10,6 @@ occurs
 
 posts {#posts}
 occurs
-: zero or more
+: *
 type
 : link(post)
