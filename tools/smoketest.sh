@@ -181,6 +181,10 @@ if command -v rep &> /dev/null && [ -f "$NREPL_PORT_FILE" ]; then
     log "Testing nREPL via rep..."
     assert_rep "list-schemas returns post" "(list-schemas)" "post"
     assert_rep "list-content returns post" "(list-content)" "first-post"
+
+    log "Testing edge queries via nREPL..."
+    assert_rep "refs-from post has author edge" '(refs-from "/post/hello-world")' "author"
+    assert_rep "refs-to author has post edge" '(refs-to "/author/default")' "post"
 else
     log "Skipping nREPL tests (rep not available or $NREPL_PORT_FILE not found)"
 fi

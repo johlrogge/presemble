@@ -267,6 +267,14 @@ fn extract_edges_from_graph(
                     });
                 }
             }
+            template::Value::LinkExpression { target: content::LinkTarget::PathRef(path), .. } => {
+                edges.push(site_index::Edge {
+                    source: source.clone(),
+                    target: site_index::UrlPath::new(path),
+                    slot: slot_name.to_string(),
+                    kind: site_index::EdgeKind::PathRef,
+                });
+            }
             template::Value::List(items) => {
                 for item in items {
                     if let template::Value::Record(record) = item
@@ -549,6 +557,19 @@ impl Conductor {
                 };
 
                 graph.insert(node);
+            }
+        }
+
+        // Extract edges from all page DataGraphs
+        let edge_data: Vec<(site_index::UrlPath, template::DataGraph)> = graph
+            .iter()
+            .filter_map(|node| {
+                node.page_data().map(|pd| (node.url_path.clone(), pd.data.clone()))
+            })
+            .collect();
+        for (url, data) in &edge_data {
+            for edge in extract_edges_from_graph(url, data) {
+                graph.add_edge(edge);
             }
         }
 
