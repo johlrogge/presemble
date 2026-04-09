@@ -1200,10 +1200,20 @@ impl Conductor {
                 }
                 CommandResult::ok()
             }
-            Command::ScaffoldSite { template_name, format } => {
+            Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity } => {
                 match site_templates::template_by_name(&template_name) {
                     Some(template) => {
-                        match template.scaffold(&self.site_dir, &format) {
+                        let style = site_templates::StyleConfig {
+                            font_mood: font_mood.parse().unwrap_or_default(),
+                            seed_color: if seed_color.is_empty() {
+                                site_templates::StyleConfig::default().seed_color
+                            } else {
+                                seed_color
+                            },
+                            palette_type: palette_type.parse().unwrap_or_default(),
+                            complexity: complexity.parse().unwrap_or_default(),
+                        };
+                        match template.scaffold(&self.site_dir, &format, &style) {
                             Ok(()) => {
                                 // Refresh schema cache — new schemas were written to disk
                                 self.refresh_schema_cache();

@@ -74,6 +74,10 @@ pub enum Command {
         template_name: String,
         /// Template format: "hiccup" or "html".
         format: String,
+        font_mood: String,
+        seed_color: String,
+        palette_type: String,
+        complexity: String,
     },
 }
 

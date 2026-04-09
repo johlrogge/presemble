@@ -1,0 +1,4 @@
+[:nav {:class "site-nav"}
+  [:a {:href "/"} "Home"]
+  [:a {:href "/post/"} "Posts"]
+  [:a {:href "/author/"} "Authors"]]

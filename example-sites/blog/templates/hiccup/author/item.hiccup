@@ -1,5 +1,8 @@
 [:template {:presemble/define "body"}
   [:main
+    [:presemble/include {:src "nav"}]
+    [:nav {:class "breadcrumb"}
+      [:a {:href "/author/"} "\u2190 All authors"]]
     [:presemble/insert {:data "input.name" :as "h1"}]
     [:presemble/insert {:data "input.bio" :as "p"}]]]
 

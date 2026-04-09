@@ -5,58 +5,886 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Welcome to Presemble</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 3rem auto; padding: 0 1rem; color: #333; }
-    h1 { color: #1a1a1a; }
-    .templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 1rem; margin: 2rem 0; }
-    .template-card { border: 1px solid #ddd; border-radius: 0.5rem; padding: 1.5rem; cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; }
-    .template-card:hover { border-color: #5d8a6e; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    .template-card h3 { margin: 0 0 0.5rem; color: #1a1a1a; }
-    .template-card p { margin: 0; color: #666; font-size: 0.9rem; }
-    .format-select { margin: 1rem 0; }
-    .format-select label { margin-right: 1rem; }
-    .format-select input { margin-right: 0.3rem; }
-    .status { margin: 1rem 0; color: #5d8a6e; font-style: italic; }
+    *, *::before, *::after { box-sizing: border-box; }
+
+    :root {
+      --color-bg: #f7f8f6;
+      --color-surface: #ffffff;
+      --color-border: #e2e6df;
+      --color-accent: #5d8a6e;
+      --color-accent-hover: #4a7259;
+      --color-accent-light: #eaf2ed;
+      --color-text: #1a1f17;
+      --color-muted: #6b7568;
+      --color-selected-border: #5d8a6e;
+      --color-selected-bg: #eaf2ed;
+      --radius-card: 0.75rem;
+      --radius-btn: 0.5rem;
+      --shadow-card: 0 1px 4px rgba(0,0,0,0.07), 0 4px 16px rgba(0,0,0,0.04);
+      --shadow-card-hover: 0 4px 12px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.06);
+      --transition: 0.15s ease;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--color-bg);
+      color: var(--color-text);
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Layout */
+    .layout {
+      display: flex;
+      flex: 1;
+      min-height: 100vh;
+    }
+
+    .main-panel {
+      flex: 1;
+      max-width: 680px;
+      padding: 2.5rem 2rem 3rem;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .preview-panel {
+      width: 340px;
+      background: var(--color-surface);
+      border-left: 1px solid var(--color-border);
+      padding: 2rem 1.5rem;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    @media (max-width: 900px) {
+      .layout { flex-direction: column; }
+      .main-panel { max-width: 100%; }
+      .preview-panel {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid var(--color-border);
+        position: static;
+        height: auto;
+      }
+    }
+
+    /* Header */
+    .header {
+      margin-bottom: 2rem;
+    }
+
+    .wordmark {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--color-accent);
+      letter-spacing: -0.02em;
+      margin: 0 0 0.25rem;
+    }
+
+    .step-title {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--color-text);
+      margin: 0 0 0.4rem;
+      letter-spacing: -0.02em;
+    }
+
+    .step-subtitle {
+      color: var(--color-muted);
+      font-size: 0.95rem;
+      margin: 0;
+    }
+
+    /* Progress */
+    .progress-bar {
+      display: flex;
+      gap: 0.4rem;
+      margin-bottom: 2.5rem;
+      align-items: center;
+    }
+
+    .progress-step {
+      height: 4px;
+      flex: 1;
+      border-radius: 2px;
+      background: var(--color-border);
+      transition: background var(--transition);
+    }
+
+    .progress-step.done {
+      background: var(--color-accent);
+    }
+
+    .progress-step.active {
+      background: var(--color-accent);
+      opacity: 0.5;
+    }
+
+    .progress-label {
+      font-size: 0.78rem;
+      color: var(--color-muted);
+      white-space: nowrap;
+      margin-left: 0.5rem;
+    }
+
+    /* Card grid */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 2rem;
+    }
+
+    .card-grid.two-col {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .card {
+      background: var(--color-surface);
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-card);
+      padding: 1.25rem 1rem;
+      cursor: pointer;
+      transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+      box-shadow: var(--shadow-card);
+      text-align: left;
+    }
+
+    .card:hover {
+      border-color: var(--color-accent);
+      box-shadow: var(--shadow-card-hover);
+    }
+
+    .card.selected {
+      border-color: var(--color-selected-border);
+      background: var(--color-selected-bg);
+    }
+
+    .card-icon {
+      font-size: 1.5rem;
+      margin-bottom: 0.6rem;
+      line-height: 1;
+    }
+
+    .card-name {
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin: 0 0 0.3rem;
+      color: var(--color-text);
+    }
+
+    .card-desc {
+      font-size: 0.82rem;
+      color: var(--color-muted);
+      margin: 0;
+      line-height: 1.4;
+    }
+
+    /* Font mood card */
+    .font-sample {
+      margin-top: 0.6rem;
+      font-size: 0.9rem;
+    }
+
+    .font-sample-heading {
+      font-weight: 700;
+      margin-bottom: 0.15rem;
+      color: var(--color-text);
+    }
+
+    .font-sample-body {
+      font-size: 0.8rem;
+      color: var(--color-muted);
+    }
+
+    /* Palette type card */
+    .palette-swatches {
+      display: flex;
+      gap: 0.3rem;
+      margin-top: 0.6rem;
+    }
+
+    .swatch {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 1px solid rgba(0,0,0,0.1);
+      flex-shrink: 0;
+    }
+
+    /* Color picker */
+    .color-step {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .color-picker-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    input[type="color"] {
+      width: 64px;
+      height: 64px;
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-card);
+      padding: 4px;
+      background: var(--color-surface);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .hex-input {
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 1.1rem;
+      border: 2px solid var(--color-border);
+      border-radius: var(--radius-btn);
+      padding: 0.5rem 0.75rem;
+      width: 120px;
+      color: var(--color-text);
+      background: var(--color-surface);
+      transition: border-color var(--transition);
+    }
+
+    .hex-input:focus {
+      outline: none;
+      border-color: var(--color-accent);
+    }
+
+    /* Navigation */
+    .nav {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      margin-top: auto;
+      padding-top: 1.5rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      padding: 0.65rem 1.5rem;
+      border-radius: var(--radius-btn);
+      font-size: 0.95rem;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+      transition: background var(--transition), opacity var(--transition);
+    }
+
+    .btn-primary {
+      background: var(--color-accent);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      background: var(--color-accent-hover);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--color-muted);
+      border: 1px solid var(--color-border);
+    }
+
+    .btn-ghost:hover {
+      background: var(--color-border);
+      color: var(--color-text);
+    }
+
+    /* Status */
+    .status {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      color: var(--color-accent);
+      font-style: italic;
+      min-height: 1.4em;
+    }
+
+    .status.error {
+      color: #c0392b;
+    }
+
+    /* Loading */
+    .loading-cards {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .skeleton {
+      background: linear-gradient(90deg, var(--color-border) 25%, #eee 50%, var(--color-border) 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.2s infinite;
+      border-radius: var(--radius-card);
+      height: 120px;
+      flex: 1;
+    }
+
+    @keyframes shimmer {
+      0% { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    /* Preview panel */
+    .preview-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--color-muted);
+      margin-bottom: 1rem;
+    }
+
+    .preview-frame {
+      background: #fff;
+      border: 1px solid var(--color-border);
+      border-radius: 0.5rem;
+      padding: 1.5rem;
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .preview-frame.loading::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(255,255,255,0.7);
+    }
+
+    .preview-content h1 {
+      font-size: 1.3rem;
+      margin: 0 0 0.5rem;
+      line-height: 1.3;
+    }
+
+    .preview-content p {
+      font-size: 0.85rem;
+      margin: 0 0 0.75rem;
+      line-height: 1.6;
+    }
+
+    .preview-content a {
+      text-decoration: underline;
+    }
+
+    .preview-content blockquote {
+      margin: 0.75rem 0;
+      padding-left: 0.75rem;
+      font-size: 0.85rem;
+      font-style: italic;
+    }
+
+    .preview-note {
+      font-size: 0.78rem;
+      color: var(--color-muted);
+      margin-top: 0.75rem;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
-  <h1>Welcome to Presemble</h1>
-  <p>This directory is empty. Choose a site template to get started:</p>
-  <div class="format-select">
-    <label><input type="radio" name="format" value="hiccup" checked> Hiccup (recommended)</label>
-    <label><input type="radio" name="format" value="html"> HTML</label>
+  <div class="layout">
+    <main class="main-panel">
+      <div id="wizard"></div>
+    </main>
+    <aside class="preview-panel">
+      <div class="preview-label">Live Preview</div>
+      <div class="preview-frame" id="preview-frame">
+        <div class="preview-content" id="preview-content">
+          <h1>Hello, world</h1>
+          <p>This is a sample paragraph showing how your content will look once the site is created. The typography and colors here reflect your choices.</p>
+          <p>Visit <a href="#">our blog</a> for the latest updates and articles.</p>
+          <blockquote>Good design is as little design as possible.</blockquote>
+        </div>
+      </div>
+      <p class="preview-note">Preview updates as you make selections.</p>
+    </aside>
   </div>
-  <div class="templates" id="templates"></div>
-  <div class="status" id="status"></div>
+
   <script>
-    fetch('/_presemble/templates')
-      .then(function(r) { return r.json(); })
-      .then(function(templates) {
-        var container = document.getElementById('templates');
-        templates.forEach(function(t) {
-          var card = document.createElement('div');
-          card.className = 'template-card';
-          card.innerHTML = '<h3>' + t.name + '</h3><p>' + t.description + '</p>';
-          card.onclick = function() {
-            var format = document.querySelector('input[name="format"]:checked').value;
-            document.getElementById('status').textContent = 'Creating site...';
-            fetch('/_presemble/scaffold', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ template: t.name, format: format })
-            })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-              if (data.ok) {
-                document.getElementById('status').textContent = 'Site created! Reloading...';
-                setTimeout(function() { location.reload(); }, 1000);
-              } else {
-                document.getElementById('status').textContent = 'Error: ' + (data.error || 'Unknown error');
+    // ── State ────────────────────────────────────────────────────────────────
+    var state = {
+      step: 1,
+      site_type: '',
+      font_mood: '',
+      seed_color: '#2563eb',
+      palette_type: '',
+      complexity: '',
+      format: 'hiccup',
+    };
+
+    var fontMoods = [];
+    var paletteTypes = [];
+    var previewDebounce = null;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    function esc(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function hslFromHex(hex) {
+      hex = hex.replace('#', '');
+      if (hex.length === 3) { hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2]; }
+      var r = parseInt(hex.substring(0,2), 16) / 255;
+      var g = parseInt(hex.substring(2,4), 16) / 255;
+      var b = parseInt(hex.substring(4,6), 16) / 255;
+      var max = Math.max(r, g, b), min = Math.min(r, g, b);
+      var h, s, l = (max + min) / 2;
+      if (max === min) {
+        h = s = 0;
+      } else {
+        var d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+          case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+          case g: h = ((b - r) / d + 2) / 6; break;
+          default: h = ((r - g) / d + 4) / 6; break;
+        }
+      }
+      return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
+    }
+
+    function hslToHex(h, s, l) {
+      h = ((h % 360) + 360) % 360;
+      s /= 100; l /= 100;
+      var c = (1 - Math.abs(2 * l - 1)) * s;
+      var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+      var m = l - c / 2;
+      var r, g, b;
+      if (h < 60)       { r = c; g = x; b = 0; }
+      else if (h < 120) { r = x; g = c; b = 0; }
+      else if (h < 180) { r = 0; g = c; b = x; }
+      else if (h < 240) { r = 0; g = x; b = c; }
+      else if (h < 300) { r = x; g = 0; b = c; }
+      else              { r = c; g = 0; b = x; }
+      var toHex = function(v) {
+        var h2 = Math.round((v + m) * 255).toString(16);
+        return h2.length === 1 ? '0' + h2 : h2;
+      };
+      return '#' + toHex(r) + toHex(g) + toHex(b);
+    }
+
+    function swatchesForPalette(seedHex, offsets) {
+      try {
+        var hsl = hslFromHex(seedHex);
+        return offsets.map(function(offset) {
+          return hslToHex(hsl[0] + offset, hsl[1], hsl[2]);
+        });
+      } catch (e) {
+        return offsets.map(function() { return seedHex; });
+      }
+    }
+
+    // ── Preview ──────────────────────────────────────────────────────────────
+    function schedulePreview() {
+      if (previewDebounce) { clearTimeout(previewDebounce); }
+      previewDebounce = setTimeout(fetchPreview, 300);
+    }
+
+    function fetchPreview() {
+      if (!state.seed_color) return;
+      var frame = document.getElementById('preview-frame');
+      frame.classList.add('loading');
+      fetch('/_presemble/style-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          font_mood: state.font_mood || 'clean',
+          seed_color: state.seed_color,
+          palette_type: state.palette_type || 'cool',
+          complexity: state.complexity || 'simple',
+        })
+      })
+      .then(function(r) { return r.text(); })
+      .then(function(css) {
+        var existing = document.getElementById('preview-style');
+        if (!existing) {
+          existing = document.createElement('style');
+          existing.id = 'preview-style';
+          document.head.appendChild(existing);
+        }
+        // Scope CSS to preview-content
+        var scoped = css
+          .replace(/:root\s*\{/g, '#preview-content {')
+          .replace(/^body\s*\{/gm, '#preview-content {')
+          .replace(/^(a|h[1-6]|blockquote|\.byline)\b/gm, '#preview-content $1');
+        existing.textContent = scoped;
+        frame.classList.remove('loading');
+      })
+      .catch(function() {
+        frame.classList.remove('loading');
+      });
+    }
+
+    // ── Load font moods ──────────────────────────────────────────────────────
+    function loadFontMoods(cb) {
+      fetch('/_presemble/font-moods')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          fontMoods = data;
+          cb();
+        })
+        .catch(function() { cb(); });
+    }
+
+    // ── Load palette types ───────────────────────────────────────────────────
+    function loadPaletteTypes(cb) {
+      fetch('/_presemble/palette-types')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          paletteTypes = data;
+          cb();
+        })
+        .catch(function() { cb(); });
+    }
+
+    // ── Google Fonts ─────────────────────────────────────────────────────────
+    var loadedFonts = {};
+    function ensureFont(url) {
+      if (!url || loadedFonts[url]) return;
+      loadedFonts[url] = true;
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = url;
+      document.head.appendChild(link);
+    }
+
+    // ── Render helpers ───────────────────────────────────────────────────────
+    function renderProgress() {
+      var steps = 6;
+      var parts = [];
+      parts.push('<div class="progress-bar">');
+      for (var i = 1; i <= steps; i++) {
+        var cls = i < state.step ? 'done' : i === state.step ? 'active' : '';
+        parts.push('<div class="progress-step ' + cls + '"></div>');
+      }
+      parts.push('<span class="progress-label">Step ' + state.step + ' of ' + steps + '</span>');
+      parts.push('</div>');
+      return parts.join('');
+    }
+
+    function renderNav(showBack, nextLabel, nextId, nextDisabled) {
+      var parts = ['<div class="nav">'];
+      if (showBack) {
+        parts.push('<button class="btn btn-ghost" id="btn-back">← Back</button>');
+      }
+      parts.push('<button class="btn btn-primary" id="' + nextId + '"' + (nextDisabled ? ' disabled' : '') + '>' + nextLabel + '</button>');
+      parts.push('</div>');
+      parts.push('<div class="status" id="status"></div>');
+      return parts.join('');
+    }
+
+    // ── Steps ────────────────────────────────────────────────────────────────
+    function renderStep1() {
+      var types = [
+        { id: 'blog', icon: '✍', name: 'Blog', desc: 'Posts and author profiles — ideal for writing and publishing.' },
+        { id: 'personal', icon: '🌿', name: 'Personal', desc: 'A simple homepage with pages — great as a personal site.' },
+        { id: 'portfolio', icon: '🖼', name: 'Portfolio', desc: 'Showcase work with project pages — built for creators.' },
+      ];
+      var html = renderProgress();
+      html += '<div class="header"><div class="wordmark">Presemble</div>';
+      html += '<h1 class="step-title">What kind of site?</h1>';
+      html += '<p class="step-subtitle">Choose the template that best fits your goals.</p></div>';
+      html += '<div class="card-grid">';
+      types.forEach(function(t) {
+        html += '<div class="card" data-type="' + esc(t.id) + '">';
+        html += '<div class="card-icon">' + t.icon + '</div>';
+        html += '<div class="card-name">' + esc(t.name) + '</div>';
+        html += '<div class="card-desc">' + esc(t.desc) + '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    function renderStep2() {
+      var html = renderProgress();
+      html += '<div class="header"><div class="wordmark">Presemble</div>';
+      html += '<h1 class="step-title">Font mood</h1>';
+      html += '<p class="step-subtitle">Pick the typographic feel for your site.</p></div>';
+
+      if (fontMoods.length === 0) {
+        html += '<div class="loading-cards">';
+        for (var i = 0; i < 3; i++) { html += '<div class="skeleton"></div>'; }
+        html += '</div>';
+      } else {
+        html += '<div class="card-grid">';
+        fontMoods.forEach(function(m) {
+          ensureFont(m.google_fonts_url);
+          var sel = state.font_mood === m.id ? ' selected' : '';
+          html += '<div class="card' + sel + '" data-mood="' + esc(m.id) + '">';
+          html += '<div class="card-name">' + esc(m.label) + '</div>';
+          html += '<div class="font-sample">';
+          html += '<div class="font-sample-heading" style="font-family:' + esc(m.heading) + '">The quick fox</div>';
+          html += '<div class="font-sample-body" style="font-family:' + esc(m.body) + '">Sample body text in this font</div>';
+          html += '</div></div>';
+        });
+        html += '</div>';
+      }
+      html += renderNav(true, 'Next →', 'btn-next', !state.font_mood);
+      return html;
+    }
+
+    function renderStep3() {
+      var html = renderProgress();
+      html += '<div class="header"><div class="wordmark">Presemble</div>';
+      html += '<h1 class="step-title">Seed color</h1>';
+      html += '<p class="step-subtitle">Pick the main accent color — the palette is derived from it.</p></div>';
+      html += '<div class="color-step">';
+      html += '<div class="color-picker-row">';
+      html += '<input type="color" id="color-picker" value="' + esc(state.seed_color) + '">';
+      html += '<input type="text" class="hex-input" id="hex-input" value="' + esc(state.seed_color) + '" maxlength="7" spellcheck="false">';
+      html += '</div>';
+      html += '</div>';
+      html += renderNav(true, 'Next →', 'btn-next', false);
+      return html;
+    }
+
+    function renderStep4() {
+      var html = renderProgress();
+      html += '<div class="header"><div class="wordmark">Presemble</div>';
+      html += '<h1 class="step-title">Palette type</h1>';
+      html += '<p class="step-subtitle">How should your accent color expand into a full palette?</p></div>';
+
+      if (paletteTypes.length === 0) {
+        html += '<div class="loading-cards">';
+        for (var i = 0; i < 3; i++) { html += '<div class="skeleton"></div>'; }
+        html += '</div>';
+      } else {
+        html += '<div class="card-grid two-col">';
+        paletteTypes.forEach(function(p) {
+          var sel = state.palette_type === p.id ? ' selected' : '';
+          var swatches = swatchesForPalette(state.seed_color, p.hue_offsets);
+          html += '<div class="card' + sel + '" data-palette="' + esc(p.id) + '">';
+          html += '<div class="card-name">' + esc(p.label) + '</div>';
+          html += '<div class="card-desc">' + esc(p.description) + '</div>';
+          html += '<div class="palette-swatches">';
+          swatches.forEach(function(c) {
+            html += '<div class="swatch" style="background:' + esc(c) + '"></div>';
+          });
+          html += '</div></div>';
+        });
+        html += '</div>';
+      }
+      html += renderNav(true, 'Next →', 'btn-next', !state.palette_type);
+      return html;
+    }
+
+    function renderStep5() {
+      var options = [
+        { id: 'simple', name: 'Simple', desc: '6 core properties — clean and easy to customize.' },
+        { id: 'involved', name: 'Involved', desc: '14 properties — more nuanced control over colors and spacing.' },
+      ];
+      var html = renderProgress();
+      html += '<div class="header"><div class="wordmark">Presemble</div>';
+      html += '<h1 class="step-title">Complexity</h1>';
+      html += '<p class="step-subtitle">How much decoration do you want in the generated CSS?</p></div>';
+      html += '<div class="card-grid two-col">';
+      options.forEach(function(o) {
+        var sel = state.complexity === o.id ? ' selected' : '';
+        html += '<div class="card' + sel + '" data-complexity="' + esc(o.id) + '">';
+        html += '<div class="card-name">' + esc(o.name) + '</div>';
+        html += '<div class="card-desc">' + esc(o.desc) + '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+      html += renderNav(true, 'Next →', 'btn-next', !state.complexity);
+      return html;
+    }
+
+    function renderStep6() {
+      var options = [
+        { id: 'hiccup', name: 'Hiccup', desc: 'Recommended — a concise, Clojure-inspired DSL for templates.' },
+        { id: 'html', name: 'HTML', desc: 'Standard HTML templates — familiar and widely understood.' },
+      ];
+      var html = renderProgress();
+      html += '<div class="header"><div class="wordmark">Presemble</div>';
+      html += '<h1 class="step-title">Template format</h1>';
+      html += '<p class="step-subtitle">Which format should your template files use?</p></div>';
+      html += '<div class="card-grid two-col">';
+      options.forEach(function(o) {
+        var sel = state.format === o.id ? ' selected' : '';
+        html += '<div class="card' + sel + '" data-format="' + esc(o.id) + '">';
+        html += '<div class="card-name">' + esc(o.name) + '</div>';
+        html += '<div class="card-desc">' + esc(o.desc) + '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+      html += renderNav(true, 'Create Site', 'btn-create', false);
+      return html;
+    }
+
+    // ── Render & bind ────────────────────────────────────────────────────────
+    function render() {
+      var wizard = document.getElementById('wizard');
+      var html;
+      switch (state.step) {
+        case 1: html = renderStep1(); break;
+        case 2: html = renderStep2(); break;
+        case 3: html = renderStep3(); break;
+        case 4: html = renderStep4(); break;
+        case 5: html = renderStep5(); break;
+        case 6: html = renderStep6(); break;
+        default: html = '';
+      }
+      wizard.innerHTML = html;
+      bindStep();
+      schedulePreview();
+    }
+
+    function bindStep() {
+      var backBtn = document.getElementById('btn-back');
+      if (backBtn) {
+        backBtn.addEventListener('click', function() {
+          state.step -= 1;
+          render();
+        });
+      }
+
+      switch (state.step) {
+        case 1:
+          document.querySelectorAll('[data-type]').forEach(function(card) {
+            card.addEventListener('click', function() {
+              state.site_type = card.dataset.type;
+              state.step = 2;
+              loadFontMoods(render);
+            });
+          });
+          break;
+
+        case 2:
+          document.querySelectorAll('[data-mood]').forEach(function(card) {
+            card.addEventListener('click', function() {
+              state.font_mood = card.dataset.mood;
+              state.step = 3;
+              render();
+            });
+          });
+          break;
+
+        case 3:
+          var colorPicker = document.getElementById('color-picker');
+          var hexInput = document.getElementById('hex-input');
+          if (colorPicker) {
+            colorPicker.addEventListener('input', function() {
+              state.seed_color = colorPicker.value;
+              hexInput.value = colorPicker.value;
+              schedulePreview();
+            });
+          }
+          if (hexInput) {
+            hexInput.addEventListener('input', function() {
+              var v = hexInput.value.trim();
+              if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+                state.seed_color = v;
+                colorPicker.value = v;
+                schedulePreview();
               }
             });
-          };
-          container.appendChild(card);
-        });
-      });
+          }
+          var nextBtn3 = document.getElementById('btn-next');
+          if (nextBtn3) {
+            nextBtn3.addEventListener('click', function() {
+              state.step = 4;
+              loadPaletteTypes(render);
+            });
+          }
+          break;
+
+        case 4:
+          document.querySelectorAll('[data-palette]').forEach(function(card) {
+            card.addEventListener('click', function() {
+              state.palette_type = card.dataset.palette;
+              state.step = 5;
+              render();
+            });
+          });
+          break;
+
+        case 5:
+          document.querySelectorAll('[data-complexity]').forEach(function(card) {
+            card.addEventListener('click', function() {
+              state.complexity = card.dataset.complexity;
+              state.step = 6;
+              render();
+            });
+          });
+          break;
+
+        case 6:
+          document.querySelectorAll('[data-format]').forEach(function(card) {
+            card.addEventListener('click', function() {
+              state.format = card.dataset.format;
+              document.querySelectorAll('[data-format]').forEach(function(c) {
+                c.classList.toggle('selected', c.dataset.format === state.format);
+              });
+            });
+          });
+          var createBtn = document.getElementById('btn-create');
+          if (createBtn) {
+            createBtn.addEventListener('click', function() {
+              createBtn.disabled = true;
+              var statusEl = document.getElementById('status');
+              statusEl.textContent = 'Creating site...';
+              statusEl.className = 'status';
+              fetch('/_presemble/scaffold', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  template: state.site_type,
+                  format: state.format,
+                  font_mood: state.font_mood,
+                  seed_color: state.seed_color,
+                  palette_type: state.palette_type,
+                  complexity: state.complexity,
+                })
+              })
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                if (data.ok) {
+                  statusEl.textContent = 'Site created! Reloading...';
+                  setTimeout(function() { location.reload(); }, 1000);
+                } else {
+                  statusEl.textContent = 'Error: ' + (data.error || 'Unknown error');
+                  statusEl.className = 'status error';
+                  createBtn.disabled = false;
+                }
+              })
+              .catch(function(e) {
+                statusEl.textContent = 'Network error: ' + e.message;
+                statusEl.className = 'status error';
+                createBtn.disabled = false;
+              });
+            });
+          }
+          break;
+      }
+    }
+
+    // ── Boot ─────────────────────────────────────────────────────────────────
+    render();
   </script>
 </body>
 </html>

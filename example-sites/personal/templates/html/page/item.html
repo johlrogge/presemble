@@ -8,6 +8,10 @@
 </head>
 <body>
 <main>
+  <presemble:include src="nav" />
+  <nav class="breadcrumb">
+    <a href="/page/">&#x2190; All pages</a>
+  </nav>
   <presemble:insert data="input.title" as="h1"></presemble:insert>
   <template data-slot="input.description">
     <p class="description"><presemble:insert data="input.description"></presemble:insert></p>
