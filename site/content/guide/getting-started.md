@@ -21,7 +21,7 @@ mkdir my-site
 presemble serve my-site/
 ```
 
-The browser opens a welcome page. Pick a starter template — blog, personal site, or portfolio — and choose Hiccup or HTML for your template syntax. The wizard scaffolds a complete working site and navigates the browser to your new homepage.
+The browser opens a six-step wizard: site type (blog, personal, or portfolio), font mood, color seed, palette type, complexity, and template syntax (Hiccup or HTML). A live preview panel updates on each step. The wizard generates a custom stylesheet and scaffolds a complete working site, then navigates the browser to your new homepage.
 
 ## Or scaffold from the command line
 

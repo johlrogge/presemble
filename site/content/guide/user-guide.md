@@ -804,18 +804,41 @@ Run "Connect to a Running REPL Server" in VS Code and select nREPL. The default 
 
 ## Site wizard
 
-Point `presemble serve` at an empty directory and the browser opens a welcome page. Pick a starter template and choose Hiccup or HTML. The wizard scaffolds the site and the browser navigates to the homepage.
+Point `presemble serve` at an empty directory and the browser opens a guided setup wizard. Six steps take you from zero to a fully styled, working site.
+
+### Steps
+
+| Step | What you choose |
+|---|---|
+| Site type | Blog, personal site, or portfolio |
+| Font mood | One of 7 curated type pairings |
+| Color seed | A hue in degrees (0–360) |
+| Palette type | Analogous, complementary, or triadic |
+| Complexity | Sparse to rich |
+| Template format | Hiccup (EDN) or HTML |
+
+A live CSS preview panel updates on every step. The color step includes a light/dark theme toggle.
+
+### Generated stylesheet
+
+The wizard generates a `StyleConfig` from your choices and passes it to the CSS generator, which produces a complete custom-property stylesheet using HSL color math. The stylesheet covers typography, color system, spacing, layout, and a `prefers-color-scheme` light/dark block. It is written to `assets/style.css` in the scaffolded site.
 
 ### Starter templates
 
 | Template | Contents |
 |---|---|
-| Blog | Post schema, author schema, homepage with recent posts |
-| Personal | About page, project schema, homepage |
-| Portfolio | Project schema with image slots, contact page, homepage |
+| Blog | Post schema, author schema, posts index, homepage |
+| Personal | About page, page schema, homepage |
+| Portfolio | Project schema with image slots, projects index, homepage |
+
+Each starter includes schemas, seed content, Hiccup templates, navigation partials, and the generated stylesheet.
+
+### Navigation and index pages
+
+Every starter includes shared navigation via `presemble:include` and breadcrumb navigation on item pages. Collection index pages list all items of that type. No page is a dead end.
 
 ### After scaffolding
 
-The wizard writes files to disk and the file watcher picks them up. Edit content files, see changes in the browser, use the LSP for completions and diagnostics. The normal serve workflow applies immediately.
+The wizard writes files to disk and the file watcher picks them up immediately. Edit content files, see changes in the browser, use the LSP for completions and diagnostics. The normal serve workflow applies from the first page load.
 
-`presemble init <dir>` is still available for scripted setups — it produces a hello-world `note` site without the browser wizard.
+`presemble init <dir>` is still available for scripted setups — it produces a minimal hello-world `note` site without the browser wizard.
