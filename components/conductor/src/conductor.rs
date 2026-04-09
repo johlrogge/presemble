@@ -244,6 +244,50 @@ fn resolve_cross_references(
 }
 
 /// A simple TemplateRegistry backed by the site repository (no caching).
+/// Walk a resolved DataGraph and extract all edges pointing to other pages.
+///
+/// After reference resolution, PathRef links become `Value::Record` entries
+/// containing an `href` field. This function finds those records (both at the
+/// top level and inside `Value::List`) and returns an `Edge` for each one.
+fn extract_edges_from_graph(
+    source: &site_index::UrlPath,
+    data: &template::DataGraph,
+) -> Vec<site_index::Edge> {
+    let mut edges = Vec::new();
+
+    for (slot_name, value) in data.iter() {
+        match value {
+            template::Value::Record(record) => {
+                if let Some(template::Value::Text(href)) = record.resolve(&["href"]) {
+                    edges.push(site_index::Edge {
+                        source: source.clone(),
+                        target: site_index::UrlPath::new(href),
+                        slot: slot_name.to_string(),
+                        kind: site_index::EdgeKind::PathRef,
+                    });
+                }
+            }
+            template::Value::List(items) => {
+                for item in items {
+                    if let template::Value::Record(record) = item
+                        && let Some(template::Value::Text(href)) = record.resolve(&["href"])
+                    {
+                        edges.push(site_index::Edge {
+                            source: source.clone(),
+                            target: site_index::UrlPath::new(href),
+                            slot: slot_name.to_string(),
+                            kind: site_index::EdgeKind::PathRef,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    edges
+}
+
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
     repo: site_repository::SiteRepository,
@@ -529,6 +573,20 @@ impl Conductor {
             .collect()
     }
 
+    /// Query all edges pointing to the given URL.
+    pub fn query_edges_to(&self, url: &str) -> Vec<site_index::Edge> {
+        let url_path = site_index::UrlPath::new(url);
+        let sg = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+        sg.edges_to(&url_path).into_iter().cloned().collect()
+    }
+
+    /// Query all edges originating from the given URL.
+    pub fn query_edges_from(&self, url: &str) -> Vec<site_index::Edge> {
+        let url_path = site_index::UrlPath::new(url);
+        let sg = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+        sg.edges_from(&url_path).into_iter().cloned().collect()
+    }
+
     /// Get in-memory document text, falling back to disk.
     pub fn document_text(&self, path: &Path) -> Option<String> {
         if let Some(text) = self.doc_sources.read().unwrap_or_else(|e| e.into_inner()).get(path) {
@@ -657,6 +715,44 @@ impl Conductor {
                     .filter_map(|n| n.page_data().map(|pd| template::Value::Record(pd.data.clone())))
                     .collect();
                 graph.insert(stem_key.as_str(), template::Value::List(items));
+            }
+        }
+
+        // Inject reverse references — group incoming edges by source stem
+        {
+            let sg = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+            let url_path_obj = site_index::UrlPath::new(&url_path);
+            let incoming = sg.edges_to(&url_path_obj);
+            let mut refs_by_stem: std::collections::HashMap<String, Vec<template::Value>> =
+                std::collections::HashMap::new();
+            for edge in incoming {
+                if let Some(source_node) = sg.get(&edge.source)
+                    && let Some(source_data) = source_node.page_data()
+                {
+                    let stem_str = source_data.schema_stem.as_str().to_string();
+                    refs_by_stem
+                        .entry(stem_str)
+                        .or_default()
+                        .push(template::Value::Record(source_data.data.clone()));
+                }
+            }
+            for (stem_key, items) in refs_by_stem {
+                let key = format!("_refs_{stem_key}");
+                if graph.resolve(&[&key]).is_none() {
+                    graph.insert(&key, template::Value::List(items));
+                }
+            }
+        }
+
+        // Extract edges from the fully-resolved graph and update the site graph.
+        // Collect edges first (no lock held), then acquire write lock briefly.
+        let url_path_obj = site_index::UrlPath::new(&url_path);
+        let new_edges = extract_edges_from_graph(&url_path_obj, &graph);
+        {
+            let mut sg = self.site_graph.write().unwrap_or_else(|e| e.into_inner());
+            sg.remove_edges_from(&url_path_obj);
+            for edge in new_edges {
+                sg.add_edge(edge);
             }
         }
 
@@ -1382,6 +1478,57 @@ mod link_resolution_tests {
             }
             other => panic!("expected List after resolution, got {other:?}"),
         }
+    }
+
+    // ── extract_edges_from_graph ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_edges_from_graph_record_with_href() {
+        let source = site_index::UrlPath::new("/post/hello");
+        let mut author_record = template::DataGraph::new();
+        author_record.insert("href", template::Value::Text("/author/alice".to_string()));
+        author_record.insert("name", template::Value::Text("Alice".to_string()));
+
+        let mut data = template::DataGraph::new();
+        data.insert("author", template::Value::Record(author_record));
+
+        let edges = extract_edges_from_graph(&source, &data);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target.as_str(), "/author/alice");
+        assert_eq!(edges[0].slot, "author");
+        assert_eq!(edges[0].kind, site_index::EdgeKind::PathRef);
+    }
+
+    #[test]
+    fn extract_edges_from_graph_list_of_records() {
+        let source = site_index::UrlPath::new("/index");
+        let mut r1 = template::DataGraph::new();
+        r1.insert("href", template::Value::Text("/post/a".to_string()));
+        let mut r2 = template::DataGraph::new();
+        r2.insert("href", template::Value::Text("/post/b".to_string()));
+
+        let mut data = template::DataGraph::new();
+        data.insert(
+            "posts",
+            template::Value::List(vec![
+                template::Value::Record(r1),
+                template::Value::Record(r2),
+            ]),
+        );
+
+        let edges = extract_edges_from_graph(&source, &data);
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|e| e.slot == "posts"));
+    }
+
+    #[test]
+    fn extract_edges_from_graph_skips_non_link_values() {
+        let source = site_index::UrlPath::new("/post/hello");
+        let mut data = template::DataGraph::new();
+        data.insert("title", template::Value::Text("Hello".to_string()));
+
+        let edges = extract_edges_from_graph(&source, &data);
+        assert!(edges.is_empty());
     }
 
     /// Verify that link expressions with unknown paths resolve to Absent.

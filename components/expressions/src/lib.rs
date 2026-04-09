@@ -152,6 +152,49 @@ fn sort_key_for(data: &template::DataGraph, field: &str) -> SortKey {
     }
 }
 
+// ── Edge extraction ──────────────────────────────────────────────────────────
+
+/// Walk a resolved DataGraph and extract all edges pointing to other pages.
+///
+/// After reference resolution, PathRef links become `Value::Record` entries
+/// containing an `href` field. This function finds those records (both at the
+/// top level and inside `Value::List`) and returns an `Edge` for each one.
+pub fn extract_edges(source: &site_index::UrlPath, data: &template::DataGraph) -> Vec<site_index::Edge> {
+    let mut edges = Vec::new();
+
+    for (slot_name, value) in data.iter() {
+        match value {
+            template::Value::Record(record) => {
+                if let Some(template::Value::Text(href)) = record.resolve(&["href"]) {
+                    edges.push(site_index::Edge {
+                        source: source.clone(),
+                        target: site_index::UrlPath::new(href),
+                        slot: slot_name.to_string(),
+                        kind: site_index::EdgeKind::PathRef,
+                    });
+                }
+            }
+            template::Value::List(items) => {
+                for item in items {
+                    if let template::Value::Record(record) = item
+                        && let Some(template::Value::Text(href)) = record.resolve(&["href"])
+                    {
+                        edges.push(site_index::Edge {
+                            source: source.clone(),
+                            target: site_index::UrlPath::new(href),
+                            slot: slot_name.to_string(),
+                            kind: site_index::EdgeKind::PathRef,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    edges
+}
+
 // ── REPL evaluator (new) ─────────────────────────────────────────────────────
 
 /// Evaluate an expression in the REPL context against the conductor's live state.
@@ -527,6 +570,53 @@ mod tests {
                 "expected stem 'post'"
             );
         }
+    }
+
+    // ── extract_edges ────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_edges_from_record_with_href() {
+        let source = site_index::UrlPath::new("/post/hello");
+        let mut author_record = template::DataGraph::new();
+        author_record.insert("href", template::Value::Text("/author/alice".to_string()));
+        author_record.insert("name", template::Value::Text("Alice".to_string()));
+
+        let mut data = template::DataGraph::new();
+        data.insert("author", template::Value::Record(author_record));
+
+        let edges = extract_edges(&source, &data);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target.as_str(), "/author/alice");
+        assert_eq!(edges[0].slot, "author");
+    }
+
+    #[test]
+    fn extract_edges_from_list_of_records() {
+        let source = site_index::UrlPath::new("/index");
+        let mut r1 = template::DataGraph::new();
+        r1.insert("href", template::Value::Text("/post/a".to_string()));
+        let mut r2 = template::DataGraph::new();
+        r2.insert("href", template::Value::Text("/post/b".to_string()));
+
+        let mut data = template::DataGraph::new();
+        data.insert("highlight", template::Value::List(vec![
+            template::Value::Record(r1),
+            template::Value::Record(r2),
+        ]));
+
+        let edges = extract_edges(&source, &data);
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn extract_edges_skips_non_link_values() {
+        let source = site_index::UrlPath::new("/post/hello");
+        let mut data = template::DataGraph::new();
+        data.insert("title", template::Value::Text("Hello".to_string()));
+        data.insert("body", template::Value::Html("<p>hi</p>".to_string()));
+
+        let edges = extract_edges(&source, &data);
+        assert!(edges.is_empty());
     }
 
     #[test]

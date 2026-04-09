@@ -126,6 +126,10 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
                 "suggest" => builtin_suggest(&items[1..], conductor),
                 "get-suggestions" => builtin_get_suggestions(&items[1..], conductor),
 
+                // Graph queries
+                "refs-to" => builtin_refs_to(&items[1..], conductor),
+                "refs-from" => builtin_refs_from(&items[1..], conductor),
+
                 // Arithmetic (useful for REPL)
                 "+" => builtin_add(&items[1..], conductor),
                 "-" => builtin_sub(&items[1..], conductor),
@@ -582,6 +586,58 @@ fn builtin_get_suggestions(
     }
 }
 
+// ── Graph queries ────────────────────────────────────────────────────────────
+
+fn edge_to_value(edge: &site_index::Edge) -> template::Value {
+    let kind_str = match edge.kind {
+        site_index::EdgeKind::PathRef => "path-ref",
+        site_index::EdgeKind::ThreadResult => "thread-result",
+        site_index::EdgeKind::CollectionMember => "collection-member",
+        site_index::EdgeKind::StylesheetImport => "stylesheet-import",
+        site_index::EdgeKind::StylesheetAssetRef => "stylesheet-asset-ref",
+    };
+    let mut record = template::DataGraph::new();
+    record.insert("source", template::Value::Text(edge.source.as_str().to_string()));
+    record.insert("target", template::Value::Text(edge.target.as_str().to_string()));
+    record.insert("slot", template::Value::Text(edge.slot.clone()));
+    record.insert("kind", template::Value::Text(kind_str.to_string()));
+    template::Value::Record(record)
+}
+
+/// (refs-to "/author/alice") → list of edge records pointing to that URL.
+fn builtin_refs_to(
+    args: &[Form],
+    cond: &conductor::Conductor,
+) -> Result<template::Value, String> {
+    if args.is_empty() {
+        return Err("refs-to requires 1 argument: url".into());
+    }
+    let url_val = eval_expanded(&args[0], cond)?;
+    let url_str = match &url_val {
+        template::Value::Text(s) => s.clone(),
+        _ => return Err("refs-to: url must be a string".into()),
+    };
+    let edges = cond.query_edges_to(&url_str);
+    Ok(template::Value::List(edges.iter().map(edge_to_value).collect()))
+}
+
+/// (refs-from "/post/hello") → list of edge records originating from that URL.
+fn builtin_refs_from(
+    args: &[Form],
+    cond: &conductor::Conductor,
+) -> Result<template::Value, String> {
+    if args.is_empty() {
+        return Err("refs-from requires 1 argument: url".into());
+    }
+    let url_val = eval_expanded(&args[0], cond)?;
+    let url_str = match &url_val {
+        template::Value::Text(s) => s.clone(),
+        _ => return Err("refs-from: url must be a string".into()),
+    };
+    let edges = cond.query_edges_from(&url_str);
+    Ok(template::Value::List(edges.iter().map(edge_to_value).collect()))
+}
+
 // ── Arithmetic ───────────────────────────────────────────────────────────────
 
 fn builtin_add(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
@@ -703,6 +759,9 @@ const DOCS: &[(&str, &str, &str)] = &[
     // Editorial
     ("suggest", "(suggest \"file\" \"slot\" \"value\" \"reason\")", "Create an editorial suggestion."),
     ("get-suggestions", "(get-suggestions \"file\")", "Get pending suggestions for a file."),
+    // Graph queries
+    ("refs-to", "(refs-to \"/author/alice\")", "Returns all edges pointing to the given URL. Each edge is a map with :source, :target, :slot, :kind."),
+    ("refs-from", "(refs-from \"/post/hello\")", "Returns all edges originating from the given URL."),
     // Arithmetic
     ("+", "(+ a b ...)", "Add numbers."),
     ("-", "(- a b ...)", "Subtract numbers. (- a) negates."),
@@ -992,5 +1051,114 @@ mod tests {
         let cond = empty_conductor();
         let result = eval_str("#{1 2}", &cond);
         assert!(result.is_err());
+    }
+
+    // ── graph query builtins ─────────────────────────────────────────────────
+
+    /// Build a conductor with two edges already loaded into the site graph.
+    /// post/hello → author/alice (slot "author", PathRef)
+    /// post/world → author/alice (slot "author", PathRef)
+    fn conductor_with_edges() -> conductor::Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .schema("post", POST_SCHEMA_SRC)
+            .build();
+        let cond = conductor::Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap();
+
+        let mut graph = site_index::SiteGraph::new();
+        graph.add_edge(site_index::Edge {
+            source: site_index::UrlPath::new("/post/hello"),
+            target: site_index::UrlPath::new("/author/alice"),
+            slot: "author".to_string(),
+            kind: site_index::EdgeKind::PathRef,
+        });
+        graph.add_edge(site_index::Edge {
+            source: site_index::UrlPath::new("/post/world"),
+            target: site_index::UrlPath::new("/author/alice"),
+            slot: "author".to_string(),
+            kind: site_index::EdgeKind::PathRef,
+        });
+        graph.add_edge(site_index::Edge {
+            source: site_index::UrlPath::new("/post/hello"),
+            target: site_index::UrlPath::new("/tag/rust"),
+            slot: "tags".to_string(),
+            kind: site_index::EdgeKind::PathRef,
+        });
+        cond.set_site_graph(graph);
+        cond
+    }
+
+    #[test]
+    fn refs_to_returns_edges_pointing_to_url() {
+        let cond = conductor_with_edges();
+        let result = eval_str(r#"(refs-to "/author/alice")"#, &cond).unwrap();
+        if let template::Value::List(items) = result {
+            assert_eq!(items.len(), 2, "two posts reference /author/alice");
+            // Check that each item is a record with the expected keys
+            for item in &items {
+                assert!(matches!(item, template::Value::Record(_)), "each edge should be a Record");
+                if let template::Value::Record(r) = item {
+                    assert!(
+                        matches!(r.resolve(&["target"]), Some(template::Value::Text(t)) if t == "/author/alice"),
+                        "target should be /author/alice"
+                    );
+                    assert!(
+                        matches!(r.resolve(&["kind"]), Some(template::Value::Text(k)) if k == "path-ref"),
+                        "kind should be path-ref"
+                    );
+                }
+            }
+        } else {
+            panic!("expected List from refs-to, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn refs_to_unknown_url_returns_empty_list() {
+        let cond = conductor_with_edges();
+        let result = eval_str(r#"(refs-to "/nobody")"#, &cond).unwrap();
+        assert!(matches!(&result, template::Value::List(items) if items.is_empty()));
+    }
+
+    #[test]
+    fn refs_from_returns_edges_originating_from_url() {
+        let cond = conductor_with_edges();
+        let result = eval_str(r#"(refs-from "/post/hello")"#, &cond).unwrap();
+        if let template::Value::List(items) = result {
+            assert_eq!(items.len(), 2, "/post/hello has two outgoing refs: author + tag");
+            for item in &items {
+                assert!(matches!(item, template::Value::Record(_)));
+                if let template::Value::Record(r) = item {
+                    assert!(
+                        matches!(r.resolve(&["source"]), Some(template::Value::Text(s)) if s == "/post/hello"),
+                        "source should be /post/hello"
+                    );
+                }
+            }
+        } else {
+            panic!("expected List from refs-from, got {result:?}");
+        }
+    }
+
+    #[test]
+    fn refs_from_unknown_url_returns_empty_list() {
+        let cond = conductor_with_edges();
+        let result = eval_str(r#"(refs-from "/nobody")"#, &cond).unwrap();
+        assert!(matches!(&result, template::Value::List(items) if items.is_empty()));
+    }
+
+    #[test]
+    fn refs_to_missing_arg_returns_error() {
+        let cond = empty_conductor();
+        let result = eval_str("(refs-to)", &cond);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("refs-to requires 1 argument"));
+    }
+
+    #[test]
+    fn refs_from_missing_arg_returns_error() {
+        let cond = empty_conductor();
+        let result = eval_str("(refs-from)", &cond);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("refs-from requires 1 argument"));
     }
 }
