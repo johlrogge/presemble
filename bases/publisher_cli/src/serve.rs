@@ -766,11 +766,27 @@ async fn create_content_handler(
         stem: req.stem.clone(),
         slug: req.slug.clone(),
     }) {
-        Ok(conductor::Response::ContentCreated(url)) => axum::Json(CreateContentResponse {
-            ok: true,
-            url: Some(url),
-            error: None,
-        }),
+        Ok(conductor::Response::ContentCreated(url)) => {
+            // Trigger a full publisher rebuild so output HTML exists for the new page
+            let url_config = crate::UrlConfig::default();
+            if let Err(e) = crate::build_for_serve(&state.site_dir, &url_config) {
+                return axum::Json(CreateContentResponse {
+                    ok: true,
+                    url: Some(url),
+                    error: Some(format!("content created but build failed: {e}")),
+                });
+            }
+            // Notify browser to reload — smart navigation will go to the new page
+            let _ = state.reload_tx.send(BrowserMessage::Reload {
+                pages: vec![url.clone()],
+                anchor: None,
+            });
+            axum::Json(CreateContentResponse {
+                ok: true,
+                url: Some(url),
+                error: None,
+            })
+        }
         Ok(conductor::Response::Error(e)) => axum::Json(CreateContentResponse {
             ok: false,
             url: None,
