@@ -1041,9 +1041,16 @@ impl Conductor {
             Command::GetGrammar { stem } => {
                 CommandResult::with_response(Response::SchemaSource(self.schema_source(&stem)))
             }
-            Command::GetDocumentText { path } => CommandResult::with_response(
-                Response::DocumentText(self.document_text(Path::new(&path))),
-            ),
+            Command::GetDocumentText { path } => {
+                // Accept both absolute paths and site-relative paths (e.g. "content/post/hello.md").
+                // A path that does not start with '/' is resolved relative to site_dir.
+                let resolved = if Path::new(&path).is_absolute() {
+                    PathBuf::from(&path)
+                } else {
+                    self.site_dir.join(&path)
+                };
+                CommandResult::with_response(Response::DocumentText(self.document_text(&resolved)))
+            }
             Command::GetBuildErrors => {
                 // TODO: implement build error tracking
                 CommandResult::with_response(Response::BuildErrors(HashMap::new()))
@@ -1520,6 +1527,35 @@ impl Conductor {
                     }
                     None => CommandResult::error(format!("unknown template: {template_name}")),
                 }
+            }
+            Command::ListContent => {
+                let content_dir = self.site_dir.join("content");
+                let mut paths = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&content_dir) {
+                    for entry in entries.flatten() {
+                        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                            let stem = entry.file_name().to_string_lossy().to_string();
+                            let type_dir = content_dir.join(&stem);
+                            if let Ok(files) = std::fs::read_dir(&type_dir) {
+                                for f in files.flatten() {
+                                    let name = f.file_name().to_string_lossy().to_string();
+                                    if name.ends_with(".md") {
+                                        paths.push(format!("content/{stem}/{name}"));
+                                    }
+                                }
+                            }
+                        }
+                        // Also handle root-level content files (index.md)
+                        if entry.file_type().is_ok_and(|t| t.is_file()) {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if name.ends_with(".md") {
+                                paths.push(format!("content/{name}"));
+                            }
+                        }
+                    }
+                }
+                paths.sort();
+                CommandResult::with_response(Response::ContentList(paths))
             }
         }
     }

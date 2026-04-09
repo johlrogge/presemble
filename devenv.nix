@@ -26,7 +26,7 @@ in
   claude.code.mcpServers.presemble = {
     type = "stdio";
     command = "cargo";
-    args = [ "polylith" "cargo" "--profile" "dev" "run" "--bin" "presemble" "--" "mcp" "site/" ];
+    args = [ "polylith" "cargo" "--profile" "dev" "run" "--bin" "presemble" "--" "mcp" ];
   };
 
   enterShell = ''

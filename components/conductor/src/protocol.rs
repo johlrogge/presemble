@@ -91,6 +91,8 @@ pub enum Command {
         complexity: String,
         theme: String,
     },
+    /// List all content files in the site.
+    ListContent,
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -112,6 +114,8 @@ pub enum Response {
     DirtyBuffers(Vec<String>),
     /// Distinct file paths that have at least one pending suggestion (sorted).
     SuggestionFiles(Vec<String>),
+    /// List of content-relative paths for all content files.
+    ContentList(Vec<String>),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.

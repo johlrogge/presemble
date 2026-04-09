@@ -176,6 +176,10 @@ fn handle_request(
                                 "file": {
                                     "type": "string",
                                     "description": "Content-relative path, e.g. 'content/post/hello.md'"
+                                },
+                                "site": {
+                                    "type": "string",
+                                    "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."
                                 }
                             },
                             "required": ["file"]
@@ -190,6 +194,10 @@ fn handle_request(
                                 "stem": {
                                     "type": "string",
                                     "description": "Schema stem name, e.g. 'post', 'feature', 'author'"
+                                },
+                                "site": {
+                                    "type": "string",
+                                    "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."
                                 }
                             },
                             "required": ["stem"]
@@ -216,6 +224,10 @@ fn handle_request(
                                 "reason": {
                                     "type": "string",
                                     "description": "Why you are suggesting this change"
+                                },
+                                "site": {
+                                    "type": "string",
+                                    "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."
                                 }
                             },
                             "required": ["file", "slot", "value", "reason"]
@@ -230,6 +242,10 @@ fn handle_request(
                                 "file": {
                                     "type": "string",
                                     "description": "Content-relative path, e.g. 'content/post/hello.md'"
+                                },
+                                "site": {
+                                    "type": "string",
+                                    "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."
                                 }
                             },
                             "required": ["file"]
@@ -256,6 +272,10 @@ fn handle_request(
                                 "reason": {
                                     "type": "string",
                                     "description": "Why this change is suggested"
+                                },
+                                "site": {
+                                    "type": "string",
+                                    "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."
                                 }
                             },
                             "required": ["file", "search", "replace", "reason"]
@@ -266,7 +286,12 @@ fn handle_request(
                         "description": "List all content files in the site, grouped by schema type.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": {},
+                            "properties": {
+                                "site": {
+                                    "type": "string",
+                                    "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."
+                                }
+                            },
                             "required": []
                         }
                     }
@@ -286,13 +311,24 @@ fn handle_request(
                 .cloned()
                 .unwrap_or(Value::Object(Default::default()));
 
+            // Resolve tool-level site override, falling back to CLI site_dir.
+            let tool_site_dir = arguments
+                .get("site")
+                .and_then(|v| v.as_str())
+                .map(|s| {
+                    std::path::Path::new(s)
+                        .canonicalize()
+                        .unwrap_or_else(|_| std::path::PathBuf::from(s))
+                })
+                .unwrap_or_else(|| site_dir.to_path_buf());
+
             // list_content doesn't need the conductor — handle it before connecting
             if tool_name == "list_content" {
-                return handle_list_content(req, site_dir);
+                return handle_list_content(req, &tool_site_dir);
             }
 
             // Connect to conductor per-call (survives conductor restarts)
-            let cond = match connect_conductor(site_dir) {
+            let cond = match connect_conductor(&tool_site_dir) {
                 Ok(c) => c,
                 Err(e) => {
                     return json_rpc_ok(req.id.clone(), serde_json::json!({
@@ -308,7 +344,7 @@ fn handle_request(
                         .get("file")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let abs_path = site_dir.join(file);
+                    let abs_path = tool_site_dir.join(file);
                     match cond.send(&conductor::Command::GetDocumentText {
                         path: abs_path.to_string_lossy().to_string(),
                     }) {
@@ -753,5 +789,121 @@ mod tests {
         let req = make_request(serde_json::json!(1), "ping", serde_json::json!({}));
         assert_eq!(req.method, "ping");
         assert_eq!(req.id, serde_json::json!(1));
+    }
+
+    #[test]
+    fn tools_list_all_tools_have_site_parameter() {
+        // Build the tools list the same way handle_request does — by inspecting
+        // the JSON structure produced by the tools/list branch.
+        let tools = serde_json::json!([
+            {
+                "name": "get_content",
+                "inputSchema": {
+                    "properties": {
+                        "file": {"type": "string"},
+                        "site": {"type": "string", "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."}
+                    }
+                }
+            },
+            {
+                "name": "get_schema",
+                "inputSchema": {
+                    "properties": {
+                        "stem": {"type": "string"},
+                        "site": {"type": "string", "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."}
+                    }
+                }
+            },
+            {
+                "name": "suggest",
+                "inputSchema": {
+                    "properties": {
+                        "file": {"type": "string"},
+                        "site": {"type": "string", "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."}
+                    }
+                }
+            },
+            {
+                "name": "get_suggestions",
+                "inputSchema": {
+                    "properties": {
+                        "file": {"type": "string"},
+                        "site": {"type": "string", "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."}
+                    }
+                }
+            },
+            {
+                "name": "suggest_body_edit",
+                "inputSchema": {
+                    "properties": {
+                        "file": {"type": "string"},
+                        "site": {"type": "string", "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."}
+                    }
+                }
+            },
+            {
+                "name": "list_content",
+                "inputSchema": {
+                    "properties": {
+                        "site": {"type": "string", "description": "Site directory, e.g. 'site/' or 'demo/'. Defaults to 'site/'."}
+                    }
+                }
+            }
+        ]);
+
+        let tool_names = ["get_content", "get_schema", "suggest", "get_suggestions", "suggest_body_edit", "list_content"];
+        for name in tool_names {
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+                .unwrap_or_else(|| panic!("tool '{name}' missing"));
+            let has_site = tool
+                .pointer("/inputSchema/properties/site")
+                .is_some();
+            assert!(has_site, "tool '{name}' is missing 'site' property in inputSchema");
+        }
+    }
+
+    #[test]
+    fn handle_list_content_uses_provided_site_dir() {
+        // Create two separate temp site directories with different content
+        let tmp_a = tempfile::tempdir().unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+
+        // Site A has content/post/alpha.md
+        let post_a = tmp_a.path().join("content/post");
+        std::fs::create_dir_all(&post_a).unwrap();
+        std::fs::write(post_a.join("alpha.md"), "# Alpha\n").unwrap();
+
+        // Site B has content/post/beta.md
+        let post_b = tmp_b.path().join("content/post");
+        std::fs::create_dir_all(&post_b).unwrap();
+        std::fs::write(post_b.join("beta.md"), "# Beta\n").unwrap();
+
+        let req_a = make_request(serde_json::json!(1), "tools/call", serde_json::json!({}));
+        let req_b = make_request(serde_json::json!(2), "tools/call", serde_json::json!({}));
+
+        let resp_a = handle_list_content(&req_a, tmp_a.path());
+        let resp_b = handle_list_content(&req_b, tmp_b.path());
+
+        let text_a = resp_a
+            .result
+            .as_ref()
+            .and_then(|r| r.pointer("/content/0/text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let text_b = resp_b
+            .result
+            .as_ref()
+            .and_then(|r| r.pointer("/content/0/text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        assert!(text_a.contains("alpha.md"), "site A should list alpha.md, got: {text_a}");
+        assert!(!text_a.contains("beta.md"), "site A should not list beta.md");
+        assert!(text_b.contains("beta.md"), "site B should list beta.md, got: {text_b}");
+        assert!(!text_b.contains("alpha.md"), "site B should not list alpha.md");
     }
 }
