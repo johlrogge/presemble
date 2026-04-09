@@ -882,7 +882,7 @@ el.focus();
 if(!el.textContent.trim()){var r=document.createRange();r.selectNodeContents(el);r.collapse(true);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}
 var toolbar=document.createElement('div');
 toolbar.className='presemble-edit-toolbar';
-toolbar.innerHTML='<button class="presemble-save" title="Suggest">&#10003;</button><button class="presemble-undo" title="Cancel">&#8630;</button>';
+toolbar.innerHTML='<button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Cancel">&#8630;</button>';
 el.after(toolbar);
 function cleanup(){
 el.contentEditable='false';
@@ -910,7 +910,7 @@ if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
 el.innerText=original;
 });
 }
-toolbar.querySelector('.presemble-save').onclick=function(ev){ev.stopPropagation();suggest();};
+toolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();suggest();};
 toolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();el.innerText=original;cleanup();};
 el.addEventListener('keydown',function handler(ev){
 if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();suggest();el.removeEventListener('keydown',handler);}
