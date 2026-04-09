@@ -30,6 +30,12 @@ The conductor is the single source of truth for all site state. Every client —
 - Read content files from disk (`fs::read_to_string`, `fs::read_dir`)
 - Build absolute paths from a `site_dir`
 - Maintain their own copy of resolution/evaluation logic
+- Require environment variables or hardcoded paths to find the conductor
+
+**Per-call site targeting:**
+- Clients that serve multiple sites (e.g. the MCP server) accept the site directory as a parameter on each request, not as a startup argument
+- The conductor socket URL is derived from the canonical site directory path — clients connect to the right conductor by passing the right site dir
+- No environment variables, no configuration files, no discovery protocols — the site dir is the only input needed to connect
 
 **Conductor daemon lifecycle:**
 - First client to need the conductor starts it (via `ensure_conductor`)
@@ -42,33 +48,35 @@ The conductor is the single source of truth for all site state. Every client —
 
 2. **No duplication.** `list_content`, `get_content`, link resolution, and schema lookup are implemented once in the conductor, not reimplemented in each client.
 
-3. **Remote editing (future).** The local conductor can proxy to a remote conductor. Clients don't change — they still talk to the local daemon. This is the foundation for multiplayer editing.
+3. **No configuration.** Clients don't need environment variables or config files to find the conductor. The site directory is the only input. This eliminates a class of misconfiguration errors.
 
-4. **Testability.** Testing a client means testing protocol translation, not business logic. Business logic tests live in the conductor.
+4. **Remote editing (future).** The local conductor can proxy to a remote conductor. Clients don't change — they still talk to the local daemon. This is the foundation for multiplayer editing.
 
-## Current violations
+5. **Testability.** Testing a client means testing protocol translation, not business logic. Business logic tests live in the conductor.
 
-- `mcp_server::handle_list_content` reads `site_dir.join("content")` directly via `fs::read_dir`
-- `mcp_server::get_content` builds `site_dir.join(file)` to construct absolute paths
-- `devenv.nix` hardcodes MCP to `site/` — should use the same site_dir as the running conductor
+## Remaining violations
+
 - `publisher_cli::serve` maintains its own build pipeline (`build_for_serve`, `rebuild_affected`) alongside the conductor
 - `evaluator` has duplicated link resolution logic from `expressions`
+- `mcp_server::handle_list_content` still reads the filesystem (conductor `ListContent` command exists but is not yet wired)
 
 ## Migration path
 
-1. **Immediate:** Add `ListContent` conductor command. MCP `list_content` becomes a conductor client call.
-2. **Immediate:** MCP `get_content` sends content-relative paths to conductor, not absolute paths.
-3. **Immediate:** Fix `devenv.nix` — MCP site_dir must match `presemble serve` site_dir.
-4. **M4:** Serve delegates build/render to conductor. Serve becomes a pure HTTP frontend.
-5. **M4:** Extract duplicated evaluation logic from conductor into shared component.
-6. **Future:** Conductor-to-conductor proxy for remote/multiplayer editing.
+1. ~~Add `ListContent` conductor command~~ — done
+2. ~~MCP per-call `site` parameter~~ — done
+3. ~~Remove hardcoded `site/` from devenv.nix~~ — done
+4. Wire MCP `list_content` to conductor `ListContent` command
+5. **M4:** Serve delegates build/render to conductor. Serve becomes a pure HTTP frontend.
+6. **M4:** Extract duplicated evaluation logic from conductor into shared component.
+7. **Future:** Conductor-to-conductor proxy for remote/multiplayer editing.
 
 ## Alternatives considered
-- **Each client manages its own state** — the current reality. Causes duplication, stale reads, and makes remote editing impossible.
+- **Environment variable for site dir** — rejected. Adds a source of error with no benefit. The site dir is already a natural parameter of each operation.
+- **Auto-discovery of running conductors** — rejected. Too much magic. The site dir deterministically maps to a socket URL.
+- **Each client manages its own state** — the pre-ADR reality. Causes duplication, stale reads, and makes remote editing impossible.
 - **Shared library instead of IPC** — clients link the conductor as a library. Simpler but prevents remote operation and multiplayer.
 
 ## Consequences
 - All new MCP/REPL/serve features must go through conductor commands
 - Adding a conductor command is the way to expose new capabilities to all clients simultaneously
 - The conductor's command vocabulary becomes the project's API surface
-- Clients need the same site_dir as the serve process to connect to the right conductor
