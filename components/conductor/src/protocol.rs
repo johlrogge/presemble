@@ -78,6 +78,7 @@ pub enum Command {
         seed_color: String,
         palette_type: String,
         complexity: String,
+        theme: String,
     },
 }
 

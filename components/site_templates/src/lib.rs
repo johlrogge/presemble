@@ -30,33 +30,100 @@ impl SiteTemplate {
             let path = file.path();
             let path_str = path.to_string_lossy();
 
-            // Skip template files that don't match the chosen format.
-            // templates/hiccup/ or templates/html/ — only write the matching one.
-            if path_str.contains("templates/hiccup/") && format != "hiccup" {
-                continue;
-            }
-            if path_str.contains("templates/html/") && format != "html" {
+            // HTML template directories are no longer stored on disk — templates are
+            // generated from hiccup source at scaffold time instead.
+            if path_str.contains("templates/html/") {
                 continue;
             }
 
-            // Map templates/{format}/* to templates/*
-            let target_path = if path_str.contains(&format!("templates/{format}/")) {
-                let remapped = path_str.replacen(&format!("templates/{format}/"), "templates/", 1);
-                target.join(std::path::Path::new(&remapped))
-            } else {
-                target.join(path)
-            };
+            let is_hiccup_template = path_str.contains("templates/hiccup/");
 
-            if let Some(parent) = target_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+            if is_hiccup_template && format == "hiccup" {
+                // Remap templates/hiccup/* → templates/* and write as-is
+                let remapped = path_str.replacen("templates/hiccup/", "templates/", 1);
+                let target_path = target.join(std::path::Path::new(&remapped));
+                if let Some(parent) = target_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+                }
+                std::fs::write(&target_path, file.contents())
+                    .map_err(|e| format!("write {}: {e}", target_path.display()))?;
+            } else if is_hiccup_template && format == "html" {
+                // Convert hiccup → HTML and write with .html extension
+                let src = std::str::from_utf8(file.contents())
+                    .map_err(|e| format!("utf8 error in {}: {e}", path_str))?;
+                let nodes = template::parse_template_hiccup(src)
+                    .map_err(|e| format!("hiccup parse error in {}: {e}", path_str))?;
+                let html = serialize_nodes_preserve_presemble(&nodes);
+                // Remap templates/hiccup/* → templates/*, change extension to .html
+                let remapped = path_str.replacen("templates/hiccup/", "templates/", 1);
+                let remapped_html = if remapped.ends_with(".hiccup") {
+                    format!("{}.html", &remapped[..remapped.len() - ".hiccup".len()])
+                } else {
+                    remapped
+                };
+                let target_path = target.join(std::path::Path::new(&remapped_html));
+                if let Some(parent) = target_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+                }
+                std::fs::write(&target_path, html)
+                    .map_err(|e| format!("write {}: {e}", target_path.display()))?;
+            } else if !is_hiccup_template {
+                // Non-template file: write as-is at its original relative path
+                let target_path = target.join(path);
+                if let Some(parent) = target_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+                }
+                std::fs::write(&target_path, file.contents())
+                    .map_err(|e| format!("write {}: {e}", target_path.display()))?;
             }
-            std::fs::write(&target_path, file.contents())
-                .map_err(|e| format!("write {}: {e}", target_path.display()))?;
         }
         for subdir in dir.dirs() {
             self.write_dir(subdir, target, format)?;
         }
         Ok(())
+    }
+}
+
+/// Serialize template nodes to HTML/XML, preserving presemble directive elements as XML tags.
+///
+/// Unlike `template::serialize_nodes`, which strips presemble elements (designed for final
+/// rendered output), this serializer keeps them as XML so the resulting `.html` templates
+/// can be loaded and used by the template engine.
+fn serialize_nodes_preserve_presemble(nodes: &[template::dom::Node]) -> String {
+    let mut out = String::new();
+    for node in nodes {
+        serialize_node_preserve_presemble(node, &mut out);
+    }
+    out
+}
+
+fn serialize_node_preserve_presemble(node: &template::dom::Node, out: &mut String) {
+    match node {
+        template::dom::Node::Text(text) => out.push_str(&template::html_escape_text(text)),
+        template::dom::Node::Element(el) => serialize_element_preserve_presemble(el, out),
+    }
+}
+
+fn serialize_element_preserve_presemble(el: &template::dom::Element, out: &mut String) {
+    out.push('<');
+    out.push_str(&el.name);
+    for (k, v) in &el.attrs {
+        out.push(' ');
+        out.push_str(k);
+        out.push_str("=\"");
+        out.push_str(&template::html_escape_attr(&v.to_html_value()));
+        out.push('"');
+    }
+    if el.children.is_empty() {
+        out.push_str(" />");
+    } else {
+        out.push('>');
+        for child in &el.children {
+            serialize_node_preserve_presemble(child, out);
+        }
+        out.push_str("</");
+        out.push_str(&el.name);
+        out.push('>');
     }
 }
 
@@ -236,6 +303,35 @@ impl FromStr for PaletteType {
     }
 }
 
+/// Light or dark color scheme.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
+}
+
+impl fmt::Display for Theme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Theme::Light => write!(f, "Light"),
+            Theme::Dark => write!(f, "Dark"),
+        }
+    }
+}
+
+impl FromStr for Theme {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "light" => Ok(Theme::Light),
+            "dark" => Ok(Theme::Dark),
+            other => Err(format!("unknown theme: {other}")),
+        }
+    }
+}
+
 /// Controls how many CSS custom properties are emitted.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Complexity {
@@ -275,6 +371,7 @@ pub struct StyleConfig {
     pub seed_color: String,
     pub palette_type: PaletteType,
     pub complexity: Complexity,
+    pub theme: Theme,
 }
 
 impl Default for StyleConfig {
@@ -284,6 +381,7 @@ impl Default for StyleConfig {
             seed_color: "#2563eb".to_owned(),
             palette_type: PaletteType::Cool,
             complexity: Complexity::Simple,
+            theme: Theme::Light,
         }
     }
 }
@@ -357,11 +455,25 @@ pub fn generate_css(config: &StyleConfig) -> String {
     } else {
         rotate_hue(h, 180)
     };
+    let secondary_h = if offsets.len() > 2 {
+        Some(rotate_hue(h, offsets[2]))
+    } else {
+        None
+    };
 
     let color_primary = hsl_to_css(primary_h, s, l);
     let color_accent = hsl_to_css(accent_h, s, l);
-    let color_bg = hsl_to_css(primary_h, s * 0.1, 98.0);
-    let color_text = hsl_to_css(primary_h, s * 0.15, 15.0);
+
+    let (color_bg, color_text) = match config.theme {
+        Theme::Light => (
+            hsl_to_css(primary_h, s * 0.1, 98.0),
+            hsl_to_css(primary_h, s * 0.15, 15.0),
+        ),
+        Theme::Dark => (
+            hsl_to_css(primary_h, s * 0.15, 10.0),
+            hsl_to_css(primary_h, s * 0.1, 90.0),
+        ),
+    };
 
     let mut vars = format!(
         "  --color-primary: {color_primary};\n\
@@ -372,14 +484,29 @@ pub fn generate_css(config: &StyleConfig) -> String {
            --font-body: '{b_font}', sans-serif;\n"
     );
 
+    if let Some(sh) = secondary_h {
+        let color_secondary = hsl_to_css(sh, s, l);
+        vars.push_str(&format!("  --color-secondary: {color_secondary};\n"));
+    }
+
     if config.complexity == Complexity::Involved {
         let color_primary_light = hsl_to_css(primary_h, s * 0.6, (l + 20.0).min(90.0));
         let color_primary_dark = hsl_to_css(primary_h, s, (l - 15.0).max(5.0));
         let color_accent_light = hsl_to_css(accent_h, s * 0.6, (l + 20.0).min(90.0));
         let color_accent_dark = hsl_to_css(accent_h, s, (l - 15.0).max(5.0));
-        let color_surface = hsl_to_css(primary_h, s * 0.05, 96.0);
-        let color_text_muted = hsl_to_css(primary_h, s * 0.1, 45.0);
-        let color_border = hsl_to_css(primary_h, s * 0.1, 80.0);
+
+        let (color_surface, color_text_muted, color_border) = match config.theme {
+            Theme::Light => (
+                hsl_to_css(primary_h, s * 0.05, 96.0),
+                hsl_to_css(primary_h, s * 0.1, 45.0),
+                hsl_to_css(primary_h, s * 0.1, 80.0),
+            ),
+            Theme::Dark => (
+                hsl_to_css(primary_h, s * 0.05, 14.0),
+                hsl_to_css(primary_h, s * 0.1, 60.0),
+                hsl_to_css(primary_h, s * 0.1, 25.0),
+            ),
+        };
 
         vars.push_str(&format!(
             "  --color-primary-light: {color_primary_light};\n\
@@ -395,6 +522,36 @@ pub fn generate_css(config: &StyleConfig) -> String {
              --spacing-xl: 4rem;\n"
         ));
     }
+
+    let involved_rules = if config.complexity == Complexity::Involved {
+        "\
+blockquote {\n\
+  border-left: 3px solid var(--color-accent-light);\n\
+  padding: var(--spacing-sm) var(--spacing-md);\n\
+  background: var(--color-surface);\n\
+  color: var(--color-text-muted);\n\
+  border-radius: 0 4px 4px 0;\n\
+}\n\
+\n\
+article {\n\
+  border: 1px solid var(--color-border);\n\
+  border-radius: 8px;\n\
+  padding: var(--spacing-md);\n\
+  background: var(--color-surface);\n\
+  margin-bottom: var(--spacing-lg);\n\
+}\n\
+\n\
+h1, h2 {\n\
+  border-bottom: 2px solid var(--color-primary-light);\n\
+  padding-bottom: var(--spacing-sm);\n\
+}\n\
+\n\
+a:hover {\n\
+  color: var(--color-accent-dark);\n\
+}\n"
+    } else {
+        ""
+    };
 
     format!(
         "/* Generated by Presemble — move @import to <link> tags for production performance */\n\
@@ -462,7 +619,8 @@ pub fn generate_css(config: &StyleConfig) -> String {
          \n\
          .breadcrumb a:hover {{\n\
            text-decoration: underline;\n\
-         }}\n"
+         }}\n\
+         {involved_rules}"
     )
 }
 
@@ -731,8 +889,33 @@ mod tests {
         t.scaffold(dir.path(), "html", &StyleConfig::default()).unwrap();
 
         assert!(dir.path().join("templates/post/item.html").exists());
+        assert!(dir.path().join("templates/author/item.html").exists());
+        assert!(dir.path().join("templates/nav.html").exists());
         // Hiccup templates should NOT be present
         assert!(!dir.path().join("templates/post/item.hiccup").exists());
+    }
+
+    #[test]
+    fn scaffold_blog_html_content_contains_nav_element() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = template_by_name("blog").unwrap();
+        t.scaffold(dir.path(), "html", &StyleConfig::default()).unwrap();
+
+        let nav_html = std::fs::read_to_string(dir.path().join("templates/nav.html")).unwrap();
+        assert!(nav_html.contains("<nav"), "converted nav.html should contain <nav element");
+    }
+
+    #[test]
+    fn scaffold_blog_html_content_contains_presemble_include() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = template_by_name("blog").unwrap();
+        t.scaffold(dir.path(), "html", &StyleConfig::default()).unwrap();
+
+        let post_html = std::fs::read_to_string(dir.path().join("templates/post/item.html")).unwrap();
+        assert!(
+            post_html.contains("presemble:include"),
+            "converted post template should contain presemble:include reference"
+        );
     }
 
     #[test]
@@ -763,5 +946,159 @@ mod tests {
         let css = std::fs::read_to_string(dir.path().join("assets/style.css")).unwrap();
         assert!(css.contains("JetBrains Mono"), "expected techy heading font");
         assert!(css.contains("--color-primary:"), "expected color vars");
+    }
+
+    // ── palette hue offsets ─────────────────────────────────────────────────
+
+    #[test]
+    fn warm_and_cool_produce_different_accent_for_same_seed() {
+        let warm = StyleConfig {
+            palette_type: PaletteType::Warm,
+            ..Default::default()
+        };
+        let cool = StyleConfig {
+            palette_type: PaletteType::Cool,
+            ..Default::default()
+        };
+        let warm_css = generate_css(&warm);
+        let cool_css = generate_css(&cool);
+        // Extract --color-accent values and compare
+        let warm_accent = warm_css
+            .lines()
+            .find(|l| l.contains("--color-accent:"))
+            .expect("warm should have --color-accent");
+        let cool_accent = cool_css
+            .lines()
+            .find(|l| l.contains("--color-accent:"))
+            .expect("cool should have --color-accent");
+        assert_ne!(warm_accent, cool_accent, "Warm and Cool should produce different accent colors");
+    }
+
+    #[test]
+    fn bold_palette_emits_secondary_color() {
+        let config = StyleConfig {
+            palette_type: PaletteType::Bold,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        assert!(css.contains("--color-secondary:"), "Bold palette should emit --color-secondary");
+    }
+
+    #[test]
+    fn cool_palette_does_not_emit_secondary_color() {
+        let config = StyleConfig {
+            palette_type: PaletteType::Cool,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        assert!(!css.contains("--color-secondary:"), "Cool palette should not emit --color-secondary");
+    }
+
+    #[test]
+    fn warm_palette_emits_secondary_color() {
+        let config = StyleConfig {
+            palette_type: PaletteType::Warm,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        assert!(css.contains("--color-secondary:"), "Warm palette should emit --color-secondary");
+    }
+
+    // ── Theme ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn theme_dark_produces_low_lightness_bg() {
+        let config = StyleConfig {
+            theme: Theme::Dark,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        // --color-bg should contain lightness 10.0%
+        let bg_line = css
+            .lines()
+            .find(|l| l.contains("--color-bg:"))
+            .expect("should have --color-bg");
+        assert!(bg_line.contains("10.0%"), "Dark theme --color-bg should have lightness 10.0%, got: {bg_line}");
+    }
+
+    #[test]
+    fn theme_light_produces_high_lightness_bg() {
+        let config = StyleConfig {
+            theme: Theme::Light,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        let bg_line = css
+            .lines()
+            .find(|l| l.contains("--color-bg:"))
+            .expect("should have --color-bg");
+        assert!(bg_line.contains("98.0%"), "Light theme --color-bg should have lightness 98.0%, got: {bg_line}");
+    }
+
+    #[test]
+    fn theme_dark_involved_surface_is_dark() {
+        let config = StyleConfig {
+            theme: Theme::Dark,
+            complexity: Complexity::Involved,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        let surface_line = css
+            .lines()
+            .find(|l| l.contains("--color-surface:"))
+            .expect("should have --color-surface");
+        assert!(surface_line.contains("14.0%"), "Dark Involved --color-surface should have lightness 14.0%, got: {surface_line}");
+    }
+
+    // ── Involved structural CSS ──────────────────────────────────────────────
+
+    #[test]
+    fn involved_css_contains_blockquote_rule() {
+        let config = StyleConfig {
+            complexity: Complexity::Involved,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        assert!(css.contains("blockquote"), "Involved CSS should contain blockquote rule");
+        assert!(css.contains("var(--color-accent-light)"), "blockquote should reference --color-accent-light");
+    }
+
+    #[test]
+    fn involved_css_contains_article_rule() {
+        let config = StyleConfig {
+            complexity: Complexity::Involved,
+            ..Default::default()
+        };
+        let css = generate_css(&config);
+        assert!(css.contains("article"), "Involved CSS should contain article rule");
+    }
+
+    #[test]
+    fn simple_css_does_not_contain_blockquote_rule() {
+        let config = StyleConfig::default(); // Simple
+        let css = generate_css(&config);
+        assert!(!css.contains("blockquote"), "Simple CSS should not contain blockquote rule");
+    }
+
+    // ── Theme FromStr round-trip ──────────────────────────────────────────────
+
+    #[test]
+    fn theme_from_str_round_trips() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let s = theme.to_string();
+            let parsed: Theme = s.parse().expect("should parse back");
+            assert_eq!(parsed, theme, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn theme_from_str_case_insensitive() {
+        assert_eq!("LIGHT".parse::<Theme>().unwrap(), Theme::Light);
+        assert_eq!("dark".parse::<Theme>().unwrap(), Theme::Dark);
+    }
+
+    #[test]
+    fn theme_from_str_unknown_errors() {
+        assert!("midnight".parse::<Theme>().is_err());
     }
 }

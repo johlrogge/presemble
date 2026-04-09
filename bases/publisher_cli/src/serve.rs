@@ -553,6 +553,8 @@ struct ScaffoldRequest {
     palette_type: String,
     #[serde(default)]
     complexity: String,
+    #[serde(default)]
+    theme: String,
 }
 
 async fn font_moods_handler() -> axum::Json<serde_json::Value> {
@@ -596,6 +598,8 @@ struct StylePreviewRequest {
     palette_type: String,
     #[serde(default)]
     complexity: String,
+    #[serde(default)]
+    theme: String,
 }
 
 async fn style_preview_handler(
@@ -610,6 +614,7 @@ async fn style_preview_handler(
         },
         palette_type: req.palette_type.parse().unwrap_or_default(),
         complexity: req.complexity.parse().unwrap_or_default(),
+        theme: req.theme.parse().unwrap_or_default(),
     };
     (
         [("content-type", "text/css")],
@@ -635,6 +640,7 @@ async fn scaffold_handler(
         seed_color: req.seed_color.clone(),
         palette_type: req.palette_type.clone(),
         complexity: req.complexity.clone(),
+        theme: req.theme.clone(),
     }) {
         Ok(conductor::Response::Ok) => {
             // After scaffolding, trigger a full build so output HTML exists.

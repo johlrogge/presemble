@@ -33,6 +33,7 @@
       min-height: 100vh;
       display: flex;
       flex-direction: column;
+      transition: background 0.4s ease, color 0.4s ease;
     }
 
     /* Layout */
@@ -155,6 +156,7 @@
       transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
       box-shadow: var(--shadow-card);
       text-align: left;
+      position: relative;
     }
 
     .card:hover {
@@ -165,6 +167,16 @@
     .card.selected {
       border-color: var(--color-selected-border);
       background: var(--color-selected-bg);
+    }
+
+    .card.selected::after {
+      content: '✓';
+      position: absolute;
+      top: 0.6rem;
+      right: 0.75rem;
+      font-size: 0.85rem;
+      color: var(--color-accent);
+      font-weight: 700;
     }
 
     .card-icon {
@@ -261,6 +273,45 @@
       border-color: var(--color-accent);
     }
 
+    /* Theme toggle */
+    .theme-toggle {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .theme-toggle-label {
+      font-size: 0.85rem;
+      color: var(--color-muted);
+      margin-right: 0.25rem;
+    }
+
+    .theme-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.4rem 0.9rem;
+      border-radius: var(--radius-btn);
+      font-size: 0.88rem;
+      font-weight: 500;
+      cursor: pointer;
+      border: 2px solid var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-muted);
+      transition: border-color var(--transition), background var(--transition), color var(--transition);
+    }
+
+    .theme-btn:hover {
+      border-color: var(--color-accent);
+      color: var(--color-text);
+    }
+
+    .theme-btn.selected {
+      border-color: var(--color-selected-border);
+      background: var(--color-selected-bg);
+      color: var(--color-text);
+    }
+
     /* Navigation */
     .nav {
       display: flex;
@@ -287,9 +338,11 @@
     .btn-primary {
       background: var(--color-accent);
       color: #fff;
+      font-weight: 600;
+      padding: 0.7rem 2rem;
     }
 
-    .btn-primary:hover {
+    .btn-primary:hover:not(:disabled) {
       background: var(--color-accent-hover);
     }
 
@@ -429,6 +482,7 @@
       palette_type: '',
       complexity: '',
       format: 'hiccup',
+      theme: 'light',
     };
 
     var fontMoods = [];
@@ -503,6 +557,20 @@
       previewDebounce = setTimeout(fetchPreview, 300);
     }
 
+    function applyBodyColors(bgColor, textColor) {
+      if (bgColor) {
+        document.body.style.background = bgColor;
+      }
+      if (textColor) {
+        document.body.style.color = textColor;
+      }
+    }
+
+    function resetBodyColors() {
+      document.body.style.background = '';
+      document.body.style.color = '';
+    }
+
     function fetchPreview() {
       if (!state.seed_color) return;
       var frame = document.getElementById('preview-frame');
@@ -515,6 +583,7 @@
           seed_color: state.seed_color,
           palette_type: state.palette_type || 'cool',
           complexity: state.complexity || 'simple',
+          theme: state.theme || 'light',
         })
       })
       .then(function(r) { return r.text(); })
@@ -532,6 +601,17 @@
           .replace(/^(a|h[1-6]|blockquote|\.byline)\b/gm, '#preview-content $1');
         existing.textContent = scoped;
         frame.classList.remove('loading');
+
+        // Apply background/text colors to wizard body (step 2+)
+        if (state.step > 1) {
+          var bgMatch = css.match(/--color-bg\s*:\s*([^;]+);/);
+          var textMatch = css.match(/--color-text\s*:\s*([^;]+);/);
+          var bg = bgMatch ? bgMatch[1].trim() : null;
+          var text = textMatch ? textMatch[1].trim() : null;
+          applyBodyColors(bg, text);
+        } else {
+          resetBodyColors();
+        }
       })
       .catch(function() {
         frame.classList.remove('loading');
@@ -588,7 +668,7 @@
     function renderNav(showBack, nextLabel, nextId, nextDisabled) {
       var parts = ['<div class="nav">'];
       if (showBack) {
-        parts.push('<button class="btn btn-ghost" id="btn-back">← Back</button>');
+        parts.push('<button class="btn btn-ghost" id="btn-back">&#8592; Back</button>');
       }
       parts.push('<button class="btn btn-primary" id="' + nextId + '"' + (nextDisabled ? ' disabled' : '') + '>' + nextLabel + '</button>');
       parts.push('</div>');
@@ -599,9 +679,9 @@
     // ── Steps ────────────────────────────────────────────────────────────────
     function renderStep1() {
       var types = [
-        { id: 'blog', icon: '✍', name: 'Blog', desc: 'Posts and author profiles — ideal for writing and publishing.' },
-        { id: 'personal', icon: '🌿', name: 'Personal', desc: 'A simple homepage with pages — great as a personal site.' },
-        { id: 'portfolio', icon: '🖼', name: 'Portfolio', desc: 'Showcase work with project pages — built for creators.' },
+        { id: 'blog', icon: '&#x270D;', name: 'Blog', desc: 'Posts and author profiles — ideal for writing and publishing.' },
+        { id: 'personal', icon: '&#x1F33F;', name: 'Personal', desc: 'A simple homepage with pages — great as a personal site.' },
+        { id: 'portfolio', icon: '&#x1F5BC;', name: 'Portfolio', desc: 'Showcase work with project pages — built for creators.' },
       ];
       var html = renderProgress();
       html += '<div class="header"><div class="wordmark">Presemble</div>';
@@ -609,13 +689,15 @@
       html += '<p class="step-subtitle">Choose the template that best fits your goals.</p></div>';
       html += '<div class="card-grid">';
       types.forEach(function(t) {
-        html += '<div class="card" data-type="' + esc(t.id) + '">';
+        var sel = state.site_type === t.id ? ' selected' : '';
+        html += '<div class="card' + sel + '" data-type="' + esc(t.id) + '">';
         html += '<div class="card-icon">' + t.icon + '</div>';
         html += '<div class="card-name">' + esc(t.name) + '</div>';
         html += '<div class="card-desc">' + esc(t.desc) + '</div>';
         html += '</div>';
       });
       html += '</div>';
+      html += renderNav(false, 'Next &#8594;', 'btn-next', !state.site_type);
       return html;
     }
 
@@ -643,11 +725,13 @@
         });
         html += '</div>';
       }
-      html += renderNav(true, 'Next →', 'btn-next', !state.font_mood);
+      html += renderNav(true, 'Next &#8594;', 'btn-next', !state.font_mood);
       return html;
     }
 
     function renderStep3() {
+      var lightSel = state.theme === 'light' ? ' selected' : '';
+      var darkSel = state.theme === 'dark' ? ' selected' : '';
       var html = renderProgress();
       html += '<div class="header"><div class="wordmark">Presemble</div>';
       html += '<h1 class="step-title">Seed color</h1>';
@@ -657,8 +741,13 @@
       html += '<input type="color" id="color-picker" value="' + esc(state.seed_color) + '">';
       html += '<input type="text" class="hex-input" id="hex-input" value="' + esc(state.seed_color) + '" maxlength="7" spellcheck="false">';
       html += '</div>';
+      html += '<div class="theme-toggle">';
+      html += '<span class="theme-toggle-label">Theme:</span>';
+      html += '<button class="theme-btn' + lightSel + '" id="btn-theme-light">&#9728; Light</button>';
+      html += '<button class="theme-btn' + darkSel + '" id="btn-theme-dark">&#9790; Dark</button>';
       html += '</div>';
-      html += renderNav(true, 'Next →', 'btn-next', false);
+      html += '</div>';
+      html += renderNav(true, 'Next &#8594;', 'btn-next', false);
       return html;
     }
 
@@ -688,7 +777,7 @@
         });
         html += '</div>';
       }
-      html += renderNav(true, 'Next →', 'btn-next', !state.palette_type);
+      html += renderNav(true, 'Next &#8594;', 'btn-next', !state.palette_type);
       return html;
     }
 
@@ -710,7 +799,7 @@
         html += '</div>';
       });
       html += '</div>';
-      html += renderNav(true, 'Next →', 'btn-next', !state.complexity);
+      html += renderNav(true, 'Next &#8594;', 'btn-next', !state.complexity);
       return html;
     }
 
@@ -759,6 +848,9 @@
       if (backBtn) {
         backBtn.addEventListener('click', function() {
           state.step -= 1;
+          if (state.step === 1) {
+            resetBodyColors();
+          }
           render();
         });
       }
@@ -768,20 +860,44 @@
           document.querySelectorAll('[data-type]').forEach(function(card) {
             card.addEventListener('click', function() {
               state.site_type = card.dataset.type;
+              document.querySelectorAll('[data-type]').forEach(function(c) {
+                c.classList.toggle('selected', c.dataset.type === state.site_type);
+              });
+              var nextBtn = document.getElementById('btn-next');
+              if (nextBtn) { nextBtn.disabled = false; }
+              schedulePreview();
+            });
+          });
+          var nextBtn1 = document.getElementById('btn-next');
+          if (nextBtn1) {
+            nextBtn1.addEventListener('click', function() {
+              if (!state.site_type) return;
               state.step = 2;
               loadFontMoods(render);
             });
-          });
+          }
           break;
 
         case 2:
           document.querySelectorAll('[data-mood]').forEach(function(card) {
             card.addEventListener('click', function() {
               state.font_mood = card.dataset.mood;
+              document.querySelectorAll('[data-mood]').forEach(function(c) {
+                c.classList.toggle('selected', c.dataset.mood === state.font_mood);
+              });
+              var nextBtn = document.getElementById('btn-next');
+              if (nextBtn) { nextBtn.disabled = false; }
+              schedulePreview();
+            });
+          });
+          var nextBtn2 = document.getElementById('btn-next');
+          if (nextBtn2) {
+            nextBtn2.addEventListener('click', function() {
+              if (!state.font_mood) return;
               state.step = 3;
               render();
             });
-          });
+          }
           break;
 
         case 3:
@@ -804,6 +920,24 @@
               }
             });
           }
+          var btnThemeLight = document.getElementById('btn-theme-light');
+          var btnThemeDark = document.getElementById('btn-theme-dark');
+          if (btnThemeLight) {
+            btnThemeLight.addEventListener('click', function() {
+              state.theme = 'light';
+              btnThemeLight.classList.add('selected');
+              btnThemeDark.classList.remove('selected');
+              schedulePreview();
+            });
+          }
+          if (btnThemeDark) {
+            btnThemeDark.addEventListener('click', function() {
+              state.theme = 'dark';
+              btnThemeDark.classList.add('selected');
+              btnThemeLight.classList.remove('selected');
+              schedulePreview();
+            });
+          }
           var nextBtn3 = document.getElementById('btn-next');
           if (nextBtn3) {
             nextBtn3.addEventListener('click', function() {
@@ -817,20 +951,44 @@
           document.querySelectorAll('[data-palette]').forEach(function(card) {
             card.addEventListener('click', function() {
               state.palette_type = card.dataset.palette;
+              document.querySelectorAll('[data-palette]').forEach(function(c) {
+                c.classList.toggle('selected', c.dataset.palette === state.palette_type);
+              });
+              var nextBtn = document.getElementById('btn-next');
+              if (nextBtn) { nextBtn.disabled = false; }
+              schedulePreview();
+            });
+          });
+          var nextBtn4 = document.getElementById('btn-next');
+          if (nextBtn4) {
+            nextBtn4.addEventListener('click', function() {
+              if (!state.palette_type) return;
               state.step = 5;
               render();
             });
-          });
+          }
           break;
 
         case 5:
           document.querySelectorAll('[data-complexity]').forEach(function(card) {
             card.addEventListener('click', function() {
               state.complexity = card.dataset.complexity;
+              document.querySelectorAll('[data-complexity]').forEach(function(c) {
+                c.classList.toggle('selected', c.dataset.complexity === state.complexity);
+              });
+              var nextBtn = document.getElementById('btn-next');
+              if (nextBtn) { nextBtn.disabled = false; }
+              schedulePreview();
+            });
+          });
+          var nextBtn5 = document.getElementById('btn-next');
+          if (nextBtn5) {
+            nextBtn5.addEventListener('click', function() {
+              if (!state.complexity) return;
               state.step = 6;
               render();
             });
-          });
+          }
           break;
 
         case 6:
@@ -840,6 +998,7 @@
               document.querySelectorAll('[data-format]').forEach(function(c) {
                 c.classList.toggle('selected', c.dataset.format === state.format);
               });
+              schedulePreview();
             });
           });
           var createBtn = document.getElementById('btn-create');
@@ -859,6 +1018,7 @@
                   seed_color: state.seed_color,
                   palette_type: state.palette_type,
                   complexity: state.complexity,
+                  theme: state.theme,
                 })
               })
               .then(function(r) { return r.json(); })

@@ -1200,7 +1200,7 @@ impl Conductor {
                 }
                 CommandResult::ok()
             }
-            Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity } => {
+            Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity, theme } => {
                 match site_templates::template_by_name(&template_name) {
                     Some(template) => {
                         let style = site_templates::StyleConfig {
@@ -1212,6 +1212,7 @@ impl Conductor {
                             },
                             palette_type: palette_type.parse().unwrap_or_default(),
                             complexity: complexity.parse().unwrap_or_default(),
+                            theme: theme.parse().unwrap_or_default(),
                         };
                         match template.scaffold(&self.site_dir, &format, &style) {
                             Ok(()) => {
