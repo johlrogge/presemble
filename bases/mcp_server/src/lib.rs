@@ -103,39 +103,63 @@ fn connect_conductor(site_dir: &Path) -> Result<conductor::ConductorClient, Stri
     conductor::ensure_conductor(site_dir)
 }
 
-fn handle_list_content(req: &JsonRpcRequest, site_dir: &Path) -> JsonRpcResponse {
-    let content_dir = site_dir.join("content");
-    let mut result = String::new();
-    if let Ok(entries) = std::fs::read_dir(&content_dir) {
-        let mut type_dirs: Vec<_> = entries.flatten().collect();
-        type_dirs.sort_by_key(|e| e.file_name());
-        for entry in type_dirs {
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                let stem = entry.file_name().to_string_lossy().to_string();
-                result.push_str(&format!("\n## {stem}\n"));
-                let type_dir = content_dir.join(&stem);
-                if let Ok(files) = std::fs::read_dir(&type_dir) {
-                    let mut file_entries: Vec<_> = files.flatten().collect();
-                    file_entries.sort_by_key(|e| e.file_name());
-                    for f in file_entries {
-                        let name = f.file_name().to_string_lossy().to_string();
-                        if name.ends_with(".md") {
-                            result.push_str(&format!("- content/{stem}/{name}\n"));
-                        }
-                    }
-                }
-            }
+/// Format a list of content paths (as returned by conductor `ListContent`)
+/// into grouped markdown with `## stem` headers.
+///
+/// Paths are expected to have the form `content/<stem>/<file>`.
+/// Paths that do not match this structure are silently ignored.
+fn format_content_list(paths: &[String]) -> String {
+    use std::collections::BTreeMap;
+
+    let mut by_stem: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for path in paths {
+        // Expect "content/<stem>/<file>"
+        let mut parts = path.splitn(3, '/');
+        if let (Some("content"), Some(stem), Some(_)) = (parts.next(), parts.next(), parts.next()) {
+            by_stem.entry(stem).or_default().push(path.as_str());
         }
     }
-    if result.is_empty() {
-        result = "No content files found.".to_string();
+
+    if by_stem.is_empty() {
+        return "No content files found.".to_string();
     }
-    json_rpc_ok(
-        req.id.clone(),
-        serde_json::json!({
-            "content": [{"type": "text", "text": result.trim()}]
-        }),
-    )
+
+    let mut result = String::new();
+    for (stem, files) in &by_stem {
+        result.push_str(&format!("\n## {stem}\n"));
+        for file in files {
+            result.push_str(&format!("- {file}\n"));
+        }
+    }
+    result.trim().to_string()
+}
+
+fn handle_list_content(req: &JsonRpcRequest, cond: &conductor::ConductorClient) -> JsonRpcResponse {
+    match cond.send(&conductor::Command::ListContent) {
+        Ok(conductor::Response::ContentList(paths)) => {
+            let text = format_content_list(&paths);
+            json_rpc_ok(
+                req.id.clone(),
+                serde_json::json!({
+                    "content": [{"type": "text", "text": text}]
+                }),
+            )
+        }
+        Ok(other) => json_rpc_ok(
+            req.id.clone(),
+            serde_json::json!({
+                "content": [{"type": "text", "text": format!("Unexpected response: {other:?}")}],
+                "isError": true
+            }),
+        ),
+        Err(e) => json_rpc_ok(
+            req.id.clone(),
+            serde_json::json!({
+                "content": [{"type": "text", "text": format!("Conductor error: {e}")}],
+                "isError": true
+            }),
+        ),
+    }
 }
 
 fn handle_request(
@@ -321,11 +345,6 @@ fn handle_request(
                         .unwrap_or_else(|_| std::path::PathBuf::from(s))
                 })
                 .unwrap_or_else(|| site_dir.to_path_buf());
-
-            // list_content doesn't need the conductor — handle it before connecting
-            if tool_name == "list_content" {
-                return handle_list_content(req, &tool_site_dir);
-            }
 
             // Connect to conductor per-call (survives conductor restarts)
             let cond = match connect_conductor(&tool_site_dir) {
@@ -592,10 +611,7 @@ fn handle_request(
                     }
                 }
 
-                "list_content" => {
-                    // Handled before conductor connect — should not reach here
-                    unreachable!("list_content handled before conductor connect")
-                }
+                "list_content" => handle_list_content(req, &cond),
 
                 _ => json_rpc_ok(
                     req.id.clone(),
@@ -710,77 +726,46 @@ mod tests {
     }
 
     #[test]
-    fn list_content_returns_no_content_for_missing_dir() {
-        use std::path::PathBuf;
-
-        // Use a temp directory with no content/ subdir
-        let tmp = tempfile::tempdir().unwrap();
-        let site_dir = tmp.path().to_path_buf();
-
-        // Build a minimal fake request; we need a ConductorClient to call
-        // handle_request. Since list_content is purely filesystem-based,
-        // we can test it by extracting the listing logic separately.
-        // Instead, verify it produces "No content files found."
-        let content_dir = site_dir.join("content");
-        let mut result = String::new();
-        if let Ok(entries) = std::fs::read_dir(&content_dir) {
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                    let stem = entry.file_name().to_string_lossy().to_string();
-                    result.push_str(&format!("\n## {stem}\n"));
-                }
-            }
-        }
-        if result.is_empty() {
-            result = "No content files found.".to_string();
-        }
-        assert_eq!(result.trim(), "No content files found.");
-
-        // Suppress unused import warning — PathBuf is used for type clarity
-        let _: PathBuf = site_dir;
+    fn format_content_list_returns_no_content_for_empty_paths() {
+        let result = format_content_list(&[]);
+        assert_eq!(result, "No content files found.");
     }
 
     #[test]
-    fn list_content_enumerates_markdown_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let site_dir = tmp.path();
-
-        // Create content/post/hello.md and content/post/world.md
-        let post_dir = site_dir.join("content/post");
-        std::fs::create_dir_all(&post_dir).unwrap();
-        std::fs::write(post_dir.join("hello.md"), "# Hello\n").unwrap();
-        std::fs::write(post_dir.join("world.md"), "# World\n").unwrap();
-        // A non-md file should be ignored
-        std::fs::write(post_dir.join("draft.txt"), "draft").unwrap();
-
-        let content_dir = site_dir.join("content");
-        let mut result = String::new();
-        if let Ok(entries) = std::fs::read_dir(&content_dir) {
-            let mut type_dirs: Vec<_> = entries.flatten().collect();
-            type_dirs.sort_by_key(|e| e.file_name());
-            for entry in type_dirs {
-                if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                    let stem = entry.file_name().to_string_lossy().to_string();
-                    result.push_str(&format!("\n## {stem}\n"));
-                    let type_dir = content_dir.join(&stem);
-                    if let Ok(files) = std::fs::read_dir(&type_dir) {
-                        let mut file_entries: Vec<_> = files.flatten().collect();
-                        file_entries.sort_by_key(|e| e.file_name());
-                        for f in file_entries {
-                            let name = f.file_name().to_string_lossy().to_string();
-                            if name.ends_with(".md") {
-                                result.push_str(&format!("- content/{stem}/{name}\n"));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+    fn format_content_list_groups_by_stem() {
+        let paths = vec![
+            "content/post/hello.md".to_string(),
+            "content/post/world.md".to_string(),
+        ];
+        let result = format_content_list(&paths);
         assert!(result.contains("## post"), "should have post section");
         assert!(result.contains("content/post/hello.md"), "should list hello.md");
         assert!(result.contains("content/post/world.md"), "should list world.md");
-        assert!(!result.contains("draft.txt"), "should not list non-md files");
+    }
+
+    #[test]
+    fn format_content_list_sorts_stems_alphabetically() {
+        let paths = vec![
+            "content/zebra/z.md".to_string(),
+            "content/alpha/a.md".to_string(),
+        ];
+        let result = format_content_list(&paths);
+        let alpha_pos = result.find("## alpha").unwrap();
+        let zebra_pos = result.find("## zebra").unwrap();
+        assert!(alpha_pos < zebra_pos, "alpha should appear before zebra");
+    }
+
+    #[test]
+    fn format_content_list_ignores_paths_without_content_prefix() {
+        let paths = vec![
+            "content/post/hello.md".to_string(),
+            "schemas/post.md".to_string(),
+            "templates/index.hiccup".to_string(),
+        ];
+        let result = format_content_list(&paths);
+        assert!(result.contains("content/post/hello.md"));
+        assert!(!result.contains("schemas"), "non-content paths should be ignored");
+        assert!(!result.contains("templates"), "non-content paths should be ignored");
     }
 
     // Suppresses dead_code warning for make_request helper used in future tests
@@ -867,39 +852,14 @@ mod tests {
     }
 
     #[test]
-    fn handle_list_content_uses_provided_site_dir() {
-        // Create two separate temp site directories with different content
-        let tmp_a = tempfile::tempdir().unwrap();
-        let tmp_b = tempfile::tempdir().unwrap();
+    fn format_content_list_two_sites_produce_independent_results() {
+        // Verify that format_content_list only uses the provided paths — no
+        // global state or filesystem access.
+        let paths_a = vec!["content/post/alpha.md".to_string()];
+        let paths_b = vec!["content/post/beta.md".to_string()];
 
-        // Site A has content/post/alpha.md
-        let post_a = tmp_a.path().join("content/post");
-        std::fs::create_dir_all(&post_a).unwrap();
-        std::fs::write(post_a.join("alpha.md"), "# Alpha\n").unwrap();
-
-        // Site B has content/post/beta.md
-        let post_b = tmp_b.path().join("content/post");
-        std::fs::create_dir_all(&post_b).unwrap();
-        std::fs::write(post_b.join("beta.md"), "# Beta\n").unwrap();
-
-        let req_a = make_request(serde_json::json!(1), "tools/call", serde_json::json!({}));
-        let req_b = make_request(serde_json::json!(2), "tools/call", serde_json::json!({}));
-
-        let resp_a = handle_list_content(&req_a, tmp_a.path());
-        let resp_b = handle_list_content(&req_b, tmp_b.path());
-
-        let text_a = resp_a
-            .result
-            .as_ref()
-            .and_then(|r| r.pointer("/content/0/text"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let text_b = resp_b
-            .result
-            .as_ref()
-            .and_then(|r| r.pointer("/content/0/text"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let text_a = format_content_list(&paths_a);
+        let text_b = format_content_list(&paths_b);
 
         assert!(text_a.contains("alpha.md"), "site A should list alpha.md, got: {text_a}");
         assert!(!text_a.contains("beta.md"), "site A should not list beta.md");
