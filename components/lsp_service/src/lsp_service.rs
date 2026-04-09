@@ -3,13 +3,38 @@ use lsp_capabilities::{
     link_completions,
     schema_completions, slot_position, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
-    Severity, SlotAction, TemplateDefinitionTarget,
+    Severity, SlotAction, SlotCompletion, TemplateDefinitionTarget,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
+
+/// Build link completions from pre-fetched conductor link options.
+///
+/// Converts `conductor::LinkOption` values into `SlotCompletion` items so the
+/// `lsp_service` can use conductor data without coupling `lsp_capabilities` to
+/// the `conductor` crate (which would create a circular dependency).
+fn link_completions_from_options(options: &[conductor::LinkOption]) -> Vec<SlotCompletion> {
+    let mut completions: Vec<SlotCompletion> = options
+        .iter()
+        .map(|opt| {
+            let link_text = format!("[{}]({})", opt.title, opt.url);
+            SlotCompletion {
+                label: format!("{} \u{2013} {}", opt.stem, opt.title),
+                detail: opt.url.clone(),
+                documentation: None,
+                insert_text: link_text,
+                is_snippet: false,
+                sort_text: None,
+                preselect: false,
+            }
+        })
+        .collect();
+    completions.sort_by(|a, b| a.detail.cmp(&b.detail));
+    completions
+}
 
 /// Check if two LSP ranges overlap (a diagnostic is relevant to a code action request).
 fn ranges_overlap(a: &Range, b: &Range) -> bool {
@@ -124,6 +149,29 @@ impl PresembleLsp {
         } else {
             site_file_kind_to_fc(self.site_index.classify(path))
         }
+    }
+
+    /// Get document text for a URI.
+    ///
+    /// When a conductor is available, delegates to `GetDocumentText` (which returns the
+    /// in-memory editor buffer if dirty, otherwise falls back to the on-disk file).
+    /// When no conductor is present, falls back to the local `doc_sources` cache first,
+    /// then reads from disk.
+    #[allow(dead_code)] // will be wired to remaining fs::read_to_string call sites incrementally
+    async fn document_text(&self, uri: &Url) -> Option<String> {
+        let path = uri.to_file_path().ok()?;
+        let path_str = path.to_string_lossy();
+        {
+            let cond_guard = self.conductor.lock().await;
+            if let Some(ref cond) = *cond_guard
+                && let Ok(maybe_text) = cond.get_document_text(&path_str)
+            {
+                return maybe_text.or_else(|| std::fs::read_to_string(&path).ok());
+            }
+        }
+        // Fallback: local cache first, then disk
+        self.doc_sources.lock().await.get(&uri.to_string()).cloned()
+            .or_else(|| std::fs::read_to_string(&path).ok())
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
@@ -766,7 +814,26 @@ impl LanguageServer for PresembleLsp {
                 if trigger == Some("[")
                     && separator_line(&src).is_some_and(|sl| pos.line > sl)
                 {
-                    let link_items = link_completions(&self.repo);
+                    let link_items = {
+                        let cond_guard = self.conductor.lock().await;
+                        if let Some(ref cond) = *cond_guard {
+                            // Fetch all link options from the conductor by iterating all schemas.
+                            let stems = cond.list_schemas().unwrap_or_default();
+                            let all_options: Vec<conductor::LinkOption> = stems
+                                .iter()
+                                .flat_map(|(stem, _)| {
+                                    cond.list_link_options(stem).unwrap_or_default()
+                                })
+                                .collect();
+                            if all_options.is_empty() {
+                                link_completions(&self.repo)
+                            } else {
+                                link_completions_from_options(&all_options)
+                            }
+                        } else {
+                            link_completions(&self.repo)
+                        }
+                    };
                     let current_line = line_text(&src, pos.line);
                     let bracket_col = current_line[..pos.character as usize]
                         .rfind('[')

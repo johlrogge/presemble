@@ -631,6 +631,42 @@ impl Conductor {
         std::fs::read_to_string(path).ok()
     }
 
+    /// List all link completion options for a given schema stem.
+    ///
+    /// Reads from the site graph (in-memory) and extracts title from the data graph.
+    /// Falls back to the slug if no title is found.
+    pub fn list_link_options(&self, stem: &str) -> Vec<crate::protocol::LinkOption> {
+        let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+        let schema_stem = site_index::SchemaStem::new(stem);
+        let mut options: Vec<crate::protocol::LinkOption> = graph
+            .items_for_stem(&schema_stem)
+            .into_iter()
+            .filter_map(|node| {
+                let pd = node.page_data()?;
+                let url = node.url_path.as_str().to_string();
+                let slug = url.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+                let title = match pd.data.resolve(&["title"]) {
+                    Some(template::Value::Text(t)) => t.clone(),
+                    _ => slug.clone(),
+                };
+                Some(crate::protocol::LinkOption { stem: stem.to_string(), slug, title, url })
+            })
+            .collect();
+        options.sort_by(|a, b| a.slug.cmp(&b.slug));
+        options
+    }
+
+    /// List all schema stems known to the conductor (excludes collection schemas).
+    pub fn list_schemas(&self) -> Vec<String> {
+        let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+        let mut stems: Vec<String> = cache.keys()
+            .filter(|k| !k.contains('/')) // exclude collection schemas like "post/index"
+            .cloned()
+            .collect();
+        stems.sort();
+        stems
+    }
+
     /// Rebuild a single content page from in-memory text.
     ///
     /// Returns the list of URL paths that were rebuilt, or an error string.
