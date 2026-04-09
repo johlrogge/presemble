@@ -632,6 +632,34 @@ impl Conductor {
             resolve_cross_references(&mut graph, &url_index);
         }
 
+        // Inject collection data so templates can iterate (e.g. data-each="input.post")
+        // Mirrors build_render_context in publisher_cli: for each unique schema stem found
+        // in the site graph's item pages, insert a Value::List of all item data graphs
+        // under that stem key — but only if the page's own data doesn't already have that key.
+        {
+            let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+            let mut stems: Vec<site_index::SchemaStem> = site_graph
+                .iter_pages_by_kind(site_index::PageKind::Item)
+                .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.clone()))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            for stem_key in stems {
+                // Don't overwrite page's own slots (e.g., a resolved "author" link)
+                // with the collection of all authors.
+                if graph.resolve(&[stem_key.as_str()]).is_some() {
+                    continue;
+                }
+                let items: Vec<template::Value> = site_graph
+                    .items_for_stem(&stem_key)
+                    .into_iter()
+                    .filter_map(|n| n.page_data().map(|pd| template::Value::Record(pd.data.clone())))
+                    .collect();
+                graph.insert(stem_key.as_str(), template::Value::List(items));
+            }
+        }
+
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
         let fresh_repo = site_repository::SiteRepository::builder()
             .from_dir(&self.site_dir)

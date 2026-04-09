@@ -1,4 +1,4 @@
-use include_dir::{Dir, include_dir};
+use include_dir::{Dir, include_dir}; // updated: portfolio collection index pages added
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
