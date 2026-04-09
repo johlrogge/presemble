@@ -50,39 +50,85 @@ impl PresembleLsp {
         }
     }
 
-    fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
+    async fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
-        let kind = self.site_index.classify(&path);
-        let stem = match kind {
-            site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
-            _ => return None,
+        let path_str = path.to_string_lossy().to_string();
+        let cond_guard = self.conductor.lock().await;
+        let stem = if let Some(ref cond) = *cond_guard {
+            match cond.classify(&path_str) {
+                Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
+                _ => return None,
+            }
+        } else {
+            match self.site_index.classify(&path) {
+                site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
+                _ => return None,
+            }
         };
-        let grammar = self.site_index.load_grammar(&stem)?;
+        let grammar = if let Some(ref cond) = *cond_guard {
+            let src = cond.get_schema_source(&stem).ok()??;
+            schema::parse_schema(&src).ok()?
+        } else {
+            self.site_index.load_grammar(&stem)?
+        };
         Some((grammar, stem))
     }
 
-    fn grammar_for_template_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
+    async fn grammar_for_template_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
-        let kind = self.site_index.classify(&path);
-        let stem = match kind {
-            site_index::FileKind::Template { schema_stem } => schema_stem.to_string(),
-            _ => return None,
+        let path_str = path.to_string_lossy().to_string();
+        let cond_guard = self.conductor.lock().await;
+        let stem = if let Some(ref cond) = *cond_guard {
+            match cond.classify(&path_str) {
+                Ok(conductor::FileClassification::Template { schema_stem }) => schema_stem,
+                _ => return None,
+            }
+        } else {
+            match self.site_index.classify(&path) {
+                site_index::FileKind::Template { schema_stem } => schema_stem.to_string(),
+                _ => return None,
+            }
         };
-        let grammar = self.site_index.load_grammar(&stem)?;
+        let grammar = if let Some(ref cond) = *cond_guard {
+            let src = cond.get_schema_source(&stem).ok()??;
+            schema::parse_schema(&src).ok()?
+        } else {
+            self.site_index.load_grammar(&stem)?
+        };
         Some((grammar, stem))
     }
 
-    fn schema_stem(&self, uri: &Url) -> Option<String> {
+    async fn schema_stem(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
-        match self.site_index.classify(&path) {
-            site_index::FileKind::Schema { stem } => Some(stem.to_string()),
-            _ => None,
+        let path_str = path.to_string_lossy().to_string();
+        let cond_guard = self.conductor.lock().await;
+        if let Some(ref cond) = *cond_guard {
+            match cond.classify(&path_str) {
+                Ok(conductor::FileClassification::Schema { stem }) => Some(stem),
+                _ => None,
+            }
+        } else {
+            match self.site_index.classify(&path) {
+                site_index::FileKind::Schema { stem } => Some(stem.to_string()),
+                _ => None,
+            }
+        }
+    }
+
+    /// Classify a path, using the conductor when available, falling back to site_index.
+    async fn classify_path(&self, path: &std::path::Path) -> conductor::FileClassification {
+        let path_str = path.to_string_lossy().to_string();
+        let cond_guard = self.conductor.lock().await;
+        if let Some(ref cond) = *cond_guard {
+            cond.classify(&path_str).unwrap_or(conductor::FileClassification::Unknown)
+        } else {
+            site_file_kind_to_fc(self.site_index.classify(path))
         }
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
         self.doc_sources.lock().await.insert(uri.to_string(), src.clone());
-        let Some((grammar, _)) = self.grammar_for_uri(&uri) else {
+        let Some((grammar, _)) = self.grammar_for_uri(&uri).await else {
             self.client.publish_diagnostics(uri, vec![], None).await;
             return;
         };
@@ -187,7 +233,7 @@ impl PresembleLsp {
 
     async fn validate_template_and_publish(&self, uri: Url, src: String) {
         self.doc_sources.lock().await.insert(uri.to_string(), src.clone());
-        let Some((grammar, stem)) = self.grammar_for_template_uri(&uri) else {
+        let Some((grammar, stem)) = self.grammar_for_template_uri(&uri).await else {
             // No matching schema — clear diagnostics
             self.client.publish_diagnostics(uri, vec![], None).await;
             return;
@@ -233,32 +279,77 @@ impl PresembleLsp {
     }
 
     async fn revalidate_dependents(&self, schema_stem: &str) {
-        let dependents = self.site_index.dependents_of_schema(schema_stem);
-        let sources = self.doc_sources.lock().await;
+        // Prefer conductor for dependency listing; fall back to site_index.
+        let dependent_files: Vec<(std::path::PathBuf, conductor::FileClassification)> = {
+            let cond_guard = self.conductor.lock().await;
+            if let Some(ref cond) = *cond_guard {
+                match cond.list_dependents(schema_stem) {
+                    Ok(deps) => deps.into_iter().map(|d| (std::path::PathBuf::from(&d.path), d.kind)).collect(),
+                    Err(_) => {
+                        // Fallback to site_index on conductor error
+                        self.site_index.dependents_of_schema(schema_stem)
+                            .into_iter()
+                            .map(|sf| {
+                                let kind = site_file_kind_to_fc(sf.kind);
+                                (sf.path, kind)
+                            })
+                            .collect()
+                    }
+                }
+            } else {
+                self.site_index.dependents_of_schema(schema_stem)
+                    .into_iter()
+                    .map(|sf| {
+                        let kind = site_file_kind_to_fc(sf.kind);
+                        (sf.path, kind)
+                    })
+                    .collect()
+            }
+        };
 
-        let to_validate: Vec<(Url, String, site_index::FileKind)> = dependents
+        let sources = self.doc_sources.lock().await;
+        let to_validate: Vec<(Url, String, conductor::FileClassification)> = dependent_files
             .into_iter()
-            .filter(|f| !matches!(f.kind, site_index::FileKind::Schema { .. }))
-            .filter_map(|site_file| {
-                let uri = Url::from_file_path(&site_file.path).ok()?;
+            .filter(|(_, kind)| !matches!(kind, conductor::FileClassification::Schema { .. }))
+            .filter_map(|(path, kind)| {
+                let uri = Url::from_file_path(&path).ok()?;
                 let src = sources.get(&uri.to_string()).cloned()
-                    .or_else(|| std::fs::read_to_string(&site_file.path).ok())?;
-                Some((uri, src, site_file.kind))
+                    .or_else(|| std::fs::read_to_string(&path).ok())?;
+                Some((uri, src, kind))
             })
             .collect();
         drop(sources);
 
         for (uri, src, kind) in to_validate {
             match kind {
-                site_index::FileKind::Template { .. } => {
+                conductor::FileClassification::Template { .. } => {
                     self.validate_template_and_publish(uri, src).await;
                 }
-                site_index::FileKind::Content { .. } => {
+                conductor::FileClassification::Content { .. } => {
                     self.validate_and_publish(uri, src).await;
                 }
                 _ => {}
             }
         }
+    }
+}
+
+
+/// Convert a `site_index::FileKind` to a `conductor::FileClassification` for uniform handling.
+fn site_file_kind_to_fc(kind: site_index::FileKind) -> conductor::FileClassification {
+    match kind {
+        site_index::FileKind::Content { schema_stem } => {
+            conductor::FileClassification::Content { schema_stem: schema_stem.to_string() }
+        }
+        site_index::FileKind::Template { schema_stem } => {
+            conductor::FileClassification::Template { schema_stem: schema_stem.to_string() }
+        }
+        site_index::FileKind::Schema { stem } => {
+            conductor::FileClassification::Schema { stem: stem.to_string() }
+        }
+        site_index::FileKind::Stylesheet => conductor::FileClassification::Stylesheet,
+        site_index::FileKind::Asset => conductor::FileClassification::Asset,
+        site_index::FileKind::Unknown => conductor::FileClassification::Unknown,
     }
 }
 
@@ -372,14 +463,31 @@ impl LanguageServer for PresembleLsp {
                 for (uri_str, src) in open_files {
                     let Ok(uri) = uri_str.parse::<Url>() else { continue };
                     let path = uri.to_file_path().unwrap_or_default();
+                    let path_str = path.to_string_lossy().to_string();
 
                     // Only re-validate content files — templates and schemas don't have suggestions.
-                    let tmp_index = site_index::SiteIndex::new(site_dir.clone());
-                    let schema_stem = match tmp_index.classify(&path) {
-                        site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
-                        _ => continue,
+                    // Use conductor for classification and grammar loading when available,
+                    // falling back to site_index for the no-conductor path.
+                    let (_schema_stem, grammar) = {
+                        let cond_guard = conductor.lock().await;
+                        if let Some(ref cond) = *cond_guard {
+                            let stem = match cond.classify(&path_str) {
+                                Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
+                                _ => continue,
+                            };
+                            let Some(src_str) = cond.get_schema_source(&stem).ok().flatten() else { continue };
+                            let Some(g) = schema::parse_schema(&src_str).ok() else { continue };
+                            (stem, g)
+                        } else {
+                            let tmp_index = site_index::SiteIndex::new(site_dir.clone());
+                            let stem = match tmp_index.classify(&path) {
+                                site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
+                                _ => continue,
+                            };
+                            let Some(g) = tmp_index.load_grammar(&stem) else { continue };
+                            (stem, g)
+                        }
                     };
-                    let Some(grammar) = tmp_index.load_grammar(&schema_stem) else { continue };
 
                     // Query current suggestions from conductor.
                     let suggestions = {
@@ -504,12 +612,12 @@ impl LanguageServer for PresembleLsp {
         let uri = p.text_document.uri;
         let src = p.text_document.text;
         let path = uri.to_file_path().unwrap_or_default();
-        let kind = self.site_index.classify(&path);
+        let kind = self.classify_path(&path).await;
         match kind {
-            site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, src).await,
-            site_index::FileKind::Schema { .. } => {
+            conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, src).await,
+            conductor::FileClassification::Schema { .. } => {
                 self.validate_schema_and_publish(uri.clone(), src).await;
-                if let Some(stem) = self.schema_stem(&uri) {
+                if let Some(stem) = self.schema_stem(&uri).await {
                     self.revalidate_dependents(&stem).await;
                 }
             }
@@ -521,7 +629,7 @@ impl LanguageServer for PresembleLsp {
         if let Some(c) = p.content_changes.into_iter().last() {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
-            let kind = self.site_index.classify(&path);
+            let kind = self.classify_path(&path).await;
             // Notify conductor of the change (triggers rebuild + browser reload).
             // Fire-and-forget: if it fails, the LSP still works locally.
             {
@@ -534,10 +642,10 @@ impl LanguageServer for PresembleLsp {
                 }
             }
             match kind {
-                site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, c.text).await,
-                site_index::FileKind::Schema { .. } => {
+                conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, c.text).await,
+                conductor::FileClassification::Schema { .. } => {
                     self.validate_schema_and_publish(uri.clone(), c.text).await;
-                    if let Some(stem) = self.schema_stem(&uri) {
+                    if let Some(stem) = self.schema_stem(&uri).await {
                         self.revalidate_dependents(&stem).await;
                     }
                 }
@@ -561,15 +669,15 @@ impl LanguageServer for PresembleLsp {
         if let Ok(src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
-            let kind = self.site_index.classify(&path);
+            let kind = self.classify_path(&path).await;
             match kind {
-                site_index::FileKind::Content { .. } => {
+                conductor::FileClassification::Content { .. } => {
                     self.validate_and_publish(uri, src).await;
                 }
-                site_index::FileKind::Template { .. } => self.validate_template_and_publish(uri, src).await,
-                site_index::FileKind::Schema { .. } => {
+                conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, src).await,
+                conductor::FileClassification::Schema { .. } => {
                     self.validate_schema_and_publish(uri.clone(), src).await;
-                    if let Some(stem) = self.schema_stem(&uri) {
+                    if let Some(stem) = self.schema_stem(&uri).await {
                         self.revalidate_dependents(&stem).await;
                     }
                 }
@@ -581,9 +689,9 @@ impl LanguageServer for PresembleLsp {
     async fn completion(&self, p: CompletionParams) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
         let uri = &p.text_document_position.text_document.uri;
         let path = uri.to_file_path().unwrap_or_default();
-        let kind = self.site_index.classify(&path);
+        let kind = self.classify_path(&path).await;
         match kind {
-            site_index::FileKind::Schema { .. } => {
+            conductor::FileClassification::Schema { .. } => {
                 let pos = p.text_document_position.position;
                 let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
                 let items: Vec<CompletionItem> = schema_completions(&src, pos.line)
@@ -609,8 +717,8 @@ impl LanguageServer for PresembleLsp {
                     .collect();
                 Ok(Some(CompletionResponse::Array(items)))
             }
-            site_index::FileKind::Template { .. } => {
-                let Some((grammar, stem)) = self.grammar_for_template_uri(uri) else {
+            conductor::FileClassification::Template { .. } => {
+                let Some((grammar, stem)) = self.grammar_for_template_uri(uri).await else {
                     return Ok(None);
                 };
                 let pos = p.text_document_position.position;
@@ -644,7 +752,7 @@ impl LanguageServer for PresembleLsp {
                 Ok(Some(CompletionResponse::Array(items)))
             }
             _ => {
-                let Some((grammar, _stem)) = self.grammar_for_uri(uri) else {
+                let Some((grammar, _stem)) = self.grammar_for_uri(uri).await else {
                     return Ok(None);
                 };
                 let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
@@ -759,10 +867,10 @@ impl LanguageServer for PresembleLsp {
                 let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
             }
         }
-        let kind = self.site_index.classify(&path);
+        let kind = self.classify_path(&path).await;
         match kind {
-            site_index::FileKind::Template { .. } => {
-                let Some((grammar, stem)) = self.grammar_for_template_uri(uri) else {
+            conductor::FileClassification::Template { .. } => {
+                let Some((grammar, stem)) = self.grammar_for_template_uri(uri).await else {
                     return Ok(None);
                 };
                 // Find a data-path attribute at the cursor line and look up the slot's hint_text
@@ -799,7 +907,7 @@ impl LanguageServer for PresembleLsp {
                 Ok(None)
             }
             _ => {
-                let Some((grammar, _)) = self.grammar_for_uri(uri) else {
+                let Some((grammar, _)) = self.grammar_for_uri(uri).await else {
                     return Ok(None);
                 };
                 Ok(hover_for_line(&src, &grammar, line).map(|text| Hover {
@@ -823,7 +931,7 @@ impl LanguageServer for PresembleLsp {
             .unwrap_or_default();
         drop(diags);
 
-        let Some((grammar, _)) = self.grammar_for_uri(uri) else {
+        let Some((grammar, _)) = self.grammar_for_uri(uri).await else {
             return Ok(Some(Vec::new()));
         };
         let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
@@ -953,10 +1061,10 @@ impl LanguageServer for PresembleLsp {
         let src = sources.get(&uri.to_string()).cloned().unwrap_or_default();
         drop(sources);
         let path = uri.to_file_path().unwrap_or_default();
-        let kind = self.site_index.classify(&path);
+        let kind = self.classify_path(&path).await;
         match kind {
-            site_index::FileKind::Template { .. } => {
-                match template_definition(&src, line, self.site_index.site_dir()) {
+            conductor::FileClassification::Template { .. } => {
+                match template_definition(&src, line, &self.site_dir) {
                     Some(TemplateDefinitionTarget::File(path)) => {
                         let target_uri = Url::from_file_path(&path)
                             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
@@ -978,7 +1086,7 @@ impl LanguageServer for PresembleLsp {
                 }
             }
             _ => {
-                let Some(target_path) = definition_for_position(&src, line, self.site_index.site_dir()) else {
+                let Some(target_path) = definition_for_position(&src, line, &self.site_dir) else {
                     return Ok(None);
                 };
                 let target_uri = Url::from_file_path(&target_path)
@@ -1022,7 +1130,7 @@ impl LanguageServer for PresembleLsp {
                         changes.insert(uri.clone(), vec![text_edit]);
                         let edit = WorkspaceEdit { changes: Some(changes), ..Default::default() };
                         let _ = self.client.apply_edit(edit).await;
-                    } else if let Some((grammar, _)) = self.grammar_for_uri(&uri) {
+                    } else if let Some((grammar, _)) = self.grammar_for_uri(&uri).await {
                         // Slot suggestion: use the existing slot transform pipeline.
                         let action = SlotAction::AcceptSuggestion {
                             suggestion_id: suggestion_id.clone(),
