@@ -128,6 +128,7 @@ fn collect_link_options_inner(
     let mut options: Vec<LinkOption> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|ex| ex.to_str()) == Some("md"))
+        .filter(|e| e.path().file_stem().and_then(|s| s.to_str()) != Some("index"))
         .map(|e| {
             let path = e.path();
             let file_slug = path
