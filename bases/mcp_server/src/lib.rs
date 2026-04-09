@@ -473,6 +473,17 @@ fn handle_request(
                                                     s.id
                                                 )
                                             }
+                                            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
+                                                format!(
+                                                    "[{}] slot-edit {}: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
+                                                    s.author,
+                                                    slot,
+                                                    s.reason,
+                                                    search,
+                                                    replace,
+                                                    s.id
+                                                )
+                                            }
                                         }
                                     })
                                     .collect::<Vec<_>>()

@@ -1199,6 +1199,71 @@ impl Conductor {
                     events: vec![ConductorEvent::SuggestionCreated { suggestion }],
                 }
             }
+            Command::SuggestSlotEdit { file, slot, search, replace, reason, author } => {
+                // Read the current slot value for conflict detection and to verify search exists
+                let abs_path = file.resolve(&self.site_dir);
+                let original_value = self.document_text(&abs_path).and_then(|text| {
+                    let stem = std::path::Path::new(file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
+                    let schema_src = self.schema_source(&stem)?;
+                    let grammar = schema::parse_schema(&schema_src).ok()?;
+                    let doc = content::parse_and_assign(&text, &grammar).ok()?;
+                    let graph = template::build_article_graph(&doc, &grammar);
+                    match graph.resolve(&[slot.as_str()]) {
+                        Some(template::Value::Text(t)) => Some(t.clone()),
+                        _ => None,
+                    }
+                });
+
+                // Require the slot to be readable; a missing slot value means
+                // the suggestion would be guaranteed to fail on accept.
+                let original_text = match original_value {
+                    Some(ref t) => t.clone(),
+                    None => return CommandResult::error(format!(
+                        "cannot read slot '{}' from {}",
+                        slot.as_str(), file.as_str()
+                    )),
+                };
+
+                // Verify the search string exists in the slot value
+                if !original_text.contains(&search) {
+                    return CommandResult::error(format!(
+                        "search text not found in slot '{}' of {file}: {search:?}",
+                        slot.as_str()
+                    ));
+                }
+
+                let created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string();
+
+                let id = editorial_types::SuggestionId::new();
+                let suggestion = editorial_types::Suggestion {
+                    id: id.clone(),
+                    author,
+                    file,
+                    target: editorial_types::SuggestionTarget::SlotEdit {
+                        slot,
+                        search,
+                        replace,
+                    },
+                    reason,
+                    status: editorial_types::SuggestionStatus::Pending,
+                    original_value: Some(original_text),
+                    created_at,
+                };
+
+                if let Err(e) = self.persist_suggestion(&suggestion) {
+                    return CommandResult::error(format!("persist error: {e}"));
+                }
+                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), suggestion.clone());
+
+                CommandResult {
+                    response: Response::SuggestionCreated(id),
+                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
+                }
+            }
             Command::GetSuggestions { file } => {
                 let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
                 let pending: Vec<editorial_types::Suggestion> = suggestions
@@ -1219,9 +1284,51 @@ impl Conductor {
                     }
                 };
 
-                // The LSP applies the edit to the editor buffer via applyEdit.
-                // The conductor only marks the suggestion as accepted — it does NOT
-                // write to disk. The user saves when ready, which writes normally.
+                // For SlotEdit, apply the search/replace to the slot value and write back.
+                let pages = if let editorial_types::SuggestionTarget::SlotEdit { ref slot, ref search, ref replace } = suggestion.target {
+                    let abs_path = suggestion.file.resolve(&self.site_dir);
+                    // Read the current slot value
+                    let current_slot_value = self.document_text(&abs_path).and_then(|text| {
+                        let stem = std::path::Path::new(suggestion.file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
+                        let schema_src = self.schema_source(&stem)?;
+                        let grammar = schema::parse_schema(&schema_src).ok()?;
+                        let doc = content::parse_and_assign(&text, &grammar).ok()?;
+                        let graph = template::build_article_graph(&doc, &grammar);
+                        match graph.resolve(&[slot.as_str()]) {
+                            Some(template::Value::Text(t)) => Some(t.clone()),
+                            _ => None,
+                        }
+                    });
+
+                    match current_slot_value {
+                        None => return CommandResult::error(format!("cannot read slot '{}' from {}", slot.as_str(), suggestion.file)),
+                        Some(val) if !val.contains(search.as_str()) => {
+                            return CommandResult::error(format!(
+                                "search text not found in current slot '{}' of {} — content may have changed",
+                                slot.as_str(),
+                                suggestion.file
+                            ));
+                        }
+                        Some(val) => {
+                            let new_val = val.replacen(search.as_str(), replace.as_str(), 1);
+                            match self.apply_slot_edit(suggestion.file.as_str(), slot.as_str(), &new_val) {
+                                Ok(rebuilt) => rebuilt,
+                                // Rebuild failure (e.g. no template) is non-fatal: the memory
+                                // buffer was already updated inside apply_slot_edit.
+                                Err(e) => {
+                                    eprintln!("conductor: SlotEdit rebuild failed (non-fatal): {e}");
+                                    vec![]
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // The LSP applies the edit to the editor buffer via applyEdit.
+                    // The conductor only marks the suggestion as accepted — it does NOT
+                    // write to disk. The user saves when ready, which writes normally.
+                    vec![]
+                };
+
                 let mut updated = suggestion.clone();
                 updated.status = editorial_types::SuggestionStatus::Accepted;
                 if let Err(e) = self.persist_suggestion(&updated) {
@@ -1230,7 +1337,7 @@ impl Conductor {
                 self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
 
                 CommandResult::ok_with_events(vec![
-                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages: vec![] },
+                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages },
                 ])
             }
             Command::RejectSuggestion { id } => {

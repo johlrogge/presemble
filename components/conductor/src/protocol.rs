@@ -40,6 +40,15 @@ pub enum Command {
         reason: String,
         author: editorial_types::Author,
     },
+    /// Suggest a search/replace edit scoped to a specific slot.
+    SuggestSlotEdit {
+        file: editorial_types::ContentPath,
+        slot: editorial_types::SlotName,
+        search: String,
+        replace: String,
+        reason: String,
+        author: editorial_types::Author,
+    },
     /// Query all pending suggestions for a file.
     GetSuggestions {
         file: editorial_types::ContentPath,

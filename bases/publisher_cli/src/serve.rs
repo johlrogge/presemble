@@ -202,6 +202,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
         .route("/_presemble/suggest-slot", post(suggest_slot_handler))
         .route("/_presemble/suggest-body", post(suggest_body_handler))
+        .route("/_presemble/suggest-slot-edit", post(suggest_slot_edit_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
         .route("/_presemble/suggestion-files", get(suggestion_files_handler))
         .route("/_presemble/save-all", post(save_all_handler))
@@ -404,7 +405,51 @@ impl From<editorial_types::Suggestion> for SuggestionJson {
                 replace: Some(replace),
                 reason: s.reason,
             },
+            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => SuggestionJson {
+                id: s.id.to_string(),
+                author: s.author.to_string(),
+                target_type: "slot_edit",
+                slot: Some(slot.to_string()),
+                proposed_value: None,
+                search: Some(search),
+                replace: Some(replace),
+                reason: s.reason,
+            },
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestSlotEditRequest {
+    file: String,
+    slot: String,
+    search: String,
+    replace: String,
+}
+
+async fn suggest_slot_edit_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestSlotEditRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::SuggestSlotEdit {
+        file: editorial_types::ContentPath::new(&req.file),
+        slot: editorial_types::SlotName::new(&req.slot),
+        search: req.search,
+        replace: req.replace,
+        reason: "Browser suggestion".to_string(),
+        author: editorial_types::Author::Human("browser".to_string()),
+    }) {
+        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
     }
 }
 

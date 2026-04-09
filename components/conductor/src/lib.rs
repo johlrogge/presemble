@@ -807,4 +807,153 @@ mod tests {
         let graph = conductor.site_graph();
         assert!(graph.is_empty(), "empty conductor should have empty site graph");
     }
+
+    // ── SuggestSlotEdit ──────────────────────────────────────────────────────
+
+    #[test]
+    fn suggest_slot_edit_creates_pending_suggestion() {
+        let (_dir, conductor) = article_conductor_with_file();
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        // "Old Title" is the title slot value in the fixture
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            search: "Old".to_string(),
+            replace: "New".to_string(),
+            reason: "Better".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // Event should be emitted
+        let has_created = result.events.iter().any(|e| matches!(
+            e,
+            ConductorEvent::SuggestionCreated { suggestion } if suggestion.id == id
+        ));
+        assert!(has_created, "expected SuggestionCreated event");
+
+        // GetSuggestions should return the pending suggestion
+        let get_result = conductor.handle_command(Command::GetSuggestions { file });
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(suggestions.len(), 1);
+                assert!(matches!(
+                    &suggestions[0].target,
+                    editorial_types::SuggestionTarget::SlotEdit { slot, search, replace }
+                        if slot.as_str() == "title" && search == "Old" && replace == "New"
+                ));
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggest_slot_edit_fails_when_search_not_in_slot() {
+        let (_dir, conductor) = article_conductor_with_file();
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file,
+            slot: editorial_types::SlotName::new("title"),
+            search: "text that does not exist in the title".to_string(),
+            replace: "replacement".to_string(),
+            reason: "test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        assert!(
+            matches!(result.response, Response::Error(_)),
+            "expected Error when search text not found in slot"
+        );
+    }
+
+    #[test]
+    fn suggest_slot_edit_fails_when_slot_is_unreadable() {
+        let (_dir, conductor) = article_conductor_with_file();
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        // "nonexistent_slot" is not in the article schema, so original_value will be None
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file,
+            slot: editorial_types::SlotName::new("nonexistent_slot"),
+            search: "anything".to_string(),
+            replace: "replacement".to_string(),
+            reason: "test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        assert!(
+            matches!(result.response, Response::Error(_)),
+            "expected Error when slot cannot be read, got {:?}", result.response
+        );
+    }
+
+    #[test]
+    fn accept_slot_edit_suggestion_applies_search_replace_to_slot() {
+        let (dir, conductor) = article_conductor_with_file();
+        let content_file = dir.path().join("content/article/test.md");
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        // Create a SlotEdit suggestion: replace "Old" with "New" in the title slot
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            search: "Old".to_string(),
+            replace: "New".to_string(),
+            reason: "Better".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // Accept the suggestion — should apply the slot edit
+        let accept_result = conductor.handle_command(Command::AcceptSuggestion { id: id.clone() });
+        match &accept_result.response {
+            Response::Ok => {}
+            Response::Error(e) => panic!("expected Ok, got Error({e})"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Disk file should NOT be written (dirty buffer model)
+        let disk_content = std::fs::read_to_string(&content_file).unwrap();
+        assert!(
+            disk_content.contains("Old Title"),
+            "disk file should still have old title after accept: {disk_content}"
+        );
+
+        // In-memory buffer should have the replaced value
+        let mem_content = conductor.document_text(&content_file);
+        assert!(mem_content.is_some(), "should have in-memory buffer after accept");
+        let mem_text = mem_content.unwrap();
+        assert!(
+            mem_text.contains("New Title"),
+            "in-memory buffer should have 'New Title' after accept: {mem_text}"
+        );
+
+        // SuggestionAccepted event should be emitted
+        let has_accepted = accept_result.events.iter().any(|e| matches!(
+            e,
+            ConductorEvent::SuggestionAccepted { id: eid, .. } if eid == &id
+        ));
+        assert!(has_accepted, "expected SuggestionAccepted event");
+
+        // Suggestion should no longer be pending
+        let get_result = conductor.handle_command(Command::GetSuggestions { file });
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert!(
+                    suggestions.is_empty(),
+                    "accepted suggestion should not appear in pending list"
+                );
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
 }

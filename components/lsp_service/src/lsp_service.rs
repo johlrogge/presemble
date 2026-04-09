@@ -148,6 +148,19 @@ impl PresembleLsp {
                                 };
                                 (ps, pe, msg, act)
                             }
+                            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
+                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
+                                let msg = format!(
+                                    "[{}] {}: slot {} \"{}\" \u{2192} \"{}\"",
+                                    suggestion.author, suggestion.reason, slot, search, replace
+                                );
+                                let act = SlotAction::AcceptBodySuggestion {
+                                    suggestion_id: suggestion.id.to_string(),
+                                    search: search.clone(),
+                                    replace: replace.clone(),
+                                };
+                                (ps, pe, msg, act)
+                            }
                         };
                         let lsp_diag = Diagnostic {
                             range: Range {
@@ -438,6 +451,19 @@ impl LanguageServer for PresembleLsp {
                                 let msg = format!(
                                     "[{}] {}: \"{}\" \u{2192} \"{}\"",
                                     suggestion.author, suggestion.reason, search, replace
+                                );
+                                let act = SlotAction::AcceptBodySuggestion {
+                                    suggestion_id: suggestion.id.to_string(),
+                                    search: search.clone(),
+                                    replace: replace.clone(),
+                                };
+                                (ps, pe, msg, act)
+                            }
+                            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
+                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
+                                let msg = format!(
+                                    "[{}] {}: slot {} \"{}\" \u{2192} \"{}\"",
+                                    suggestion.author, suggestion.reason, slot, search, replace
                                 );
                                 let act = SlotAction::AcceptBodySuggestion {
                                     suggestion_id: suggestion.id.to_string(),
