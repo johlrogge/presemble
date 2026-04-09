@@ -51,22 +51,19 @@ struct StoredDiagnostic {
 
 pub struct PresembleLsp {
     client: Client,
-    site_index: site_index::SiteIndex,
     repo: site_repository::SiteRepository,
     pub site_dir: std::path::PathBuf,
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
-    conductor: Arc<Mutex<Option<conductor::ConductorClient>>>,
+    conductor: Arc<Mutex<conductor::ConductorClient>>,
 }
 
 impl PresembleLsp {
-    pub fn new(client: Client, site_dir: std::path::PathBuf, conductor: Option<conductor::ConductorClient>) -> Self {
+    pub fn new(client: Client, site_dir: std::path::PathBuf, conductor: conductor::ConductorClient) -> Self {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
-        let site_index = site_index::SiteIndex::new(site_dir.clone());
         let repo = site_repository::SiteRepository::new(site_dir.clone());
         Self {
             client,
-            site_index,
             repo,
             site_dir,
             doc_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -78,100 +75,59 @@ impl PresembleLsp {
     async fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
         let path_str = path.to_string_lossy().to_string();
-        let cond_guard = self.conductor.lock().await;
-        let stem = if let Some(ref cond) = *cond_guard {
-            match cond.classify(&path_str) {
-                Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
-                _ => return None,
-            }
-        } else {
-            match self.site_index.classify(&path) {
-                site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
-                _ => return None,
-            }
+        let cond = self.conductor.lock().await;
+        let stem = match cond.classify(&path_str) {
+            Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
+            _ => return None,
         };
-        let grammar = if let Some(ref cond) = *cond_guard {
-            let src = cond.get_schema_source(&stem).ok()??;
-            schema::parse_schema(&src).ok()?
-        } else {
-            self.site_index.load_grammar(&stem)?
-        };
+        let src = cond.get_schema_source(&stem).ok()??;
+        let grammar = schema::parse_schema(&src).ok()?;
         Some((grammar, stem))
     }
 
     async fn grammar_for_template_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
         let path_str = path.to_string_lossy().to_string();
-        let cond_guard = self.conductor.lock().await;
-        let stem = if let Some(ref cond) = *cond_guard {
-            match cond.classify(&path_str) {
-                Ok(conductor::FileClassification::Template { schema_stem }) => schema_stem,
-                _ => return None,
-            }
-        } else {
-            match self.site_index.classify(&path) {
-                site_index::FileKind::Template { schema_stem } => schema_stem.to_string(),
-                _ => return None,
-            }
+        let cond = self.conductor.lock().await;
+        let stem = match cond.classify(&path_str) {
+            Ok(conductor::FileClassification::Template { schema_stem }) => schema_stem,
+            _ => return None,
         };
-        let grammar = if let Some(ref cond) = *cond_guard {
-            let src = cond.get_schema_source(&stem).ok()??;
-            schema::parse_schema(&src).ok()?
-        } else {
-            self.site_index.load_grammar(&stem)?
-        };
+        let src = cond.get_schema_source(&stem).ok()??;
+        let grammar = schema::parse_schema(&src).ok()?;
         Some((grammar, stem))
     }
 
     async fn schema_stem(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
         let path_str = path.to_string_lossy().to_string();
-        let cond_guard = self.conductor.lock().await;
-        if let Some(ref cond) = *cond_guard {
-            match cond.classify(&path_str) {
-                Ok(conductor::FileClassification::Schema { stem }) => Some(stem),
-                _ => None,
-            }
-        } else {
-            match self.site_index.classify(&path) {
-                site_index::FileKind::Schema { stem } => Some(stem.to_string()),
-                _ => None,
-            }
+        let cond = self.conductor.lock().await;
+        match cond.classify(&path_str) {
+            Ok(conductor::FileClassification::Schema { stem }) => Some(stem),
+            _ => None,
         }
     }
 
-    /// Classify a path, using the conductor when available, falling back to site_index.
+    /// Classify a path using the conductor.
     async fn classify_path(&self, path: &std::path::Path) -> conductor::FileClassification {
         let path_str = path.to_string_lossy().to_string();
-        let cond_guard = self.conductor.lock().await;
-        if let Some(ref cond) = *cond_guard {
-            cond.classify(&path_str).unwrap_or(conductor::FileClassification::Unknown)
-        } else {
-            site_file_kind_to_fc(self.site_index.classify(path))
-        }
+        let cond = self.conductor.lock().await;
+        cond.classify(&path_str).unwrap_or(conductor::FileClassification::Unknown)
     }
 
     /// Get document text for a URI.
     ///
-    /// When a conductor is available, delegates to `GetDocumentText` (which returns the
+    /// Delegates to the conductor's `GetDocumentText` (which returns the
     /// in-memory editor buffer if dirty, otherwise falls back to the on-disk file).
-    /// When no conductor is present, falls back to the local `doc_sources` cache first,
-    /// then reads from disk.
     #[allow(dead_code)] // will be wired to remaining fs::read_to_string call sites incrementally
     async fn document_text(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
         let path_str = path.to_string_lossy();
-        {
-            let cond_guard = self.conductor.lock().await;
-            if let Some(ref cond) = *cond_guard
-                && let Ok(maybe_text) = cond.get_document_text(&path_str)
-            {
-                return maybe_text.or_else(|| std::fs::read_to_string(&path).ok());
-            }
+        let cond = self.conductor.lock().await;
+        if let Ok(maybe_text) = cond.get_document_text(&path_str) {
+            return maybe_text.or_else(|| std::fs::read_to_string(&path).ok());
         }
-        // Fallback: local cache first, then disk
-        self.doc_sources.lock().await.get(&uri.to_string()).cloned()
-            .or_else(|| std::fs::read_to_string(&path).ok())
+        std::fs::read_to_string(&path).ok()
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
@@ -208,12 +164,11 @@ impl PresembleLsp {
         if let Some(content_path) = uri.to_file_path().ok()
             .and_then(|p| p.strip_prefix(&self.site_dir).ok().map(|rel| rel.to_string_lossy().into_owned()))
         {
-            let cond_guard = self.conductor.lock().await;
-            if let Some(ref cond) = *cond_guard {
-                let cmd = conductor::Command::GetSuggestions {
-                    file: editorial_types::ContentPath::new(&content_path),
-                };
-                if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
+            let cond = self.conductor.lock().await;
+            let cmd = conductor::Command::GetSuggestions {
+                file: editorial_types::ContentPath::new(&content_path),
+            };
+            if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
                     for suggestion in suggestions {
                         let (pos_start, pos_end, message, action) = match &suggestion.target {
                             editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
@@ -270,7 +225,6 @@ impl PresembleLsp {
                             action: Some(action),
                         });
                     }
-                }
             }
         }
 
@@ -327,31 +281,11 @@ impl PresembleLsp {
     }
 
     async fn revalidate_dependents(&self, schema_stem: &str) {
-        // Prefer conductor for dependency listing; fall back to site_index.
         let dependent_files: Vec<(std::path::PathBuf, conductor::FileClassification)> = {
-            let cond_guard = self.conductor.lock().await;
-            if let Some(ref cond) = *cond_guard {
-                match cond.list_dependents(schema_stem) {
-                    Ok(deps) => deps.into_iter().map(|d| (std::path::PathBuf::from(&d.path), d.kind)).collect(),
-                    Err(_) => {
-                        // Fallback to site_index on conductor error
-                        self.site_index.dependents_of_schema(schema_stem)
-                            .into_iter()
-                            .map(|sf| {
-                                let kind = site_file_kind_to_fc(sf.kind);
-                                (sf.path, kind)
-                            })
-                            .collect()
-                    }
-                }
-            } else {
-                self.site_index.dependents_of_schema(schema_stem)
-                    .into_iter()
-                    .map(|sf| {
-                        let kind = site_file_kind_to_fc(sf.kind);
-                        (sf.path, kind)
-                    })
-                    .collect()
+            let cond = self.conductor.lock().await;
+            match cond.list_dependents(schema_stem) {
+                Ok(deps) => deps.into_iter().map(|d| (std::path::PathBuf::from(&d.path), d.kind)).collect(),
+                Err(_) => Vec::new(),
             }
         };
 
@@ -382,24 +316,6 @@ impl PresembleLsp {
     }
 }
 
-
-/// Convert a `site_index::FileKind` to a `conductor::FileClassification` for uniform handling.
-fn site_file_kind_to_fc(kind: site_index::FileKind) -> conductor::FileClassification {
-    match kind {
-        site_index::FileKind::Content { schema_stem } => {
-            conductor::FileClassification::Content { schema_stem: schema_stem.to_string() }
-        }
-        site_index::FileKind::Template { schema_stem } => {
-            conductor::FileClassification::Template { schema_stem: schema_stem.to_string() }
-        }
-        site_index::FileKind::Schema { stem } => {
-            conductor::FileClassification::Schema { stem: stem.to_string() }
-        }
-        site_index::FileKind::Stylesheet => conductor::FileClassification::Stylesheet,
-        site_index::FileKind::Asset => conductor::FileClassification::Asset,
-        site_index::FileKind::Unknown => conductor::FileClassification::Unknown,
-    }
-}
 
 
 /// Convert a `content::SourceEdit` to an LSP `TextEdit` using byte-to-position mapping.
@@ -514,50 +430,33 @@ impl LanguageServer for PresembleLsp {
                     let path_str = path.to_string_lossy().to_string();
 
                     // Only re-validate content files — templates and schemas don't have suggestions.
-                    // Use conductor for classification and grammar loading when available,
-                    // falling back to site_index for the no-conductor path.
                     let (_schema_stem, grammar) = {
-                        let cond_guard = conductor.lock().await;
-                        if let Some(ref cond) = *cond_guard {
-                            let stem = match cond.classify(&path_str) {
-                                Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
-                                _ => continue,
-                            };
-                            let Some(src_str) = cond.get_schema_source(&stem).ok().flatten() else { continue };
-                            let Some(g) = schema::parse_schema(&src_str).ok() else { continue };
-                            (stem, g)
-                        } else {
-                            let tmp_index = site_index::SiteIndex::new(site_dir.clone());
-                            let stem = match tmp_index.classify(&path) {
-                                site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
-                                _ => continue,
-                            };
-                            let Some(g) = tmp_index.load_grammar(&stem) else { continue };
-                            (stem, g)
-                        }
+                        let cond = conductor.lock().await;
+                        let stem = match cond.classify(&path_str) {
+                            Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
+                            _ => continue,
+                        };
+                        let Some(src_str) = cond.get_schema_source(&stem).ok().flatten() else { continue };
+                        let Some(g) = schema::parse_schema(&src_str).ok() else { continue };
+                        (stem, g)
                     };
 
                     // Query current suggestions from conductor.
                     let suggestions = {
-                        let cond_guard = conductor.lock().await;
-                        if let Some(ref cond) = *cond_guard {
-                            if let Some(content_path) = path
-                                .strip_prefix(&site_dir)
-                                .ok()
-                                .map(|rel| rel.to_string_lossy().into_owned())
-                            {
-                                let cmd = conductor::Command::GetSuggestions {
-                                    file: editorial_types::ContentPath::new(&content_path),
-                                };
-                                match cond.send(&cmd) {
-                                    Ok(conductor::Response::Suggestions(s)) => s,
-                                    _ => continue,
-                                }
-                            } else {
-                                continue;
-                            }
-                        } else {
+                        let cond = conductor.lock().await;
+                        let Some(content_path) = path
+                            .strip_prefix(&site_dir)
+                            .ok()
+                            .map(|rel| rel.to_string_lossy().into_owned())
+                        else {
                             continue;
+                        };
+                        let cmd = conductor::Command::GetSuggestions {
+                            file: editorial_types::ContentPath::new(&content_path),
+                        };
+                        match cond.send(&cmd) {
+                            Ok(conductor::Response::Suggestions(s)) => s,
+                            _ => continue,
                         }
                     };
 
@@ -681,13 +580,11 @@ impl LanguageServer for PresembleLsp {
             // Notify conductor of the change (triggers rebuild + browser reload).
             // Fire-and-forget: if it fails, the LSP still works locally.
             {
-                let cond_guard = self.conductor.lock().await;
-                if let Some(ref cond) = *cond_guard {
-                    let _ = cond.send(&conductor::Command::DocumentChanged {
-                        path: path.to_string_lossy().to_string(),
-                        text: c.text.clone(),
-                    });
-                }
+                let cond = self.conductor.lock().await;
+                let _ = cond.send(&conductor::Command::DocumentChanged {
+                    path: path.to_string_lossy().to_string(),
+                    text: c.text.clone(),
+                });
             }
             match kind {
                 conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, c.text).await,
@@ -706,13 +603,11 @@ impl LanguageServer for PresembleLsp {
         // Notify conductor that this file was saved (clears in-memory buffer, triggers rebuild).
         // Fire-and-forget: if it fails, the LSP still works locally.
         {
-            let cond_guard = self.conductor.lock().await;
-            if let Some(ref cond) = *cond_guard {
-                let path = p.text_document.uri.to_file_path().unwrap_or_default();
-                let _ = cond.send(&conductor::Command::DocumentSaved {
-                    path: path.to_string_lossy().to_string(),
-                });
-            }
+            let cond = self.conductor.lock().await;
+            let path = p.text_document.uri.to_file_path().unwrap_or_default();
+            let _ = cond.send(&conductor::Command::DocumentSaved {
+                path: path.to_string_lossy().to_string(),
+            });
         }
         if let Ok(src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
             let uri = p.text_document.uri;
@@ -815,23 +710,19 @@ impl LanguageServer for PresembleLsp {
                     && separator_line(&src).is_some_and(|sl| pos.line > sl)
                 {
                     let link_items = {
-                        let cond_guard = self.conductor.lock().await;
-                        if let Some(ref cond) = *cond_guard {
-                            // Fetch all link options from the conductor by iterating all schemas.
-                            let stems = cond.list_schemas().unwrap_or_default();
-                            let all_options: Vec<conductor::LinkOption> = stems
-                                .iter()
-                                .flat_map(|(stem, _)| {
-                                    cond.list_link_options(stem).unwrap_or_default()
-                                })
-                                .collect();
-                            if all_options.is_empty() {
-                                link_completions(&self.repo)
-                            } else {
-                                link_completions_from_options(&all_options)
-                            }
-                        } else {
+                        let cond = self.conductor.lock().await;
+                        // Fetch all link options from the conductor by iterating all schemas.
+                        let stems = cond.list_schemas().unwrap_or_default();
+                        let all_options: Vec<conductor::LinkOption> = stems
+                            .iter()
+                            .flat_map(|(stem, _)| {
+                                cond.list_link_options(stem).unwrap_or_default()
+                            })
+                            .collect();
+                        if all_options.is_empty() {
                             link_completions(&self.repo)
+                        } else {
+                            link_completions_from_options(&all_options)
                         }
                     };
                     let current_line = line_text(&src, pos.line);
@@ -922,17 +813,15 @@ impl LanguageServer for PresembleLsp {
         let line = p.text_document_position_params.position.line;
         let path = uri.to_file_path().unwrap_or_default();
         // Notify conductor of cursor position for browser scroll-follow.
-        // Fire-and-forget: if conductor is unavailable, hover still works.
+        // Fire-and-forget: failures are ignored.
         {
-            let cond_guard = self.conductor.lock().await;
-            if let Some(ref cond) = *cond_guard {
-                let rel = path
-                    .strip_prefix(&self.site_dir)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
-                let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
-            }
+            let cond = self.conductor.lock().await;
+            let rel = path
+                .strip_prefix(&self.site_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
         }
         let kind = self.classify_path(&path).await;
         match kind {
@@ -1216,11 +1105,9 @@ impl LanguageServer for PresembleLsp {
 
                 // Notify conductor to mark the suggestion accepted.
                 {
-                    let cond_guard = self.conductor.lock().await;
-                    if let Some(ref cond) = *cond_guard {
-                        let id = editorial_types::SuggestionId::from(suggestion_id);
-                        let _ = cond.send(&conductor::Command::AcceptSuggestion { id });
-                    }
+                    let cond = self.conductor.lock().await;
+                    let id = editorial_types::SuggestionId::from(suggestion_id);
+                    let _ = cond.send(&conductor::Command::AcceptSuggestion { id });
                 }
 
                 // Trigger revalidation to remove the suggestion diagnostic.
@@ -1237,11 +1124,9 @@ impl LanguageServer for PresembleLsp {
 
                 // Notify conductor to dismiss the suggestion.
                 {
-                    let cond_guard = self.conductor.lock().await;
-                    if let Some(ref cond) = *cond_guard {
-                        let id = editorial_types::SuggestionId::from(suggestion_id);
-                        let _ = cond.send(&conductor::Command::RejectSuggestion { id });
-                    }
+                    let cond = self.conductor.lock().await;
+                    let id = editorial_types::SuggestionId::from(suggestion_id);
+                    let _ = cond.send(&conductor::Command::RejectSuggestion { id });
                 }
 
                 // Trigger revalidation to remove the suggestion diagnostic.
