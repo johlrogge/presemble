@@ -65,6 +65,8 @@ pub enum Command {
     },
     /// List all dirty (unsaved) buffers.
     GetDirtyBuffers,
+    /// List distinct file paths that have at least one pending suggestion.
+    GetSuggestionFiles,
     /// Write a dirty buffer to disk.
     SaveBuffer { path: String },
     /// Write all dirty buffers to disk.
@@ -99,6 +101,8 @@ pub enum Response {
     ContentCreated(String),
     /// List of dirty (unsaved) buffer paths.
     DirtyBuffers(Vec<String>),
+    /// Distinct file paths that have at least one pending suggestion (sorted).
+    SuggestionFiles(Vec<String>),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.

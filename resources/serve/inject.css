@@ -23,7 +23,7 @@ img.presemble-suggestion{min-width:200px;min-height:120px;display:block;}
 .presemble-mascot-icon{width:3.5rem;height:3.5rem;background:#5d8a6e;color:#fff;border-radius:50%;border:none;cursor:pointer;font-size:1.6rem;line-height:3.5rem;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.2);transition:background 0.2s,transform 0.1s;}
 .presemble-mascot-icon:hover{background:#4a7159;transform:scale(1.05);}
 .presemble-mascot-badge{position:absolute;top:-4px;right:-4px;background:#e67e22;color:#fff;font-size:0.7rem;font-weight:700;min-width:1.2rem;height:1.2rem;line-height:1.2rem;border-radius:0.6rem;text-align:center;padding:0 0.3rem;display:none;}
-.presemble-mascot-menu{display:none;position:absolute;bottom:4rem;right:0;background:#fff;border-radius:0.5rem;box-shadow:0 4px 16px rgba(0,0,0,0.15);padding:0.4rem;min-width:8rem;}
+.presemble-mascot-menu{display:none;position:absolute;bottom:4rem;right:0;background:#fff;border-radius:0.5rem;box-shadow:0 4px 16px rgba(0,0,0,0.15);padding:0.4rem;min-width:12rem;}
 .presemble-mascot-menu.open{display:block;}
 .presemble-mascot-menu button{display:block;width:100%;border:none;background:none;padding:0.5rem 0.75rem;text-align:left;font-size:0.9rem;cursor:pointer;border-radius:0.3rem;transition:background 0.15s;}
 .presemble-mascot-menu button:hover{background:#f0f0f0;}
@@ -56,3 +56,10 @@ img.presemble-suggestion{min-width:200px;min-height:120px;display:block;}
 .presemble-folded-content{display:none !important;}
 .presemble-fold-summary{color:#888;font-size:0.85rem;font-style:italic;padding:0.3rem 0 0.3rem 1.5rem;border-left:2px dashed #ccc;margin:0.3rem 0;cursor:pointer;}
 .presemble-fold-summary:hover{color:#5d8a6e;}
+.presemble-edit-mode .presemble-has-suggestions{border-left:3px solid #e8a838;position:relative;}
+.presemble-edit-mode .presemble-has-suggestions::after{content:'';position:absolute;top:0;right:0;width:8px;height:8px;background:#e8a838;border-radius:50%;pointer-events:none;}
+.presemble-buffer-lists{border-top:1px solid #e0e0e0;margin-top:0.3rem;padding-top:0.3rem;max-height:16rem;overflow-y:auto;}
+.presemble-buffer-section-title{font-size:0.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.03em;padding:0.3rem 0.75rem 0.1rem;}
+.presemble-buffer-link{display:block;padding:0.25rem 0.75rem;font-size:0.85rem;color:#333;text-decoration:none;border-radius:0.3rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.presemble-buffer-link:hover{background:#f0f0f0;}
+.presemble-buffer-link.current{font-weight:600;color:#5d8a6e;}

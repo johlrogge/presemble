@@ -1362,6 +1362,17 @@ impl Conductor {
                 }
                 CommandResult::ok()
             }
+            Command::GetSuggestionFiles => {
+                let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
+                let files: Vec<String> = suggestions
+                    .values()
+                    .filter(|s| s.status == editorial_types::SuggestionStatus::Pending)
+                    .map(|s| s.file.to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                CommandResult::with_response(Response::SuggestionFiles(files))
+            }
             Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity, theme } => {
                 match site_templates::template_by_name(&template_name) {
                     Some(template) => {

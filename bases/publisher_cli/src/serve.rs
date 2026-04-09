@@ -203,6 +203,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/suggest-slot", post(suggest_slot_handler))
         .route("/_presemble/suggest-body", post(suggest_body_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
+        .route("/_presemble/suggestion-files", get(suggestion_files_handler))
         .route("/_presemble/save-all", post(save_all_handler))
         .route("/_presemble/templates", get(templates_handler))
         .route("/_presemble/scaffold", post(scaffold_handler))
@@ -580,6 +581,56 @@ async fn save_all_handler(
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+async fn suggestion_files_handler(
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let Some(ref cond) = state.conductor else {
+        let body = b"[]".to_vec();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        ).into_response();
+    };
+
+    match cond.send(&conductor::Command::GetSuggestionFiles) {
+        Ok(conductor::Response::SuggestionFiles(paths)) => {
+            let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        _ => {
+            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
     }
 }
 

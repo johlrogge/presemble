@@ -43,6 +43,16 @@ else{tryScroll(10);}
 var mode=sessionStorage.getItem('presemble-mode')||'view';
 var _editorialSuggestCount=0;
 var _dirtyCount=0;
+var _dirtyPaths=[];
+var _suggestionFilePaths=[];
+function _contentPathToUrl(p){
+var s=p;
+if(s.indexOf('content/')===0){s=s.substring(8);}
+if(s.endsWith('.md')){s=s.substring(0,s.length-3);}
+if(s==='index'||s===''){return '/';}
+if(s.endsWith('/index')){s=s.substring(0,s.length-6)+'/';}
+return '/'+s;
+}
 function countSuggestions(){return document.querySelectorAll('.presemble-suggestion').length;}
 var container=document.createElement('div');container.className='presemble-mascot';
 var icon=document.createElement('button');icon.className='presemble-mascot-icon';
@@ -96,10 +106,24 @@ else{alert(data.error||'Save failed');}
 });
 };
 _foldSetup();
+_fetchSuggestionCount();
+}
+function _editMarkSuggestions(data){
+document.querySelectorAll('.presemble-has-suggestions').forEach(function(el){
+el.classList.remove('presemble-has-suggestions');
+});
+if(!data||!data.length){return;}
+data.forEach(function(sug){
+var el=_suggestFindTarget(sug);
+if(el){el.classList.add('presemble-has-suggestions');}
+});
 }
 function _editCleanup(){
 _foldTeardown();
 if(_editToolbar){_editToolbar.remove();_editToolbar=null;}
+document.querySelectorAll('.presemble-has-suggestions').forEach(function(el){
+el.classList.remove('presemble-has-suggestions');
+});
 }
 var _sectionMap=null;
 var _foldSummaries={};
@@ -426,6 +450,7 @@ var cnt=data.length;
 _editorialSuggestCount=cnt;
 if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}
 update();
+if(mode==='edit'){_editMarkSuggestions(data);}
 });
 }
 function _fetchDirtyCount(){
@@ -433,7 +458,8 @@ fetch('/_presemble/dirty-buffers')
 .then(function(r){return r.json();})
 .then(function(paths){
 if(!Array.isArray(paths)){return;}
-_dirtyCount=paths.length;
+_dirtyPaths=paths;
+_dirtyCount=_dirtyPaths.length;
 update();
 if(_editToolbar){
 var saveBtn=_editToolbar.querySelector('.presemble-edit-save');
@@ -442,10 +468,49 @@ saveBtn.style.display=_dirtyCount>0?'':'none';
 saveBtn.textContent='\u{1F4BE} Save ('+_dirtyCount+')';
 }
 }
+_renderBufferLists();
 })
 .catch(function(){});
 }
+function _fetchSuggestionFiles(){
+fetch('/_presemble/suggestion-files').then(function(r){return r.json();})
+.then(function(data){
+_suggestionFilePaths=data||[];
+_renderBufferLists();
+}).catch(function(){});
+}
+function _renderBufferLists(){
+var menu=document.querySelector('.presemble-mascot-menu');
+if(!menu){return;}
+var container=menu.querySelector('.presemble-buffer-lists');
+if(!container){
+container=document.createElement('div');
+container.className='presemble-buffer-lists';
+menu.appendChild(container);
+}
+var html='';
+if(_dirtyPaths.length>0){
+html+='<div class="presemble-buffer-section-title">Unsaved ('+_dirtyPaths.length+')</div>';
+_dirtyPaths.forEach(function(p){
+var url=_contentPathToUrl(p);
+var current=(window.location.pathname===url||window.location.pathname===url+'/')?'  current':'';
+html+='<a class="presemble-buffer-link'+current+'" href="'+url+'">'+url+'</a>';
+});
+}
+if(_suggestionFilePaths.length>0){
+html+='<div class="presemble-buffer-section-title">Suggestions ('+_suggestionFilePaths.length+')</div>';
+_suggestionFilePaths.forEach(function(p){
+var url=_contentPathToUrl(p);
+var current=(window.location.pathname===url||window.location.pathname===url+'/')?'  current':'';
+html+='<a class="presemble-buffer-link'+current+'" href="'+url+'">'+url+'</a>';
+});
+}
+container.innerHTML=html;
+container.style.display=(html==='')?'none':'block';
+}
 setInterval(_fetchDirtyCount,2000);
+setInterval(_fetchSuggestionFiles,5000);
+_fetchSuggestionFiles();
 function _suggestEnter(){
 var fileEl=document.querySelector('[data-presemble-file]');
 if(!fileEl){return;}
@@ -484,6 +549,7 @@ editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
 window._fetchDirtyCount=_fetchDirtyCount;
 window._fetchSuggestionCount=_fetchSuggestionCount;
+window._fetchSuggestionFiles=_fetchSuggestionFiles;
 window._foldToggle=function(el){_foldToggle(el);};
 })();
 document.addEventListener('click',function(e){
@@ -556,13 +622,85 @@ el.after(berr3);
 el.style.display='';
 });
 }
+function minimalDiff(original, edited) {
+if (original === edited) return null;
+
+// Find first differing character
+var prefixLen = 0;
+var minLen = Math.min(original.length, edited.length);
+while (prefixLen < minLen && original[prefixLen] === edited[prefixLen]) {
+prefixLen++;
+}
+
+// Find last differing character (from end), don't overlap prefix
+var suffixLen = 0;
+while (suffixLen < (minLen - prefixLen)
+       && original[original.length - 1 - suffixLen] === edited[edited.length - 1 - suffixLen]) {
+suffixLen++;
+}
+
+// If everything changed, return full strings
+if (prefixLen === 0 && suffixLen === 0) {
+return { search: original, replace: edited };
+}
+
+// Expand context for uniqueness — start with the bare change
+var ctxLeft = 0;
+var ctxRight = 0;
+var maxLeft = prefixLen;
+var maxRight = suffixLen;
+
+while (true) {
+var searchStart = prefixLen - ctxLeft;
+var searchEnd = original.length - suffixLen + ctxRight;
+var candidate = original.slice(searchStart, searchEnd);
+
+// Count occurrences in original
+var count = 0;
+var idx = -1;
+while ((idx = original.indexOf(candidate, idx + 1)) !== -1) {
+count++;
+if (count > 1) break;
+}
+
+if (count <= 1) break; // unique!
+
+// Expand by snapping to word boundaries (~10 chars at a time)
+if (ctxLeft < maxLeft) {
+ctxLeft = Math.min(ctxLeft + 10, maxLeft);
+// Snap to word boundary (space/newline) on left
+while (ctxLeft < maxLeft && original[prefixLen - ctxLeft] !== ' ' && original[prefixLen - ctxLeft] !== '\n') {
+ctxLeft++;
+}
+}
+if (ctxRight < maxRight) {
+ctxRight = Math.min(ctxRight + 10, maxRight);
+// Snap to word boundary on right
+while (ctxRight < maxRight && original[original.length - suffixLen + ctxRight - 1] !== ' ' && original[original.length - suffixLen + ctxRight - 1] !== '\n') {
+ctxRight++;
+}
+}
+
+// If we've expanded to full string, stop
+if (ctxLeft >= maxLeft && ctxRight >= maxRight) break;
+}
+
+// Build final search/replace with the context
+var finalStart = prefixLen - ctxLeft;
+var finalEnd = original.length - suffixLen + ctxRight;
+var search = original.slice(finalStart, finalEnd);
+var replace = edited.slice(finalStart, edited.length - suffixLen + ctxRight);
+
+return { search: search, replace: replace };
+}
 function bsuggest(){
 var bvalue=ta.value;
 var origMd=bmd;
 bcleanup();
-if(bvalue===origMd||!bvalue.trim()){return;}
+var diff = minimalDiff(origMd, bvalue);
+if (!diff || !bvalue.trim()) { return; }
 fetch('/_presemble/suggest-body',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,body_idx:bidx,search:origMd,replace:bvalue})
+body:JSON.stringify({file:bfile,body_idx:bidx,search:diff.search,replace:diff.replace})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){
 var berr=document.createElement('div');berr.className='presemble-edit-error';
