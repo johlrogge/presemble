@@ -1,4 +1,4 @@
-use crate::document::{ContentElement, Document, FlatDocument, LinkOp, LinkTarget, LinkText};
+use crate::document::{ContentElement, Document, FlatDocument, LinkOp, LinkTarget, LinkText, RefsToTarget};
 use crate::error::ContentError;
 use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -578,6 +578,17 @@ fn parse_link_op(s: &str) -> Result<LinkOp, ContentError> {
                 .trim_matches('"')
                 .to_string();
             Ok(LinkOp::Filter { field, value })
+        }
+        "refs-to" => {
+            let arg = parts
+                .get(1)
+                .ok_or_else(|| ContentError::ParseError("refs-to requires an argument".to_string()))?;
+            let target = if *arg == "self" {
+                RefsToTarget::SelfRef
+            } else {
+                RefsToTarget::Url(arg.trim_matches('"').to_string())
+            };
+            Ok(LinkOp::RefsTo(target))
         }
         other => Err(ContentError::ParseError(format!("unknown link operation: {other}"))),
     }

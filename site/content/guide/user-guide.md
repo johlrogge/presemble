@@ -744,8 +744,29 @@ Expressions use Presemble Lisp — a small EDN-based language with threading mac
 | `(->> :post (sort-by :published :desc) (take 5))` | Latest 5 posts |
 | `(->> :feature (sort-by :title :asc))` | Features sorted by title |
 | `(->> :post (filter #(= :pinned (:status %))))` | Pinned posts only |
+| `(->> :post (refs-to self))` | All posts that link to the current page |
 
 Keywords act as accessor functions: `:title item` extracts the `:title` field from `item`.
+
+### Reverse references with `refs-to self`
+
+Any content file can populate a slot with all pages that link to it by using `(refs-to self)` in a link expression:
+
+```markdown
+[posts](->> :post (refs-to self))
+```
+
+This queries the site graph's edge index at build time and returns all posts whose link slots point to the current page's URL. The schema for the receiving page declares the slot with a link type and unbounded occurrence:
+
+```markdown
+[<post>](/post/<slug>) {#posts}
+type
+: link(post)
+occurs
+: *
+```
+
+The result is a typed list — the template iterates it exactly like any other collection. This replaces any need to maintain reverse-reference lists by hand.
 
 ## MCP server
 
@@ -801,6 +822,22 @@ Run "Connect to a Running REPL Server" in VS Code and select nREPL. The default 
 - Call suggestion operations programmatically
 - Inspect the site graph's data model
 - Prototype link expressions before adding them to content files
+- Query the edge graph with `refs-to` and `refs-from`
+
+### Edge queries
+
+Two built-ins query the site's link graph directly:
+
+| Expression | Returns |
+|---|---|
+| `(refs-to "/author/alice")` | All edges pointing to `/author/alice` |
+| `(refs-from "/post/hello")` | All edges originating from `/post/hello` |
+
+Each result is a list of edge records with `:source` and `:target` keys. Use these to explore cross-content relationships interactively before building them into content files:
+
+```clojure
+(->> (refs-to "/author/alice") (map :source))
+```
 
 ## Site wizard
 

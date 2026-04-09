@@ -11,7 +11,7 @@ Content is data. Templates are data. Schemas are the contracts between them.
 - **Live serve** — `presemble serve` rebuilds only affected pages on each save and reloads the browser automatically; click body elements to edit inline
 - **LSP support** — `presemble lsp` provides completions, diagnostics, hover, and go-to-definition for content, template, and schema files in any LSP-capable editor
 - **Editorial suggestions** — Claude and human editors push suggestions via the MCP server or conductor; each appears as an LSP diagnostic with accept/reject code actions
-- **Presemble Lisp** — content files include link expressions that assemble collections at build time: `(->> :post (sort-by :published :desc) (take 5))`
+- **Presemble Lisp** — content files include link expressions that assemble collections at build time: `(->> :post (sort-by :published :desc) (take 5))`. Reverse references (`(refs-to self)`) populate a slot with all pages that link to the current page.
 - **nREPL** — Calva and CIDER can jack in and evaluate expressions against the live content graph
 - **Site wizard** — point `presemble serve` at an empty directory for a browser-based starter scaffold
 - **Deployment URL rewriting** — authors write root-relative paths; the publisher rewrites them to relative, root-relative with base path, or absolute at build time
@@ -140,6 +140,6 @@ Requires the Nix devenv shell. Do not install packages with `cargo install -g` o
 
 ## Version
 
-Current release: **0.30.0**
+Current release: **0.31.0**
 
 See [ROADMAP.md](ROADMAP.md) for the milestone plan and [RELEASING.md](RELEASING.md) for the release workflow.

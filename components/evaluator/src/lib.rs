@@ -119,6 +119,8 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
                 "get-schema" => builtin_get_schema(&items[1..], conductor),
                 "list-content" => builtin_list_content(conductor),
                 "list-schemas" => builtin_list_schemas(conductor),
+                "refs-to" => builtin_refs_to(&items[1..], conductor),
+                "refs-from" => builtin_refs_from(&items[1..], conductor),
                 "keys" => builtin_keys(&items[1..], conductor),
                 "vals" => builtin_vals(&items[1..], conductor),
 
@@ -418,6 +420,47 @@ fn builtin_list_schemas(cond: &conductor::Conductor) -> Result<template::Value, 
     ))
 }
 
+/// (refs-to "/author/alice") — returns all edges pointing TO the given URL.
+/// Each edge is returned as a record with keys `source` and `target`.
+fn builtin_refs_to(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.is_empty() {
+        return Err("refs-to requires 1 argument: a URL path string".into());
+    }
+    let url = eval_expanded(&args[0], cond)?;
+    let url_str = match &url {
+        template::Value::Text(s) => s.clone(),
+        _ => return Err("refs-to: argument must be a string URL path".into()),
+    };
+    let edges = cond.query_edges_to(&url_str);
+    Ok(template::Value::List(
+        edges.iter().map(edge_to_value).collect(),
+    ))
+}
+
+/// (refs-from "/post/hello") — returns all edges originating FROM the given URL.
+/// Each edge is returned as a record with keys `source` and `target`.
+fn builtin_refs_from(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.is_empty() {
+        return Err("refs-from requires 1 argument: a URL path string".into());
+    }
+    let url = eval_expanded(&args[0], cond)?;
+    let url_str = match &url {
+        template::Value::Text(s) => s.clone(),
+        _ => return Err("refs-from: argument must be a string URL path".into()),
+    };
+    let edges = cond.query_edges_from(&url_str);
+    Ok(template::Value::List(
+        edges.iter().map(edge_to_value).collect(),
+    ))
+}
+
+fn edge_to_value(edge: &site_index::Edge) -> template::Value {
+    let mut record = template::DataGraph::new();
+    record.insert("source", template::Value::Text(edge.source.as_str().to_string()));
+    record.insert("target", template::Value::Text(edge.target.as_str().to_string()));
+    template::Value::Record(record)
+}
+
 /// (get map :key) or (get map :key default)
 fn builtin_get(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.len() < 2 {
@@ -703,6 +746,9 @@ const DOCS: &[(&str, &str, &str)] = &[
     // Editorial
     ("suggest", "(suggest \"file\" \"slot\" \"value\" \"reason\")", "Create an editorial suggestion."),
     ("get-suggestions", "(get-suggestions \"file\")", "Get pending suggestions for a file."),
+    // Graph queries
+    ("refs-to", "(refs-to \"/author/alice\")", "Returns all edges pointing to the given URL. Each edge is a map with :source, :target, :slot, :kind."),
+    ("refs-from", "(refs-from \"/post/hello\")", "Returns all edges originating from the given URL."),
     // Arithmetic
     ("+", "(+ a b ...)", "Add numbers."),
     ("-", "(- a b ...)", "Subtract numbers. (- a) negates."),
@@ -993,4 +1039,145 @@ mod tests {
         let result = eval_str("#{1 2}", &cond);
         assert!(result.is_err());
     }
+
+    // ── refs-to / refs-from ──────────────────────────────────────────────────
+
+    /// Build a conductor whose site graph contains two posts, one of which has a
+    /// PathRef LinkExpression pointing at /author/alice.
+    fn linked_conductor() -> conductor::Conductor {
+        use std::collections::HashSet;
+        let repo = site_repository::SiteRepository::builder()
+            .schema("post", POST_SCHEMA_SRC)
+            .build();
+        let cond = conductor::Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap();
+
+        let mut graph = site_index::SiteGraph::new();
+
+        // post/with-link has a link expression → /author/alice
+        let mut data_with_link = template::DataGraph::new();
+        data_with_link.insert("title", template::Value::Text("Post With Link".into()));
+        data_with_link.insert(
+            "author",
+            template::Value::LinkExpression {
+                text: content::LinkText::Empty,
+                target: content::LinkTarget::PathRef("/author/alice".to_string()),
+            },
+        );
+
+        let url_with_link = site_index::UrlPath::new("/post/with-link");
+        graph.insert(site_index::SiteNode {
+            url_path: url_with_link,
+            output_path: PathBuf::from("output/post/with-link/index.html"),
+            source_path: PathBuf::from("content/post/with-link.md"),
+            deps: HashSet::new(),
+            role: site_index::NodeRole::Page(site_index::PageData {
+                page_kind: site_index::PageKind::Item,
+                schema_stem: site_index::SchemaStem::new("post"),
+                template_path: PathBuf::from("templates/post/item.hiccup"),
+                content_path: PathBuf::from("content/post/with-link.md"),
+                schema_path: PathBuf::from("schemas/post/item.md"),
+                data: data_with_link,
+            }),
+        });
+
+        // post/no-link has no link expression
+        let mut data_no_link = template::DataGraph::new();
+        data_no_link.insert("title", template::Value::Text("Post Without Link".into()));
+
+        let url_no_link = site_index::UrlPath::new("/post/no-link");
+        graph.insert(site_index::SiteNode {
+            url_path: url_no_link,
+            output_path: PathBuf::from("output/post/no-link/index.html"),
+            source_path: PathBuf::from("content/post/no-link.md"),
+            deps: HashSet::new(),
+            role: site_index::NodeRole::Page(site_index::PageData {
+                page_kind: site_index::PageKind::Item,
+                schema_stem: site_index::SchemaStem::new("post"),
+                template_path: PathBuf::from("templates/post/item.hiccup"),
+                content_path: PathBuf::from("content/post/no-link.md"),
+                schema_path: PathBuf::from("schemas/post/item.md"),
+                data: data_no_link,
+            }),
+        });
+
+        cond.set_site_graph(graph);
+        cond
+    }
+
+    #[test]
+    fn refs_to_returns_edges_pointing_at_target() {
+        let cond = linked_conductor();
+        let result = eval_str(r#"(refs-to "/author/alice")"#, &cond).unwrap();
+        if let template::Value::List(edges) = result {
+            assert_eq!(edges.len(), 1, "expected 1 edge pointing to /author/alice");
+            let edge = &edges[0];
+            if let template::Value::Record(r) = edge {
+                let source = r.resolve(&["source"]).and_then(|v| v.display_text());
+                let target = r.resolve(&["target"]).and_then(|v| v.display_text());
+                assert_eq!(source.as_deref(), Some("/post/with-link"));
+                assert_eq!(target.as_deref(), Some("/author/alice"));
+            } else {
+                panic!("expected edge to be a Record, got {edge:?}");
+            }
+        } else {
+            panic!("expected List from refs-to");
+        }
+    }
+
+    #[test]
+    fn refs_to_unknown_target_returns_empty_list() {
+        let cond = linked_conductor();
+        let result = eval_str(r#"(refs-to "/author/nobody")"#, &cond).unwrap();
+        assert!(
+            matches!(result, template::Value::List(ref v) if v.is_empty()),
+            "expected empty list for unknown target"
+        );
+    }
+
+    #[test]
+    fn refs_from_returns_edges_from_source() {
+        let cond = linked_conductor();
+        let result = eval_str(r#"(refs-from "/post/with-link")"#, &cond).unwrap();
+        if let template::Value::List(edges) = result {
+            assert_eq!(edges.len(), 1, "expected 1 edge from /post/with-link");
+            let edge = &edges[0];
+            if let template::Value::Record(r) = edge {
+                let source = r.resolve(&["source"]).and_then(|v| v.display_text());
+                let target = r.resolve(&["target"]).and_then(|v| v.display_text());
+                assert_eq!(source.as_deref(), Some("/post/with-link"));
+                assert_eq!(target.as_deref(), Some("/author/alice"));
+            } else {
+                panic!("expected edge to be a Record, got {edge:?}");
+            }
+        } else {
+            panic!("expected List from refs-from");
+        }
+    }
+
+    #[test]
+    fn refs_from_page_with_no_links_returns_empty_list() {
+        let cond = linked_conductor();
+        let result = eval_str(r#"(refs-from "/post/no-link")"#, &cond).unwrap();
+        assert!(
+            matches!(result, template::Value::List(ref v) if v.is_empty()),
+            "expected empty list for page with no links"
+        );
+    }
+
+    #[test]
+    fn refs_to_requires_argument() {
+        let cond = empty_conductor();
+        let result = eval_str("(refs-to)", &cond);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("refs-to requires 1 argument"));
+    }
+
+    #[test]
+    fn refs_from_requires_argument() {
+        let cond = empty_conductor();
+        let result = eval_str("(refs-from)", &cond);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("refs-from requires 1 argument"));
+    }
+
 }

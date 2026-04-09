@@ -535,6 +535,15 @@ fn resolve_link_expressions(site_graph: &mut SiteGraph) {
         }
     }
 
+    // Build an edge index from all unresolved link expressions (PathRef only)
+    let mut all_edges = Vec::new();
+    for node in site_graph.iter_pages_by_kind(PageKind::Item) {
+        if let Some(pd) = node.page_data() {
+            all_edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
+        }
+    }
+    let edge_index = expressions::build_edge_index(&all_edges);
+
     // Collect all page URLs to iterate over (avoids borrow conflicts)
     let urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
 
@@ -542,7 +551,13 @@ fn resolve_link_expressions(site_graph: &mut SiteGraph) {
         if let Some(node) = site_graph.get_mut(url)
             && let Some(pd) = node.page_data_mut()
         {
-            expressions::resolve_link_expressions_in_graph(&mut pd.data, &url_index, &stem_index);
+            expressions::resolve_link_expressions_in_graph(
+                &mut pd.data,
+                &url_index,
+                &stem_index,
+                url,
+                &edge_index,
+            );
         }
     }
 }

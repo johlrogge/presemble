@@ -1,4 +1,4 @@
-use crate::document::{ContentElement, Document, LinkOp, LinkTarget, LinkText};
+use crate::document::{ContentElement, Document, LinkOp, LinkTarget, LinkText, RefsToTarget};
 use schema::Spanned;
 
 /// Serialize a Document back to canonical markdown.
@@ -98,6 +98,10 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
                             LinkOp::Filter { field, value } => {
                                 format!("(filter :{field} \"{value}\")")
                             }
+                            LinkOp::RefsTo(target) => match target {
+                                RefsToTarget::SelfRef => "(refs-to self)".to_string(),
+                                RefsToTarget::Url(u) => format!("(refs-to \"{u}\")"),
+                            },
                         })
                         .collect();
                     let ops_str = ops.join(" ");

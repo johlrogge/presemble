@@ -5,6 +5,18 @@ use template::DataGraph;
 
 use crate::site_index::{SchemaStem, UrlPath};
 
+/// A directed edge between two pages in the site graph.
+///
+/// Edges capture link expressions: `source` is the page that holds the
+/// link expression and `target` is the URL it points at.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Edge {
+    /// The page that contains the link expression.
+    pub source: UrlPath,
+    /// The URL the link expression points at.
+    pub target: UrlPath,
+}
+
 /// The kind of page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageKind {

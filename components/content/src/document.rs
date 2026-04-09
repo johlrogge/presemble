@@ -102,6 +102,17 @@ pub enum LinkOp {
     Take(usize),
     /// (filter :field "value")
     Filter { field: String, value: String },
+    /// (refs-to self) or (refs-to "/url")
+    RefsTo(RefsToTarget),
+}
+
+/// The target of a `refs-to` operation: either the page itself or a fixed URL.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefsToTarget {
+    /// `self` — the URL of the page being rendered
+    SelfRef,
+    /// A specific URL string
+    Url(String),
 }
 
 /// The text part of a link expression [text](target).

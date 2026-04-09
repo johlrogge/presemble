@@ -91,6 +91,35 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.31.0
+
+Edge-first graph architecture and reverse references.
+
+**Edge-first graph architecture**
+The site graph now stores typed `Edge` structs. `extract_edges` collects all link expression values from the built graph and `build_edge_index` indexes them by target URL. This turns the site graph into a navigable edge graph — any page can look up which other pages link to it.
+
+**`(refs-to self)` link expressions**
+Content files can declare reverse-reference slots using a `refs-to self` operation in a link expression:
+
+```markdown
+[posts](->> :post (refs-to self))
+```
+
+At build time the publisher queries the edge index for all items of the given type whose link slots point to the current page's URL. The result is a typed list the template iterates like any other collection. Schemas declare the slot with `type: link(<stem>)` and `occurs: *`. This replaces the previous magic `_refs_` injection with an explicit, schema-declared model.
+
+**REPL edge query builtins**
+Two new REPL builtins query the edge graph directly:
+
+- `(refs-to "/author/alice")` — returns all edges pointing to that URL
+- `(refs-from "/post/hello")` — returns all edges originating from that URL
+
+Each result is a list of edge records with `:source` and `:target` keys.
+
+**Dead code cleanup**
+Duplicate `deps.rs` file removed.
+
+---
+
 ### v0.30.0
 
 Guided site wizard, CSS generator, navigation partials, collection index pages, and seed content.

@@ -4,7 +4,13 @@
     [:nav {:class "breadcrumb"}
       [:a {:href "/author/"} "← All authors"]]
     [:presemble/insert {:data "input.name" :as "h1"}]
-    [:presemble/insert {:data "input.bio" :as "p"}]]]
+    [:presemble/insert {:data "input.bio" :as "p"}]
+    [:section
+      [:h2 "Posts by this author"]
+      [:ul
+        [:template {:data-each "input.posts"}
+          [:li
+            [:presemble/insert {:data "item.link" :as "h3"}]]]]]]]
 
 [:html {:lang "en"}
   [:head

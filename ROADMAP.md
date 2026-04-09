@@ -329,6 +329,9 @@ structural diff, and browser adapter defined there.
 - [x] Guided site wizard — 6-step browser creation with font/color/palette customization and live CSS preview (shipped v0.30.0)
 - [x] Navigation — shared nav partials, breadcrumbs, collection index pages (shipped v0.30.0)
 - [x] Content creation — publisher rebuild after creation, event-driven navigation (shipped v0.30.0)
+- [x] Edge-first graph architecture — edges extracted from link expressions, indexed by target URL for reverse lookup (shipped v0.31.0)
+- [x] `(refs-to self)` link expressions — reverse references declared in schemas, populated via content (shipped v0.31.0)
+- [x] REPL edge query builtins — `(refs-to "/url")` and `(refs-from "/url")` (shipped v0.31.0)
 - [ ] Suggest mode: mark-for-correction and suggest-changes
 - [ ] Suggestion persistence in `.presemble/suggestions/`
 - [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol
@@ -425,6 +428,9 @@ conductor-as-repl brainstorm note).
 - [ ] `presemble lsp` as thin nng client
 - [ ] `presemble serve` as query client of conductor
 - [ ] Version counter and conflict detection
+- [ ] Deduplicate conductor/expressions link resolution code (conductor has stringly-typed copies)
+- [ ] Conductor edge index caching (currently rebuilds per query)
+- [ ] Conductor `RefsTo` wiring (currently no-op — publisher handles it)
 
 **Success gate:** `presemble lsp` and `presemble serve` share state through the conductor.
 Editing a file in Helix updates the browser preview before save.

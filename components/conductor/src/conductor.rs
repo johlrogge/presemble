@@ -96,6 +96,56 @@ fn resolve_link_expressions_in_graph(
     }
 }
 
+/// Walk a `DataGraph` recursively and collect `PathRef` link expression edges.
+fn collect_link_edges_from_graph(
+    source: &site_index::UrlPath,
+    graph: &template::DataGraph,
+    edges: &mut Vec<site_index::Edge>,
+) {
+    for (_, value) in graph.iter() {
+        collect_link_edges_from_value(source, value, edges);
+    }
+}
+
+fn collect_link_edges_from_value(
+    source: &site_index::UrlPath,
+    value: &template::Value,
+    edges: &mut Vec<site_index::Edge>,
+) {
+    match value {
+        template::Value::LinkExpression {
+            target: content::LinkTarget::PathRef(path),
+            ..
+        } => {
+            edges.push(site_index::Edge {
+                source: source.clone(),
+                target: site_index::UrlPath::new(path),
+            });
+        }
+        template::Value::List(items) => {
+            for item in items {
+                collect_link_edges_from_value(source, item, edges);
+            }
+        }
+        template::Value::Record(inner) => {
+            // A resolved link expression becomes a Record with an "href" field.
+            // Extract the edge directly from the href without recursing into the record,
+            // to avoid treating every nested record as a potential edge.
+            if let Some(template::Value::Text(href)) = inner.resolve(&["href"]) {
+                edges.push(site_index::Edge {
+                    source: source.clone(),
+                    target: site_index::UrlPath::new(href.as_str()),
+                });
+            } else {
+                for (_, v) in inner.iter() {
+                    collect_link_edges_from_value(source, v, edges);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Evaluate a single link expression to a concrete `Value`.
 fn evaluate_link_expression_local(
     text: &content::LinkText,
@@ -148,6 +198,11 @@ fn evaluate_link_expression_local(
                                 .map(|t| t == value)
                                 .unwrap_or(false)
                         });
+                    }
+                    content::LinkOp::RefsTo(_) => {
+                        // RefsTo requires a full edge index; the conductor's local copy
+                        // does not yet thread an edge index through, so this is a no-op here.
+                        // The canonical implementation is in the `expressions` component.
                     }
                 }
             }
@@ -243,7 +298,6 @@ fn resolve_cross_references(
     }
 }
 
-/// A simple TemplateRegistry backed by the site repository (no caching).
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
     repo: site_repository::SiteRepository,
@@ -527,6 +581,46 @@ impl Conductor {
                 })
             })
             .collect()
+    }
+
+    /// Return all edges pointing TO the given URL path.
+    ///
+    /// Walks every item page's data graph looking for `Value::LinkExpression`
+    /// entries with a `PathRef` target that matches `target_url`.
+    pub fn query_edges_to(&self, target_url: &str) -> Vec<site_index::Edge> {
+        let target = site_index::UrlPath::new(target_url);
+        self.collect_all_edges()
+            .into_iter()
+            .filter(|e| e.target == target)
+            .collect()
+    }
+
+    /// Return all edges originating FROM the given URL path.
+    ///
+    /// Walks every item page's data graph looking for `Value::LinkExpression`
+    /// entries with a `PathRef` target originating from `source_url`.
+    pub fn query_edges_from(&self, source_url: &str) -> Vec<site_index::Edge> {
+        let source = site_index::UrlPath::new(source_url);
+        self.collect_all_edges()
+            .into_iter()
+            .filter(|e| e.source == source)
+            .collect()
+    }
+
+    /// Walk all page nodes and extract `PathRef` link expression edges.
+    fn collect_all_edges(&self) -> Vec<site_index::Edge> {
+        let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+        let mut edges = Vec::new();
+        for node in graph.iter_pages() {
+            if let Some(pd) = node.page_data() {
+                collect_link_edges_from_graph(
+                    &node.url_path,
+                    &pd.data,
+                    &mut edges,
+                );
+            }
+        }
+        edges
     }
 
     /// Get in-memory document text, falling back to disk.
@@ -1404,5 +1498,112 @@ mod link_resolution_tests {
             matches!(graph.resolve(&["link"]), Some(template::Value::Absent) | None),
             "unknown path ref should resolve to Absent"
         );
+    }
+}
+
+#[cfg(test)]
+mod query_edges_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Build a minimal SiteNode with resolved link data (Record with href).
+    fn make_page_node_with_resolved_link(
+        source_url: &str,
+        target_href: &str,
+    ) -> site_index::SiteNode {
+        let mut data = template::DataGraph::new();
+        // Simulate a resolved link expression — a Record with an href field
+        let mut linked = template::DataGraph::new();
+        linked.insert("href", template::Value::Text(target_href.to_string()));
+        linked.insert("title", template::Value::Text("Target Title".to_string()));
+        data.insert("related", template::Value::Record(linked));
+
+        site_index::SiteNode {
+            url_path: site_index::UrlPath::new(source_url),
+            output_path: PathBuf::from(format!("output{source_url}/index.html")),
+            source_path: PathBuf::from(format!("content/post/hello.md")),
+            deps: std::collections::HashSet::new(),
+            role: site_index::NodeRole::Page(site_index::PageData {
+                page_kind: site_index::PageKind::Item,
+                schema_stem: site_index::SchemaStem::new("post"),
+                template_path: PathBuf::from("templates/post/item.hiccup"),
+                content_path: PathBuf::from("content/post/hello.md"),
+                schema_path: PathBuf::from("schemas/post/item.md"),
+                data,
+            }),
+        }
+    }
+
+    fn make_conductor_with_nodes(nodes: Vec<site_index::SiteNode>) -> Conductor {
+        let repo = site_repository::SiteRepository::builder().build();
+        let conductor = Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap();
+        let mut graph = site_index::SiteGraph::new();
+        for node in nodes {
+            graph.insert(node);
+        }
+        conductor.set_site_graph(graph);
+        conductor
+    }
+
+    #[test]
+    fn query_edges_to_finds_resolved_records_with_href() {
+        // /post/alpha has a resolved Record link to /author/alice
+        let node = make_page_node_with_resolved_link("/post/alpha", "/author/alice");
+        let conductor = make_conductor_with_nodes(vec![node]);
+
+        let edges = conductor.query_edges_to("/author/alice");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected 1 edge to /author/alice from resolved Record, got {}",
+            edges.len()
+        );
+        assert_eq!(edges[0].source, site_index::UrlPath::new("/post/alpha"));
+        assert_eq!(edges[0].target, site_index::UrlPath::new("/author/alice"));
+    }
+
+    #[test]
+    fn query_edges_from_finds_resolved_records_with_href() {
+        // /post/alpha has a resolved Record link to /author/alice
+        let node = make_page_node_with_resolved_link("/post/alpha", "/author/alice");
+        let conductor = make_conductor_with_nodes(vec![node]);
+
+        let edges = conductor.query_edges_from("/post/alpha");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected 1 edge from /post/alpha via resolved Record, got {}",
+            edges.len()
+        );
+        assert_eq!(edges[0].source, site_index::UrlPath::new("/post/alpha"));
+        assert_eq!(edges[0].target, site_index::UrlPath::new("/author/alice"));
+    }
+
+    #[test]
+    fn query_edges_to_no_false_positives_for_other_records() {
+        // A record that has no href field should NOT produce an edge
+        let mut data = template::DataGraph::new();
+        let mut rec = template::DataGraph::new();
+        rec.insert("title", template::Value::Text("Just a title".to_string()));
+        data.insert("meta", template::Value::Record(rec));
+
+        let node = site_index::SiteNode {
+            url_path: site_index::UrlPath::new("/post/beta"),
+            output_path: std::path::PathBuf::from("output/post/beta/index.html"),
+            source_path: std::path::PathBuf::from("content/post/beta.md"),
+            deps: std::collections::HashSet::new(),
+            role: site_index::NodeRole::Page(site_index::PageData {
+                page_kind: site_index::PageKind::Item,
+                schema_stem: site_index::SchemaStem::new("post"),
+                template_path: std::path::PathBuf::from("templates/post/item.hiccup"),
+                content_path: std::path::PathBuf::from("content/post/beta.md"),
+                schema_path: std::path::PathBuf::from("schemas/post/item.md"),
+                data,
+            }),
+        };
+        let conductor = make_conductor_with_nodes(vec![node]);
+
+        let edges = conductor.query_edges_to("/any/target");
+        assert!(edges.is_empty(), "records without href should not produce edges");
     }
 }
