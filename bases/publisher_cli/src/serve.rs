@@ -200,6 +200,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/suggestions", get(suggestions_handler))
         .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
         .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
+        .route("/_presemble/suggest-slot", post(suggest_slot_handler))
+        .route("/_presemble/suggest-body", post(suggest_body_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
         .route("/_presemble/save-all", post(save_all_handler))
         .route("/_presemble/templates", get(templates_handler))
@@ -295,6 +297,70 @@ async fn edit_body_handler(
         ok: false,
         error: Some("conductor not available — body editing requires conductor".to_string()),
     })
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestSlotRequest {
+    file: String,
+    slot: String,
+    value: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestBodyRequest {
+    file: String,
+    #[allow(dead_code)]
+    body_idx: usize,
+    search: String,
+    replace: String,
+}
+
+async fn suggest_slot_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestSlotRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::SuggestSlotValue {
+        file: editorial_types::ContentPath::new(&req.file),
+        slot: editorial_types::SlotName::new(&req.slot),
+        value: req.value.clone(),
+        reason: "Browser suggestion".to_string(),
+        author: editorial_types::Author::Human("browser".to_string()),
+    }) {
+        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+async fn suggest_body_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestBodyRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::SuggestBodyEdit {
+        file: editorial_types::ContentPath::new(&req.file),
+        search: req.search.clone(),
+        replace: req.replace.clone(),
+        reason: "Browser suggestion".to_string(),
+        author: editorial_types::Author::Human("browser".to_string()),
+    }) {
+        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
 }
 
 /// Browser-friendly representation of a suggestion.

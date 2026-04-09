@@ -483,6 +483,7 @@ viewBtn.onclick=function(){setMode('view');};
 editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
 window._fetchDirtyCount=_fetchDirtyCount;
+window._fetchSuggestionCount=_fetchSuggestionCount;
 window._foldToggle=function(el){_foldToggle(el);};
 })();
 document.addEventListener('click',function(e){
@@ -517,7 +518,7 @@ el.parentNode.insertBefore(ta,el.nextSibling);
 ta.focus();
 var btoolbar=document.createElement('div');
 btoolbar.className='presemble-edit-toolbar';
-btoolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
+btoolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
 ta.after(btoolbar);
 el.classList.add('presemble-editing');
 function bcleanup(){
@@ -555,7 +556,23 @@ el.after(berr3);
 el.style.display='';
 });
 }
+function bsuggest(){
+var bvalue=ta.value;
+var origMd=bmd;
+bcleanup();
+if(bvalue===origMd||!bvalue.trim()){return;}
+fetch('/_presemble/suggest-body',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:bfile,body_idx:bidx,search:origMd,replace:bvalue})
+}).then(function(r){return r.json();}).then(function(data){
+if(!data.ok){
+var berr=document.createElement('div');berr.className='presemble-edit-error';
+berr.textContent=data.error||'Suggest failed';el.after(berr);
+}
+if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+}).catch(function(e){});
+}
 btoolbar.querySelector('.presemble-save').onclick=function(ev){ev.stopPropagation();bsave();};
+btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
 btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};
 ta.addEventListener('keydown',function bkeyHandler(ev){
 if(ev.key==='Escape'){bcleanup();ta.removeEventListener('keydown',bkeyHandler);}
@@ -617,7 +634,7 @@ el.focus();
 if(!el.textContent.trim()){var r=document.createRange();r.selectNodeContents(el);r.collapse(true);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}
 var toolbar=document.createElement('div');
 toolbar.className='presemble-edit-toolbar';
-toolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
+toolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
 el.after(toolbar);
 function cleanup(){
 el.contentEditable='false';
@@ -652,7 +669,26 @@ el.after(err);
 el.innerText=original;
 });
 }
+function suggest(){
+var value=el.innerText.trim();
+var origText=original;
+cleanup();
+if(value===origText||!value){return;}
+fetch('/_presemble/suggest-slot',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:pfile,slot:editSlot,value:value})
+}).then(function(r){return r.json();}).then(function(data){
+if(!data.ok){
+var err=document.createElement('div');err.className='presemble-edit-error';
+err.textContent=data.error||'Suggest failed';el.after(err);
+}
+el.innerText=origText;
+if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+}).catch(function(e){
+el.innerText=origText;
+});
+}
 toolbar.querySelector('.presemble-save').onclick=function(e){e.stopPropagation();save();};
+toolbar.querySelector('.presemble-suggest-inline').onclick=function(e){e.stopPropagation();suggest();};
 toolbar.querySelector('.presemble-undo').onclick=function(e){e.stopPropagation();el.innerText=original;cleanup();};
 el.addEventListener('keydown',function handler(e){
 if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();el.removeEventListener('keydown',handler);}
