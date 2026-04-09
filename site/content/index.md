@@ -46,13 +46,21 @@ The same suggestions appear as inline diffs in the browser preview with a toolba
 
 ### Content assembles itself
 
-Content files can include Presemble Lisp expressions that assemble collections at build time:
+Content files include Presemble Lisp expressions that assemble collections at build time:
 
 ```markdown
 []((->> :post (sort-by :published :desc) (take 5)))
 ```
 
 The expression evaluates against the site graph and produces a validated list. The homepage decides what appears and in what order; the template decides how it looks. Neither can override the other's responsibility.
+
+Expressions also support reverse references. An author page can declare a slot that populates itself with all posts that link to that author:
+
+```markdown
+[posts](->> :post (refs-to self))
+```
+
+The publisher queries the site's edge index at build time. No manual maintenance of reverse-reference lists is required.
 
 ### The page always renders
 

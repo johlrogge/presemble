@@ -55,8 +55,16 @@ Threads as the first argument. Used for single-value transforms.
 | `first` / `last` | First or last item |
 | `upcase` / `downcase` | String transforms |
 | `str` | Concatenate strings |
+| `refs-to` | All edges pointing to a given URL: `(refs-to "/author/alice")` |
+| `refs-from` | All edges originating from a given URL: `(refs-from "/post/hello")` |
 
 Keywords act as functions: `:title item` extracts the `:title` field from `item`.
+
+Edge records returned by `refs-to` and `refs-from` expose `:source` and `:target` keys. Use them to explore the site's link graph from the REPL:
+
+```clojure
+(->> (refs-to "/author/alice") (map :source))
+```
 
 ### Link expressions in content
 
