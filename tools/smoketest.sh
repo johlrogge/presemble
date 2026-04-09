@@ -34,6 +34,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+log() { echo -e "${YELLOW}▸${NC} $1"; }
+pass() { PASS=$((PASS + 1)); echo -e "  ${GREEN}✓${NC} $1"; }
+fail() { FAIL=$((FAIL + 1)); ERRORS="${ERRORS}\n  ✗ $1"; echo -e "  ${RED}✗${NC} $1"; }
+
 # Kill any stale presemble processes on our port
 if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
     log "Port $PORT is busy — killing stale processes..."
@@ -41,10 +45,6 @@ if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
     pkill -f "presemble conductor" 2>/dev/null || true
     sleep 2
 fi
-
-log() { echo -e "${YELLOW}▸${NC} $1"; }
-pass() { PASS=$((PASS + 1)); echo -e "  ${GREEN}✓${NC} $1"; }
-fail() { FAIL=$((FAIL + 1)); ERRORS="${ERRORS}\n  ✗ $1"; echo -e "  ${RED}✗${NC} $1"; }
 
 # Assert a curl response contains expected text
 assert_curl() {
