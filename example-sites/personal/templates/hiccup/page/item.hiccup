@@ -2,7 +2,7 @@
   [:main
     [:presemble/include {:src "nav"}]
     [:nav {:class "breadcrumb"}
-      [:a {:href "/page/"} "\u2190 All pages"]]
+      [:a {:href "/page/"} "← All pages"]]
     [:presemble/insert {:data "input.title" :as "h1"}]
     [:template {:data-slot "input.description"}
       [:p {:class "description"}

@@ -2,7 +2,7 @@
   [:main
     [:presemble/include {:src "nav"}]
     [:nav {:class "breadcrumb"}
-      [:a {:href "/project/"} "\u2190 All projects"]]
+      [:a {:href "/project/"} "← All projects"]]
     [:article
       [:presemble/insert {:data "input.title" :as "h1"}]
       [:presemble/insert {:data "input.description" :as "p"}]
