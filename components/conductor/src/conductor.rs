@@ -1179,11 +1179,51 @@ impl Conductor {
                     .from_dir(&self.site_dir)
                     .build();
                 match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
-                    Ok((_path, url)) => {
+                    Ok((path, url)) => {
                         // Refresh schema cache and rebuild graph for the new content
                         self.refresh_schema_cache();
                         let _ = self.build_full_graph();
-                        CommandResult::with_response(Response::ContentCreated(url))
+
+                        let mut rebuilt_pages: Vec<String> = vec![];
+
+                        // Rebuild the new content page itself
+                        if let Some(text) = self.document_text(&path) {
+                            match self.rebuild_page(&path, &text) {
+                                Ok(mut pages) => rebuilt_pages.append(&mut pages),
+                                Err(e) => eprintln!("conductor: rebuild failed for new content {}: {e}", path.display()),
+                            }
+                        }
+
+                        // Rebuild the collection index page if it exists
+                        let collection_index = self.site_dir.join("content").join(&stem).join("index.md");
+                        if collection_index.exists()
+                            && let Some(text) = self.document_text(&collection_index)
+                        {
+                            match self.rebuild_page(&collection_index, &text) {
+                                Ok(mut pages) => rebuilt_pages.append(&mut pages),
+                                Err(e) => eprintln!("conductor: rebuild failed for collection index {}: {e}", collection_index.display()),
+                            }
+                        }
+
+                        // Rebuild the site root index if it exists
+                        let site_index_path = self.site_dir.join("content").join("index.md");
+                        if site_index_path.exists()
+                            && let Some(text) = self.document_text(&site_index_path)
+                        {
+                            match self.rebuild_page(&site_index_path, &text) {
+                                Ok(mut pages) => rebuilt_pages.append(&mut pages),
+                                Err(e) => eprintln!("conductor: rebuild failed for site index {}: {e}", site_index_path.display()),
+                            }
+                        }
+
+                        CommandResult {
+                            response: Response::ContentCreated(url),
+                            events: if rebuilt_pages.is_empty() {
+                                vec![]
+                            } else {
+                                vec![ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None }]
+                            },
+                        }
                     }
                     Err(e) => CommandResult::error(e),
                 }
