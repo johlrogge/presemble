@@ -740,7 +740,7 @@ async fn schemas_handler(State(state): State<AppState>) -> axum::response::Respo
         .build();
     let stems: Vec<String> = content_editor::list_schemas(&repo)
         .into_iter()
-        .filter(|s| s != "index")
+        .filter(|s| s != "index" && !s.ends_with("/index"))
         .collect();
     let json = serde_json::to_vec(&stems).unwrap_or_default();
     (
