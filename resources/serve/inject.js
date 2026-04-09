@@ -238,7 +238,7 @@ submitBtn.disabled=true;
 fetch('/_presemble/create-content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stem:stem,slug:slug})})
 .then(function(r){return r.json();})
 .then(function(data){
-if(data.ok){overlay.remove();if(data.url){window.location.href=data.url;}}
+if(data.ok){overlay.remove();}
 else{errDiv.textContent=data.error||'Create failed';errDiv.style.display='block';submitBtn.disabled=false;}
 })
 .catch(function(err){errDiv.textContent='Network error: '+err.message;errDiv.style.display='block';submitBtn.disabled=false;});
