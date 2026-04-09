@@ -842,9 +842,10 @@ function suggest(){
 var value=el.innerText.trim();
 var origText=original;
 cleanup();
-if(value===origText||!value){return;}
-fetch('/_presemble/suggest-slot',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,slot:editSlot,value:value})
+var diff=minimalDiff(origText,value);
+if(!diff){return;}
+fetch('/_presemble/suggest-slot-edit',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:pfile,slot:editSlot,search:diff.search,replace:diff.replace})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){
 var err=document.createElement('div');err.className='presemble-edit-error';
