@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use site_index::DIR_TEMPLATES;
 use template::constants::KEY_PRESEMBLE_FILE;
 
-use crate::protocol::{Command, ConductorEvent, Response};
+use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
 
 /// The result of handling a command: a response to send back, plus
 /// zero or more events to broadcast to all subscribers.
@@ -1528,33 +1528,113 @@ impl Conductor {
                     None => CommandResult::error(format!("unknown template: {template_name}")),
                 }
             }
+            Command::Classify { path } => {
+                let file_path = std::path::Path::new(&path);
+                let abs_path = if file_path.is_absolute() {
+                    file_path.to_path_buf()
+                } else {
+                    self.site_dir.join(file_path)
+                };
+                let kind = self.site_index.classify(&abs_path);
+                let classification = match kind {
+                    site_index::FileKind::Content { schema_stem } => {
+                        FileClassification::Content { schema_stem: schema_stem.to_string() }
+                    }
+                    site_index::FileKind::Template { schema_stem } => {
+                        FileClassification::Template { schema_stem: schema_stem.to_string() }
+                    }
+                    site_index::FileKind::Schema { stem } => {
+                        FileClassification::Schema { stem: stem.to_string() }
+                    }
+                    site_index::FileKind::Stylesheet => FileClassification::Stylesheet,
+                    site_index::FileKind::Asset => FileClassification::Asset,
+                    site_index::FileKind::Unknown => FileClassification::Unknown,
+                };
+                CommandResult::with_response(Response::FileClassification(classification))
+            }
+            Command::ListSchemas => {
+                let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+                let result: Vec<(String, String)> = cache
+                    .iter()
+                    .map(|(stem, src)| (stem.clone(), src.clone()))
+                    .collect();
+                CommandResult::with_response(Response::SchemaList(result))
+            }
+            Command::ListLinkOptions { stem } => {
+                let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+                let schema_stem = site_index::SchemaStem::new(&stem);
+                let options: Vec<LinkOption> = graph
+                    .items_for_stem(&schema_stem)
+                    .into_iter()
+                    .filter_map(|node| {
+                        let pd = node.page_data()?;
+                        let url = node.url_path.as_str().to_string();
+                        // Derive slug from url: last path segment
+                        let slug = url.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+                        let title = match pd.data.resolve(&["title"]) {
+                            Some(template::Value::Text(t)) => t.clone(),
+                            _ => slug.clone(),
+                        };
+                        Some(LinkOption { stem: stem.clone(), slug, title, url })
+                    })
+                    .collect();
+                CommandResult::with_response(Response::LinkOptions(options))
+            }
+            Command::ResolveLink { path } => {
+                let abs_path = if std::path::Path::new(&path).is_absolute() {
+                    std::path::PathBuf::from(&path)
+                } else {
+                    self.site_dir.join(&path)
+                };
+                CommandResult::with_response(Response::Exists(abs_path.exists()))
+            }
+            Command::ResolveTemplate { stem } => {
+                let templates_dir = self.site_dir.join("templates");
+                let exists = templates_dir.join(&stem).join("item.hiccup").exists()
+                    || templates_dir.join(&stem).join("item.html").exists()
+                    || templates_dir.join(format!("{stem}.hiccup")).exists()
+                    || templates_dir.join(format!("{stem}.html")).exists();
+                CommandResult::with_response(Response::Exists(exists))
+            }
+            Command::ListDependents { stem } => {
+                let site_files = self.site_index.dependents_of_schema(&stem);
+                let dependents: Vec<DependentFile> = site_files
+                    .into_iter()
+                    .map(|sf| {
+                        let path = sf.path.to_string_lossy().to_string();
+                        let kind = match sf.kind {
+                            site_index::FileKind::Content { schema_stem } => {
+                                FileClassification::Content { schema_stem: schema_stem.to_string() }
+                            }
+                            site_index::FileKind::Template { schema_stem } => {
+                                FileClassification::Template { schema_stem: schema_stem.to_string() }
+                            }
+                            site_index::FileKind::Schema { stem: s } => {
+                                FileClassification::Schema { stem: s.to_string() }
+                            }
+                            site_index::FileKind::Stylesheet => FileClassification::Stylesheet,
+                            site_index::FileKind::Asset => FileClassification::Asset,
+                            site_index::FileKind::Unknown => FileClassification::Unknown,
+                        };
+                        DependentFile { path, kind }
+                    })
+                    .collect();
+                CommandResult::with_response(Response::Dependents(dependents))
+            }
             Command::ListContent => {
-                let content_dir = self.site_dir.join("content");
+                let stems = self.site_index.schema_stems();
                 let mut paths = Vec::new();
-                if let Ok(entries) = std::fs::read_dir(&content_dir) {
-                    for entry in entries.flatten() {
-                        if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                            let stem = entry.file_name().to_string_lossy().to_string();
-                            let type_dir = content_dir.join(&stem);
-                            if let Ok(files) = std::fs::read_dir(&type_dir) {
-                                for f in files.flatten() {
-                                    let name = f.file_name().to_string_lossy().to_string();
-                                    if name.ends_with(".md") {
-                                        paths.push(format!("content/{stem}/{name}"));
-                                    }
-                                }
-                            }
-                        }
-                        // Also handle root-level content files (index.md)
-                        if entry.file_type().is_ok_and(|t| t.is_file()) {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if name.ends_with(".md") {
-                                paths.push(format!("content/{name}"));
-                            }
-                        }
+                for stem in &stems {
+                    for file_path in self.site_index.content_files(stem) {
+                        paths.push(file_path.to_string_lossy().to_string());
                     }
                 }
+                // Also include root-level content (empty stem)
+                for file_path in self.site_index.content_files("") {
+                    paths.push(file_path.to_string_lossy().to_string());
+                }
                 paths.sort();
+                paths.dedup();
                 CommandResult::with_response(Response::ContentList(paths))
             }
         }

@@ -1,6 +1,33 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Serializable file classification for the wire protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FileClassification {
+    Content { schema_stem: String },
+    Template { schema_stem: String },
+    Schema { stem: String },
+    Stylesheet,
+    Asset,
+    Unknown,
+}
+
+/// A link option for completions: one item that can be referenced from content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkOption {
+    pub stem: String,
+    pub slug: String,
+    pub title: String,
+    pub url: String,
+}
+
+/// A file that depends on a given schema stem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependentFile {
+    pub path: String,
+    pub kind: FileClassification,
+}
+
 /// Commands sent from clients (LSP, serve) to the conductor via nng REQ/REP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -91,7 +118,19 @@ pub enum Command {
         complexity: String,
         theme: String,
     },
-    /// List all content files in the site.
+    /// Classify a file path into its site role.
+    Classify { path: String },
+    /// List all schema stems with their source text.
+    ListSchemas,
+    /// List all link options for a given schema stem (for completions).
+    ListLinkOptions { stem: String },
+    /// Resolve a link path: check whether it exists in the site.
+    ResolveLink { path: String },
+    /// Resolve a template stem: check whether a template exists for it.
+    ResolveTemplate { stem: String },
+    /// List all files that depend on a given schema stem.
+    ListDependents { stem: String },
+    /// List all content file paths.
     ListContent,
 }
 
@@ -114,7 +153,17 @@ pub enum Response {
     DirtyBuffers(Vec<String>),
     /// Distinct file paths that have at least one pending suggestion (sorted).
     SuggestionFiles(Vec<String>),
-    /// List of content-relative paths for all content files.
+    /// Classification of a file path.
+    FileClassification(FileClassification),
+    /// List of schema stems and their source text: `(stem, source)` pairs.
+    SchemaList(Vec<(String, String)>),
+    /// List of link options for completions.
+    LinkOptions(Vec<LinkOption>),
+    /// Whether a path or template exists.
+    Exists(bool),
+    /// List of files that depend on a schema stem.
+    Dependents(Vec<DependentFile>),
+    /// List of all content file paths (site-relative).
     ContentList(Vec<String>),
 }
 

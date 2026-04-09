@@ -4,7 +4,7 @@ mod protocol;
 
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber};
 pub use conductor::{CommandResult, Conductor};
-pub use protocol::{Command, ConductorEvent, Response};
+pub use protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
 pub use editorial_types;
 
 #[cfg(test)]
@@ -1021,6 +1021,214 @@ mod tests {
                 );
             }
             other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    // ── New Command Handlers ──────────────────────────────────────────────────
+
+    #[test]
+    fn classify_content_file_returns_content_classification() {
+        let conductor = minimal_post_conductor();
+        let result = conductor.handle_command(Command::Classify {
+            path: "content/post/hello.md".to_string(),
+        });
+        match result.response {
+            Response::FileClassification(FileClassification::Content { schema_stem }) => {
+                assert_eq!(schema_stem, "post");
+            }
+            other => panic!("expected FileClassification(Content), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_unknown_file_returns_unknown_classification() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::Classify {
+            path: "random/thing.txt".to_string(),
+        });
+        match result.response {
+            Response::FileClassification(FileClassification::Unknown) => {}
+            other => panic!("expected FileClassification(Unknown), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_schema_file_returns_schema_classification() {
+        let conductor = minimal_post_conductor();
+        let result = conductor.handle_command(Command::Classify {
+            path: "schemas/post.md".to_string(),
+        });
+        match result.response {
+            Response::FileClassification(FileClassification::Schema { stem }) => {
+                assert_eq!(stem, "post");
+            }
+            other => panic!("expected FileClassification(Schema), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_schemas_returns_schema_list() {
+        let conductor = minimal_post_conductor();
+        let result = conductor.handle_command(Command::ListSchemas);
+        match result.response {
+            Response::SchemaList(schemas) => {
+                assert!(
+                    schemas.iter().any(|(stem, _)| stem == "post"),
+                    "expected 'post' stem in schema list, got: {schemas:?}"
+                );
+            }
+            other => panic!("expected SchemaList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_schemas_returns_empty_for_empty_conductor() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListSchemas);
+        match result.response {
+            Response::SchemaList(schemas) => {
+                assert!(schemas.is_empty(), "expected empty schema list for empty conductor");
+            }
+            other => panic!("expected SchemaList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_link_options_returns_items_for_stem() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = conductor.handle_command(Command::ListLinkOptions {
+            stem: "post".to_string(),
+        });
+        match result.response {
+            Response::LinkOptions(opts) => {
+                assert_eq!(opts.len(), 2, "expected 2 link options for 'post' stem");
+                let urls: Vec<&str> = opts.iter().map(|o| o.url.as_str()).collect();
+                assert!(urls.contains(&"/post/first"), "expected /post/first in options");
+                assert!(urls.contains(&"/post/second"), "expected /post/second in options");
+            }
+            other => panic!("expected LinkOptions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_link_options_returns_empty_for_unknown_stem() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListLinkOptions {
+            stem: "nonexistent".to_string(),
+        });
+        match result.response {
+            Response::LinkOptions(opts) => {
+                assert!(opts.is_empty(), "expected empty options for unknown stem");
+            }
+            other => panic!("expected LinkOptions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_returns_false_for_nonexistent_path() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ResolveLink {
+            path: "/nonexistent/path/that/does/not/exist.md".to_string(),
+        });
+        match result.response {
+            Response::Exists(false) => {}
+            other => panic!("expected Exists(false), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_template_returns_false_for_missing_stem() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ResolveTemplate {
+            stem: "nonexistent_stem_xyz".to_string(),
+        });
+        match result.response {
+            Response::Exists(false) => {}
+            other => panic!("expected Exists(false), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_template_returns_true_when_template_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let tpl_dir = dir.path().join("templates/post");
+        std::fs::create_dir_all(&tpl_dir).unwrap();
+        std::fs::write(tpl_dir.join("item.html"), "<html></html>").unwrap();
+
+        let repo = site_repository::SiteRepository::builder().build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+
+        let result = conductor.handle_command(Command::ResolveTemplate {
+            stem: "post".to_string(),
+        });
+        match result.response {
+            Response::Exists(true) => {}
+            other => panic!("expected Exists(true), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_dependents_returns_files_for_known_stem() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = conductor.handle_command(Command::ListDependents {
+            stem: "post".to_string(),
+        });
+        match result.response {
+            Response::Dependents(deps) => {
+                // Should include schema + template + content files
+                assert!(!deps.is_empty(), "expected dependents for 'post' stem");
+                let has_schema = deps.iter().any(|d| {
+                    matches!(&d.kind, FileClassification::Schema { stem } if stem == "post")
+                });
+                let has_content = deps.iter().any(|d| {
+                    matches!(&d.kind, FileClassification::Content { schema_stem } if schema_stem == "post")
+                });
+                assert!(has_schema, "expected schema file in dependents");
+                assert!(has_content, "expected content files in dependents");
+            }
+            other => panic!("expected Dependents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_dependents_returns_empty_for_unknown_stem() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListDependents {
+            stem: "nonexistent".to_string(),
+        });
+        match result.response {
+            Response::Dependents(deps) => {
+                assert!(deps.is_empty(), "expected empty dependents for unknown stem");
+            }
+            other => panic!("expected Dependents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_content_returns_paths_for_site_with_content() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = conductor.handle_command(Command::ListContent);
+        match result.response {
+            Response::ContentList(paths) => {
+                assert_eq!(paths.len(), 2, "expected 2 content files for two-post site");
+                let has_first = paths.iter().any(|p| p.ends_with("first.md"));
+                let has_second = paths.iter().any(|p| p.ends_with("second.md"));
+                assert!(has_first, "expected first.md in content list");
+                assert!(has_second, "expected second.md in content list");
+            }
+            other => panic!("expected ContentList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_content_returns_empty_for_empty_conductor() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListContent);
+        match result.response {
+            Response::ContentList(paths) => {
+                assert!(paths.is_empty(), "expected empty content list for empty conductor");
+            }
+            other => panic!("expected ContentList, got {other:?}"),
         }
     }
 }
