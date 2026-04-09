@@ -73,7 +73,6 @@ editBtn.className=mode==='edit'?'active':'';
 suggestBtn.className=mode==='suggest'?'active':'';
 if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}else{document.body.classList.remove('presemble-edit-mode');}
 }
-if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}
 update();
 icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};
 document.addEventListener('click',function(){menu.classList.remove('open');});
@@ -217,9 +216,9 @@ var typeSelect=document.createElement('select');typeSelect.style.cssText='displa
 schemas.forEach(function(s){var o=document.createElement('option');o.value=s;o.textContent=s;typeSelect.appendChild(o);});
 var slugLabel=document.createElement('label');slugLabel.textContent='Slug:';slugLabel.style.cssText='display:block;font-size:0.85rem;margin-bottom:0.25rem;';
 var slugInput=document.createElement('input');slugInput.type='text';
-var ts=Date.now().toString(36);slugInput.value=typeSelect.value+'-'+ts;
+slugInput.value='';
 slugInput.style.cssText='display:block;width:100%;box-sizing:border-box;padding:0.4rem;border:1px solid #ccc;border-radius:0.3rem;margin-bottom:0.75rem;font-size:1rem;';
-typeSelect.onchange=function(){slugInput.value=typeSelect.value+'-'+Date.now().toString(36);};
+typeSelect.onchange=function(){};
 var errDiv=document.createElement('div');errDiv.style.cssText='color:#c00;font-size:0.85rem;margin-bottom:0.5rem;display:none;';
 var btns=document.createElement('div');btns.style.cssText='display:flex;gap:0.5rem;justify-content:flex-end;';
 var cancelBtn=document.createElement('button');cancelBtn.textContent='Cancel';cancelBtn.style.cssText='padding:0.4rem 0.9rem;border:1px solid #ccc;border-radius:0.3rem;background:#fff;cursor:pointer;';

@@ -204,6 +204,9 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/save-all", post(save_all_handler))
         .route("/_presemble/templates", get(templates_handler))
         .route("/_presemble/scaffold", post(scaffold_handler))
+        .route("/_presemble/font-moods", get(font_moods_handler))
+        .route("/_presemble/palette-types", get(palette_types_handler))
+        .route("/_presemble/style-preview", post(style_preview_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -542,6 +545,81 @@ async fn templates_handler() -> axum::response::Response {
 struct ScaffoldRequest {
     template: String,
     format: String,
+    #[serde(default)]
+    font_mood: String,
+    #[serde(default)]
+    seed_color: String,
+    #[serde(default)]
+    palette_type: String,
+    #[serde(default)]
+    complexity: String,
+    #[serde(default)]
+    theme: String,
+}
+
+async fn font_moods_handler() -> axum::Json<serde_json::Value> {
+    let moods: Vec<serde_json::Value> = site_templates::FontMood::all().iter().map(|m| {
+        let (heading, body, query) = m.fonts();
+        serde_json::json!({
+            "id": m.to_string().to_lowercase(),
+            "label": m.to_string(),
+            "heading": heading,
+            "body": body,
+            "google_fonts_url": format!("https://fonts.googleapis.com/css2?family={query}&display=swap")
+        })
+    }).collect();
+    axum::Json(serde_json::json!(moods))
+}
+
+async fn palette_types_handler() -> axum::Json<serde_json::Value> {
+    let types: Vec<serde_json::Value> = site_templates::PaletteType::all().iter().map(|p| {
+        let desc = match p {
+            site_templates::PaletteType::Warm => "Analogous — seed and neighbors",
+            site_templates::PaletteType::Cool => "Complementary — seed and opposite",
+            site_templates::PaletteType::Bold => "Split-complementary — high energy",
+        };
+        serde_json::json!({
+            "id": p.to_string().to_lowercase(),
+            "label": p.to_string(),
+            "description": desc,
+            "hue_offsets": p.hue_offsets()
+        })
+    }).collect();
+    axum::Json(serde_json::json!(types))
+}
+
+#[derive(serde::Deserialize)]
+struct StylePreviewRequest {
+    #[serde(default)]
+    font_mood: String,
+    #[serde(default)]
+    seed_color: String,
+    #[serde(default)]
+    palette_type: String,
+    #[serde(default)]
+    complexity: String,
+    #[serde(default)]
+    theme: String,
+}
+
+async fn style_preview_handler(
+    axum::Json(req): axum::Json<StylePreviewRequest>,
+) -> impl IntoResponse {
+    let config = site_templates::StyleConfig {
+        font_mood: req.font_mood.parse().unwrap_or_default(),
+        seed_color: if req.seed_color.is_empty() {
+            site_templates::StyleConfig::default().seed_color
+        } else {
+            req.seed_color
+        },
+        palette_type: req.palette_type.parse().unwrap_or_default(),
+        complexity: req.complexity.parse().unwrap_or_default(),
+        theme: req.theme.parse().unwrap_or_default(),
+    };
+    (
+        [("content-type", "text/css")],
+        site_templates::generate_css(&config),
+    )
 }
 
 /// Scaffold a new site from a template. Delegates to conductor `ScaffoldSite`.
@@ -558,6 +636,11 @@ async fn scaffold_handler(
     match cond.send(&conductor::Command::ScaffoldSite {
         template_name: req.template.clone(),
         format: req.format.clone(),
+        font_mood: req.font_mood.clone(),
+        seed_color: req.seed_color.clone(),
+        palette_type: req.palette_type.clone(),
+        complexity: req.complexity.clone(),
+        theme: req.theme.clone(),
     }) {
         Ok(conductor::Response::Ok) => {
             // After scaffolding, trigger a full build so output HTML exists.
@@ -657,7 +740,7 @@ async fn schemas_handler(State(state): State<AppState>) -> axum::response::Respo
         .build();
     let stems: Vec<String> = content_editor::list_schemas(&repo)
         .into_iter()
-        .filter(|s| s != "index")
+        .filter(|s| s != "index" && !s.ends_with("/index"))
         .collect();
     let json = serde_json::to_vec(&stems).unwrap_or_default();
     (
@@ -683,11 +766,27 @@ async fn create_content_handler(
         stem: req.stem.clone(),
         slug: req.slug.clone(),
     }) {
-        Ok(conductor::Response::ContentCreated(url)) => axum::Json(CreateContentResponse {
-            ok: true,
-            url: Some(url),
-            error: None,
-        }),
+        Ok(conductor::Response::ContentCreated(url)) => {
+            // Trigger a full publisher rebuild so output HTML exists for the new page
+            let url_config = crate::UrlConfig::default();
+            if let Err(e) = crate::build_for_serve(&state.site_dir, &url_config) {
+                return axum::Json(CreateContentResponse {
+                    ok: true,
+                    url: Some(url),
+                    error: Some(format!("content created but build failed: {e}")),
+                });
+            }
+            // Notify browser to reload — smart navigation will go to the new page
+            let _ = state.reload_tx.send(BrowserMessage::Reload {
+                pages: vec![url.clone()],
+                anchor: None,
+            });
+            axum::Json(CreateContentResponse {
+                ok: true,
+                url: Some(url),
+                error: None,
+            })
+        }
         Ok(conductor::Response::Error(e)) => axum::Json(CreateContentResponse {
             ok: false,
             url: None,

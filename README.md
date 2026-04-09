@@ -140,6 +140,6 @@ Requires the Nix devenv shell. Do not install packages with `cargo install -g` o
 
 ## Version
 
-Current release: **0.29.0**
+Current release: **0.30.0**
 
 See [ROADMAP.md](ROADMAP.md) for the milestone plan and [RELEASING.md](RELEASING.md) for the release workflow.

@@ -326,6 +326,9 @@ structural diff, and browser adapter defined there.
 - [x] Presemble mascot overlay with mode toggle (shipped v0.21.0)
 - [x] Edit mode: inline editing of simple content fields (Phase A: suggestion nodes interactive)
 - [x] Edit mode: header folding — collapse/expand sections under headings (shipped v0.29.0)
+- [x] Guided site wizard — 6-step browser creation with font/color/palette customization and live CSS preview (shipped v0.30.0)
+- [x] Navigation — shared nav partials, breadcrumbs, collection index pages (shipped v0.30.0)
+- [x] Content creation — publisher rebuild after creation, event-driven navigation (shipped v0.30.0)
 - [ ] Suggest mode: mark-for-correction and suggest-changes
 - [ ] Suggestion persistence in `.presemble/suggestions/`
 - [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol

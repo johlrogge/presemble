@@ -4,7 +4,7 @@ Presemble is a site publisher focused on editorial collaboration and semantic co
 
 You never wonder "did I forget something?" Presemble tells you — in the editor while you type, in the browser while you preview, and at build time before anything goes live. Missing fields, broken links, incomplete pages — they all surface as helpful suggestions, not cryptic errors.
 
-Start a new site with the browser wizard: point `presemble serve` at an empty directory, pick a starter template, and scaffold a working site in seconds. Or open an existing content file and let Claude push improvements as structured suggestions while you accept or reject each one.
+Start a new site with the browser wizard: point `presemble serve` at an empty directory and a six-step wizard walks you through site type, font mood, color palette, and template syntax. The wizard generates a custom stylesheet and scaffolds a complete working site in seconds. Or open an existing content file and let Claude push improvements as structured suggestions while you accept or reject each one.
 
 [Schemas As Contracts](/feature/schemas-as-contracts)
 

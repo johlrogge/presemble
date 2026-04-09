@@ -1,5 +1,8 @@
 [:template {:presemble/define "body"}
   [:main
+    [:presemble/include {:src "nav"}]
+    [:nav {:class "breadcrumb"}
+      [:a {:href "/page/"} "← All pages"]]
     [:presemble/insert {:data "input.title" :as "h1"}]
     [:template {:data-slot "input.description"}
       [:p {:class "description"}

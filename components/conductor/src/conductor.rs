@@ -632,6 +632,34 @@ impl Conductor {
             resolve_cross_references(&mut graph, &url_index);
         }
 
+        // Inject collection data so templates can iterate (e.g. data-each="input.post")
+        // Mirrors build_render_context in publisher_cli: for each unique schema stem found
+        // in the site graph's item pages, insert a Value::List of all item data graphs
+        // under that stem key — but only if the page's own data doesn't already have that key.
+        {
+            let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+            let mut stems: Vec<site_index::SchemaStem> = site_graph
+                .iter_pages_by_kind(site_index::PageKind::Item)
+                .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.clone()))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            for stem_key in stems {
+                // Don't overwrite page's own slots (e.g., a resolved "author" link)
+                // with the collection of all authors.
+                if graph.resolve(&[stem_key.as_str()]).is_some() {
+                    continue;
+                }
+                let items: Vec<template::Value> = site_graph
+                    .items_for_stem(&stem_key)
+                    .into_iter()
+                    .filter_map(|n| n.page_data().map(|pd| template::Value::Record(pd.data.clone())))
+                    .collect();
+                graph.insert(stem_key.as_str(), template::Value::List(items));
+            }
+        }
+
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
         let fresh_repo = site_repository::SiteRepository::builder()
             .from_dir(&self.site_dir)
@@ -1151,11 +1179,51 @@ impl Conductor {
                     .from_dir(&self.site_dir)
                     .build();
                 match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
-                    Ok((_path, url)) => {
+                    Ok((path, url)) => {
                         // Refresh schema cache and rebuild graph for the new content
                         self.refresh_schema_cache();
                         let _ = self.build_full_graph();
-                        CommandResult::with_response(Response::ContentCreated(url))
+
+                        let mut rebuilt_pages: Vec<String> = vec![];
+
+                        // Rebuild the new content page itself
+                        if let Some(text) = self.document_text(&path) {
+                            match self.rebuild_page(&path, &text) {
+                                Ok(mut pages) => rebuilt_pages.append(&mut pages),
+                                Err(e) => eprintln!("conductor: rebuild failed for new content {}: {e}", path.display()),
+                            }
+                        }
+
+                        // Rebuild the collection index page if it exists
+                        let collection_index = self.site_dir.join("content").join(&stem).join("index.md");
+                        if collection_index.exists()
+                            && let Some(text) = self.document_text(&collection_index)
+                        {
+                            match self.rebuild_page(&collection_index, &text) {
+                                Ok(mut pages) => rebuilt_pages.append(&mut pages),
+                                Err(e) => eprintln!("conductor: rebuild failed for collection index {}: {e}", collection_index.display()),
+                            }
+                        }
+
+                        // Rebuild the site root index if it exists
+                        let site_index_path = self.site_dir.join("content").join("index.md");
+                        if site_index_path.exists()
+                            && let Some(text) = self.document_text(&site_index_path)
+                        {
+                            match self.rebuild_page(&site_index_path, &text) {
+                                Ok(mut pages) => rebuilt_pages.append(&mut pages),
+                                Err(e) => eprintln!("conductor: rebuild failed for site index {}: {e}", site_index_path.display()),
+                            }
+                        }
+
+                        CommandResult {
+                            response: Response::ContentCreated(url),
+                            events: if rebuilt_pages.is_empty() {
+                                vec![]
+                            } else {
+                                vec![ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None }]
+                            },
+                        }
                     }
                     Err(e) => CommandResult::error(e),
                 }
@@ -1200,10 +1268,21 @@ impl Conductor {
                 }
                 CommandResult::ok()
             }
-            Command::ScaffoldSite { template_name, format } => {
+            Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity, theme } => {
                 match site_templates::template_by_name(&template_name) {
                     Some(template) => {
-                        match template.scaffold(&self.site_dir, &format) {
+                        let style = site_templates::StyleConfig {
+                            font_mood: font_mood.parse().unwrap_or_default(),
+                            seed_color: if seed_color.is_empty() {
+                                site_templates::StyleConfig::default().seed_color
+                            } else {
+                                seed_color
+                            },
+                            palette_type: palette_type.parse().unwrap_or_default(),
+                            complexity: complexity.parse().unwrap_or_default(),
+                            theme: theme.parse().unwrap_or_default(),
+                        };
+                        match template.scaffold(&self.site_dir, &format, &style) {
                             Ok(()) => {
                                 // Refresh schema cache — new schemas were written to disk
                                 self.refresh_schema_cache();

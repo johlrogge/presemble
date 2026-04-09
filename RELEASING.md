@@ -91,6 +91,39 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.30.0
+
+Guided site wizard, CSS generator, navigation partials, collection index pages, and seed content.
+
+**Guided site wizard**
+The browser wizard is now a 6-step flow: site type (blog, personal, portfolio), font mood (7 options), color seed, palette type (analogous, complementary, triadic), complexity, and template format (Hiccup or HTML). Each step shows a live CSS preview panel so the author sees the generated theme before scaffolding. A light/dark theme toggle is available on the color step. The wizard generates a `StyleConfig` and passes it to the CSS generator.
+
+**CSS generator**
+A pure function that takes a `StyleConfig` and produces a complete custom-property stylesheet using HSL color math. The generated stylesheet covers typography (one of 7 font moods), color palette (derived from the seed and palette type), spacing, and layout complexity. Sites scaffolded by the wizard start with a fully styled theme.
+
+**Navigation partials**
+Starter sites include shared navigation via `presemble:include`. Item pages now have breadcrumb navigation back to the collection index. No page is a dead end.
+
+**Collection index pages**
+All example sites have listing pages for their collections. A blog includes a posts index; a portfolio includes a projects index. Collection schemas, content, and templates are included in every starter.
+
+**Seed content**
+Scaffolded sites include meaningful starter content — real titles, real summaries, real body text — rather than placeholder lorem ipsum. The generated site is immediately browsable and demonstrates the content model in context.
+
+**Hiccup-only templates**
+HTML template duplicates are removed from example sites. At scaffold time, the wizard converts to HTML if the author chose HTML syntax. Source of truth is Hiccup.
+
+**Content creation fixes**
+Publisher rebuilds after content creation. Navigation uses event-driven routing instead of direct location assignment. The default slug is now empty. Collection index pages are filtered from the content-type dropdown in the "+" creation form.
+
+**Conductor fixes**
+Collection injection in `rebuild_page` is corrected. Affected pages rebuild correctly after content creation.
+
+**Mode initialization**
+View mode is now the default on fresh sessions. Edit mode persists within a session without requiring re-selection after navigation.
+
+---
+
 ### v0.29.0
 
 Header folding in edit mode, conductor link resolution, and internal refactor.

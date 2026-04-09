@@ -1,5 +1,6 @@
 [:template {:presemble/define "body"}
   [:main
+    [:presemble/include {:src "nav"}]
     [:presemble/insert {:data "input.tagline" :as "h1"}]
     [:section
       [:h2 "Latest Posts"]
