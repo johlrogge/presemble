@@ -31,7 +31,7 @@ jobs:
           toolchain: stable
 
       - name: Install cargo-polylith
-        run: cargo install --git https://github.com/johlrogge/cargo-polylith
+        run: cargo install --git https://github.com/johlrogge/cargo-polylith cargo-polylith
 
       - uses: actions/cache@v4
         with:
