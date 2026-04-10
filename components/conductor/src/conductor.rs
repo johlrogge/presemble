@@ -348,7 +348,7 @@ pub struct Conductor {
     dep_graph: RwLock<dep_graph::DependencyGraph>,
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
     doc_sources: RwLock<HashMap<PathBuf, String>>, // path -> in-memory text
-    site_index: site_index::SiteIndex,
+    site_index: RwLock<site_index::SiteIndex>,
     repo: site_repository::SiteRepository,
     suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::Suggestion>>,
     site_graph: RwLock<site_index::SiteGraph>,
@@ -386,7 +386,7 @@ impl Conductor {
             dep_graph: RwLock::new(dep_graph::DependencyGraph::new()),
             schema_cache: RwLock::new(schema_cache),
             doc_sources: RwLock::new(HashMap::new()),
-            site_index,
+            site_index: RwLock::new(site_index),
             repo,
             suggestions: RwLock::new(HashMap::new()),
             site_graph: RwLock::new(site_index::SiteGraph::new()),
@@ -431,6 +431,13 @@ impl Conductor {
                 cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
             }
         }
+    }
+
+    /// Refresh the site index by re-creating it from the filesystem.
+    /// Called after scaffolding or after new content directories are created.
+    fn refresh_site_index(&self) {
+        *self.site_index.write().unwrap_or_else(|e| e.into_inner()) =
+            site_index::SiteIndex::new(self.site_dir.clone());
     }
 
     /// Replace the site graph with a new one built externally.
@@ -673,7 +680,7 @@ impl Conductor {
     /// Errors here are non-fatal: the caller logs and continues.
     fn rebuild_page(&self, content_path: &Path, text: &str) -> Result<Vec<String>, String> {
         // Classify file to get schema stem
-        let stem = match self.site_index.classify(content_path) {
+        let stem = match self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(content_path) {
             site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
             _ => return Err(format!("not a content file: {}", content_path.display())),
         };
@@ -1125,7 +1132,7 @@ impl Conductor {
                 // Refresh schema cache for changed schemas
                 for p in &paths {
                     let path = std::path::Path::new(p);
-                    if let site_index::FileKind::Schema { stem } = self.site_index.classify(path)
+                    if let site_index::FileKind::Schema { stem } = self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(path)
                         && let Some(src) = self.repo.schema_source(&stem)
                     {
                         self.schema_cache.write().unwrap_or_else(|e| e.into_inner()).insert(stem.as_str().to_string(), src);
@@ -1437,8 +1444,9 @@ impl Conductor {
                     .build();
                 match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
                     Ok((path, url)) => {
-                        // Refresh schema cache and rebuild graph for the new content
+                        // Refresh schema cache, site index, and rebuild graph for the new content
                         self.refresh_schema_cache();
+                        self.refresh_site_index();
                         let _ = self.build_full_graph();
 
                         let mut rebuilt_pages: Vec<String> = vec![];
@@ -1552,8 +1560,9 @@ impl Conductor {
                         };
                         match template.scaffold(&self.site_dir, &format, &style) {
                             Ok(()) => {
-                                // Refresh schema cache — new schemas were written to disk
+                                // Refresh schema cache and site index — new schemas/dirs were written to disk
                                 self.refresh_schema_cache();
+                                self.refresh_site_index();
                                 // Rebuild the full graph with the new content
                                 let _ = self.build_full_graph();
                                 CommandResult::ok()
@@ -1571,7 +1580,7 @@ impl Conductor {
                 } else {
                     self.site_dir.join(file_path)
                 };
-                let kind = self.site_index.classify(&abs_path);
+                let kind = self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(&abs_path);
                 let classification = match kind {
                     site_index::FileKind::Content { schema_stem } => {
                         FileClassification::Content { schema_stem: schema_stem.to_string() }
@@ -1633,7 +1642,7 @@ impl Conductor {
                 CommandResult::with_response(Response::Exists(exists))
             }
             Command::ListDependents { stem } => {
-                let site_files = self.site_index.dependents_of_schema(&stem);
+                let site_files = self.site_index.read().unwrap_or_else(|e| e.into_inner()).dependents_of_schema(&stem);
                 let dependents: Vec<DependentFile> = site_files
                     .into_iter()
                     .map(|sf| {
@@ -1658,20 +1667,22 @@ impl Conductor {
                 CommandResult::with_response(Response::Dependents(dependents))
             }
             Command::ListContent => {
-                let stems = self.site_index.schema_stems();
+                let site_index = self.site_index.read().unwrap_or_else(|e| e.into_inner());
+                let stems = site_index.schema_stems();
                 let mut paths = Vec::new();
                 for stem in &stems {
-                    for file_path in self.site_index.content_files(stem) {
+                    for file_path in site_index.content_files(stem) {
                         let rel = file_path.strip_prefix(&self.site_dir)
                             .unwrap_or(&file_path);
                         paths.push(rel.to_string_lossy().to_string());
                     }
                 }
-                for file_path in self.site_index.content_files("") {
+                for file_path in site_index.content_files("") {
                     let rel = file_path.strip_prefix(&self.site_dir)
                         .unwrap_or(&file_path);
                     paths.push(rel.to_string_lossy().to_string());
                 }
+                drop(site_index);
                 paths.sort();
                 paths.dedup();
                 CommandResult::with_response(Response::ContentList(paths))

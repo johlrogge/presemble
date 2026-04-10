@@ -91,6 +91,27 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.32.1
+
+Conductor reliability, scaffold initialization, nREPL output, CI binaries.
+
+**Deterministic conductor socket hash**
+Replace `DefaultHasher` (unstable across builds) with FNV-1a for IPC socket URL computation. Debug and release binaries now connect to the same conductor, fixing the broken edit-to-reload flow when mixing build profiles.
+
+**Scaffold initializes conductor and watcher state**
+After the scaffold wizard creates a new site, the conductor refreshes its `site_index`, schema cache, and site graph. The file watcher re-watches directories created after startup. The serve-side dependency graph is propagated so incremental rebuilds can resolve affected outputs. Previously, a server restart was required after scaffolding.
+
+**nREPL readable output**
+Multi-line text results (e.g. `(doc)`) are sent as nREPL `out` messages instead of EDN-escaped value strings. `rep` now displays formatted help text directly.
+
+**CI release workflow**
+Tag pushes trigger automated builds for macOS ARM64, macOS x86_64, and Linux x86_64. Binaries are published as GitHub Release assets.
+
+**Developer environment**
+`jet` (EDN/JSON/YAML transformer) added to devenv packages.
+
+---
+
 ### v0.32.0
 
 LSP fully migrated to conductor, MCP per-call site parameter, slot-scoped suggestions, and browser suggest-mode refinements.

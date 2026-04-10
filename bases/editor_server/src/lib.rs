@@ -7,9 +7,19 @@ struct PresembleNreplHandler {
 }
 
 impl nrepl::NreplHandler for PresembleNreplHandler {
-    fn eval(&self, _session: &str, code: &str) -> Result<String, String> {
+    fn eval(&self, _session: &str, code: &str) -> Result<nrepl::EvalResult, String> {
         let value = evaluator::eval_str(code, &self.conductor)?;
-        Ok(edn::value_to_edn(&value))
+        let edn_str = edn::value_to_edn(&value);
+        // Multi-line text (e.g. from doc) is sent as nREPL "out" so the
+        // client prints it directly instead of showing an EDN-escaped string.
+        if edn_str.starts_with('"') && edn_str.contains("\\n") {
+            let text = edn_str.trim_matches('"').replace("\\n", "\n");
+            return Ok(nrepl::EvalResult {
+                value: "nil".to_string(),
+                out: Some(text),
+            });
+        }
+        Ok(nrepl::EvalResult { value: edn_str, out: None })
     }
 }
 

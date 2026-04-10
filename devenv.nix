@@ -21,6 +21,7 @@ in
     pkgs.helix
     pkgs.neovim
     pkgs.rep
+    pkgs.jet
   ];
 
   claude.code.mcpServers.presemble = {
