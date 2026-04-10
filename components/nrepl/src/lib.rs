@@ -4,9 +4,15 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+/// Result of an nREPL eval — value plus optional printed output.
+pub struct EvalResult {
+    pub value: String,
+    pub out: Option<String>,
+}
+
 /// Trait for evaluating nREPL ops. Implemented by the conductor wiring.
 pub trait NreplHandler: Send + Sync {
-    fn eval(&self, session: &str, code: &str) -> Result<String, String>;
+    fn eval(&self, session: &str, code: &str) -> Result<EvalResult, String>;
 }
 
 struct SessionStore {
@@ -96,9 +102,11 @@ impl NreplServer {
                 match bencode::decode(&buf) {
                     Ok((msg, consumed)) => {
                         buf.drain(..consumed);
-                        let response = self.handle_message(&msg);
-                        let encoded = bencode::encode(&response);
-                        stream.write_all(&encoded).map_err(|e| e.to_string())?;
+                        let responses = self.handle_message(&msg);
+                        for response in &responses {
+                            let encoded = bencode::encode(response);
+                            stream.write_all(&encoded).map_err(|e| e.to_string())?;
+                        }
                     }
                     Err(_) => break, // Incomplete message, wait for more data
                 }
@@ -107,7 +115,7 @@ impl NreplServer {
         Ok(())
     }
 
-    fn handle_message(&self, msg: &bencode::Value) -> bencode::Value {
+    fn handle_message(&self, msg: &bencode::Value) -> Vec<bencode::Value> {
         let op = msg.get("op").and_then(|v| v.as_str()).unwrap_or("");
         let id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
         let session = msg.get("session").and_then(|v| v.as_str()).unwrap_or("");
@@ -115,16 +123,16 @@ impl NreplServer {
         match op {
             "clone" => {
                 let new_session = self.sessions.create();
-                bencode::Value::dict(vec![
+                vec![bencode::Value::dict(vec![
                     ("id", bencode::Value::string(id)),
                     ("new-session", bencode::Value::string(&new_session)),
                     (
                         "status",
                         bencode::Value::List(vec![bencode::Value::string("done")]),
                     ),
-                ])
+                ])]
             }
-            "describe" => bencode::Value::dict(vec![
+            "describe" => vec![bencode::Value::dict(vec![
                 ("id", bencode::Value::string(id)),
                 ("session", bencode::Value::string(session)),
                 (
@@ -147,21 +155,33 @@ impl NreplServer {
                     "status",
                     bencode::Value::List(vec![bencode::Value::string("done")]),
                 ),
-            ]),
+            ])],
             "eval" => {
                 let code = msg.get("code").and_then(|v| v.as_str()).unwrap_or("");
                 match self.handler.eval(session, code) {
-                    Ok(result) => bencode::Value::dict(vec![
-                        ("id", bencode::Value::string(id)),
-                        ("session", bencode::Value::string(session)),
-                        ("ns", bencode::Value::string("presemble.user")),
-                        ("value", bencode::Value::string(&result)),
-                        (
-                            "status",
-                            bencode::Value::List(vec![bencode::Value::string("done")]),
-                        ),
-                    ]),
-                    Err(e) => bencode::Value::dict(vec![
+                    Ok(result) => {
+                        let mut msgs = Vec::new();
+                        // Send printed output as a separate "out" message
+                        if let Some(out) = &result.out {
+                            msgs.push(bencode::Value::dict(vec![
+                                ("id", bencode::Value::string(id)),
+                                ("session", bencode::Value::string(session)),
+                                ("out", bencode::Value::string(out)),
+                            ]));
+                        }
+                        msgs.push(bencode::Value::dict(vec![
+                            ("id", bencode::Value::string(id)),
+                            ("session", bencode::Value::string(session)),
+                            ("ns", bencode::Value::string("presemble.user")),
+                            ("value", bencode::Value::string(&result.value)),
+                            (
+                                "status",
+                                bencode::Value::List(vec![bencode::Value::string("done")]),
+                            ),
+                        ]));
+                        msgs
+                    }
+                    Err(e) => vec![bencode::Value::dict(vec![
                         ("id", bencode::Value::string(id)),
                         ("session", bencode::Value::string(session)),
                         ("err", bencode::Value::string(&e)),
@@ -172,21 +192,21 @@ impl NreplServer {
                                 bencode::Value::string("error"),
                             ]),
                         ),
-                    ]),
+                    ])],
                 }
             }
             "close" => {
                 self.sessions.remove(session);
-                bencode::Value::dict(vec![
+                vec![bencode::Value::dict(vec![
                     ("id", bencode::Value::string(id)),
                     ("session", bencode::Value::string(session)),
                     (
                         "status",
                         bencode::Value::List(vec![bencode::Value::string("done")]),
                     ),
-                ])
+                ])]
             }
-            _ => bencode::Value::dict(vec![
+            _ => vec![bencode::Value::dict(vec![
                 ("id", bencode::Value::string(id)),
                 ("session", bencode::Value::string(session)),
                 (
@@ -197,7 +217,7 @@ impl NreplServer {
                         bencode::Value::string("unknown-op"),
                     ]),
                 ),
-            ]),
+            ])],
         }
     }
 }
@@ -213,11 +233,11 @@ mod tests {
     struct EchoHandler;
 
     impl NreplHandler for EchoHandler {
-        fn eval(&self, _session: &str, code: &str) -> Result<String, String> {
+        fn eval(&self, _session: &str, code: &str) -> Result<EvalResult, String> {
             if code == "err" {
                 Err("boom".to_string())
             } else {
-                Ok(format!("echo:{code}"))
+                Ok(EvalResult { value: format!("echo:{code}"), out: None })
             }
         }
     }
@@ -239,7 +259,8 @@ mod tests {
             ("op", bencode::Value::string("clone")),
             ("id", bencode::Value::string("1")),
         ]);
-        let resp = server.handle_message(&msg);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
         let new_session = resp.get("new-session").and_then(|v| v.as_str());
         assert!(new_session.is_some(), "new-session key should be present");
         let ns = new_session.unwrap();
@@ -263,7 +284,8 @@ mod tests {
             ("session", bencode::Value::string("presemble-0")),
             ("code", bencode::Value::string("hello")),
         ]);
-        let resp = server.handle_message(&msg);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
         let value = resp.get("value").and_then(|v| v.as_str());
         assert_eq!(value, Some("echo:hello"));
         let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
@@ -281,7 +303,8 @@ mod tests {
             ("session", bencode::Value::string("presemble-0")),
             ("code", bencode::Value::string("err")),
         ]);
-        let resp = server.handle_message(&msg);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
         let err = resp.get("err").and_then(|v| v.as_str());
         assert_eq!(err, Some("boom"));
         let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
@@ -298,7 +321,8 @@ mod tests {
             ("op", bencode::Value::string("frobnicate")),
             ("id", bencode::Value::string("4")),
         ]);
-        let resp = server.handle_message(&msg);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
         let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
         assert!(status.contains(&bencode::Value::string("unknown-op")));
         assert!(status.contains(&bencode::Value::string("error")));
