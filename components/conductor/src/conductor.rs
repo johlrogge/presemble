@@ -2098,6 +2098,59 @@ mod smoke_tests {
     }
 
     #[test]
+    fn suggest_slot_edit_round_trip() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        let file = editorial_types::ContentPath::new("content/post/hello.md");
+
+        // Submit a SlotEdit suggestion
+        let suggest_cmd = Command::SuggestSlotEdit {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            search: "Hello World".to_string(),
+            replace: "Hello Universe".to_string(),
+            author: editorial_types::Author::Human("test".to_string()),
+            reason: "testing slot edit".to_string(),
+        };
+        let suggest_result = conductor.handle_command(suggest_cmd);
+
+        assert!(
+            matches!(suggest_result.response, Response::SuggestionCreated(_)),
+            "expected Response::SuggestionCreated, got {:?}",
+            suggest_result.response
+        );
+
+        // Retrieve suggestions for the file
+        let get_cmd = Command::GetSuggestions { file: file.clone() };
+        let get_result = conductor.handle_command(get_cmd);
+
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(
+                    suggestions.len(),
+                    1,
+                    "expected exactly 1 pending suggestion, got {}",
+                    suggestions.len()
+                );
+                assert_eq!(suggestions[0].file, file);
+                assert!(
+                    matches!(
+                        &suggestions[0].target,
+                        editorial_types::SuggestionTarget::SlotEdit { slot, search, replace }
+                        if slot.as_str() == "title"
+                            && search == "Hello World"
+                            && replace == "Hello Universe"
+                    ),
+                    "suggestion target should be SlotEdit with correct slot/search/replace, got {:?}",
+                    suggestions[0].target
+                );
+            }
+            other => panic!("expected Suggestions response, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn document_changed_updates_in_memory_source() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);

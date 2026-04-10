@@ -183,61 +183,8 @@ impl PresembleLsp {
                 file: editorial_types::ContentPath::new(&content_path),
             };
             if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
-                    for suggestion in suggestions {
-                        let (pos_start, pos_end, message, action) = match &suggestion.target {
-                            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
-                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
-                                let msg = format!(
-                                    "[{}] {}: \"{}\"",
-                                    suggestion.author, suggestion.reason, proposed_value
-                                );
-                                let act = SlotAction::AcceptSuggestion {
-                                    suggestion_id: suggestion.id.to_string(),
-                                    slot_name: slot.to_string(),
-                                    proposed_value: proposed_value.clone(),
-                                };
-                                (ps, pe, msg, act)
-                            }
-                            editorial_types::SuggestionTarget::BodyText { search, replace } => {
-                                let (ps, pe) = find_text_position(&src, search);
-                                let msg = format!(
-                                    "[{}] {}: \"{}\" \u{2192} \"{}\"",
-                                    suggestion.author, suggestion.reason, search, replace
-                                );
-                                let act = SlotAction::AcceptBodySuggestion {
-                                    suggestion_id: suggestion.id.to_string(),
-                                    search: search.clone(),
-                                    replace: replace.clone(),
-                                };
-                                (ps, pe, msg, act)
-                            }
-                            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
-                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
-                                let msg = format!(
-                                    "[{}] {}: slot {} \"{}\" \u{2192} \"{}\"",
-                                    suggestion.author, suggestion.reason, slot, search, replace
-                                );
-                                let act = SlotAction::AcceptBodySuggestion {
-                                    suggestion_id: suggestion.id.to_string(),
-                                    search: search.clone(),
-                                    replace: replace.clone(),
-                                };
-                                (ps, pe, msg, act)
-                            }
-                        };
-                        let lsp_diag = Diagnostic {
-                            range: Range {
-                                start: Position { line: pos_start.0, character: pos_start.1 },
-                                end: Position { line: pos_end.0, character: pos_end.1 },
-                            },
-                            severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
-                            message,
-                            ..Default::default()
-                        };
-                        stored.push(StoredDiagnostic {
-                            lsp_diag,
-                            action: Some(action),
-                        });
+                    for suggestion in &suggestions {
+                        stored.push(suggestion_to_diagnostic(suggestion, &src, &grammar));
                     }
             }
         }
@@ -521,60 +468,7 @@ impl LanguageServer for PresembleLsp {
                     };
 
                     for suggestion in &suggestions {
-                        let (pos_start, pos_end, message, action) = match &suggestion.target {
-                            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
-                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
-                                let msg = format!(
-                                    "[{}] {}: \"{}\"",
-                                    suggestion.author, suggestion.reason, proposed_value
-                                );
-                                let act = SlotAction::AcceptSuggestion {
-                                    suggestion_id: suggestion.id.to_string(),
-                                    slot_name: slot.to_string(),
-                                    proposed_value: proposed_value.clone(),
-                                };
-                                (ps, pe, msg, act)
-                            }
-                            editorial_types::SuggestionTarget::BodyText { search, replace } => {
-                                let (ps, pe) = find_text_position(&src, search);
-                                let msg = format!(
-                                    "[{}] {}: \"{}\" \u{2192} \"{}\"",
-                                    suggestion.author, suggestion.reason, search, replace
-                                );
-                                let act = SlotAction::AcceptBodySuggestion {
-                                    suggestion_id: suggestion.id.to_string(),
-                                    search: search.clone(),
-                                    replace: replace.clone(),
-                                };
-                                (ps, pe, msg, act)
-                            }
-                            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
-                                let (ps, pe) = slot_position(&src, &grammar, slot.as_str());
-                                let msg = format!(
-                                    "[{}] {}: slot {} \"{}\" \u{2192} \"{}\"",
-                                    suggestion.author, suggestion.reason, slot, search, replace
-                                );
-                                let act = SlotAction::AcceptBodySuggestion {
-                                    suggestion_id: suggestion.id.to_string(),
-                                    search: search.clone(),
-                                    replace: replace.clone(),
-                                };
-                                (ps, pe, msg, act)
-                            }
-                        };
-                        let lsp_diag = Diagnostic {
-                            range: Range {
-                                start: Position { line: pos_start.0, character: pos_start.1 },
-                                end: Position { line: pos_end.0, character: pos_end.1 },
-                            },
-                            severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
-                            message,
-                            ..Default::default()
-                        };
-                        stored.push(StoredDiagnostic {
-                            lsp_diag,
-                            action: Some(action),
-                        });
+                        stored.push(suggestion_to_diagnostic(suggestion, &src, &grammar));
                     }
 
                     let diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
@@ -1194,6 +1088,71 @@ fn separator_line(src: &str) -> Option<u32> {
         .enumerate()
         .find(|(_, l)| l.trim() == "----")
         .map(|(i, _)| i as u32)
+}
+
+/// Convert a single editorial suggestion into a `StoredDiagnostic`.
+///
+/// Handles all three `SuggestionTarget` variants and produces an LSP
+/// `INFORMATION`-severity diagnostic with the corresponding `SlotAction`.
+fn suggestion_to_diagnostic(
+    suggestion: &editorial_types::Suggestion,
+    src: &str,
+    grammar: &schema::Grammar,
+) -> StoredDiagnostic {
+    let (pos_start, pos_end, message, action) = match &suggestion.target {
+        editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
+            let (ps, pe) = slot_position(src, grammar, slot.as_str());
+            let msg = format!(
+                "[{}] {}: \"{}\"",
+                suggestion.author, suggestion.reason, proposed_value
+            );
+            let act = SlotAction::AcceptSuggestion {
+                suggestion_id: suggestion.id.to_string(),
+                slot_name: slot.to_string(),
+                proposed_value: proposed_value.clone(),
+            };
+            (ps, pe, msg, act)
+        }
+        editorial_types::SuggestionTarget::BodyText { search, replace } => {
+            let (ps, pe) = find_text_position(src, search);
+            let msg = format!(
+                "[{}] {}: \"{}\" \u{2192} \"{}\"",
+                suggestion.author, suggestion.reason, search, replace
+            );
+            let act = SlotAction::AcceptBodySuggestion {
+                suggestion_id: suggestion.id.to_string(),
+                search: search.clone(),
+                replace: replace.clone(),
+            };
+            (ps, pe, msg, act)
+        }
+        editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
+            let (ps, pe) = slot_position(src, grammar, slot.as_str());
+            let msg = format!(
+                "[{}] {}: slot {} \"{}\" \u{2192} \"{}\"",
+                suggestion.author, suggestion.reason, slot, search, replace
+            );
+            let act = SlotAction::AcceptBodySuggestion {
+                suggestion_id: suggestion.id.to_string(),
+                search: search.clone(),
+                replace: replace.clone(),
+            };
+            (ps, pe, msg, act)
+        }
+    };
+    let lsp_diag = Diagnostic {
+        range: Range {
+            start: Position { line: pos_start.0, character: pos_start.1 },
+            end: Position { line: pos_end.0, character: pos_end.1 },
+        },
+        severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
+        message,
+        ..Default::default()
+    };
+    StoredDiagnostic {
+        lsp_diag,
+        action: Some(action),
+    }
 }
 
 /// Find the LSP position range of a text string within source.
