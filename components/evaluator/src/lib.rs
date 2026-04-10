@@ -790,6 +790,149 @@ fn builtin_doc(args: &[Form]) -> Result<template::Value, String> {
     Err(format!("no documentation for: {name}"))
 }
 
+// ── Legacy string-based REPL evaluator ───────────────────────────────────────
+// This is the predecessor to `eval_str` / `eval`. New callers should prefer
+// `eval_str`. Kept here for backwards compatibility with existing call sites.
+
+/// Evaluate an expression in the REPL context against the conductor's live state.
+/// Supports a limited set of string-based commands (legacy interface).
+/// New code should prefer `eval_str` instead.
+pub fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<template::Value, String> {
+    use std::collections::HashSet;
+    let code = code.trim();
+
+    if code.is_empty() {
+        return Ok(template::Value::Absent);
+    }
+
+    // Bare keyword: :stem → all items for that stem
+    if code.starts_with(':') && !code.contains(' ') {
+        let stem = &code[1..]; // strip leading ':'
+        let items = conductor.query_items_for_stem(stem);
+        let values: Vec<template::Value> = items
+            .into_iter()
+            .map(|(url, mut graph)| {
+                graph.insert("url", template::Value::Text(url));
+                template::Value::Record(graph)
+            })
+            .collect();
+        return Ok(template::Value::List(values));
+    }
+
+    // Thread expression: (->> :stem ...) or (-> :stem ...)
+    if code.starts_with("(->>") || code.starts_with("(->") {
+        let target = content::parse_link_target(code)
+            .map_err(|e| format!("parse error: {e}"))?;
+        let text = content::LinkText::Empty;
+        let (url_index, stem_index) = repl_build_indexes(conductor);
+        let edge_index = expressions::EdgeIndex::new();
+        let current_url = site_index::UrlPath::new("/");
+        return Ok(expressions::evaluate_link_expression(
+            &text,
+            &target,
+            &url_index,
+            &stem_index,
+            &current_url,
+            &edge_index,
+        ));
+    }
+
+    // (get-content "path")
+    if code.starts_with("(get-content") {
+        let path = repl_extract_string_arg(code)?;
+        let abs_path = conductor.site_dir().join(&path);
+        match conductor.document_text(&abs_path) {
+            Some(text) => return Ok(template::Value::Text(text)),
+            None => return Err(format!("file not found: {path}")),
+        }
+    }
+
+    // (get-schema :stem)
+    if code.starts_with("(get-schema") {
+        let stem = repl_extract_keyword_arg(code)?;
+        match conductor.schema_source(&stem) {
+            Some(src) => return Ok(template::Value::Text(src)),
+            None => return Err(format!("no schema for: {stem}")),
+        }
+    }
+
+    // (list-content)
+    if code.starts_with("(list-content") {
+        let graph = conductor.site_graph();
+        let mut urls: Vec<template::Value> = graph
+            .iter_pages_by_kind(site_index::PageKind::Item)
+            .map(|n| template::Value::Text(n.url_path.as_str().to_string()))
+            .collect();
+        urls.sort_by(|a, b| {
+            let a = if let template::Value::Text(s) = a { s.as_str() } else { "" };
+            let b = if let template::Value::Text(s) = b { s.as_str() } else { "" };
+            a.cmp(b)
+        });
+        return Ok(template::Value::List(urls));
+    }
+
+    // (list-schemas)
+    if code.starts_with("(list-schemas") {
+        let graph = conductor.site_graph();
+        let mut stems: Vec<String> = graph
+            .iter_pages_by_kind(site_index::PageKind::Item)
+            .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.as_str().to_string()))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        stems.sort();
+        let values: Vec<template::Value> = stems
+            .into_iter()
+            .map(template::Value::Text)
+            .collect();
+        return Ok(template::Value::List(values));
+    }
+
+    Err(format!("unknown expression: {code}"))
+}
+
+/// Build url_index and stem_index from conductor's SiteGraph (for eval_repl).
+fn repl_build_indexes(
+    conductor: &conductor::Conductor,
+) -> (expressions::UrlIndex, expressions::StemIndex) {
+    use std::collections::HashMap;
+    let graph = conductor.site_graph();
+
+    let url_index: expressions::UrlIndex = graph
+        .iter_pages_by_kind(site_index::PageKind::Item)
+        .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
+        .collect();
+
+    let mut stem_index: expressions::StemIndex = HashMap::new();
+    for node in graph.iter_pages_by_kind(site_index::PageKind::Item) {
+        if let Some(pd) = node.page_data() {
+            stem_index
+                .entry(pd.schema_stem.clone())
+                .or_default()
+                .push((node.url_path.clone(), pd.data.clone()));
+        }
+    }
+
+    (url_index, stem_index)
+}
+
+/// Extract a string argument from a form like `(get-content "path")` (for eval_repl).
+fn repl_extract_string_arg(code: &str) -> Result<String, String> {
+    let start = code.find('"').ok_or("expected string argument")?;
+    let end = code[start + 1..].find('"').ok_or("unterminated string")?;
+    Ok(code[start + 1..start + 1 + end].to_string())
+}
+
+/// Extract a keyword argument from a form like `(get-schema :post)` (for eval_repl).
+fn repl_extract_keyword_arg(code: &str) -> Result<String, String> {
+    let start = code.find(':').ok_or("expected keyword argument")?;
+    let rest = &code[start + 1..];
+    let end = rest
+        .find(|c: char| c == ')' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    Ok(rest[..end].to_string())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1178,6 +1321,105 @@ mod tests {
         let result = eval_str("(refs-from)", &cond);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("refs-from requires 1 argument"));
+    }
+
+    // ── eval_repl tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn eval_repl_empty_returns_absent() {
+        let conductor = empty_conductor();
+        let result = eval_repl("", &conductor).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    #[test]
+    fn eval_repl_whitespace_returns_absent() {
+        let conductor = empty_conductor();
+        let result = eval_repl("   ", &conductor).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    #[test]
+    fn eval_repl_bare_keyword_returns_list() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = eval_repl(":post", &conductor).unwrap();
+        assert!(matches!(result, template::Value::List(_)));
+        if let template::Value::List(items) = result {
+            assert_eq!(items.len(), 2, "expected 2 post items");
+            for item in &items {
+                assert!(
+                    matches!(item, template::Value::Record(_)),
+                    "each item should be a record"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eval_repl_bare_keyword_unknown_stem_returns_empty_list() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = eval_repl(":nonexistent", &conductor).unwrap();
+        assert!(matches!(result, template::Value::List(ref v) if v.is_empty()));
+    }
+
+    #[test]
+    fn eval_repl_get_schema_returns_text() {
+        let conductor = empty_conductor();
+        let result = eval_repl("(get-schema :post)", &conductor).unwrap();
+        assert!(matches!(result, template::Value::Text(_)));
+        if let template::Value::Text(src) = result {
+            assert!(src.contains("Post title"), "schema text should contain 'Post title'");
+        }
+    }
+
+    #[test]
+    fn eval_repl_get_schema_unknown_returns_error() {
+        let conductor = empty_conductor();
+        let result = eval_repl("(get-schema :nonexistent)", &conductor);
+        assert!(result.is_err(), "expected error for unknown schema");
+    }
+
+    #[test]
+    fn eval_repl_list_content_returns_list() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = eval_repl("(list-content)", &conductor).unwrap();
+        assert!(matches!(result, template::Value::List(_)));
+        if let template::Value::List(items) = result {
+            assert_eq!(items.len(), 2, "expected 2 content items");
+        }
+    }
+
+    #[test]
+    fn eval_repl_list_schemas_returns_list() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = eval_repl("(list-schemas)", &conductor).unwrap();
+        assert!(matches!(result, template::Value::List(_)));
+        if let template::Value::List(items) = result {
+            assert_eq!(items.len(), 1, "expected 1 unique stem (post)");
+            assert!(
+                matches!(&items[0], template::Value::Text(s) if s == "post"),
+                "expected stem 'post'"
+            );
+        }
+    }
+
+    #[test]
+    fn eval_repl_unknown_expression_returns_error() {
+        let conductor = empty_conductor();
+        let result = eval_repl("(frobnicate :foo)", &conductor);
+        assert!(result.is_err(), "expected error for unknown expression");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("unknown expression"), "error should mention 'unknown expression'");
+    }
+
+    #[test]
+    fn eval_repl_thread_expr_returns_list() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = eval_repl("(->> :post)", &conductor).unwrap();
+        assert!(matches!(result, template::Value::List(_)));
+        if let template::Value::List(items) = result {
+            assert_eq!(items.len(), 2, "expected 2 post items from thread expr");
+        }
     }
 
 }

@@ -12,6 +12,7 @@ macros = { workspace = true }
 template = { workspace = true }
 content = { workspace = true }
 conductor = { workspace = true }
+expressions = { workspace = true }
 site_index = { workspace = true }
 editorial_types = { workspace = true }
 reader = { workspace = true }
