@@ -775,7 +775,8 @@ fn builtin_doc(args: &[Form]) -> Result<template::Value, String> {
             help.push_str(&format!("  {name:<16} {desc}\n"));
             help.push_str(&format!("  {:<16} {sig}\n\n", ""));
         }
-        return Ok(template::Value::Text(help));
+        eprint!("{help}");
+        return Ok(template::Value::Absent);
     }
     let name = match &args[0] {
         Form::Symbol(s) => s.as_str(),
@@ -784,7 +785,8 @@ fn builtin_doc(args: &[Form]) -> Result<template::Value, String> {
     };
     for (doc_name, sig, desc) in DOCS {
         if *doc_name == name {
-            return Ok(template::Value::Text(format!("{doc_name}\n  {sig}\n  {desc}")));
+            eprintln!("{doc_name}\n  {sig}\n  {desc}");
+            return Ok(template::Value::Absent);
         }
     }
     Err(format!("no documentation for: {name}"))
