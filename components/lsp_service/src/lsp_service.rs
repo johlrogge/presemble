@@ -78,7 +78,11 @@ impl PresembleLsp {
         let cond = self.conductor.lock().await;
         let stem = match cond.classify(&path_str) {
             Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
-            _ => return None,
+            Ok(_) => return None,  // Not a content file — expected, no need to log
+            Err(e) => {
+                eprintln!("presemble-lsp: classify error for {path_str}: {e}");
+                return None;
+            }
         };
         let src = cond.get_schema_source(&stem).ok()??;
         let grammar = schema::parse_schema(&src).ok()?;
@@ -91,7 +95,11 @@ impl PresembleLsp {
         let cond = self.conductor.lock().await;
         let stem = match cond.classify(&path_str) {
             Ok(conductor::FileClassification::Template { schema_stem }) => schema_stem,
-            _ => return None,
+            Ok(_) => return None,
+            Err(e) => {
+                eprintln!("presemble-lsp: classify error for {path_str}: {e}");
+                return None;
+            }
         };
         let src = cond.get_schema_source(&stem).ok()??;
         let grammar = schema::parse_schema(&src).ok()?;
@@ -112,7 +120,13 @@ impl PresembleLsp {
     async fn classify_path(&self, path: &std::path::Path) -> conductor::FileClassification {
         let path_str = path.to_string_lossy().to_string();
         let cond = self.conductor.lock().await;
-        cond.classify(&path_str).unwrap_or(conductor::FileClassification::Unknown)
+        match cond.classify(&path_str) {
+            Ok(fc) => fc,
+            Err(e) => {
+                eprintln!("presemble-lsp: classify error for {path_str}: {e}");
+                conductor::FileClassification::Unknown
+            }
+        }
     }
 
     /// Get document text for a URI.
@@ -405,6 +419,15 @@ impl LanguageServer for PresembleLsp {
     async fn initialized(&self, _: InitializedParams) {
         self.client.log_message(MessageType::INFO, "Presemble LSP ready").await;
 
+        // Verify conductor is reachable on startup
+        {
+            let cond = self.conductor.lock().await;
+            match cond.ping() {
+                Ok(()) => self.client.log_message(MessageType::INFO, "conductor connection verified").await,
+                Err(e) => self.client.log_message(MessageType::ERROR, format!("conductor unreachable: {e}")).await,
+            }
+        }
+
         // Spawn a background task that polls the conductor for new suggestions every 2 seconds.
         // This ensures diagnostics update when Claude pushes a suggestion via MCP,
         // without requiring the user to manually edit the file.
@@ -434,7 +457,11 @@ impl LanguageServer for PresembleLsp {
                         let cond = conductor.lock().await;
                         let stem = match cond.classify(&path_str) {
                             Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
-                            _ => continue,
+                            Ok(_) => continue,
+                            Err(e) => {
+                                eprintln!("presemble-lsp: poll classify error for {path_str}: {e}");
+                                continue;
+                            }
                         };
                         let Some(src_str) = cond.get_schema_source(&stem).ok().flatten() else { continue };
                         let Some(g) = schema::parse_schema(&src_str).ok() else { continue };
@@ -456,7 +483,14 @@ impl LanguageServer for PresembleLsp {
                         };
                         match cond.send(&cmd) {
                             Ok(conductor::Response::Suggestions(s)) => s,
-                            _ => continue,
+                            Ok(other) => {
+                                eprintln!("presemble-lsp: unexpected suggestion response: {other:?}");
+                                continue;
+                            }
+                            Err(e) => {
+                                eprintln!("presemble-lsp: suggestion poll error: {e}");
+                                continue;
+                            }
                         }
                     };
 
