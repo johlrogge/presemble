@@ -40,7 +40,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            profiles/live/target/
+            target/
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
@@ -50,7 +50,7 @@ jobs:
       - name: Package binary
         run: |
           mkdir -p dist
-          cp profiles/live/target/release/presemble dist/presemble-${{ matrix.suffix }}
+          cp target/release/presemble dist/presemble-${{ matrix.suffix }}
 
       - uses: actions/upload-artifact@v4
         with:
