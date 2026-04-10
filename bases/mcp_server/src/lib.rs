@@ -176,7 +176,7 @@ fn handle_request(
                 },
                 "serverInfo": {
                     "name": "presemble",
-                    "version": "0.21.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }),
         ),
@@ -684,7 +684,7 @@ mod tests {
         let result_value = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "presemble", "version": "0.21.0" }
+            "serverInfo": { "name": "presemble", "version": env!("CARGO_PKG_VERSION") }
         });
         for key in expected_keys {
             assert!(
