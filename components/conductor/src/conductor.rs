@@ -1893,3 +1893,238 @@ mod query_edges_tests {
         assert!(edges.is_empty(), "records without href should not produce edges");
     }
 }
+
+#[cfg(test)]
+mod smoke_tests {
+    use super::*;
+
+    const SCHEMA_SRC: &str = "# Your post title {#title}\noccurs\n: exactly once\n";
+    const TEMPLATE_SRC: &str = "[:div [:h1 title]]";
+    const CONTENT_SRC: &str = "title: Hello World\n---\nBody text here\n";
+
+    /// Build a minimal site in a tempdir and return the tempdir.
+    ///
+    /// Layout:
+    ///   schemas/post/item.md      — a simple schema with a title slot
+    ///   templates/post/item.hiccup — a minimal hiccup template
+    ///   content/post/hello.md     — a content file with title and body
+    fn build_minimal_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
+        std::fs::create_dir_all(root.join("templates/post")).expect("create templates/post");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
+
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("content/post/hello.md"), CONTENT_SRC).expect("write content");
+
+        tmp
+    }
+
+    /// Create a conductor for the given tempdir using the builder-based repo
+    /// so the schema cache is populated from disk.
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    #[test]
+    fn classify_absolute_content_path() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let abs_path = tmp.path().join("content/post/hello.md");
+        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(
+                result.response,
+                Response::FileClassification(FileClassification::Content { ref schema_stem })
+                if schema_stem == "post"
+            ),
+            "expected Content classification with schema_stem=post, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn classify_absolute_template_path() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let abs_path = tmp.path().join("templates/post/item.hiccup");
+        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(
+                result.response,
+                Response::FileClassification(FileClassification::Template { ref schema_stem })
+                if schema_stem == "post"
+            ),
+            "expected Template classification with schema_stem=post, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn classify_absolute_schema_path() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let abs_path = tmp.path().join("schemas/post/item.md");
+        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(
+                result.response,
+                Response::FileClassification(FileClassification::Schema { ref stem })
+                if stem == "post"
+            ),
+            "expected Schema classification with stem=post, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn classify_outside_site_returns_unknown() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let cmd = Command::Classify { path: "/tmp/not-a-site/foo.md".to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(result.response, Response::FileClassification(FileClassification::Unknown)),
+            "expected Unknown classification for path outside site, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn get_schema_source_after_construction() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let cmd = Command::GetGrammar { stem: "post".into() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(result.response, Response::SchemaSource(Some(_))),
+            "expected SchemaSource(Some(_)) for known stem, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn completions_flow_classify_then_schema() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        // Step 1: classify the content file (as the LSP does)
+        let abs_path = tmp.path().join("content/post/hello.md");
+        let classify_cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let classify_result = conductor.handle_command(classify_cmd);
+
+        let stem = match classify_result.response {
+            Response::FileClassification(FileClassification::Content { schema_stem }) => schema_stem,
+            other => panic!("expected Content classification, got {:?}", other),
+        };
+        assert_eq!(stem, "post");
+
+        // Step 2: get schema source for that stem
+        let grammar_cmd = Command::GetGrammar { stem: stem.clone() };
+        let grammar_result = conductor.handle_command(grammar_cmd);
+
+        let schema_src = match grammar_result.response {
+            Response::SchemaSource(Some(src)) => src,
+            other => panic!("expected SchemaSource(Some(_)), got {:?}", other),
+        };
+
+        // Step 3: parse schema and verify the title slot is present
+        let grammar = schema::parse_schema(&schema_src)
+            .expect("schema should parse successfully");
+
+        assert!(
+            grammar.preamble.iter().any(|slot| slot.name.as_str() == "title"),
+            "grammar should have a 'title' slot; preamble slots: {:?}",
+            grammar.preamble.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn suggestion_round_trip() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        let file = editorial_types::ContentPath::new("content/post/hello.md");
+
+        // Submit a slot suggestion
+        let suggest_cmd = Command::SuggestSlotValue {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            value: "A Better Title".to_string(),
+            reason: "More descriptive".to_string(),
+            author: editorial_types::Author::Human("tester".to_string()),
+        };
+        let suggest_result = conductor.handle_command(suggest_cmd);
+
+        assert!(
+            matches!(suggest_result.response, Response::SuggestionCreated(_)),
+            "expected SuggestionCreated, got {:?}",
+            suggest_result.response
+        );
+
+        // Retrieve suggestions for the file
+        let get_cmd = Command::GetSuggestions { file: file.clone() };
+        let get_result = conductor.handle_command(get_cmd);
+
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(
+                    suggestions.len(),
+                    1,
+                    "expected exactly 1 pending suggestion, got {}",
+                    suggestions.len()
+                );
+                assert_eq!(suggestions[0].file, file);
+                assert!(
+                    matches!(
+                        &suggestions[0].target,
+                        editorial_types::SuggestionTarget::Slot { proposed_value, .. }
+                        if proposed_value == "A Better Title"
+                    ),
+                    "suggestion target should have proposed_value 'A Better Title'"
+                );
+            }
+            other => panic!("expected Suggestions response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn document_changed_updates_in_memory_source() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        let abs_path = tmp.path().join("content/post/hello.md");
+        let abs_path_str = abs_path.to_string_lossy().to_string();
+        let new_text = "title: Changed\n---\nNew body\n".to_string();
+
+        // Notify conductor of the in-memory change
+        let changed_cmd = Command::DocumentChanged {
+            path: abs_path_str.clone(),
+            text: new_text.clone(),
+        };
+        conductor.handle_command(changed_cmd);
+
+        // Retrieve the in-memory text
+        let get_cmd = Command::GetDocumentText { path: abs_path_str };
+        let get_result = conductor.handle_command(get_cmd);
+
+        match get_result.response {
+            Response::DocumentText(Some(text)) => {
+                assert_eq!(
+                    text, new_text,
+                    "in-memory document text should match what was sent via DocumentChanged"
+                );
+            }
+            other => panic!("expected DocumentText(Some(_)), got {:?}", other),
+        }
+    }
+}
