@@ -81,6 +81,7 @@ struct AppState {
     build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
     site_dir: std::path::PathBuf,
     conductor: Option<Arc<conductor::ConductorClient>>,
+    graph: Arc<Mutex<DependencyGraph>>,
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
@@ -191,6 +192,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         build_errors,
         site_dir: site_dir.to_path_buf(),
         conductor: conductor_client,
+        graph: Arc::clone(&current_graph),
     };
 
     let app = Router::new()
@@ -812,11 +814,18 @@ async fn scaffold_handler(
             // After scaffolding, trigger a full build so output HTML exists.
             // The conductor refreshed its graph, but we need rendered pages.
             let url_config = crate::UrlConfig::default();
-            if let Err(e) = crate::build_for_serve(&state.site_dir, &url_config) {
-                return axum::Json(EditResponse {
-                    ok: false,
-                    error: Some(format!("scaffold succeeded but build failed: {e}")),
-                });
+            match crate::build_for_serve(&state.site_dir, &url_config) {
+                Err(e) => {
+                    return axum::Json(EditResponse {
+                        ok: false,
+                        error: Some(format!("scaffold succeeded but build failed: {e}")),
+                    });
+                }
+                Ok(outcome) => {
+                    // Propagate the new dependency graph so the file watcher can
+                    // detect affected outputs after the scaffold creates new directories.
+                    *state.graph.lock().unwrap_or_else(|e| e.into_inner()) = outcome.dep_graph;
+                }
             }
             // Notify browser to reload
             let _ = state.reload_tx.send(BrowserMessage::Reload {
@@ -1290,13 +1299,22 @@ fn watch_and_rebuild(
     // Brief settle delay — avoids reacting to filesystem events from the initial build
     std::thread::sleep(Duration::from_millis(500));
 
+    let subdirs = ["schemas", "content", "templates"];
+
+    // Track which directories we are currently watching so we can add any
+    // that are created after startup (e.g. by the scaffold wizard).
+    let mut watched_dirs: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+
     // Watch schemas, content, and templates directories
-    for subdir in &["schemas", "content", "templates"] {
+    for subdir in &subdirs {
         let path = site_dir.join(subdir);
-        if path.exists()
-            && let Err(e) = watcher.watch(&path, RecursiveMode::Recursive)
-        {
-            eprintln!("Warning: could not watch {}: {e}", path.display());
+        if path.exists() {
+            if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+                eprintln!("Warning: could not watch {}: {e}", path.display());
+            } else {
+                watched_dirs.insert(path);
+            }
         }
     }
 
@@ -1465,6 +1483,19 @@ fn watch_and_rebuild(
                         let _ = reload_tx.send(BrowserMessage::Reload { pages: Vec::new(), anchor: None });
                     }
                     Err(e2) => eprintln!("Full rebuild failed: {e2}"),
+                }
+            }
+        }
+
+        // After each rebuild, watch any subdirectories that now exist but weren't
+        // present at startup (e.g. created by the scaffold wizard).
+        for subdir in &subdirs {
+            let path = site_dir.join(subdir);
+            if path.exists() && !watched_dirs.contains(&path) {
+                if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+                    eprintln!("Warning: could not watch {}: {e}", path.display());
+                } else {
+                    watched_dirs.insert(path);
                 }
             }
         }
