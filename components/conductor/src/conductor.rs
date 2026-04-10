@@ -1662,12 +1662,15 @@ impl Conductor {
                 let mut paths = Vec::new();
                 for stem in &stems {
                     for file_path in self.site_index.content_files(stem) {
-                        paths.push(file_path.to_string_lossy().to_string());
+                        let rel = file_path.strip_prefix(&self.site_dir)
+                            .unwrap_or(&file_path);
+                        paths.push(rel.to_string_lossy().to_string());
                     }
                 }
-                // Also include root-level content (empty stem)
                 for file_path in self.site_index.content_files("") {
-                    paths.push(file_path.to_string_lossy().to_string());
+                    let rel = file_path.strip_prefix(&self.site_dir)
+                        .unwrap_or(&file_path);
+                    paths.push(rel.to_string_lossy().to_string());
                 }
                 paths.sort();
                 paths.dedup();
