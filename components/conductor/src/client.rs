@@ -214,17 +214,22 @@ fn cleanup_stale_socket(site_dir: &std::path::Path) {
     }
 }
 
+/// FNV-1a hash — deterministic across all builds and Rust versions.
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// Compute the IPC socket URL for a site directory.
 pub fn socket_url(site_dir: &std::path::Path) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let canonical = site_dir
         .canonicalize()
         .unwrap_or_else(|_| site_dir.to_path_buf());
-    let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = fnv1a_hash(canonical.as_os_str().as_encoded_bytes());
 
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     let socket_dir = std::path::Path::new(&runtime_dir).join("presemble");

@@ -84,8 +84,24 @@ impl PresembleLsp {
                 return None;
             }
         };
-        let src = cond.get_schema_source(&stem).ok()??;
-        let grammar = schema::parse_schema(&src).ok()?;
+        let src = match cond.get_schema_source(&stem) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                eprintln!("presemble-lsp: no schema source for stem '{stem}'");
+                return None;
+            }
+            Err(e) => {
+                eprintln!("presemble-lsp: get_schema_source error for '{stem}': {e}");
+                return None;
+            }
+        };
+        let grammar = match schema::parse_schema(&src) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("presemble-lsp: schema parse error for '{stem}': {e}");
+                return None;
+            }
+        };
         Some((grammar, stem))
     }
 
@@ -101,8 +117,24 @@ impl PresembleLsp {
                 return None;
             }
         };
-        let src = cond.get_schema_source(&stem).ok()??;
-        let grammar = schema::parse_schema(&src).ok()?;
+        let src = match cond.get_schema_source(&stem) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                eprintln!("presemble-lsp: no schema source for stem '{stem}'");
+                return None;
+            }
+            Err(e) => {
+                eprintln!("presemble-lsp: get_schema_source error for '{stem}': {e}");
+                return None;
+            }
+        };
+        let grammar = match schema::parse_schema(&src) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("presemble-lsp: schema parse error for '{stem}': {e}");
+                return None;
+            }
+        };
         Some((grammar, stem))
     }
 
