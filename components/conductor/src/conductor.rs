@@ -739,7 +739,7 @@ impl Conductor {
 
         // Resolve link expressions using the current site graph as index
         {
-            let site_graph = self.site_graph.read().unwrap();
+            let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
             let url_index: HashMap<String, template::DataGraph> = site_graph
                 .iter_pages_by_kind(site_index::PageKind::Item)
                 .filter_map(|n| {
