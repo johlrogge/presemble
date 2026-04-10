@@ -332,7 +332,7 @@ structural diff, and browser adapter defined there.
 - [x] Edge-first graph architecture — edges extracted from link expressions, indexed by target URL for reverse lookup (shipped v0.31.0)
 - [x] `(refs-to self)` link expressions — reverse references declared in schemas, populated via content (shipped v0.31.0)
 - [x] REPL edge query builtins — `(refs-to "/url")` and `(refs-from "/url")` (shipped v0.31.0)
-- [ ] Suggest mode: mark-for-correction and suggest-changes
+- [x] Suggest mode: slot-scoped search/replace (SlotEdit), suggest buttons, suggest-mode-only editing (shipped v0.32.0)
 - [ ] Suggestion persistence in `.presemble/suggestions/`
 - [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol
 
@@ -421,16 +421,18 @@ conductor-as-repl brainstorm note).
 - Conflicts live in editor memory only as LSP diagnostics with quickfixes
 
 **Deliverables:**
-- [ ] ADR for conductor architecture and REPL protocol
-- [ ] S-expression command protocol: EDN parsing, dispatch to transforms and queries
-- [ ] nng IPC layer with PUB/SUB and REQ/REP
-- [ ] Conductor process: dep_graph, schema cache, file watcher, in-memory content
-- [ ] `presemble lsp` as thin nng client
+- [x] ADR for conductor architecture and REPL protocol (ADR-031, shipped v0.25.0+)
+- [x] S-expression command protocol: EDN parsing, dispatch to transforms and queries (shipped v0.26.0)
+- [x] nng IPC layer with PUB/SUB and REQ/REP (shipped v0.25.0)
+- [x] Conductor process: dep_graph, schema cache, file watcher, in-memory content (shipped v0.25.0)
+- [x] `presemble lsp` as thin nng client (shipped v0.32.0 — ADR-031 Phase 5)
+- [x] MCP server as conductor client with per-call site parameter (shipped v0.32.0)
 - [ ] `presemble serve` as query client of conductor
 - [ ] Version counter and conflict detection
 - [ ] Deduplicate conductor/expressions link resolution code (conductor has stringly-typed copies)
 - [ ] Conductor edge index caching (currently rebuilds per query)
 - [ ] Conductor `RefsTo` wiring (currently no-op — publisher handles it)
+- [ ] IPC socket lifecycle: SocketGuard cleanup, signal handling, sweep_stale_sockets
 
 **Success gate:** `presemble lsp` and `presemble serve` share state through the conductor.
 Editing a file in Helix updates the browser preview before save.

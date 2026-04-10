@@ -51,3 +51,11 @@ diagnostics at the exact failing line.
 The server classifies each open document by its path within the site directory. No
 separate language server instances, no per-file-type configuration. Start it once and
 it covers the whole site.
+
+### Conductor-backed LSP
+
+The LSP server delegates classify, grammar loading, completions, and document text to
+the conductor daemon. If a conductor is already running for the site (for example,
+started by `presemble serve`), the LSP connects to it automatically. If no conductor
+is running, the LSP starts one on the first request. There is no standalone LSP mode —
+the conductor is always required.

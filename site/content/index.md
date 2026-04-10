@@ -38,11 +38,15 @@ Presemble schemas are enforced. If a content file violates its schema, the build
 
 `presemble lsp` classifies every open file by its path within the site directory. Content files under `content/post/` receive completions for every slot declared in the post schema, diagnostics for every violation, and link completions that enumerate the actual content directory. Template files receive data-path completions derived from the schema. Schema files receive keyword completions and parse-error diagnostics. One server process, one configuration, the whole site.
 
+The LSP routes classify, grammar, completions, and document text through the conductor daemon. If `presemble serve` is already running for the site, the LSP connects to that conductor. Otherwise the LSP starts one automatically on the first request.
+
 ### Claude as editorial collaborator
 
 `presemble mcp site/` exposes the site to Claude Code. Claude reads your schemas to understand your content model, reads your content files to understand what exists, and pushes targeted suggestions to specific slots with a rationale. Each suggestion appears as an LSP diagnostic in your editor with an accept/reject code action. Claude uses the same suggestion protocol as a human editor — there is no special AI path.
 
-The same suggestions appear as inline diffs in the browser preview with a toolbar to accept or reject them individually or in bulk.
+Each MCP tool call accepts a `site` parameter, so a single MCP server instance can work across multiple Presemble sites without restart. Content enumeration (`list_content`) goes through the conductor — the MCP server never reads the filesystem directly.
+
+The same suggestions appear as inline diffs in the browser preview with a toolbar to accept or reject them individually or in bulk. The diff is minimal — only the changed text is highlighted. Slot-scoped suggestions (`SuggestSlotEdit`) let a collaborator target a phrase within a slot rather than replacing the whole value.
 
 ### Content assembles itself
 
