@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use site_index::DIR_TEMPLATES;
 use template::constants::KEY_PRESEMBLE_FILE;
 
-use crate::protocol::{Command, ConductorEvent, Response};
+use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
 
 /// The result of handling a command: a response to send back, plus
 /// zero or more events to broadcast to all subscribers.
@@ -631,6 +631,42 @@ impl Conductor {
         std::fs::read_to_string(path).ok()
     }
 
+    /// List all link completion options for a given schema stem.
+    ///
+    /// Reads from the site graph (in-memory) and extracts title from the data graph.
+    /// Falls back to the slug if no title is found.
+    pub fn list_link_options(&self, stem: &str) -> Vec<crate::protocol::LinkOption> {
+        let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+        let schema_stem = site_index::SchemaStem::new(stem);
+        let mut options: Vec<crate::protocol::LinkOption> = graph
+            .items_for_stem(&schema_stem)
+            .into_iter()
+            .filter_map(|node| {
+                let pd = node.page_data()?;
+                let url = node.url_path.as_str().to_string();
+                let slug = url.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+                let title = match pd.data.resolve(&["title"]) {
+                    Some(template::Value::Text(t)) => t.clone(),
+                    _ => slug.clone(),
+                };
+                Some(crate::protocol::LinkOption { stem: stem.to_string(), slug, title, url })
+            })
+            .collect();
+        options.sort_by(|a, b| a.slug.cmp(&b.slug));
+        options
+    }
+
+    /// List all schema stems known to the conductor (excludes collection schemas).
+    pub fn list_schemas(&self) -> Vec<String> {
+        let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+        let mut stems: Vec<String> = cache.keys()
+            .filter(|k| !k.contains('/')) // exclude collection schemas like "post/index"
+            .cloned()
+            .collect();
+        stems.sort();
+        stems
+    }
+
     /// Rebuild a single content page from in-memory text.
     ///
     /// Returns the list of URL paths that were rebuilt, or an error string.
@@ -703,7 +739,7 @@ impl Conductor {
 
         // Resolve link expressions using the current site graph as index
         {
-            let site_graph = self.site_graph.read().unwrap();
+            let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
             let url_index: HashMap<String, template::DataGraph> = site_graph
                 .iter_pages_by_kind(site_index::PageKind::Item)
                 .filter_map(|n| {
@@ -1041,9 +1077,16 @@ impl Conductor {
             Command::GetGrammar { stem } => {
                 CommandResult::with_response(Response::SchemaSource(self.schema_source(&stem)))
             }
-            Command::GetDocumentText { path } => CommandResult::with_response(
-                Response::DocumentText(self.document_text(Path::new(&path))),
-            ),
+            Command::GetDocumentText { path } => {
+                // Accept both absolute paths and site-relative paths (e.g. "content/post/hello.md").
+                // A path that does not start with '/' is resolved relative to site_dir.
+                let resolved = if Path::new(&path).is_absolute() {
+                    PathBuf::from(&path)
+                } else {
+                    self.site_dir.join(&path)
+                };
+                CommandResult::with_response(Response::DocumentText(self.document_text(&resolved)))
+            }
             Command::GetBuildErrors => {
                 // TODO: implement build error tracking
                 CommandResult::with_response(Response::BuildErrors(HashMap::new()))
@@ -1120,6 +1163,12 @@ impl Conductor {
                     let graph = template::build_article_graph(&doc, &grammar);
                     match graph.resolve(&[slot.as_str()]) {
                         Some(template::Value::Text(t)) => Some(t.clone()),
+                        Some(template::Value::List(items)) => {
+                            let texts: Vec<String> = items.iter().filter_map(|v| {
+                                if let template::Value::Text(t) = v { Some(t.clone()) } else { None }
+                            }).collect();
+                            if texts.is_empty() { None } else { Some(texts.join("\n\n")) }
+                        }
                         _ => None,
                     }
                 });
@@ -1199,6 +1248,78 @@ impl Conductor {
                     events: vec![ConductorEvent::SuggestionCreated { suggestion }],
                 }
             }
+            Command::SuggestSlotEdit { file, slot, search, replace, reason, author } => {
+                // Read the current slot value for conflict detection and to verify search exists
+                let abs_path = file.resolve(&self.site_dir);
+                let original_value = self.document_text(&abs_path).and_then(|text| {
+                    let stem = std::path::Path::new(file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
+                    let schema_src = self.schema_source(&stem)?;
+                    let grammar = schema::parse_schema(&schema_src).ok()?;
+                    let doc = content::parse_and_assign(&text, &grammar).ok()?;
+                    let graph = template::build_article_graph(&doc, &grammar);
+                    match graph.resolve(&[slot.as_str()]) {
+                        Some(template::Value::Text(t)) => Some(t.clone()),
+                        Some(template::Value::List(items)) => {
+                            // Multi-paragraph slot: join all text items
+                            let texts: Vec<String> = items.iter().filter_map(|v| {
+                                if let template::Value::Text(t) = v { Some(t.clone()) } else { None }
+                            }).collect();
+                            if texts.is_empty() { None } else { Some(texts.join(" ")) }
+                        }
+                        _ => None,
+                    }
+                });
+
+                // Require the slot to be readable; a missing slot value means
+                // the suggestion would be guaranteed to fail on accept.
+                let original_text = match original_value {
+                    Some(ref t) => t.clone(),
+                    None => return CommandResult::error(format!(
+                        "cannot read slot '{}' from {}",
+                        slot.as_str(), file.as_str()
+                    )),
+                };
+
+                // Verify the search string exists in the slot value
+                if !original_text.contains(&search) {
+                    return CommandResult::error(format!(
+                        "search text not found in slot '{}' of {file}: {search:?}",
+                        slot.as_str()
+                    ));
+                }
+
+                let created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string();
+
+                let id = editorial_types::SuggestionId::new();
+                let suggestion = editorial_types::Suggestion {
+                    id: id.clone(),
+                    author,
+                    file,
+                    target: editorial_types::SuggestionTarget::SlotEdit {
+                        slot,
+                        search,
+                        replace,
+                    },
+                    reason,
+                    status: editorial_types::SuggestionStatus::Pending,
+                    original_value: Some(original_text),
+                    created_at,
+                };
+
+                if let Err(e) = self.persist_suggestion(&suggestion) {
+                    return CommandResult::error(format!("persist error: {e}"));
+                }
+                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), suggestion.clone());
+
+                CommandResult {
+                    response: Response::SuggestionCreated(id),
+                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
+                }
+            }
             Command::GetSuggestions { file } => {
                 let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
                 let pending: Vec<editorial_types::Suggestion> = suggestions
@@ -1219,9 +1340,51 @@ impl Conductor {
                     }
                 };
 
-                // The LSP applies the edit to the editor buffer via applyEdit.
-                // The conductor only marks the suggestion as accepted — it does NOT
-                // write to disk. The user saves when ready, which writes normally.
+                // For SlotEdit, apply the search/replace to the slot value and write back.
+                let pages = if let editorial_types::SuggestionTarget::SlotEdit { ref slot, ref search, ref replace } = suggestion.target {
+                    let abs_path = suggestion.file.resolve(&self.site_dir);
+                    // Read the current slot value
+                    let current_slot_value = self.document_text(&abs_path).and_then(|text| {
+                        let stem = std::path::Path::new(suggestion.file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
+                        let schema_src = self.schema_source(&stem)?;
+                        let grammar = schema::parse_schema(&schema_src).ok()?;
+                        let doc = content::parse_and_assign(&text, &grammar).ok()?;
+                        let graph = template::build_article_graph(&doc, &grammar);
+                        match graph.resolve(&[slot.as_str()]) {
+                            Some(template::Value::Text(t)) => Some(t.clone()),
+                            _ => None,
+                        }
+                    });
+
+                    match current_slot_value {
+                        None => return CommandResult::error(format!("cannot read slot '{}' from {}", slot.as_str(), suggestion.file)),
+                        Some(val) if !val.contains(search.as_str()) => {
+                            return CommandResult::error(format!(
+                                "search text not found in current slot '{}' of {} — content may have changed",
+                                slot.as_str(),
+                                suggestion.file
+                            ));
+                        }
+                        Some(val) => {
+                            let new_val = val.replacen(search.as_str(), replace.as_str(), 1);
+                            match self.apply_slot_edit(suggestion.file.as_str(), slot.as_str(), &new_val) {
+                                Ok(rebuilt) => rebuilt,
+                                // Rebuild failure (e.g. no template) is non-fatal: the memory
+                                // buffer was already updated inside apply_slot_edit.
+                                Err(e) => {
+                                    eprintln!("conductor: SlotEdit rebuild failed (non-fatal): {e}");
+                                    vec![]
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // The LSP applies the edit to the editor buffer via applyEdit.
+                    // The conductor only marks the suggestion as accepted — it does NOT
+                    // write to disk. The user saves when ready, which writes normally.
+                    vec![]
+                };
+
                 let mut updated = suggestion.clone();
                 updated.status = editorial_types::SuggestionStatus::Accepted;
                 if let Err(e) = self.persist_suggestion(&updated) {
@@ -1230,7 +1393,7 @@ impl Conductor {
                 self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
 
                 CommandResult::ok_with_events(vec![
-                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages: vec![] },
+                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages },
                 ])
             }
             Command::RejectSuggestion { id } => {
@@ -1362,6 +1525,17 @@ impl Conductor {
                 }
                 CommandResult::ok()
             }
+            Command::GetSuggestionFiles => {
+                let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
+                let files: Vec<String> = suggestions
+                    .values()
+                    .filter(|s| s.status == editorial_types::SuggestionStatus::Pending)
+                    .map(|s| s.file.to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                CommandResult::with_response(Response::SuggestionFiles(files))
+            }
             Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity, theme } => {
                 match site_templates::template_by_name(&template_name) {
                     Some(template) => {
@@ -1389,6 +1563,118 @@ impl Conductor {
                     }
                     None => CommandResult::error(format!("unknown template: {template_name}")),
                 }
+            }
+            Command::Classify { path } => {
+                let file_path = std::path::Path::new(&path);
+                let abs_path = if file_path.is_absolute() {
+                    file_path.to_path_buf()
+                } else {
+                    self.site_dir.join(file_path)
+                };
+                let kind = self.site_index.classify(&abs_path);
+                let classification = match kind {
+                    site_index::FileKind::Content { schema_stem } => {
+                        FileClassification::Content { schema_stem: schema_stem.to_string() }
+                    }
+                    site_index::FileKind::Template { schema_stem } => {
+                        FileClassification::Template { schema_stem: schema_stem.to_string() }
+                    }
+                    site_index::FileKind::Schema { stem } => {
+                        FileClassification::Schema { stem: stem.to_string() }
+                    }
+                    site_index::FileKind::Stylesheet => FileClassification::Stylesheet,
+                    site_index::FileKind::Asset => FileClassification::Asset,
+                    site_index::FileKind::Unknown => FileClassification::Unknown,
+                };
+                CommandResult::with_response(Response::FileClassification(classification))
+            }
+            Command::ListSchemas => {
+                let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+                let result: Vec<(String, String)> = cache
+                    .iter()
+                    .map(|(stem, src)| (stem.clone(), src.clone()))
+                    .collect();
+                CommandResult::with_response(Response::SchemaList(result))
+            }
+            Command::ListLinkOptions { stem } => {
+                let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+                let schema_stem = site_index::SchemaStem::new(&stem);
+                let options: Vec<LinkOption> = graph
+                    .items_for_stem(&schema_stem)
+                    .into_iter()
+                    .filter_map(|node| {
+                        let pd = node.page_data()?;
+                        let url = node.url_path.as_str().to_string();
+                        // Derive slug from url: last path segment
+                        let slug = url.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+                        let title = match pd.data.resolve(&["title"]) {
+                            Some(template::Value::Text(t)) => t.clone(),
+                            _ => slug.clone(),
+                        };
+                        Some(LinkOption { stem: stem.clone(), slug, title, url })
+                    })
+                    .collect();
+                CommandResult::with_response(Response::LinkOptions(options))
+            }
+            Command::ResolveLink { path } => {
+                let abs_path = if std::path::Path::new(&path).is_absolute() {
+                    std::path::PathBuf::from(&path)
+                } else {
+                    self.site_dir.join(&path)
+                };
+                CommandResult::with_response(Response::Exists(abs_path.exists()))
+            }
+            Command::ResolveTemplate { stem } => {
+                let templates_dir = self.site_dir.join("templates");
+                let exists = templates_dir.join(&stem).join("item.hiccup").exists()
+                    || templates_dir.join(&stem).join("item.html").exists()
+                    || templates_dir.join(format!("{stem}.hiccup")).exists()
+                    || templates_dir.join(format!("{stem}.html")).exists();
+                CommandResult::with_response(Response::Exists(exists))
+            }
+            Command::ListDependents { stem } => {
+                let site_files = self.site_index.dependents_of_schema(&stem);
+                let dependents: Vec<DependentFile> = site_files
+                    .into_iter()
+                    .map(|sf| {
+                        let path = sf.path.to_string_lossy().to_string();
+                        let kind = match sf.kind {
+                            site_index::FileKind::Content { schema_stem } => {
+                                FileClassification::Content { schema_stem: schema_stem.to_string() }
+                            }
+                            site_index::FileKind::Template { schema_stem } => {
+                                FileClassification::Template { schema_stem: schema_stem.to_string() }
+                            }
+                            site_index::FileKind::Schema { stem: s } => {
+                                FileClassification::Schema { stem: s.to_string() }
+                            }
+                            site_index::FileKind::Stylesheet => FileClassification::Stylesheet,
+                            site_index::FileKind::Asset => FileClassification::Asset,
+                            site_index::FileKind::Unknown => FileClassification::Unknown,
+                        };
+                        DependentFile { path, kind }
+                    })
+                    .collect();
+                CommandResult::with_response(Response::Dependents(dependents))
+            }
+            Command::ListContent => {
+                let stems = self.site_index.schema_stems();
+                let mut paths = Vec::new();
+                for stem in &stems {
+                    for file_path in self.site_index.content_files(stem) {
+                        let rel = file_path.strip_prefix(&self.site_dir)
+                            .unwrap_or(&file_path);
+                        paths.push(rel.to_string_lossy().to_string());
+                    }
+                }
+                for file_path in self.site_index.content_files("") {
+                    let rel = file_path.strip_prefix(&self.site_dir)
+                        .unwrap_or(&file_path);
+                    paths.push(rel.to_string_lossy().to_string());
+                }
+                paths.sort();
+                paths.dedup();
+                CommandResult::with_response(Response::ContentList(paths))
             }
         }
     }
@@ -1605,5 +1891,293 @@ mod query_edges_tests {
 
         let edges = conductor.query_edges_to("/any/target");
         assert!(edges.is_empty(), "records without href should not produce edges");
+    }
+}
+
+#[cfg(test)]
+mod smoke_tests {
+    use super::*;
+
+    const SCHEMA_SRC: &str = "# Your post title {#title}\noccurs\n: exactly once\n";
+    const TEMPLATE_SRC: &str = "[:div [:h1 title]]";
+    const CONTENT_SRC: &str = "title: Hello World\n---\nBody text here\n";
+
+    /// Build a minimal site in a tempdir and return the tempdir.
+    ///
+    /// Layout:
+    ///   schemas/post/item.md      — a simple schema with a title slot
+    ///   templates/post/item.hiccup — a minimal hiccup template
+    ///   content/post/hello.md     — a content file with title and body
+    fn build_minimal_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
+        std::fs::create_dir_all(root.join("templates/post")).expect("create templates/post");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
+
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("content/post/hello.md"), CONTENT_SRC).expect("write content");
+
+        tmp
+    }
+
+    /// Create a conductor for the given tempdir using the builder-based repo
+    /// so the schema cache is populated from disk.
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    #[test]
+    fn classify_absolute_content_path() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let abs_path = tmp.path().join("content/post/hello.md");
+        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(
+                result.response,
+                Response::FileClassification(FileClassification::Content { ref schema_stem })
+                if schema_stem == "post"
+            ),
+            "expected Content classification with schema_stem=post, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn classify_absolute_template_path() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let abs_path = tmp.path().join("templates/post/item.hiccup");
+        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(
+                result.response,
+                Response::FileClassification(FileClassification::Template { ref schema_stem })
+                if schema_stem == "post"
+            ),
+            "expected Template classification with schema_stem=post, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn classify_absolute_schema_path() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let abs_path = tmp.path().join("schemas/post/item.md");
+        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(
+                result.response,
+                Response::FileClassification(FileClassification::Schema { ref stem })
+                if stem == "post"
+            ),
+            "expected Schema classification with stem=post, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn classify_outside_site_returns_unknown() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let cmd = Command::Classify { path: "/tmp/not-a-site/foo.md".to_string() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(result.response, Response::FileClassification(FileClassification::Unknown)),
+            "expected Unknown classification for path outside site, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn get_schema_source_after_construction() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        let cmd = Command::GetGrammar { stem: "post".into() };
+        let result = conductor.handle_command(cmd);
+        assert!(
+            matches!(result.response, Response::SchemaSource(Some(_))),
+            "expected SchemaSource(Some(_)) for known stem, got {:?}",
+            result.response
+        );
+    }
+
+    #[test]
+    fn completions_flow_classify_then_schema() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        // Step 1: classify the content file (as the LSP does)
+        let abs_path = tmp.path().join("content/post/hello.md");
+        let classify_cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let classify_result = conductor.handle_command(classify_cmd);
+
+        let stem = match classify_result.response {
+            Response::FileClassification(FileClassification::Content { schema_stem }) => schema_stem,
+            other => panic!("expected Content classification, got {:?}", other),
+        };
+        assert_eq!(stem, "post");
+
+        // Step 2: get schema source for that stem
+        let grammar_cmd = Command::GetGrammar { stem: stem.clone() };
+        let grammar_result = conductor.handle_command(grammar_cmd);
+
+        let schema_src = match grammar_result.response {
+            Response::SchemaSource(Some(src)) => src,
+            other => panic!("expected SchemaSource(Some(_)), got {:?}", other),
+        };
+
+        // Step 3: parse schema and verify the title slot is present
+        let grammar = schema::parse_schema(&schema_src)
+            .expect("schema should parse successfully");
+
+        assert!(
+            grammar.preamble.iter().any(|slot| slot.name.as_str() == "title"),
+            "grammar should have a 'title' slot; preamble slots: {:?}",
+            grammar.preamble.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn suggestion_round_trip() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        let file = editorial_types::ContentPath::new("content/post/hello.md");
+
+        // Submit a slot suggestion
+        let suggest_cmd = Command::SuggestSlotValue {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            value: "A Better Title".to_string(),
+            reason: "More descriptive".to_string(),
+            author: editorial_types::Author::Human("tester".to_string()),
+        };
+        let suggest_result = conductor.handle_command(suggest_cmd);
+
+        assert!(
+            matches!(suggest_result.response, Response::SuggestionCreated(_)),
+            "expected SuggestionCreated, got {:?}",
+            suggest_result.response
+        );
+
+        // Retrieve suggestions for the file
+        let get_cmd = Command::GetSuggestions { file: file.clone() };
+        let get_result = conductor.handle_command(get_cmd);
+
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(
+                    suggestions.len(),
+                    1,
+                    "expected exactly 1 pending suggestion, got {}",
+                    suggestions.len()
+                );
+                assert_eq!(suggestions[0].file, file);
+                assert!(
+                    matches!(
+                        &suggestions[0].target,
+                        editorial_types::SuggestionTarget::Slot { proposed_value, .. }
+                        if proposed_value == "A Better Title"
+                    ),
+                    "suggestion target should have proposed_value 'A Better Title'"
+                );
+            }
+            other => panic!("expected Suggestions response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn suggest_slot_edit_round_trip() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        let file = editorial_types::ContentPath::new("content/post/hello.md");
+
+        // Submit a SlotEdit suggestion
+        let suggest_cmd = Command::SuggestSlotEdit {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            search: "Hello World".to_string(),
+            replace: "Hello Universe".to_string(),
+            author: editorial_types::Author::Human("test".to_string()),
+            reason: "testing slot edit".to_string(),
+        };
+        let suggest_result = conductor.handle_command(suggest_cmd);
+
+        assert!(
+            matches!(suggest_result.response, Response::SuggestionCreated(_)),
+            "expected Response::SuggestionCreated, got {:?}",
+            suggest_result.response
+        );
+
+        // Retrieve suggestions for the file
+        let get_cmd = Command::GetSuggestions { file: file.clone() };
+        let get_result = conductor.handle_command(get_cmd);
+
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(
+                    suggestions.len(),
+                    1,
+                    "expected exactly 1 pending suggestion, got {}",
+                    suggestions.len()
+                );
+                assert_eq!(suggestions[0].file, file);
+                assert!(
+                    matches!(
+                        &suggestions[0].target,
+                        editorial_types::SuggestionTarget::SlotEdit { slot, search, replace }
+                        if slot.as_str() == "title"
+                            && search == "Hello World"
+                            && replace == "Hello Universe"
+                    ),
+                    "suggestion target should be SlotEdit with correct slot/search/replace, got {:?}",
+                    suggestions[0].target
+                );
+            }
+            other => panic!("expected Suggestions response, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn document_changed_updates_in_memory_source() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+
+        let abs_path = tmp.path().join("content/post/hello.md");
+        let abs_path_str = abs_path.to_string_lossy().to_string();
+        let new_text = "title: Changed\n---\nNew body\n".to_string();
+
+        // Notify conductor of the in-memory change
+        let changed_cmd = Command::DocumentChanged {
+            path: abs_path_str.clone(),
+            text: new_text.clone(),
+        };
+        conductor.handle_command(changed_cmd);
+
+        // Retrieve the in-memory text
+        let get_cmd = Command::GetDocumentText { path: abs_path_str };
+        let get_result = conductor.handle_command(get_cmd);
+
+        match get_result.response {
+            Response::DocumentText(Some(text)) => {
+                assert_eq!(
+                    text, new_text,
+                    "in-memory document text should match what was sent via DocumentChanged"
+                );
+            }
+            other => panic!("expected DocumentText(Some(_)), got {:?}", other),
+        }
     }
 }

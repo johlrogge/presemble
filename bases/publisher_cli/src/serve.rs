@@ -168,8 +168,12 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                         Ok(conductor::ConductorEvent::CursorScrollTo { anchor }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::ScrollTo { anchor });
                         }
-                        Ok(_) => {
-                            // Ignore events not relevant to the browser (e.g. suggestion lifecycle)
+                        Ok(conductor::ConductorEvent::SuggestionAccepted { pages, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
+                        }
+                        Ok(conductor::ConductorEvent::SuggestionCreated { .. }) |
+                        Ok(conductor::ConductorEvent::SuggestionRejected { .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages: vec![], anchor: None });
                         }
                         Err(e) => {
                             eprintln!("Conductor subscription error: {e}");
@@ -200,7 +204,11 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/suggestions", get(suggestions_handler))
         .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
         .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
+        .route("/_presemble/suggest-slot", post(suggest_slot_handler))
+        .route("/_presemble/suggest-body", post(suggest_body_handler))
+        .route("/_presemble/suggest-slot-edit", post(suggest_slot_edit_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
+        .route("/_presemble/suggestion-files", get(suggestion_files_handler))
         .route("/_presemble/save-all", post(save_all_handler))
         .route("/_presemble/templates", get(templates_handler))
         .route("/_presemble/scaffold", post(scaffold_handler))
@@ -297,6 +305,70 @@ async fn edit_body_handler(
     })
 }
 
+#[derive(serde::Deserialize)]
+struct SuggestSlotRequest {
+    file: String,
+    slot: String,
+    value: String,
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestBodyRequest {
+    file: String,
+    #[allow(dead_code)]
+    body_idx: usize,
+    search: String,
+    replace: String,
+}
+
+async fn suggest_slot_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestSlotRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::SuggestSlotValue {
+        file: editorial_types::ContentPath::new(&req.file),
+        slot: editorial_types::SlotName::new(&req.slot),
+        value: req.value.clone(),
+        reason: "Browser suggestion".to_string(),
+        author: editorial_types::Author::Human("browser".to_string()),
+    }) {
+        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+async fn suggest_body_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestBodyRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+    match cond.send(&conductor::Command::SuggestBodyEdit {
+        file: editorial_types::ContentPath::new(&req.file),
+        search: req.search.clone(),
+        replace: req.replace.clone(),
+        reason: "Browser suggestion".to_string(),
+        author: editorial_types::Author::Human("browser".to_string()),
+    }) {
+        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
 /// Browser-friendly representation of a suggestion.
 #[derive(serde::Serialize)]
 struct SuggestionJson {
@@ -337,7 +409,51 @@ impl From<editorial_types::Suggestion> for SuggestionJson {
                 replace: Some(replace),
                 reason: s.reason,
             },
+            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => SuggestionJson {
+                id: s.id.to_string(),
+                author: s.author.to_string(),
+                target_type: "slot_edit",
+                slot: Some(slot.to_string()),
+                proposed_value: None,
+                search: Some(search),
+                replace: Some(replace),
+                reason: s.reason,
+            },
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SuggestSlotEditRequest {
+    file: String,
+    slot: String,
+    search: String,
+    replace: String,
+}
+
+async fn suggest_slot_edit_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SuggestSlotEditRequest>,
+) -> axum::Json<EditResponse> {
+    let Some(ref cond) = state.conductor else {
+        return axum::Json(EditResponse {
+            ok: false,
+            error: Some("conductor not available".to_string()),
+        });
+    };
+
+    match cond.send(&conductor::Command::SuggestSlotEdit {
+        file: editorial_types::ContentPath::new(&req.file),
+        slot: editorial_types::SlotName::new(&req.slot),
+        search: req.search,
+        replace: req.replace,
+        reason: "Browser suggestion".to_string(),
+        author: editorial_types::Author::Human("browser".to_string()),
+    }) {
+        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
     }
 }
 
@@ -514,6 +630,56 @@ async fn save_all_handler(
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
+    }
+}
+
+async fn suggestion_files_handler(
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let Some(ref cond) = state.conductor else {
+        let body = b"[]".to_vec();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        ).into_response();
+    };
+
+    match cond.send(&conductor::Command::GetSuggestionFiles) {
+        Ok(conductor::Response::SuggestionFiles(paths)) => {
+            let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
+        _ => {
+            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response()
+        }
     }
 }
 
@@ -847,8 +1013,17 @@ async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
     // - adapter_side: our bridge (write requests in, read responses out)
     let (lsp_side, adapter_side) = tokio::io::duplex(1024 * 64);
 
+    let conductor_client = conductor::ensure_conductor(&site_dir).unwrap_or_else(|e| {
+        // Log the error but don't abort the WebSocket connection — a stale
+        // connection attempt is better than a hard failure for in-browser LSP.
+        eprintln!("presemble: could not start conductor for WebSocket LSP: {e}");
+        // We cannot proceed without a conductor; create a placeholder by
+        // connecting to the URL (which may fail at the send level, handled gracefully).
+        conductor::ConductorClient::connect(&conductor::socket_url(&site_dir))
+            .expect("conductor socket unreachable after ensure_conductor failed")
+    });
     let (service, lsp_socket) = LspService::new(|client| {
-        PresembleLsp::new(client, site_dir, None)
+        PresembleLsp::new(client, site_dir, conductor_client)
     });
 
     // Split lsp_side for the Server (needs separate AsyncRead and AsyncWrite).

@@ -10,7 +10,7 @@ language-servers = ["presemble-lsp"]
 
 [language-server.presemble-lsp]
 command = "presemble"
-args = ["lsp", "site/"]
+args = ["lsp", "demo/"]
 
 # Point rust-analyzer at the polylith dev profile workspace
 # (root Cargo.toml no longer has [workspace] after polylith migration)

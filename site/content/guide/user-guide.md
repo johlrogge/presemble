@@ -547,7 +547,13 @@ In Edit mode, headings in the served page display a fold toggle. Click the toggl
 
 In Suggest mode, missing slots render as suggestion nodes guided by schema hint text. Click a suggestion node to open an editing form for that slot. When a collaborator or Claude pushes a suggestion via the MCP server or conductor API, the browser shows the proposed value as an inline diff alongside the current content. A toolbar offers "Accept all" and "Reject all"; individual suggestions can be accepted or rejected from the diff view.
 
+Suggestion UI is limited to Suggest mode. Edit mode no longer shows suggestion overlays — the two modes are kept visually separate. Suggestion markers and a speech bubble icon accompany each pending suggestion node to make them easy to locate on a busy page.
+
 The preview toggle switches between the current state and a preview of the page with all suggestions applied.
+
+### Slot-scoped suggestions (SlotEdit)
+
+The `SuggestSlotEdit` command targets a specific slot with a search/replace operation rather than replacing the slot's entire value. This is distinct from full-slot suggestions — it makes targeted edits within a slot's content (for example, correcting one sentence in a long summary without replacing the rest). The conductor handles both suggestion kinds; they appear as separate diagnostic entries in the LSP and as separate nodes in the browser diff view.
 
 ### Creating new content from the browser
 
@@ -607,6 +613,8 @@ presemble lsp <site-dir>
 ```
 
 Starts an LSP server over stdio. A single server process handles content, template, and schema files, dispatching by path. Point any LSP-capable editor at the `presemble lsp` binary.
+
+The LSP requires a conductor daemon. If `presemble serve` is already running for the site, the LSP connects to its conductor automatically. If no conductor is running, the LSP starts one on the first incoming request. There is no standalone mode — all classify, grammar, completions, and document-text operations go through the conductor.
 
 ### Helix setup
 
@@ -782,8 +790,10 @@ Starts an MCP server that exposes the site to Claude Code and other MCP-capable 
 |---|---|
 | `get_content` | Read a content file by type and slug |
 | `get_schema` | Read the schema for a content type |
-| `list_content` | List all content files for a type |
+| `list_content` | List all content files for a type (goes through conductor `ListContent`) |
 | `suggest` | Push a suggestion for a named slot in a content file |
+
+Each tool accepts an optional `site` parameter. Pass the site directory path to target a specific site when Claude has the MCP server configured globally rather than per-project.
 
 ### Workflow with Claude Code
 

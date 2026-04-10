@@ -4,7 +4,7 @@ mod protocol;
 
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber};
 pub use conductor::{CommandResult, Conductor};
-pub use protocol::{Command, ConductorEvent, Response};
+pub use protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
 pub use editorial_types;
 
 #[cfg(test)]
@@ -806,5 +806,429 @@ mod tests {
         let conductor = empty_conductor();
         let graph = conductor.site_graph();
         assert!(graph.is_empty(), "empty conductor should have empty site graph");
+    }
+
+    // ── SuggestSlotEdit ──────────────────────────────────────────────────────
+
+    #[test]
+    fn suggest_slot_edit_creates_pending_suggestion() {
+        let (_dir, conductor) = article_conductor_with_file();
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        // "Old Title" is the title slot value in the fixture
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            search: "Old".to_string(),
+            replace: "New".to_string(),
+            reason: "Better".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // Event should be emitted
+        let has_created = result.events.iter().any(|e| matches!(
+            e,
+            ConductorEvent::SuggestionCreated { suggestion } if suggestion.id == id
+        ));
+        assert!(has_created, "expected SuggestionCreated event");
+
+        // GetSuggestions should return the pending suggestion
+        let get_result = conductor.handle_command(Command::GetSuggestions { file });
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(suggestions.len(), 1);
+                assert!(matches!(
+                    &suggestions[0].target,
+                    editorial_types::SuggestionTarget::SlotEdit { slot, search, replace }
+                        if slot.as_str() == "title" && search == "Old" && replace == "New"
+                ));
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    /// Build a conductor with a multi-paragraph summary slot (Value::List case).
+    fn multi_paragraph_conductor() -> (tempfile::TempDir, Conductor) {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Content file with two summary paragraphs (occurs: 1..3 produces Value::List)
+        let content_dir = dir.path().join("content/article");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(
+            content_dir.join("multi.md"),
+            "# Multi Para Title\n\nFirst summary paragraph.\n\nSecond summary paragraph.\n",
+        )
+        .unwrap();
+
+        let repo = site_repository::SiteRepository::builder()
+            .schema("article", ARTICLE_SCHEMA_SRC)
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+        (dir, conductor)
+    }
+
+    #[test]
+    fn suggest_slot_value_captures_list_original_value() {
+        // Regression test: when a slot resolves to Value::List (multi-occurrence),
+        // SuggestSlotValue must join the list items with "\n\n" and store them
+        // as the original_value for conflict detection.
+        let (_dir, conductor) = multi_paragraph_conductor();
+
+        let file = editorial_types::ContentPath::new("content/article/multi.md");
+        let slot = editorial_types::SlotName::new("summary");
+
+        let result = conductor.handle_command(Command::SuggestSlotValue {
+            file: file.clone(),
+            slot,
+            value: "A single improved summary.".to_string(),
+            reason: "Consolidate paragraphs".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // The original_value must capture both paragraphs joined by "\n\n"
+        let suggestions_result = conductor.handle_command(Command::GetSuggestions { file });
+        match suggestions_result.response {
+            Response::Suggestions(suggestions) => {
+                assert_eq!(suggestions.len(), 1);
+                assert_eq!(suggestions[0].id, id);
+                let orig = suggestions[0].original_value.as_deref().unwrap_or("");
+                assert!(
+                    orig.contains("First summary paragraph."),
+                    "original_value should contain first paragraph, got: {orig:?}"
+                );
+                assert!(
+                    orig.contains("Second summary paragraph."),
+                    "original_value should contain second paragraph, got: {orig:?}"
+                );
+                assert!(
+                    orig.contains("\n\n"),
+                    "original_value should join paragraphs with \\n\\n, got: {orig:?}"
+                );
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggest_slot_edit_fails_when_search_not_in_slot() {
+        let (_dir, conductor) = article_conductor_with_file();
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file,
+            slot: editorial_types::SlotName::new("title"),
+            search: "text that does not exist in the title".to_string(),
+            replace: "replacement".to_string(),
+            reason: "test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        assert!(
+            matches!(result.response, Response::Error(_)),
+            "expected Error when search text not found in slot"
+        );
+    }
+
+    #[test]
+    fn suggest_slot_edit_fails_when_slot_is_unreadable() {
+        let (_dir, conductor) = article_conductor_with_file();
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        // "nonexistent_slot" is not in the article schema, so original_value will be None
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file,
+            slot: editorial_types::SlotName::new("nonexistent_slot"),
+            search: "anything".to_string(),
+            replace: "replacement".to_string(),
+            reason: "test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        assert!(
+            matches!(result.response, Response::Error(_)),
+            "expected Error when slot cannot be read, got {:?}", result.response
+        );
+    }
+
+    #[test]
+    fn accept_slot_edit_suggestion_applies_search_replace_to_slot() {
+        let (dir, conductor) = article_conductor_with_file();
+        let content_file = dir.path().join("content/article/test.md");
+        let file = editorial_types::ContentPath::new("content/article/test.md");
+
+        // Create a SlotEdit suggestion: replace "Old" with "New" in the title slot
+        let result = conductor.handle_command(Command::SuggestSlotEdit {
+            file: file.clone(),
+            slot: editorial_types::SlotName::new("title"),
+            search: "Old".to_string(),
+            replace: "New".to_string(),
+            reason: "Better".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+        let id = match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        };
+
+        // Accept the suggestion — should apply the slot edit
+        let accept_result = conductor.handle_command(Command::AcceptSuggestion { id: id.clone() });
+        match &accept_result.response {
+            Response::Ok => {}
+            Response::Error(e) => panic!("expected Ok, got Error({e})"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // Disk file should NOT be written (dirty buffer model)
+        let disk_content = std::fs::read_to_string(&content_file).unwrap();
+        assert!(
+            disk_content.contains("Old Title"),
+            "disk file should still have old title after accept: {disk_content}"
+        );
+
+        // In-memory buffer should have the replaced value
+        let mem_content = conductor.document_text(&content_file);
+        assert!(mem_content.is_some(), "should have in-memory buffer after accept");
+        let mem_text = mem_content.unwrap();
+        assert!(
+            mem_text.contains("New Title"),
+            "in-memory buffer should have 'New Title' after accept: {mem_text}"
+        );
+
+        // SuggestionAccepted event should be emitted
+        let has_accepted = accept_result.events.iter().any(|e| matches!(
+            e,
+            ConductorEvent::SuggestionAccepted { id: eid, .. } if eid == &id
+        ));
+        assert!(has_accepted, "expected SuggestionAccepted event");
+
+        // Suggestion should no longer be pending
+        let get_result = conductor.handle_command(Command::GetSuggestions { file });
+        match get_result.response {
+            Response::Suggestions(suggestions) => {
+                assert!(
+                    suggestions.is_empty(),
+                    "accepted suggestion should not appear in pending list"
+                );
+            }
+            other => panic!("expected Suggestions, got {other:?}"),
+        }
+    }
+
+    // ── New Command Handlers ──────────────────────────────────────────────────
+
+    #[test]
+    fn classify_content_file_returns_content_classification() {
+        let conductor = minimal_post_conductor();
+        let result = conductor.handle_command(Command::Classify {
+            path: "content/post/hello.md".to_string(),
+        });
+        match result.response {
+            Response::FileClassification(FileClassification::Content { schema_stem }) => {
+                assert_eq!(schema_stem, "post");
+            }
+            other => panic!("expected FileClassification(Content), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_unknown_file_returns_unknown_classification() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::Classify {
+            path: "random/thing.txt".to_string(),
+        });
+        match result.response {
+            Response::FileClassification(FileClassification::Unknown) => {}
+            other => panic!("expected FileClassification(Unknown), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_schema_file_returns_schema_classification() {
+        let conductor = minimal_post_conductor();
+        let result = conductor.handle_command(Command::Classify {
+            path: "schemas/post.md".to_string(),
+        });
+        match result.response {
+            Response::FileClassification(FileClassification::Schema { stem }) => {
+                assert_eq!(stem, "post");
+            }
+            other => panic!("expected FileClassification(Schema), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_schemas_returns_schema_list() {
+        let conductor = minimal_post_conductor();
+        let result = conductor.handle_command(Command::ListSchemas);
+        match result.response {
+            Response::SchemaList(schemas) => {
+                assert!(
+                    schemas.iter().any(|(stem, _)| stem == "post"),
+                    "expected 'post' stem in schema list, got: {schemas:?}"
+                );
+            }
+            other => panic!("expected SchemaList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_schemas_returns_empty_for_empty_conductor() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListSchemas);
+        match result.response {
+            Response::SchemaList(schemas) => {
+                assert!(schemas.is_empty(), "expected empty schema list for empty conductor");
+            }
+            other => panic!("expected SchemaList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_link_options_returns_items_for_stem() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = conductor.handle_command(Command::ListLinkOptions {
+            stem: "post".to_string(),
+        });
+        match result.response {
+            Response::LinkOptions(opts) => {
+                assert_eq!(opts.len(), 2, "expected 2 link options for 'post' stem");
+                let urls: Vec<&str> = opts.iter().map(|o| o.url.as_str()).collect();
+                assert!(urls.contains(&"/post/first"), "expected /post/first in options");
+                assert!(urls.contains(&"/post/second"), "expected /post/second in options");
+            }
+            other => panic!("expected LinkOptions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_link_options_returns_empty_for_unknown_stem() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListLinkOptions {
+            stem: "nonexistent".to_string(),
+        });
+        match result.response {
+            Response::LinkOptions(opts) => {
+                assert!(opts.is_empty(), "expected empty options for unknown stem");
+            }
+            other => panic!("expected LinkOptions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_returns_false_for_nonexistent_path() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ResolveLink {
+            path: "/nonexistent/path/that/does/not/exist.md".to_string(),
+        });
+        match result.response {
+            Response::Exists(false) => {}
+            other => panic!("expected Exists(false), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_template_returns_false_for_missing_stem() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ResolveTemplate {
+            stem: "nonexistent_stem_xyz".to_string(),
+        });
+        match result.response {
+            Response::Exists(false) => {}
+            other => panic!("expected Exists(false), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_template_returns_true_when_template_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let tpl_dir = dir.path().join("templates/post");
+        std::fs::create_dir_all(&tpl_dir).unwrap();
+        std::fs::write(tpl_dir.join("item.html"), "<html></html>").unwrap();
+
+        let repo = site_repository::SiteRepository::builder().build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+
+        let result = conductor.handle_command(Command::ResolveTemplate {
+            stem: "post".to_string(),
+        });
+        match result.response {
+            Response::Exists(true) => {}
+            other => panic!("expected Exists(true), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_dependents_returns_files_for_known_stem() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = conductor.handle_command(Command::ListDependents {
+            stem: "post".to_string(),
+        });
+        match result.response {
+            Response::Dependents(deps) => {
+                // Should include schema + template + content files
+                assert!(!deps.is_empty(), "expected dependents for 'post' stem");
+                let has_schema = deps.iter().any(|d| {
+                    matches!(&d.kind, FileClassification::Schema { stem } if stem == "post")
+                });
+                let has_content = deps.iter().any(|d| {
+                    matches!(&d.kind, FileClassification::Content { schema_stem } if schema_stem == "post")
+                });
+                assert!(has_schema, "expected schema file in dependents");
+                assert!(has_content, "expected content files in dependents");
+            }
+            other => panic!("expected Dependents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_dependents_returns_empty_for_unknown_stem() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListDependents {
+            stem: "nonexistent".to_string(),
+        });
+        match result.response {
+            Response::Dependents(deps) => {
+                assert!(deps.is_empty(), "expected empty dependents for unknown stem");
+            }
+            other => panic!("expected Dependents, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_content_returns_paths_for_site_with_content() {
+        let (_dir, conductor) = two_post_conductor();
+        let result = conductor.handle_command(Command::ListContent);
+        match result.response {
+            Response::ContentList(paths) => {
+                assert_eq!(paths.len(), 2, "expected 2 content files for two-post site");
+                let has_first = paths.iter().any(|p| p.ends_with("first.md"));
+                let has_second = paths.iter().any(|p| p.ends_with("second.md"));
+                assert!(has_first, "expected first.md in content list");
+                assert!(has_second, "expected second.md in content list");
+            }
+            other => panic!("expected ContentList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_content_returns_empty_for_empty_conductor() {
+        let conductor = empty_conductor();
+        let result = conductor.handle_command(Command::ListContent);
+        match result.response {
+            Response::ContentList(paths) => {
+                assert!(paths.is_empty(), "expected empty content list for empty conductor");
+            }
+            other => panic!("expected ContentList, got {other:?}"),
+        }
     }
 }

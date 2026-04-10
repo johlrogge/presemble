@@ -19,11 +19,17 @@ Accepted suggestions write the new value to the content file. Rejected suggestio
 - `get_content` — read a content file
 - `get_schema` — read a schema
 - `suggest` — push a suggestion for a named slot
-- `list_content` — enumerate content files by type
+- `list_content` — enumerate content files by type (wired to conductor `ListContent`)
+
+Each tool accepts an optional `site` parameter. If you configure the MCP server globally rather than per-project, Claude passes the site directory on each call — no restart required to switch between sites.
 
 Claude can read your schemas to understand your content model, read your content files to understand what exists, and push targeted suggestions to specific slots with a rationale. The author sees each suggestion as an LSP diagnostic and decides whether to accept it.
 
 This is the same suggestion protocol a human editor uses. There is no special Claude path — Claude is just another collaborator using the suggestion API.
+
+### Slot-scoped suggestions (SlotEdit)
+
+In addition to full-slot replacement suggestions, the conductor accepts `SuggestSlotEdit` — a search/replace suggestion that targets part of a slot's content. This lets a collaborator correct one sentence in a long summary or fix a single phrase in a body section without proposing a full rewrite. Both kinds appear as LSP diagnostics with accept/reject code actions and as inline diffs in the browser.
 
 ### Browser suggestion preview
 

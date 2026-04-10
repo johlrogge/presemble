@@ -1,6 +1,6 @@
 use nng::options::Options;
 
-use crate::protocol::{Command, ConductorEvent, Response};
+use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
 
 /// Client for sending commands to the conductor via nng REQ socket.
 pub struct ConductorClient {
@@ -46,6 +46,87 @@ impl ConductorClient {
         match self.send(&Command::Ping)? {
             Response::Pong => Ok(()),
             other => Err(format!("unexpected response to ping: {other:?}")),
+        }
+    }
+
+    /// Classify a file path into its site role.
+    pub fn classify(&self, path: &str) -> Result<FileClassification, String> {
+        match self.send(&Command::Classify { path: path.to_string() })? {
+            Response::FileClassification(fc) => Ok(fc),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Get the schema source for a given stem.
+    pub fn get_schema_source(&self, stem: &str) -> Result<Option<String>, String> {
+        match self.send(&Command::GetGrammar { stem: stem.to_string() })? {
+            Response::SchemaSource(src) => Ok(src),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Get the in-memory text of a document (editor buffer or disk fallback).
+    pub fn get_document_text(&self, path: &str) -> Result<Option<String>, String> {
+        match self.send(&Command::GetDocumentText { path: path.to_string() })? {
+            Response::DocumentText(text) => Ok(text),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// List all content file paths.
+    pub fn list_content(&self) -> Result<Vec<String>, String> {
+        match self.send(&Command::ListContent)? {
+            Response::ContentList(paths) => Ok(paths),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// List all schema stems with their source text.
+    pub fn list_schemas(&self) -> Result<Vec<(String, String)>, String> {
+        match self.send(&Command::ListSchemas)? {
+            Response::SchemaList(schemas) => Ok(schemas),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// List link options for completions for a given schema stem.
+    pub fn list_link_options(&self, stem: &str) -> Result<Vec<LinkOption>, String> {
+        match self.send(&Command::ListLinkOptions { stem: stem.to_string() })? {
+            Response::LinkOptions(opts) => Ok(opts),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Resolve a link path: check whether it exists in the site.
+    pub fn resolve_link(&self, path: &str) -> Result<bool, String> {
+        match self.send(&Command::ResolveLink { path: path.to_string() })? {
+            Response::Exists(b) => Ok(b),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// Resolve a template stem: check whether a template exists for it.
+    pub fn resolve_template(&self, stem: &str) -> Result<bool, String> {
+        match self.send(&Command::ResolveTemplate { stem: stem.to_string() })? {
+            Response::Exists(b) => Ok(b),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
+    /// List files that depend on a given schema stem.
+    pub fn list_dependents(&self, stem: &str) -> Result<Vec<DependentFile>, String> {
+        match self.send(&Command::ListDependents { stem: stem.to_string() })? {
+            Response::Dependents(deps) => Ok(deps),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
         }
     }
 }

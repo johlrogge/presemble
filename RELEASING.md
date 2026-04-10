@@ -91,6 +91,27 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.32.0
+
+LSP fully migrated to conductor, MCP per-call site parameter, slot-scoped suggestions, and browser suggest-mode refinements.
+
+**LSP fully migrated to conductor (ADR-031)**
+All LSP operations — classify, grammar loading, completions, and document text — go through the conductor daemon. The dual-mode fallback that let the LSP operate without a conductor is removed. Error observability is added: LSP startup performs a health check, and conductor errors are surfaced as LSP diagnostics. The LSP connects to a running conductor (started by `presemble serve`) or starts one automatically on the first request.
+
+**MCP per-call site parameter**
+Each MCP tool call accepts an optional `site` parameter. A single MCP server instance can target multiple sites without restart — pass the site directory path on each call. The `list_content` tool is now wired to the conductor's `ListContent` command, removing the last direct filesystem read from the MCP server. The MCP version string is dynamic.
+
+**Slot-scoped editorial suggestions (SlotEdit)**
+New `SuggestSlotEdit` conductor command pushes a search/replace suggestion targeting part of a slot's content rather than replacing the whole value. Distinct from full-slot suggestions in both the LSP diagnostic view and the browser diff UI.
+
+**Browser suggest-mode refinements**
+Suggestion overlays are exclusive to Suggest mode — Edit mode no longer shows them. Suggestion diffs are minimal: only changed words are highlighted. A speech bubble icon marks each suggestion node. The toolbar shows a buffer list of all pending changes. Suggestion markers make it easy to locate pending suggestions on a busy page.
+
+**Conductor hardening**
+Conductor locks are poison-resilient. `ListContent` returns relative paths. Ten smoke tests cover classify, grammar loading, suggestions, and document overlay end-to-end.
+
+---
+
 ### v0.31.0
 
 Edge-first graph architecture and reverse references.

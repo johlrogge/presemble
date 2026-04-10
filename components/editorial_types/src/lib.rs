@@ -110,6 +110,12 @@ pub enum SuggestionTarget {
         search: String,
         replace: String,
     },
+    /// Search/replace scoped to a specific slot
+    SlotEdit {
+        slot: SlotName,
+        search: String,
+        replace: String,
+    },
 }
 
 /// A first-class editorial suggestion.
@@ -220,6 +226,33 @@ mod tests {
         assert_eq!(back.id, suggestion.id);
         assert_eq!(back.author, suggestion.author);
         assert!(matches!(&back.target, SuggestionTarget::Slot { slot, .. } if slot.as_str() == "title"));
+        assert_eq!(back.status, SuggestionStatus::Pending);
+    }
+
+    #[test]
+    fn slot_edit_suggestion_serializes_and_deserializes() {
+        let suggestion = Suggestion {
+            id: SuggestionId(String::from("sug-000000000000cd01")),
+            author: Author::Human("editor".into()),
+            file: ContentPath::new("content/post/hello.md"),
+            target: SuggestionTarget::SlotEdit {
+                slot: SlotName::new("bio"),
+                search: String::from("developer"),
+                replace: String::from("engineer"),
+            },
+            reason: String::from("More accurate title"),
+            status: SuggestionStatus::Pending,
+            original_value: Some(String::from("Experienced developer")),
+            created_at: String::from("2026-04-09T00:00:00Z"),
+        };
+        let json = serde_json::to_string(&suggestion).expect("serialize");
+        let back: Suggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, suggestion.id);
+        assert!(matches!(
+            &back.target,
+            SuggestionTarget::SlotEdit { slot, search, replace }
+                if slot.as_str() == "bio" && search == "developer" && replace == "engineer"
+        ));
         assert_eq!(back.status, SuggestionStatus::Pending);
     }
 

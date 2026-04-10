@@ -1,6 +1,33 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Serializable file classification for the wire protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FileClassification {
+    Content { schema_stem: String },
+    Template { schema_stem: String },
+    Schema { stem: String },
+    Stylesheet,
+    Asset,
+    Unknown,
+}
+
+/// A link option for completions: one item that can be referenced from content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkOption {
+    pub stem: String,
+    pub slug: String,
+    pub title: String,
+    pub url: String,
+}
+
+/// A file that depends on a given schema stem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependentFile {
+    pub path: String,
+    pub kind: FileClassification,
+}
+
 /// Commands sent from clients (LSP, serve) to the conductor via nng REQ/REP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -40,6 +67,15 @@ pub enum Command {
         reason: String,
         author: editorial_types::Author,
     },
+    /// Suggest a search/replace edit scoped to a specific slot.
+    SuggestSlotEdit {
+        file: editorial_types::ContentPath,
+        slot: editorial_types::SlotName,
+        search: String,
+        replace: String,
+        reason: String,
+        author: editorial_types::Author,
+    },
     /// Query all pending suggestions for a file.
     GetSuggestions {
         file: editorial_types::ContentPath,
@@ -65,6 +101,8 @@ pub enum Command {
     },
     /// List all dirty (unsaved) buffers.
     GetDirtyBuffers,
+    /// List distinct file paths that have at least one pending suggestion.
+    GetSuggestionFiles,
     /// Write a dirty buffer to disk.
     SaveBuffer { path: String },
     /// Write all dirty buffers to disk.
@@ -80,6 +118,20 @@ pub enum Command {
         complexity: String,
         theme: String,
     },
+    /// Classify a file path into its site role.
+    Classify { path: String },
+    /// List all schema stems with their source text.
+    ListSchemas,
+    /// List all link options for a given schema stem (for completions).
+    ListLinkOptions { stem: String },
+    /// Resolve a link path: check whether it exists in the site.
+    ResolveLink { path: String },
+    /// Resolve a template stem: check whether a template exists for it.
+    ResolveTemplate { stem: String },
+    /// List all files that depend on a given schema stem.
+    ListDependents { stem: String },
+    /// List all content file paths.
+    ListContent,
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -99,6 +151,20 @@ pub enum Response {
     ContentCreated(String),
     /// List of dirty (unsaved) buffer paths.
     DirtyBuffers(Vec<String>),
+    /// Distinct file paths that have at least one pending suggestion (sorted).
+    SuggestionFiles(Vec<String>),
+    /// Classification of a file path.
+    FileClassification(FileClassification),
+    /// List of schema stems and their source text: `(stem, source)` pairs.
+    SchemaList(Vec<(String, String)>),
+    /// List of link options for completions.
+    LinkOptions(Vec<LinkOption>),
+    /// Whether a path or template exists.
+    Exists(bool),
+    /// List of files that depend on a schema stem.
+    Dependents(Vec<DependentFile>),
+    /// List of all content file paths (site-relative).
+    ContentList(Vec<String>),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.

@@ -312,8 +312,8 @@ enum Command {
     },
     /// Run the MCP server for Claude Code integration (reads JSON-RPC from stdin, writes to stdout)
     Mcp {
-        /// Path to the site directory
-        site_dir: String,
+        /// Path to the site directory (optional — each tool call can specify its own site)
+        site_dir: Option<String>,
     },
 }
 
@@ -359,7 +359,8 @@ pub fn run() -> Result<(), CliError> {
             convert_template(Path::new(&input), &to, output.as_deref().map(Path::new))
         }
         Some(Command::Mcp { site_dir }) => {
-            mcp_server::run(Path::new(&site_dir)).map_err(CliError::Render)
+            let dir = site_dir.as_deref().unwrap_or("site/");
+            mcp_server::run(Path::new(dir)).map_err(CliError::Render)
         }
         None => {
             // backward compat: presemble <site-dir>

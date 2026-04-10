@@ -9,7 +9,7 @@ Content is data. Templates are data. Schemas are the contracts between them.
 - **Schema-validated content** — define document grammars in markdown; the publisher enforces them at build time with hard failures and clear error messages
 - **Data-bound templates** — templates are parsed DOM trees, not text with holes; written in Hiccup (EDN) and composed with `juxt` and pipe combinators
 - **Live serve** — `presemble serve` rebuilds only affected pages on each save and reloads the browser automatically; click body elements to edit inline
-- **LSP support** — `presemble lsp` provides completions, diagnostics, hover, and go-to-definition for content, template, and schema files in any LSP-capable editor
+- **LSP support** — `presemble lsp` provides completions, diagnostics, hover, and go-to-definition for content, template, and schema files in any LSP-capable editor; requires a conductor daemon running for the same site
 - **Editorial suggestions** — Claude and human editors push suggestions via the MCP server or conductor; each appears as an LSP diagnostic with accept/reject code actions
 - **Presemble Lisp** — content files include link expressions that assemble collections at build time: `(->> :post (sort-by :published :desc) (take 5))`. Reverse references (`(refs-to self)`) populate a slot with all pages that link to the current page.
 - **nREPL** — Calva and CIDER can jack in and evaluate expressions against the live content graph
@@ -45,7 +45,7 @@ presemble build my-site/ --config .presemble/github-pages.json
 presemble lsp my-site/
 ```
 
-Point your editor at the `presemble lsp` binary. It handles content, template, and schema files in the same server process, dispatching by file path.
+Point your editor at the `presemble lsp` binary. It handles content, template, and schema files in the same server process, dispatching by file path. The LSP delegates classify, grammar loading, completions, and document-text operations to the conductor daemon; start `presemble serve` first or the LSP will start its own conductor on first request.
 
 | File type | Completions | Diagnostics | Hover | Go-to-definition |
 |---|---|---|---|---|
@@ -60,6 +60,8 @@ presemble mcp my-site/
 ```
 
 Starts an MCP server for Claude Code. Claude reads schemas, reads content, and pushes suggestions to specific slots with rationale. Each suggestion appears as an LSP diagnostic. Accept or reject with a code action. Suggestions also appear as inline diffs in the browser preview.
+
+Each MCP tool call accepts an optional `site` parameter so a single MCP server instance can target multiple sites. The `list_content` tool is wired to the conductor's `ListContent` command — content enumeration goes through the conductor, not the filesystem.
 
 ## nREPL
 
@@ -140,6 +142,6 @@ Requires the Nix devenv shell. Do not install packages with `cargo install -g` o
 
 ## Version
 
-Current release: **0.31.0**
+Current release: **0.32.0**
 
 See [ROADMAP.md](ROADMAP.md) for the milestone plan and [RELEASING.md](RELEASING.md) for the release workflow.

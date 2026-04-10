@@ -20,13 +20,13 @@ The mascot overlay in the corner of the page shows the current mode:
 
 ### Suggest mode
 
-The mascot popover offers three modes: View, Edit, and Suggest. In Suggest mode, missing slots render as inline suggestion nodes with the schema's hint text. Clicking a suggestion node opens an editing form pre-filled with the hint. Fill in the value and save — the slot is written to the content file and the suggestion node disappears.
+The mascot popover offers three modes: View, Edit, and Suggest. In Suggest mode, missing slots render as inline suggestion nodes with the schema's hint text. A speech bubble icon marks each node so suggestions stand out on the page. Clicking a suggestion node opens an editing form pre-filled with the hint. Fill in the value and save — the slot is written to the content file and the suggestion node disappears.
 
-Suggest mode makes it possible to fill in a content file entirely from the browser, guided slot-by-slot by the schema's own hint text.
+Suggest mode makes it possible to fill in a content file entirely from the browser, guided slot-by-slot by the schema's own hint text. Suggestion overlays are exclusive to Suggest mode; Edit mode no longer shows them.
 
 ### Pending suggestion diffs
 
-When a collaborator (or Claude via the MCP server) pushes suggestions, they appear as inline diffs in the browser alongside the current content. A toolbar shows the count of pending suggestions and offers "Accept all" and "Reject all" shortcuts. Individual suggestions can be accepted or rejected from the diff view.
+When a collaborator (or Claude via the MCP server) pushes suggestions, they appear as inline diffs in the browser alongside the current content. The diff is minimal — only the changed words are highlighted, not the entire slot value. A toolbar shows the count of pending suggestions and offers "Accept all" and "Reject all" shortcuts. Individual suggestions can be accepted or rejected from the diff view. The toolbar also shows a buffer list of all pending changes across the page.
 
 The preview toggle switches between the current published state and a preview of what the page looks like with all suggestions applied.
 
