@@ -14,3 +14,4 @@ profiles/*/
 bases/publisher_cli/target
 site/.presemble/
 .nrepl-port
+/result
