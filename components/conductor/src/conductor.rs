@@ -43,15 +43,6 @@ fn line_to_byte_offset(src: &str, line: u32) -> usize {
         .sum()
 }
 
-/// Derive a URL path from a content-relative file path.
-/// e.g. "content/post/hello.md" → "/post/hello"
-#[allow(dead_code)]
-fn derive_url_from_content_path(file: &str) -> String {
-    let stripped = file.strip_prefix("content/").unwrap_or(file);
-    let without_ext = stripped.strip_suffix(".md").unwrap_or(stripped);
-    format!("/{without_ext}")
-}
-
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
     repo: site_repository::SiteRepository,
@@ -106,6 +97,7 @@ pub struct Conductor {
     repo: site_repository::SiteRepository,
     suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::Suggestion>>,
     site_graph: RwLock<site_index::SiteGraph>,
+    build_errors: RwLock<HashMap<String, Vec<String>>>,
 }
 
 impl Conductor {
@@ -144,6 +136,7 @@ impl Conductor {
             repo,
             suggestions: RwLock::new(HashMap::new()),
             site_graph: RwLock::new(site_index::SiteGraph::new()),
+            build_errors: RwLock::new(HashMap::new()),
         };
 
         // Load persisted pending suggestions from disk
@@ -838,6 +831,24 @@ impl Conductor {
         self.rebuild_page(&abs_path, &new_source)
     }
 
+    /// Derive the URL path for a content file (for error tracking).
+    fn url_for_content_path(&self, content_path: &Path) -> Option<String> {
+        let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
+        let stem = match site_idx.classify(content_path) {
+            site_index::FileKind::Content { schema_stem } => schema_stem.as_str().to_string(),
+            _ => return None,
+        };
+        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let url = if stem.is_empty() {
+            if slug == "index" { "/".to_string() } else { format!("/{slug}") }
+        } else if slug == "index" {
+            format!("/{stem}/")
+        } else {
+            format!("/{stem}/{slug}")
+        };
+        Some(url)
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -856,8 +867,8 @@ impl Conductor {
                 CommandResult::with_response(Response::DocumentText(self.document_text(&resolved)))
             }
             Command::GetBuildErrors => {
-                // TODO: implement build error tracking
-                CommandResult::with_response(Response::BuildErrors(HashMap::new()))
+                let errors = self.build_errors.read().unwrap_or_else(|e| e.into_inner());
+                CommandResult::with_response(Response::BuildErrors(errors.clone()))
             }
             Command::Shutdown => CommandResult::ok(),
             Command::DocumentChanged { path, text } => {
@@ -868,13 +879,33 @@ impl Conductor {
 
                 // Rebuild the page from in-memory text and broadcast PagesRebuilt.
                 match self.rebuild_page(&path_buf, &text) {
-                    Ok(pages) if !pages.is_empty() => CommandResult::ok_with_events(vec![
-                        ConductorEvent::PagesRebuilt { pages, anchor: None },
-                    ]),
+                    Ok(pages) if !pages.is_empty() => {
+                        // Clear any previous build errors for these pages
+                        {
+                            let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
+                            for page in &pages {
+                                let bare = page.trim_end_matches('/').to_string();
+                                errors.remove(&bare);
+                                errors.remove(&format!("{bare}/"));
+                            }
+                        }
+                        CommandResult::ok_with_events(vec![
+                            ConductorEvent::PagesRebuilt { pages, anchor: None },
+                        ])
+                    }
                     Ok(_) => CommandResult::ok(),
                     Err(e) => {
                         eprintln!("conductor: rebuild failed for {path}: {e}");
-                        CommandResult::ok()
+                        // Record the error
+                        if let Some(url) = self.url_for_content_path(&path_buf) {
+                            self.build_errors.write().unwrap_or_else(|e| e.into_inner())
+                                .insert(url.clone(), vec![e]);
+                            CommandResult::ok_with_events(vec![
+                                ConductorEvent::BuildFailed { error_pages: vec![url] },
+                            ])
+                        } else {
+                            CommandResult::ok()
+                        }
                     }
                 }
             }
@@ -885,21 +916,124 @@ impl Conductor {
                 CommandResult::ok()
             }
             Command::FileChanged { paths } => {
+                // 1. Clear in-memory versions
                 for p in &paths {
                     let path = PathBuf::from(p);
-                    // Clear in-memory version
                     self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
                 }
-                // Refresh schema cache for changed schemas
+
+                // 2. Refresh site index for new/removed files
+                {
+                    let mut idx = self.site_index.write().unwrap_or_else(|e| e.into_inner());
+                    *idx = site_index::SiteIndex::new(self.site_dir.clone());
+                }
+
+                // 3. Refresh schema cache for changed schemas
+                self.refresh_schema_cache();
+
+                // 4. Rebuild the full site graph
+                if let Err(e) = self.build_full_graph() {
+                    eprintln!("conductor: full graph rebuild failed: {e}");
+                }
+
+                // 5. Classify changed files and determine which pages to rebuild
+                let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
+                let mut content_to_rebuild: Vec<PathBuf> = Vec::new();
+                let mut stems_to_rebuild: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut has_stylesheet_change = false;
+
                 for p in &paths {
-                    let path = std::path::Path::new(p);
-                    if let site_index::FileKind::Schema { stem } = self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(path)
-                        && let Some(src) = self.repo.schema_source(&stem)
-                    {
-                        self.schema_cache.write().unwrap_or_else(|e| e.into_inner()).insert(stem.as_str().to_string(), src);
+                    let path = Path::new(p);
+                    match site_idx.classify(path) {
+                        site_index::FileKind::Content { schema_stem } => {
+                            content_to_rebuild.push(PathBuf::from(p));
+                            stems_to_rebuild.insert(schema_stem.as_str().to_string());
+                        }
+                        site_index::FileKind::Schema { stem } => {
+                            stems_to_rebuild.insert(stem.as_str().to_string());
+                        }
+                        site_index::FileKind::Template { schema_stem } => {
+                            stems_to_rebuild.insert(schema_stem.as_str().to_string());
+                        }
+                        site_index::FileKind::Stylesheet => {
+                            has_stylesheet_change = true;
+                        }
+                        _ => {}
                     }
                 }
-                CommandResult::ok()
+                drop(site_idx);
+
+                // For stems that changed (schema or template), find ALL content files using that stem
+                if !stems_to_rebuild.is_empty() {
+                    let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+                    for node in site_graph.iter() {
+                        if let Some(pd) = node.page_data()
+                            && stems_to_rebuild.contains(pd.schema_stem.as_str())
+                            && let Some(template::Value::Text(file)) = pd.data.resolve(&[KEY_PRESEMBLE_FILE])
+                        {
+                            let abs_path = self.site_dir.join(file);
+                            if !content_to_rebuild.contains(&abs_path) {
+                                content_to_rebuild.push(abs_path);
+                            }
+                        }
+                    }
+                }
+
+                // 6. Rebuild each content file
+                let mut rebuilt_pages: Vec<String> = Vec::new();
+                let mut failed_pages: Vec<String> = Vec::new();
+                let mut new_errors: HashMap<String, Vec<String>> = HashMap::new();
+
+                for content_path in &content_to_rebuild {
+                    let text = match std::fs::read_to_string(content_path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("conductor: cannot read {}: {e}", content_path.display());
+                            continue;
+                        }
+                    };
+
+                    match self.rebuild_page(content_path, &text) {
+                        Ok(pages) => {
+                            rebuilt_pages.extend(pages);
+                        }
+                        Err(e) => {
+                            eprintln!("conductor: rebuild failed for {}: {e}", content_path.display());
+                            if let Some(url) = self.url_for_content_path(content_path) {
+                                new_errors.insert(url.clone(), vec![e]);
+                                failed_pages.push(url);
+                            }
+                        }
+                    }
+                }
+
+                // 7. Update build errors
+                {
+                    let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
+                    for page in &rebuilt_pages {
+                        let bare = page.trim_end_matches('/').to_string();
+                        errors.remove(&bare);
+                        errors.remove(&format!("{bare}/"));
+                    }
+                    for (url, msgs) in new_errors {
+                        errors.insert(url, msgs);
+                    }
+                }
+
+                // 8. Build events
+                let mut events = Vec::new();
+                if !rebuilt_pages.is_empty() || has_stylesheet_change {
+                    events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
+                }
+                if !failed_pages.is_empty() {
+                    events.push(ConductorEvent::BuildFailed { error_pages: failed_pages });
+                }
+
+                if events.is_empty() {
+                    CommandResult::ok()
+                } else {
+                    CommandResult::ok_with_events(events)
+                }
             }
             Command::CursorMoved { path, line } => {
                 let abs_path = self.site_dir.join(&path);
