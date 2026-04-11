@@ -122,6 +122,7 @@ ADRs live in `docs/adr/`. The presemble.io site is in `site/` and is built with 
 | `components/content` | [components/content/README.md](components/content/README.md) |
 | `components/template` | [components/template/README.md](components/template/README.md) |
 | `components/dep_graph` | [components/dep_graph/README.md](components/dep_graph/README.md) |
+| `components/conductor` | [components/conductor/README.md](components/conductor/README.md) |
 | `components/lsp_service` | [components/lsp_service/README.md](components/lsp_service/README.md) |
 | `components/lsp_capabilities` | [components/lsp_capabilities/README.md](components/lsp_capabilities/README.md) |
 | `bases/publisher_cli` | [bases/publisher_cli/README.md](bases/publisher_cli/README.md) |
@@ -142,6 +143,6 @@ Requires the Nix devenv shell. Do not install packages with `cargo install -g` o
 
 ## Version
 
-Current release: **0.32.0**
+Current release: **0.32.5**
 
 See [ROADMAP.md](ROADMAP.md) for the milestone plan and [RELEASING.md](RELEASING.md) for the release workflow.

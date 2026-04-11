@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use crate::{build_for_serve, rebuild_affected, BuildPolicy, DependencyGraph, UrlConfig};
+use crate::{build_for_serve, UrlConfig};
 use axum::{
     Router,
     extract::{Query, State, WebSocketUpgrade},
@@ -9,14 +9,12 @@ use axum::{
 };
 use lsp_service::PresembleLsp;
 use tower_lsp::{LspService, Server};
-use content::{parse_document, ContentElement};
 use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::Path;
-use site_index::DIR_CONTENT;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -78,10 +76,8 @@ pub fn serve_site(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<
 struct AppState {
     output_dir: std::path::PathBuf,
     reload_tx: broadcast::Sender<BrowserMessage>,
-    build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
     site_dir: std::path::PathBuf,
-    conductor: Option<Arc<conductor::ConductorClient>>,
-    graph: Arc<Mutex<DependencyGraph>>,
+    conductor: Arc<conductor::ConductorClient>,
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
@@ -91,15 +87,10 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
 
     let out_dir = crate::output_dir(site_dir);
 
-    // Initial build — capture the dependency graph
+    // Initial build — populate the output directory (conductor doesn't render HTML yet).
     println!("Building site...");
-    let current_graph = Arc::new(Mutex::new(DependencyGraph::new()));
-    let build_errors: Arc<Mutex<HashMap<String, Vec<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
     match build_for_serve(site_dir, url_config) {
         Ok(outcome) => {
-            *current_graph.lock().unwrap_or_else(|e| e.into_inner()) = outcome.dep_graph;
-            *build_errors.lock().unwrap_or_else(|e| e.into_inner()) = outcome.build_errors;
             if outcome.files_failed > 0 {
                 eprintln!("Build completed with {} error(s)", outcome.files_failed);
             } else {
@@ -113,47 +104,22 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
 
     let (reload_tx, _) = broadcast::channel::<BrowserMessage>(16);
 
-    let snapshot: ContentSnapshot = Arc::new(Mutex::new(HashMap::new()));
-    {
-        let content_dir = site_dir.join(DIR_CONTENT);
-        if content_dir.exists() {
-            let mut files = Vec::new();
-            collect_content_md_files(&content_dir, &mut files);
-            let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-            for path in files {
-                if let Some(elems) = body_elements_from_path(&path) {
-                    snap.insert(path, elems);
-                }
-            }
-        }
-    }
+    // Connect to conductor — mandatory for serve mode.
+    let conductor_client = Arc::new(
+        conductor::ensure_conductor(site_dir)
+            .map_err(|e| CliError::Render(format!("conductor required for serve: {e}")))?
+    );
+    println!("Connected to conductor");
 
-    // Start file watcher in background thread
+    // Start file watcher in background thread — delegates rebuilds to conductor.
     let site_dir_owned = site_dir.to_path_buf();
-    let graph_clone = Arc::clone(&current_graph);
-    let url_config_owned = url_config.clone();
-    let reload_tx_clone = reload_tx.clone();
-    let snapshot_clone = Arc::clone(&snapshot);
-    let build_errors_clone = Arc::clone(&build_errors);
+    let conductor_for_watcher = Arc::clone(&conductor_client);
     std::thread::spawn(move || {
-        watch_and_rebuild(&site_dir_owned, graph_clone, &url_config_owned, reload_tx_clone, snapshot_clone, build_errors_clone);
+        watch_and_rebuild(&site_dir_owned, conductor_for_watcher);
     });
 
-    // Connect to conductor (auto-starts if needed)
-    let conductor_client = match conductor::ensure_conductor(site_dir) {
-        Ok(c) => {
-            println!("Connected to conductor");
-            Some(Arc::new(c))
-        }
-        Err(e) => {
-            eprintln!("Warning: conductor not available: {e}");
-            eprintln!("Running without conductor — edits from Helix will not update browser live");
-            None
-        }
-    };
-
     // Subscribe to conductor events and forward to the reload broadcast channel
-    if conductor_client.is_some() {
+    {
         let pub_url = format!("{}-pub", conductor::socket_url(site_dir));
         let reload_tx_clone = reload_tx.clone();
         std::thread::spawn(move || {
@@ -189,10 +155,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
     let state = AppState {
         output_dir: out_dir.clone(),
         reload_tx,
-        build_errors,
         site_dir: site_dir.to_path_buf(),
         conductor: conductor_client,
-        graph: Arc::clone(&current_graph),
     };
 
     let app = Router::new()
@@ -252,13 +216,7 @@ async fn edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-    match cond.send(&conductor::Command::EditSlot {
+    match state.conductor.send(&conductor::Command::EditSlot {
         file: req.file.clone(),
         slot: req.slot.clone(),
         value: req.value.clone(),
@@ -281,30 +239,16 @@ async fn edit_body_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditBodyRequest>,
 ) -> axum::Json<EditResponse> {
-    // Forward through conductor if available
-    if let Some(ref cond) = state.conductor {
-        match cond.send(&conductor::Command::EditBodyElement {
-            file: req.file.clone(),
-            body_idx: req.body_idx,
-            content: req.content.clone(),
-        }) {
-            Ok(conductor::Response::Ok) => {
-                return axum::Json(EditResponse { ok: true, error: None });
-            }
-            Ok(conductor::Response::Error(e)) => {
-                return axum::Json(EditResponse { ok: false, error: Some(e) });
-            }
-            Err(e) => {
-                return axum::Json(EditResponse { ok: false, error: Some(e) });
-            }
-            _ => {} // unexpected response, fall through
-        }
+    match state.conductor.send(&conductor::Command::EditBodyElement {
+        file: req.file.clone(),
+        body_idx: req.body_idx,
+        content: req.content.clone(),
+    }) {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
+        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
     }
-
-    axum::Json(EditResponse {
-        ok: false,
-        error: Some("conductor not available — body editing requires conductor".to_string()),
-    })
 }
 
 #[derive(serde::Deserialize)]
@@ -327,13 +271,7 @@ async fn suggest_slot_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestSlotRequest>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-    match cond.send(&conductor::Command::SuggestSlotValue {
+    match state.conductor.send(&conductor::Command::SuggestSlotValue {
         file: editorial_types::ContentPath::new(&req.file),
         slot: editorial_types::SlotName::new(&req.slot),
         value: req.value.clone(),
@@ -351,13 +289,7 @@ async fn suggest_body_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestBodyRequest>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-    match cond.send(&conductor::Command::SuggestBodyEdit {
+    match state.conductor.send(&conductor::Command::SuggestBodyEdit {
         file: editorial_types::ContentPath::new(&req.file),
         search: req.search.clone(),
         replace: req.replace.clone(),
@@ -437,14 +369,7 @@ async fn suggest_slot_edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestSlotEditRequest>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-
-    match cond.send(&conductor::Command::SuggestSlotEdit {
+    match state.conductor.send(&conductor::Command::SuggestSlotEdit {
         file: editorial_types::ContentPath::new(&req.file),
         slot: editorial_types::SlotName::new(&req.slot),
         search: req.search,
@@ -470,16 +395,7 @@ async fn suggestions_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    let Some(ref cond) = state.conductor else {
-        let body = r#"{"error":"conductor not available"}"#.to_string();
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::CONTENT_TYPE, "application/json")],
-            body.into_bytes(),
-        ).into_response();
-    };
-
-    match cond.send(&conductor::Command::GetSuggestions {
+    match state.conductor.send(&conductor::Command::GetSuggestions {
         file: editorial_types::ContentPath::new(&query.file),
     }) {
         Ok(conductor::Response::Suggestions(suggestions)) => {
@@ -529,14 +445,7 @@ async fn accept_suggestion_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-
-    match cond.send(&conductor::Command::AcceptSuggestion {
+    match state.conductor.send(&conductor::Command::AcceptSuggestion {
         id: editorial_types::SuggestionId::from(req.id),
     }) {
         Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
@@ -550,14 +459,7 @@ async fn reject_suggestion_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-
-    match cond.send(&conductor::Command::RejectSuggestion {
+    match state.conductor.send(&conductor::Command::RejectSuggestion {
         id: editorial_types::SuggestionId::from(req.id),
     }) {
         Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
@@ -572,16 +474,7 @@ async fn dirty_buffers_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    let Some(ref cond) = state.conductor else {
-        let body = b"[]".to_vec();
-        return (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            body,
-        ).into_response();
-    };
-
-    match cond.send(&conductor::Command::GetDirtyBuffers) {
+    match state.conductor.send(&conductor::Command::GetDirtyBuffers) {
         Ok(conductor::Response::DirtyBuffers(paths)) => {
             let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
             (
@@ -620,14 +513,7 @@ async fn dirty_buffers_handler(
 async fn save_all_handler(
     State(state): State<AppState>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-
-    match cond.send(&conductor::Command::SaveAllBuffers) {
+    match state.conductor.send(&conductor::Command::SaveAllBuffers) {
         Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
         Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
@@ -640,16 +526,7 @@ async fn suggestion_files_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    let Some(ref cond) = state.conductor else {
-        let body = b"[]".to_vec();
-        return (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            body,
-        ).into_response();
-    };
-
-    match cond.send(&conductor::Command::GetSuggestionFiles) {
+    match state.conductor.send(&conductor::Command::GetSuggestionFiles) {
         Ok(conductor::Response::SuggestionFiles(paths)) => {
             let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
             (
@@ -795,13 +672,7 @@ async fn scaffold_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<ScaffoldRequest>,
 ) -> axum::Json<EditResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(EditResponse {
-            ok: false,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-    match cond.send(&conductor::Command::ScaffoldSite {
+    match state.conductor.send(&conductor::Command::ScaffoldSite {
         template_name: req.template.clone(),
         format: req.format.clone(),
         font_mood: req.font_mood.clone(),
@@ -811,27 +682,10 @@ async fn scaffold_handler(
         theme: req.theme.clone(),
     }) {
         Ok(conductor::Response::Ok) => {
-            // After scaffolding, trigger a full build so output HTML exists.
-            // The conductor refreshed its graph, but we need rendered pages.
-            let url_config = crate::UrlConfig::default();
-            match crate::build_for_serve(&state.site_dir, &url_config) {
-                Err(e) => {
-                    return axum::Json(EditResponse {
-                        ok: false,
-                        error: Some(format!("scaffold succeeded but build failed: {e}")),
-                    });
-                }
-                Ok(outcome) => {
-                    // Propagate the new dependency graph so the file watcher can
-                    // detect affected outputs after the scaffold creates new directories.
-                    *state.graph.lock().unwrap_or_else(|e| e.into_inner()) = outcome.dep_graph;
-                }
+            // Tell conductor about new files so it renders them
+            if let Ok(conductor::Response::ContentList(paths)) = state.conductor.send(&conductor::Command::ListContent) {
+                let _ = state.conductor.send(&conductor::Command::FileChanged { paths });
             }
-            // Notify browser to reload
-            let _ = state.reload_tx.send(BrowserMessage::Reload {
-                pages: vec![],
-                anchor: None,
-            });
             axum::Json(EditResponse { ok: true, error: None })
         }
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
@@ -857,6 +711,7 @@ fn apply_edit(
 #[derive(serde::Deserialize)]
 struct LinksQuery {
     schema: String,
+    #[allow(dead_code)]
     slot: String,
 }
 
@@ -866,30 +721,22 @@ async fn links_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    let repo = site_repository::SiteRepository::new(&state.site_dir);
-    let options =
-        content_editor::collect_link_options(&state.site_dir, &repo, &query.schema, &query.slot);
-
-    // Reserialize as {text, href} for JS compatibility
-    #[derive(serde::Serialize)]
-    struct LinkOptionJson {
-        text: String,
-        href: String,
+    match state.conductor.send(&conductor::Command::ListLinkOptions {
+        stem: query.schema.clone(),
+    }) {
+        Ok(conductor::Response::LinkOptions(options)) => {
+            #[derive(serde::Serialize)]
+            struct LinkOptionJson { text: String, href: String }
+            let mapped: Vec<LinkOptionJson> = options.into_iter()
+                .map(|o| LinkOptionJson { text: o.title, href: o.url })
+                .collect();
+            let json = serde_json::to_vec(&mapped).unwrap_or_default();
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        _ => {
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], b"[]".to_vec()).into_response()
+        }
     }
-    let mapped: Vec<LinkOptionJson> = options
-        .into_iter()
-        .map(|o| LinkOptionJson {
-            text: o.label,
-            href: o.value,
-        })
-        .collect();
-    let json = serde_json::to_vec(&mapped).unwrap_or_default();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        json,
-    )
-        .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -910,52 +757,31 @@ struct CreateContentResponse {
 async fn schemas_handler(State(state): State<AppState>) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    let repo = site_repository::SiteRepository::builder()
-        .from_dir(&state.site_dir)
-        .build();
-    let stems: Vec<String> = content_editor::list_schemas(&repo)
-        .into_iter()
-        .filter(|s| s != "index" && !s.ends_with("/index"))
-        .collect();
-    let json = serde_json::to_vec(&stems).unwrap_or_default();
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json")],
-        json,
-    )
-        .into_response()
+    match state.conductor.send(&conductor::Command::ListSchemas) {
+        Ok(conductor::Response::SchemaList(schemas)) => {
+            let stems: Vec<String> = schemas.into_iter()
+                .map(|(stem, _src)| stem)
+                .filter(|s| s != "index" && !s.ends_with("/index"))
+                .collect();
+            let json = serde_json::to_vec(&stems).unwrap_or_default();
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        _ => {
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], b"[]".to_vec()).into_response()
+        }
+    }
 }
 
 async fn create_content_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<CreateContentRequest>,
 ) -> axum::Json<CreateContentResponse> {
-    let Some(ref cond) = state.conductor else {
-        return axum::Json(CreateContentResponse {
-            ok: false,
-            url: None,
-            error: Some("conductor not available".to_string()),
-        });
-    };
-    match cond.send(&conductor::Command::CreateContent {
+    match state.conductor.send(&conductor::Command::CreateContent {
         stem: req.stem.clone(),
         slug: req.slug.clone(),
     }) {
         Ok(conductor::Response::ContentCreated(url)) => {
-            // Trigger a full publisher rebuild so output HTML exists for the new page
-            let url_config = crate::UrlConfig::default();
-            if let Err(e) = crate::build_for_serve(&state.site_dir, &url_config) {
-                return axum::Json(CreateContentResponse {
-                    ok: true,
-                    url: Some(url),
-                    error: Some(format!("content created but build failed: {e}")),
-                });
-            }
-            // Notify browser to reload — smart navigation will go to the new page
-            let _ = state.reload_tx.send(BrowserMessage::Reload {
-                pages: vec![url.clone()],
-                anchor: None,
-            });
+            // Conductor already rebuilt and will emit PagesRebuilt via the event subscriber
             axum::Json(CreateContentResponse {
                 ok: true,
                 url: Some(url),
@@ -1093,7 +919,10 @@ async fn file_handler(
     // Check for build errors before attempting to serve from disk.
     // Normalise: look up with and without trailing slash.
     {
-        let errors = state.build_errors.lock().unwrap_or_else(|e| e.into_inner());
+        let errors: HashMap<String, Vec<String>> = match state.conductor.send(&conductor::Command::GetBuildErrors) {
+            Ok(conductor::Response::BuildErrors(e)) => e,
+            _ => HashMap::new(),
+        };
         let bare = path.trim_end_matches('/');
         let key = if bare.is_empty() { "/" } else { bare };
         if let Some(messages) = errors.get(key).or_else(|| errors.get(&format!("{key}/"))) {
@@ -1242,49 +1071,9 @@ fn is_relevant_path(path: &std::path::Path) -> bool {
     )
 }
 
-type ContentSnapshot = Arc<Mutex<HashMap<std::path::PathBuf, Vec<ContentElement>>>>;
-
-fn body_elements_from_path(path: &std::path::Path) -> Option<Vec<ContentElement>> {
-    let src = std::fs::read_to_string(path).ok()?;
-    let doc = parse_document(&src).ok()?;
-    let start = doc.elements.iter().position(|e| matches!(e.node, ContentElement::Separator))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    Some(doc.elements.iter().skip(start).map(|s| s.node.clone()).collect())
-}
-
-fn collect_content_md_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_content_md_files(&path, files);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            files.push(path);
-        }
-    }
-}
-
-fn first_changed_body_idx(old: &[ContentElement], new: &[ContentElement]) -> Option<usize> {
-    let min_len = old.len().min(new.len());
-    for i in 0..min_len {
-        if old[i] != new[i] {
-            return Some(i);
-        }
-    }
-    if new.len() > old.len() {
-        return Some(old.len());
-    }
-    None
-}
-
 fn watch_and_rebuild(
     site_dir: &Path,
-    graph: Arc<Mutex<DependencyGraph>>,
-    url_config: &UrlConfig,
-    reload_tx: broadcast::Sender<BrowserMessage>,
-    snapshot: ContentSnapshot,
-    build_errors: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    conductor: Arc<conductor::ConductorClient>,
 ) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
@@ -1364,127 +1153,24 @@ fn watch_and_rebuild(
             continue;
         }
 
-        let current = graph.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let affected_count = dirty
-            .iter()
-            .flat_map(|p| current.affected_outputs(p))
-            .count();
-
-        // Also check if any dirty file belongs to a page that previously failed —
-        // failed pages are not in the dep_graph, so affected_count would be 0 for them,
-        // but we still need to rebuild to clear (or re-record) the error.
-        let has_errored_content = {
-            let errors = build_errors.lock().unwrap_or_else(|e| e.into_inner());
-            !errors.is_empty() && dirty.iter().any(|p| {
-                p.extension().and_then(|e| e.to_str()) == Some("md")
-                    && p.starts_with(site_dir.join(DIR_CONTENT))
-            })
-        };
-
-        let content_base = site_dir.join(DIR_CONTENT);
-        let new_content_files: Vec<std::path::PathBuf> = dirty.iter()
-            .filter(|p| {
-                p.starts_with(&content_base)
-                    && p.extension().and_then(|e| e.to_str()) == Some("md")
-                    && p.exists()
-            })
-            .filter(|p| {
-                let canonical = std::fs::canonicalize(p).unwrap_or_else(|_| (*p).clone());
-                !current.is_known_source(&canonical)
-            })
-            .cloned()
+        // Convert dirty paths to site-relative strings for the conductor
+        let paths: Vec<String> = dirty.iter()
+            .filter_map(|p| p.to_str().map(|s| s.to_string()))
             .collect();
-        let has_new_content = !new_content_files.is_empty();
 
-        if affected_count == 0 && !has_errored_content && !has_new_content {
-            continue;
-        }
+        println!("  rebuild: {} file(s) changed [{}]",
+            dirty.len(),
+            dirty.iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                .collect::<Vec<_>>()
+                .join(", "));
 
-        let trigger_files: Vec<&str> = dirty.iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-            .collect();
-        println!("  rebuild: {} file(s) changed → {} page(s) affected [{}]",
-            dirty.len(), affected_count.max(1),
-            trigger_files.join(", "));
-        match rebuild_affected(site_dir, &dirty, &current, url_config, &new_content_files, &BuildPolicy::lenient()) {
-            Ok(outcome) => {
-                let mut g = graph.lock().unwrap_or_else(|e| e.into_inner());
-                g.merge(outcome.dep_graph);
-
-                // Update the shared error map: clear errors for successfully rebuilt pages,
-                // then record errors for newly failed pages.
-                {
-                    let mut errors = build_errors.lock().unwrap_or_else(|e| e.into_inner());
-                    for entry in outcome.site_graph.iter() {
-                        let bare = entry.url_path.as_str().trim_end_matches('/').to_string();
-                        errors.remove(&bare);
-                        errors.remove(&format!("{bare}/"));
-                    }
-                    for (url, msgs) in &outcome.build_errors {
-                        errors.insert(url.clone(), msgs.clone());
-                    }
-                }
-
-                if outcome.files_failed > 0 {
-                    eprintln!("  rebuild failed: {} error(s)", outcome.files_failed);
-                    // Send a reload so the browser navigates to the error page.
-                    let error_pages: Vec<String> = outcome.build_errors.keys().cloned().collect();
-                    let _ = reload_tx.send(BrowserMessage::Reload { pages: error_pages, anchor: None });
-                } else if outcome.files_built > 0 || outcome.files_with_suggestions > 0 {
-                    println!("  {} page(s) rebuilt", outcome.files_built);
-                    let mut pages: Vec<String> = outcome.site_graph
-                        .iter()
-                        .map(|e| e.url_path.as_str().to_string())
-                        .collect();
-                    pages.sort();
-
-                    let content_base = site_dir.join(DIR_CONTENT);
-                    let dirty_content: Vec<std::path::PathBuf> = dirty
-                        .iter()
-                        .filter(|p| p.starts_with(&content_base) && p.extension().and_then(|e| e.to_str()) == Some("md"))
-                        .cloned()
-                        .collect();
-
-                    let anchor: Option<String> = if dirty_content.len() == 1 {
-                        let changed_path = &dirty_content[0];
-                        let old_elements = snapshot.lock().unwrap_or_else(|e| e.into_inner()).get(changed_path).cloned();
-                        let new_elements = body_elements_from_path(changed_path);
-                        match (old_elements, new_elements) {
-                            (Some(old), Some(new)) => first_changed_body_idx(&old, &new).map(|idx| format!("presemble-body-{idx}")),
-                            (None, Some(new)) if !new.is_empty() => Some("presemble-body-0".to_string()),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-
-                    // Update snapshot
-                    {
-                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                        for path in &dirty_content {
-                            if let Some(elems) = body_elements_from_path(path) {
-                                snap.insert(path.clone(), elems);
-                            }
-                        }
-                    }
-
-                    let _ = reload_tx.send(BrowserMessage::Reload { pages, anchor });
-                }
-            }
-            Err(e) => {
-                eprintln!("Rebuild failed: {e} — falling back to full rebuild");
-                match build_for_serve(site_dir, url_config) {
-                    Ok(outcome) => {
-                        let mut g = graph.lock().unwrap_or_else(|e| e.into_inner());
-                        *g = outcome.dep_graph;
-                        // Update error map from full rebuild
-                        *build_errors.lock().unwrap_or_else(|e| e.into_inner()) = outcome.build_errors;
-                        println!("Full rebuild complete");
-                        let _ = reload_tx.send(BrowserMessage::Reload { pages: Vec::new(), anchor: None });
-                    }
-                    Err(e2) => eprintln!("Full rebuild failed: {e2}"),
-                }
-            }
+        // Delegate rebuild to the conductor — it handles classification,
+        // rebuild, error tracking, and emits PagesRebuilt/BuildFailed events.
+        // The conductor event subscriber thread forwards those as BrowserMessage::Reload.
+        match conductor.send(&conductor::Command::FileChanged { paths }) {
+            Ok(_) => {}
+            Err(e) => eprintln!("  conductor FileChanged failed: {e}"),
         }
 
         // After each rebuild, watch any subdirectories that now exist but weren't
@@ -1599,26 +1285,6 @@ mod tests {
     }
 
     #[test]
-    fn first_changed_idx_finds_first_diff() {
-        let old = vec![ContentElement::Paragraph { text: "a".to_string() }, ContentElement::Paragraph { text: "b".to_string() }];
-        let new = vec![ContentElement::Paragraph { text: "a".to_string() }, ContentElement::Paragraph { text: "changed".to_string() }];
-        assert_eq!(first_changed_body_idx(&old, &new), Some(1));
-    }
-
-    #[test]
-    fn first_changed_idx_append_returns_old_len() {
-        let old = vec![ContentElement::Paragraph { text: "a".to_string() }];
-        let new = vec![ContentElement::Paragraph { text: "a".to_string() }, ContentElement::Paragraph { text: "new".to_string() }];
-        assert_eq!(first_changed_body_idx(&old, &new), Some(1));
-    }
-
-    #[test]
-    fn first_changed_idx_identical_returns_none() {
-        let elems = vec![ContentElement::Paragraph { text: "x".to_string() }];
-        assert_eq!(first_changed_body_idx(&elems, &elems.clone()), None);
-    }
-
-    #[test]
     fn render_error_page_contains_url_and_messages() {
         let html = render_error_page("/article/foo", &["[ERROR] title must be capitalized".to_string()]);
         assert!(html.contains("/article/foo"), "should contain url path");
@@ -1658,7 +1324,7 @@ mod tests {
     #[test]
     fn apply_edit_writes_to_content_file() {
         let dir = tempfile::tempdir().unwrap();
-        use site_index::DIR_SCHEMAS;
+        use site_index::{DIR_CONTENT, DIR_SCHEMAS};
         let schemas_dir = dir.path().join(DIR_SCHEMAS);
         std::fs::create_dir_all(&schemas_dir).unwrap();
         std::fs::create_dir_all(dir.path().join(DIR_CONTENT).join("article")).unwrap();

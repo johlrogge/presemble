@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 pub use template_registry::FileTemplateRegistry;
 
-pub use dep_graph::DependencyGraph;
+use dep_graph::DependencyGraph;
 pub use error::CliError;
 
 use site_index::{DIR_ASSETS, DIR_CONTENT, DIR_SCHEMAS, DIR_TEMPLATES, NodeRole, PageData, PageKind, SchemaStem, SiteGraph, SiteNode, UrlPath};
@@ -559,69 +559,6 @@ fn resolve_link_expressions(site_graph: &mut SiteGraph) {
                 url,
                 &edge_index,
             );
-        }
-    }
-}
-
-/// Resolve cross-content references in a single DataGraph (one level deep).
-///
-/// When a `Value::Record` has an `href` that matches another page's url_path,
-/// merge the referenced page's data fields into the record.
-fn resolve_graph(
-    graph: &mut template::DataGraph,
-    url_index: &std::collections::HashMap<String, template::DataGraph>,
-) {
-    // Collect keys to resolve and the href values to look up
-    let to_resolve: Vec<(String, String)> = graph
-        .iter()
-        .filter_map(|(key, value)| {
-            if let template::Value::Record(sub) = value
-                && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
-                && url_index.contains_key(href)
-            {
-                return Some((key.clone(), href.clone()));
-            }
-            None
-        })
-        .collect();
-
-    // Merge referenced page data into each identified record
-    for (key, href) in to_resolve {
-        if let Some(referenced) = url_index.get(&href)
-            && let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key])
-        {
-            // Preserve href and text (they belong to the link, not the reference)
-            sub.merge_from(referenced, &["href", "text"]);
-        }
-    }
-
-    // Also resolve records inside lists (multi-occurrence link slots)
-    let list_keys: Vec<String> = graph
-        .iter()
-        .filter_map(|(key, value)| {
-            if matches!(value, template::Value::List(_)) {
-                Some(key.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for key in list_keys {
-        if let Some(template::Value::List(items)) = graph.resolve_mut(&[&key]) {
-            for item in items.iter_mut() {
-                if let template::Value::Record(sub) = item {
-                    // Check if this record has an href that matches a built page
-                    let href = sub.resolve(&["href"]).and_then(|v| {
-                        if let template::Value::Text(s) = v { Some(s.clone()) } else { None }
-                    });
-                    if let Some(href) = href
-                        && let Some(referenced) = url_index.get(&href)
-                    {
-                        sub.merge_from(referenced, &["href", "text"]);
-                    }
-                }
-            }
         }
     }
 }
@@ -1227,9 +1164,9 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
 
     // Phase 2: Resolve all cross-content references once
     {
-        let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
+        let url_index: expressions::UrlIndex = site_graph
             .iter_pages_by_kind(PageKind::Item)
-            .filter_map(|n| n.page_data().map(|pd| (n.url_path.as_str().to_string(), pd.data.clone())))
+            .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
             .collect();
         if !url_index.is_empty() {
             // collect urls to avoid borrow issues
@@ -1238,7 +1175,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
                 if let Some(node) = site_graph.get_mut(url)
                     && let Some(pd) = node.page_data_mut()
                 {
-                    resolve_graph(&mut pd.data, &url_index);
+                    expressions::resolve_cross_references(&mut pd.data, &url_index);
                 }
             }
         }
@@ -1246,15 +1183,15 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
 
     // Phase 2: Resolve index graph separately (it may reference item pages added above)
     {
-        let url_index: std::collections::HashMap<String, template::DataGraph> = site_graph
+        let url_index: expressions::UrlIndex = site_graph
             .iter_pages_by_kind(PageKind::Item)
-            .filter_map(|n| n.page_data().map(|pd| (n.url_path.as_str().to_string(), pd.data.clone())))
+            .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
             .collect();
         let index_url = UrlPath::new("/");
         if let Some(node) = site_graph.get_mut(&index_url)
             && let Some(pd) = node.page_data_mut()
         {
-            resolve_graph(&mut pd.data, &url_index);
+            expressions::resolve_cross_references(&mut pd.data, &url_index);
         }
     }
 

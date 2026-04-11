@@ -56,18 +56,18 @@ The conductor is the single source of truth for all site state. Every client —
 
 ## Remaining violations
 
-- `publisher_cli::serve` maintains its own build pipeline (`build_for_serve`, `rebuild_affected`) alongside the conductor
-- `evaluator` has duplicated link resolution logic from `expressions`
-- `mcp_server::handle_list_content` still reads the filesystem (conductor `ListContent` command exists but is not yet wired)
+None. All clients operate through conductor commands.
+
+`publisher_cli::serve` calls `build_for_serve` once at startup to bootstrap the output directory (HTML rendering, asset discovery, stylesheet/asset copying). This is not a violation — it is a one-time bootstrap, not a parallel pipeline. All subsequent rebuilds go through the conductor's `FileChanged` command.
 
 ## Migration path
 
 1. ~~Add `ListContent` conductor command~~ — done
 2. ~~MCP per-call `site` parameter~~ — done
 3. ~~Remove hardcoded `site/` from devenv.nix~~ — done
-4. Wire MCP `list_content` to conductor `ListContent` command
-5. **M4:** Serve delegates build/render to conductor. Serve becomes a pure HTTP frontend.
-6. **M4:** Extract duplicated evaluation logic from conductor into shared component.
+4. ~~Wire MCP `list_content` to conductor `ListContent` command~~ — done (was already wired)
+5. ~~Serve delegates rebuild to conductor~~ — done. Serve is a thin HTTP frontend; `watch_and_rebuild` sends `FileChanged` to conductor; all handlers use conductor commands.
+6. ~~Extract duplicated evaluation logic from conductor into shared component~~ — done. Conductor calls `expressions::*`; `eval_repl` moved to `evaluator`.
 7. **Future:** Conductor-to-conductor proxy for remote/multiplayer editing.
 
 ## Alternatives considered

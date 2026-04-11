@@ -43,261 +43,6 @@ fn line_to_byte_offset(src: &str, line: u32) -> usize {
         .sum()
 }
 
-/// Derive a URL path from a content-relative file path.
-/// e.g. "content/post/hello.md" → "/post/hello"
-#[allow(dead_code)]
-fn derive_url_from_content_path(file: &str) -> String {
-    let stripped = file.strip_prefix("content/").unwrap_or(file);
-    let without_ext = stripped.strip_suffix(".md").unwrap_or(stripped);
-    format!("/{without_ext}")
-}
-
-/// Resolve all `Value::LinkExpression` entries in a single `DataGraph`.
-/// Also resolves `LinkExpression` values inside `Value::List` items.
-fn resolve_link_expressions_in_graph(
-    graph: &mut template::DataGraph,
-    url_index: &HashMap<String, template::DataGraph>,
-    stem_index: &HashMap<String, Vec<(String, template::DataGraph)>>,
-) {
-    // Collect all top-level keys first (avoids borrow conflicts)
-    let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
-
-    for key in keys {
-        let resolved = match graph.resolve(&[key.as_str()]) {
-            Some(template::Value::LinkExpression { text, target }) => {
-                let text = text.clone();
-                let target = target.clone();
-                Some(evaluate_link_expression_local(&text, &target, url_index, stem_index))
-            }
-            Some(template::Value::List(items)) => {
-                let new_items: Vec<template::Value> = items
-                    .iter()
-                    .flat_map(|item| match item {
-                        template::Value::LinkExpression { text, target } => {
-                            let resolved = evaluate_link_expression_local(
-                                text, target, url_index, stem_index,
-                            );
-                            match resolved {
-                                template::Value::List(inner) => inner,
-                                other => vec![other],
-                            }
-                        }
-                        other => vec![other.clone()],
-                    })
-                    .collect();
-                Some(template::Value::List(new_items))
-            }
-            _ => None,
-        };
-
-        if let Some(value) = resolved {
-            graph.insert(key, value);
-        }
-    }
-}
-
-/// Walk a `DataGraph` recursively and collect `PathRef` link expression edges.
-fn collect_link_edges_from_graph(
-    source: &site_index::UrlPath,
-    graph: &template::DataGraph,
-    edges: &mut Vec<site_index::Edge>,
-) {
-    for (_, value) in graph.iter() {
-        collect_link_edges_from_value(source, value, edges);
-    }
-}
-
-fn collect_link_edges_from_value(
-    source: &site_index::UrlPath,
-    value: &template::Value,
-    edges: &mut Vec<site_index::Edge>,
-) {
-    match value {
-        template::Value::LinkExpression {
-            target: content::LinkTarget::PathRef(path),
-            ..
-        } => {
-            edges.push(site_index::Edge {
-                source: source.clone(),
-                target: site_index::UrlPath::new(path),
-            });
-        }
-        template::Value::List(items) => {
-            for item in items {
-                collect_link_edges_from_value(source, item, edges);
-            }
-        }
-        template::Value::Record(inner) => {
-            // A resolved link expression becomes a Record with an "href" field.
-            // Extract the edge directly from the href without recursing into the record,
-            // to avoid treating every nested record as a potential edge.
-            if let Some(template::Value::Text(href)) = inner.resolve(&["href"]) {
-                edges.push(site_index::Edge {
-                    source: source.clone(),
-                    target: site_index::UrlPath::new(href.as_str()),
-                });
-            } else {
-                for (_, v) in inner.iter() {
-                    collect_link_edges_from_value(source, v, edges);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Evaluate a single link expression to a concrete `Value`.
-fn evaluate_link_expression_local(
-    text: &content::LinkText,
-    target: &content::LinkTarget,
-    url_index: &HashMap<String, template::DataGraph>,
-    stem_index: &HashMap<String, Vec<(String, template::DataGraph)>>,
-) -> template::Value {
-    match target {
-        content::LinkTarget::PathRef(path) => {
-            if let Some(data) = url_index.get(path) {
-                let mut record = data.clone();
-                record.insert("href", template::Value::Text(path.clone()));
-                if let content::LinkText::Static(label) = text {
-                    record.insert("text", template::Value::Text(label.clone()));
-                }
-                template::Value::Record(record)
-            } else {
-                eprintln!(
-                    "[presemble] warning: link expression references unknown path '{path}'"
-                );
-                template::Value::Absent
-            }
-        }
-        content::LinkTarget::ThreadExpr { source, operations } => {
-            let items = stem_index.get(source).cloned().unwrap_or_default();
-            let mut result: Vec<(String, template::DataGraph)> = items;
-
-            for op in operations {
-                match op {
-                    content::LinkOp::SortBy { field, descending } => {
-                        let field = field.clone();
-                        let desc = *descending;
-                        result.sort_by(|(_, a), (_, b)| {
-                            let ak = sort_key_for_field(a, &field);
-                            let bk = sort_key_for_field(b, &field);
-                            let ord = ak.cmp(&bk);
-                            if desc { ord.reverse() } else { ord }
-                        });
-                    }
-                    content::LinkOp::Take(n) => {
-                        result.truncate(*n);
-                    }
-                    content::LinkOp::Filter { field, value } => {
-                        let field = field.clone();
-                        let value = value.clone();
-                        result.retain(|(_, data)| {
-                            let field_ref: &str = &field;
-                            data.resolve(&[field_ref])
-                                .and_then(|v| v.display_text())
-                                .map(|t| t == value)
-                                .unwrap_or(false)
-                        });
-                    }
-                    content::LinkOp::RefsTo(_) => {
-                        // RefsTo requires a full edge index; the conductor's local copy
-                        // does not yet thread an edge index through, so this is a no-op here.
-                        // The canonical implementation is in the `expressions` component.
-                    }
-                }
-            }
-
-            let values: Vec<template::Value> = result
-                .into_iter()
-                .map(|(url, mut data)| {
-                    data.insert("href", template::Value::Text(url));
-                    template::Value::Record(data)
-                })
-                .collect();
-
-            template::Value::List(values)
-        }
-    }
-}
-
-/// Sort key for link expression ordering.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum SortKeyLocal {
-    Numeric(i64),
-    Text(String),
-    Missing,
-}
-
-fn sort_key_for_field(data: &template::DataGraph, field: &str) -> SortKeyLocal {
-    match data.resolve(&[field]).and_then(|v| v.display_text()) {
-        None => SortKeyLocal::Missing,
-        Some(text) => {
-            if let Ok(n) = text.parse::<i64>() {
-                SortKeyLocal::Numeric(n)
-            } else {
-                SortKeyLocal::Text(text)
-            }
-        }
-    }
-}
-
-/// Resolve cross-content references: when a `Value::Record` has an `href` that
-/// matches a page in the url_index, merge the referenced page's data into the record.
-/// This enriches link slots (e.g., highlight links to features) with the target page's
-/// title, summary, etc.
-fn resolve_cross_references(
-    graph: &mut template::DataGraph,
-    url_index: &HashMap<String, template::DataGraph>,
-) {
-    // Top-level Records with href matching a built page
-    let to_resolve: Vec<(String, String)> = graph
-        .iter()
-        .filter_map(|(key, value)| {
-            if let template::Value::Record(sub) = value
-                && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
-                && url_index.contains_key(href)
-            {
-                Some((key.clone(), href.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (key, href) in to_resolve {
-        if let Some(referenced) = url_index.get(&href)
-            && let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key])
-        {
-            sub.merge_from(referenced, &["href", "text"]);
-        }
-    }
-
-    // Also resolve records inside lists (multi-occurrence link slots)
-    let list_keys: Vec<String> = graph
-        .iter()
-        .filter_map(|(key, value)| {
-            if matches!(value, template::Value::List(_)) { Some(key.clone()) } else { None }
-        })
-        .collect();
-
-    for key in list_keys {
-        if let Some(template::Value::List(items)) = graph.resolve_mut(&[&key]) {
-            for item in items.iter_mut() {
-                if let template::Value::Record(sub) = item {
-                    let href = sub.resolve(&["href"]).and_then(|v| {
-                        if let template::Value::Text(s) = v { Some(s.clone()) } else { None }
-                    });
-                    if let Some(href) = href
-                        && let Some(referenced) = url_index.get(&href)
-                    {
-                        sub.merge_from(referenced, &["href", "text"]);
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Used by the conductor's rebuild_page method.
 struct SimpleTemplateRegistry {
     repo: site_repository::SiteRepository,
@@ -352,6 +97,7 @@ pub struct Conductor {
     repo: site_repository::SiteRepository,
     suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::Suggestion>>,
     site_graph: RwLock<site_index::SiteGraph>,
+    build_errors: RwLock<HashMap<String, Vec<String>>>,
 }
 
 impl Conductor {
@@ -390,6 +136,7 @@ impl Conductor {
             repo,
             suggestions: RwLock::new(HashMap::new()),
             site_graph: RwLock::new(site_index::SiteGraph::new()),
+            build_errors: RwLock::new(HashMap::new()),
         };
 
         // Load persisted pending suggestions from disk
@@ -620,11 +367,7 @@ impl Conductor {
         let mut edges = Vec::new();
         for node in graph.iter_pages() {
             if let Some(pd) = node.page_data() {
-                collect_link_edges_from_graph(
-                    &node.url_path,
-                    &pd.data,
-                    &mut edges,
-                );
+                edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
             }
         }
         edges
@@ -747,26 +490,37 @@ impl Conductor {
         // Resolve link expressions using the current site graph as index
         {
             let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-            let url_index: HashMap<String, template::DataGraph> = site_graph
+            let url_index: expressions::UrlIndex = site_graph
                 .iter_pages_by_kind(site_index::PageKind::Item)
-                .filter_map(|n| {
-                    n.page_data()
-                        .map(|pd| (n.url_path.as_str().to_string(), pd.data.clone()))
-                })
+                .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
                 .collect();
-            let mut stem_index: HashMap<String, Vec<(String, template::DataGraph)>> =
-                HashMap::new();
+            let mut stem_index: expressions::StemIndex = HashMap::new();
             for node in site_graph.iter_pages_by_kind(site_index::PageKind::Item) {
                 if let Some(pd) = node.page_data() {
                     stem_index
-                        .entry(pd.schema_stem.as_str().to_string())
+                        .entry(pd.schema_stem.clone())
                         .or_default()
-                        .push((node.url_path.as_str().to_string(), pd.data.clone()));
+                        .push((node.url_path.clone(), pd.data.clone()));
                 }
             }
-            resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+            // Build edge index for RefsTo support
+            let mut all_edges = Vec::new();
+            for node in site_graph.iter_pages_by_kind(site_index::PageKind::Item) {
+                if let Some(pd) = node.page_data() {
+                    all_edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
+                }
+            }
+            let edge_index = expressions::build_edge_index(&all_edges);
+            let current_url = site_index::UrlPath::new(&url_path);
+            expressions::resolve_link_expressions_in_graph(
+                &mut graph,
+                &url_index,
+                &stem_index,
+                &current_url,
+                &edge_index,
+            );
             // Phase 2: resolve cross-content references (link Records with href matching a page)
-            resolve_cross_references(&mut graph, &url_index);
+            expressions::resolve_cross_references(&mut graph, &url_index);
         }
 
         // Inject collection data so templates can iterate (e.g. data-each="input.post")
@@ -1077,6 +831,24 @@ impl Conductor {
         self.rebuild_page(&abs_path, &new_source)
     }
 
+    /// Derive the URL path for a content file (for error tracking).
+    fn url_for_content_path(&self, content_path: &Path) -> Option<String> {
+        let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
+        let stem = match site_idx.classify(content_path) {
+            site_index::FileKind::Content { schema_stem } => schema_stem.as_str().to_string(),
+            _ => return None,
+        };
+        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let url = if stem.is_empty() {
+            if slug == "index" { "/".to_string() } else { format!("/{slug}") }
+        } else if slug == "index" {
+            format!("/{stem}/")
+        } else {
+            format!("/{stem}/{slug}")
+        };
+        Some(url)
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -1095,8 +867,8 @@ impl Conductor {
                 CommandResult::with_response(Response::DocumentText(self.document_text(&resolved)))
             }
             Command::GetBuildErrors => {
-                // TODO: implement build error tracking
-                CommandResult::with_response(Response::BuildErrors(HashMap::new()))
+                let errors = self.build_errors.read().unwrap_or_else(|e| e.into_inner());
+                CommandResult::with_response(Response::BuildErrors(errors.clone()))
             }
             Command::Shutdown => CommandResult::ok(),
             Command::DocumentChanged { path, text } => {
@@ -1107,13 +879,33 @@ impl Conductor {
 
                 // Rebuild the page from in-memory text and broadcast PagesRebuilt.
                 match self.rebuild_page(&path_buf, &text) {
-                    Ok(pages) if !pages.is_empty() => CommandResult::ok_with_events(vec![
-                        ConductorEvent::PagesRebuilt { pages, anchor: None },
-                    ]),
+                    Ok(pages) if !pages.is_empty() => {
+                        // Clear any previous build errors for these pages
+                        {
+                            let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
+                            for page in &pages {
+                                let bare = page.trim_end_matches('/').to_string();
+                                errors.remove(&bare);
+                                errors.remove(&format!("{bare}/"));
+                            }
+                        }
+                        CommandResult::ok_with_events(vec![
+                            ConductorEvent::PagesRebuilt { pages, anchor: None },
+                        ])
+                    }
                     Ok(_) => CommandResult::ok(),
                     Err(e) => {
                         eprintln!("conductor: rebuild failed for {path}: {e}");
-                        CommandResult::ok()
+                        // Record the error
+                        if let Some(url) = self.url_for_content_path(&path_buf) {
+                            self.build_errors.write().unwrap_or_else(|e| e.into_inner())
+                                .insert(url.clone(), vec![e]);
+                            CommandResult::ok_with_events(vec![
+                                ConductorEvent::BuildFailed { error_pages: vec![url] },
+                            ])
+                        } else {
+                            CommandResult::ok()
+                        }
                     }
                 }
             }
@@ -1124,21 +916,124 @@ impl Conductor {
                 CommandResult::ok()
             }
             Command::FileChanged { paths } => {
+                // 1. Clear in-memory versions
                 for p in &paths {
                     let path = PathBuf::from(p);
-                    // Clear in-memory version
                     self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
                 }
-                // Refresh schema cache for changed schemas
+
+                // 2. Refresh site index for new/removed files
+                {
+                    let mut idx = self.site_index.write().unwrap_or_else(|e| e.into_inner());
+                    *idx = site_index::SiteIndex::new(self.site_dir.clone());
+                }
+
+                // 3. Refresh schema cache for changed schemas
+                self.refresh_schema_cache();
+
+                // 4. Rebuild the full site graph
+                if let Err(e) = self.build_full_graph() {
+                    eprintln!("conductor: full graph rebuild failed: {e}");
+                }
+
+                // 5. Classify changed files and determine which pages to rebuild
+                let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
+                let mut content_to_rebuild: Vec<PathBuf> = Vec::new();
+                let mut stems_to_rebuild: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut has_stylesheet_change = false;
+
                 for p in &paths {
-                    let path = std::path::Path::new(p);
-                    if let site_index::FileKind::Schema { stem } = self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(path)
-                        && let Some(src) = self.repo.schema_source(&stem)
-                    {
-                        self.schema_cache.write().unwrap_or_else(|e| e.into_inner()).insert(stem.as_str().to_string(), src);
+                    let path = Path::new(p);
+                    match site_idx.classify(path) {
+                        site_index::FileKind::Content { schema_stem } => {
+                            content_to_rebuild.push(PathBuf::from(p));
+                            stems_to_rebuild.insert(schema_stem.as_str().to_string());
+                        }
+                        site_index::FileKind::Schema { stem } => {
+                            stems_to_rebuild.insert(stem.as_str().to_string());
+                        }
+                        site_index::FileKind::Template { schema_stem } => {
+                            stems_to_rebuild.insert(schema_stem.as_str().to_string());
+                        }
+                        site_index::FileKind::Stylesheet => {
+                            has_stylesheet_change = true;
+                        }
+                        _ => {}
                     }
                 }
-                CommandResult::ok()
+                drop(site_idx);
+
+                // For stems that changed (schema or template), find ALL content files using that stem
+                if !stems_to_rebuild.is_empty() {
+                    let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+                    for node in site_graph.iter() {
+                        if let Some(pd) = node.page_data()
+                            && stems_to_rebuild.contains(pd.schema_stem.as_str())
+                            && let Some(template::Value::Text(file)) = pd.data.resolve(&[KEY_PRESEMBLE_FILE])
+                        {
+                            let abs_path = self.site_dir.join(file);
+                            if !content_to_rebuild.contains(&abs_path) {
+                                content_to_rebuild.push(abs_path);
+                            }
+                        }
+                    }
+                }
+
+                // 6. Rebuild each content file
+                let mut rebuilt_pages: Vec<String> = Vec::new();
+                let mut failed_pages: Vec<String> = Vec::new();
+                let mut new_errors: HashMap<String, Vec<String>> = HashMap::new();
+
+                for content_path in &content_to_rebuild {
+                    let text = match std::fs::read_to_string(content_path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprintln!("conductor: cannot read {}: {e}", content_path.display());
+                            continue;
+                        }
+                    };
+
+                    match self.rebuild_page(content_path, &text) {
+                        Ok(pages) => {
+                            rebuilt_pages.extend(pages);
+                        }
+                        Err(e) => {
+                            eprintln!("conductor: rebuild failed for {}: {e}", content_path.display());
+                            if let Some(url) = self.url_for_content_path(content_path) {
+                                new_errors.insert(url.clone(), vec![e]);
+                                failed_pages.push(url);
+                            }
+                        }
+                    }
+                }
+
+                // 7. Update build errors
+                {
+                    let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
+                    for page in &rebuilt_pages {
+                        let bare = page.trim_end_matches('/').to_string();
+                        errors.remove(&bare);
+                        errors.remove(&format!("{bare}/"));
+                    }
+                    for (url, msgs) in new_errors {
+                        errors.insert(url, msgs);
+                    }
+                }
+
+                // 8. Build events
+                let mut events = Vec::new();
+                if !rebuilt_pages.is_empty() || has_stylesheet_change {
+                    events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
+                }
+                if !failed_pages.is_empty() {
+                    events.push(ConductorEvent::BuildFailed { error_pages: failed_pages });
+                }
+
+                if events.is_empty() {
+                    CommandResult::ok()
+                } else {
+                    CommandResult::ok_with_events(events)
+                }
             }
             Command::CursorMoved { path, line } => {
                 let abs_path = self.site_dir.join(&path);
@@ -1695,7 +1590,7 @@ impl Conductor {
 mod link_resolution_tests {
     use super::*;
 
-    /// Verify that `resolve_link_expressions_in_graph` resolves a PathRef link
+    /// Verify that `expressions::resolve_link_expressions_in_graph` resolves a PathRef link
     /// expression to a record from the url_index.
     #[test]
     fn resolve_path_ref_replaces_link_expression_with_record() {
@@ -1711,11 +1606,19 @@ mod link_resolution_tests {
         // Build url_index with the target page
         let mut target_data = template::DataGraph::new();
         target_data.insert("title", template::Value::Text("Hello Post Title".to_string()));
-        let mut url_index = HashMap::new();
-        url_index.insert("/post/hello".to_string(), target_data);
-        let stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+        let mut url_index: expressions::UrlIndex = HashMap::new();
+        url_index.insert(site_index::UrlPath::new("/post/hello"), target_data);
+        let stem_index: expressions::StemIndex = HashMap::new();
+        let edge_index = expressions::build_edge_index(&[]);
+        let current_url = site_index::UrlPath::new("/");
 
-        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+        expressions::resolve_link_expressions_in_graph(
+            &mut graph,
+            &url_index,
+            &stem_index,
+            &current_url,
+            &edge_index,
+        );
 
         // After resolution, "highlight" should be a Record with title and href
         match graph.resolve(&["highlight"]) {
@@ -1733,7 +1636,7 @@ mod link_resolution_tests {
         }
     }
 
-    /// Verify that `resolve_link_expressions_in_graph` resolves a ThreadExpr
+    /// Verify that `expressions::resolve_link_expressions_in_graph` resolves a ThreadExpr
     /// to a list of records from the stem_index.
     #[test]
     fn resolve_thread_expr_produces_list() {
@@ -1755,17 +1658,25 @@ mod link_resolution_tests {
         let mut post2 = template::DataGraph::new();
         post2.insert("title", template::Value::Text("Post Two".to_string()));
 
-        let url_index: HashMap<String, template::DataGraph> = HashMap::new();
-        let mut stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
+        let url_index: expressions::UrlIndex = HashMap::new();
+        let mut stem_index: expressions::StemIndex = HashMap::new();
         stem_index.insert(
-            "post".to_string(),
+            site_index::SchemaStem::new("post"),
             vec![
-                ("/post/one".to_string(), post1),
-                ("/post/two".to_string(), post2),
+                (site_index::UrlPath::new("/post/one"), post1),
+                (site_index::UrlPath::new("/post/two"), post2),
             ],
         );
+        let edge_index = expressions::build_edge_index(&[]);
+        let current_url = site_index::UrlPath::new("/");
 
-        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+        expressions::resolve_link_expressions_in_graph(
+            &mut graph,
+            &url_index,
+            &stem_index,
+            &current_url,
+            &edge_index,
+        );
 
         match graph.resolve(&["posts"]) {
             Some(template::Value::List(items)) => {
@@ -1787,9 +1698,18 @@ mod link_resolution_tests {
             },
         );
 
-        let url_index: HashMap<String, template::DataGraph> = HashMap::new();
-        let stem_index: HashMap<String, Vec<(String, template::DataGraph)>> = HashMap::new();
-        resolve_link_expressions_in_graph(&mut graph, &url_index, &stem_index);
+        let url_index: expressions::UrlIndex = HashMap::new();
+        let stem_index: expressions::StemIndex = HashMap::new();
+        let edge_index = expressions::build_edge_index(&[]);
+        let current_url = site_index::UrlPath::new("/");
+
+        expressions::resolve_link_expressions_in_graph(
+            &mut graph,
+            &url_index,
+            &stem_index,
+            &current_url,
+            &edge_index,
+        );
 
         assert!(
             matches!(graph.resolve(&["link"]), Some(template::Value::Absent) | None),

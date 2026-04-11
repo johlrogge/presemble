@@ -94,7 +94,14 @@ mod tests {
             text: text.clone(),
         });
         assert!(matches!(result.response, Response::Ok));
-        assert!(result.events.is_empty());
+        // Rebuild will fail (no schema) and emit a BuildFailed event if the path is classifiable.
+        // Either no events or a single BuildFailed event is acceptable here.
+        for event in &result.events {
+            assert!(
+                matches!(event, ConductorEvent::BuildFailed { .. }),
+                "unexpected event type: {event:?}"
+            );
+        }
 
         // GetDocumentText should return the in-memory version
         let result2 = conductor.handle_command(Command::GetDocumentText { path });
@@ -181,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn document_changed_emits_no_event_when_no_template_exists() {
+    fn document_changed_emits_build_failed_when_no_template_exists() {
         let conductor = minimal_post_conductor();
         let content_path = "/test-site/content/post/hello.md";
 
@@ -191,7 +198,14 @@ mod tests {
         });
 
         assert!(matches!(result.response, Response::Ok));
-        assert!(result.events.is_empty(), "no events when rebuild fails");
+        // When rebuild fails and we can derive a URL, a BuildFailed event is emitted.
+        assert_eq!(result.events.len(), 1, "expected one BuildFailed event");
+        match &result.events[0] {
+            ConductorEvent::BuildFailed { error_pages } => {
+                assert!(error_pages.contains(&"/post/hello".to_string()));
+            }
+            other => panic!("expected BuildFailed, got {other:?}"),
+        }
     }
 
     #[test]
