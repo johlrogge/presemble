@@ -7,7 +7,7 @@ use rayon::prelude::*;
 
 pub use template_registry::FileTemplateRegistry;
 
-pub use dep_graph::DependencyGraph;
+use dep_graph::DependencyGraph;
 pub use error::CliError;
 
 use site_index::{DIR_ASSETS, DIR_CONTENT, DIR_SCHEMAS, DIR_TEMPLATES, NodeRole, PageData, PageKind, SchemaStem, SiteGraph, SiteNode, UrlPath};
