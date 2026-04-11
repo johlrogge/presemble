@@ -427,9 +427,12 @@ conductor-as-repl brainstorm note).
 - [x] Conductor process: dep_graph, schema cache, file watcher, in-memory content (shipped v0.25.0)
 - [x] `presemble lsp` as thin nng client (shipped v0.32.0 — ADR-031 Phase 5)
 - [x] MCP server as conductor client with per-call site parameter (shipped v0.32.0)
-- [ ] `presemble serve` as query client of conductor
+- [x] `presemble serve` as thin conductor client — no local DependencyGraph, no local build_errors, no local ContentSnapshot; all handlers delegate to conductor commands (shipped v0.32.5 — ADR-031 complete)
+- [x] Deduplicate link resolution into shared `expressions` component — conductor calls `expressions::*`, no stringly-typed copies (shipped v0.32.5)
+- [x] Conductor rebuilds affected pages on `FileChanged` — was a no-op before (shipped v0.32.5)
+- [x] Conductor tracks build errors and returns them via `GetBuildErrors` (shipped v0.32.5)
+- [x] DependencyGraph removed from publisher_cli public API (shipped v0.32.5)
 - [ ] Version counter and conflict detection
-- [ ] Deduplicate conductor/expressions link resolution code (conductor has stringly-typed copies)
 - [ ] Conductor edge index caching (currently rebuilds per query)
 - [ ] Conductor `RefsTo` wiring (currently no-op — publisher handles it)
 - [ ] IPC socket lifecycle: SocketGuard cleanup, signal handling, sweep_stale_sockets
