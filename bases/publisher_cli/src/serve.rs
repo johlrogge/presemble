@@ -212,20 +212,33 @@ struct EditResponse {
     error: Option<String>,
 }
 
+/// Convert a conductor command result into an EditResponse.
+fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum::Json<EditResponse> {
+    match result {
+        Ok(conductor::Response::Ok) | Ok(conductor::Response::SuggestionCreated(_)) => {
+            axum::Json(EditResponse { ok: true, error: None })
+        }
+        Ok(conductor::Response::Error(e)) => {
+            axum::Json(EditResponse { ok: false, error: Some(e) })
+        }
+        Err(e) => {
+            axum::Json(EditResponse { ok: false, error: Some(e) })
+        }
+        _ => {
+            axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) })
+        }
+    }
+}
+
 async fn edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::EditSlot {
-        file: req.file.clone(),
-        slot: req.slot.clone(),
-        value: req.value.clone(),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected response".to_string()) }),
-    }
+    conductor_edit_response(state.conductor.send(&conductor::Command::EditSlot {
+        file: req.file,
+        slot: req.slot,
+        value: req.value,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -239,16 +252,11 @@ async fn edit_body_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditBodyRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::EditBodyElement {
-        file: req.file.clone(),
+    conductor_edit_response(state.conductor.send(&conductor::Command::EditBodyElement {
+        file: req.file,
         body_idx: req.body_idx,
-        content: req.content.clone(),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+        content: req.content,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -271,36 +279,26 @@ async fn suggest_slot_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestSlotRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SuggestSlotValue {
+    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestSlotValue {
         file: editorial_types::ContentPath::new(&req.file),
         slot: editorial_types::SlotName::new(&req.slot),
-        value: req.value.clone(),
+        value: req.value,
         reason: "Browser suggestion".to_string(),
         author: editorial_types::Author::Human("browser".to_string()),
-    }) {
-        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 async fn suggest_body_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestBodyRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SuggestBodyEdit {
+    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestBodyEdit {
         file: editorial_types::ContentPath::new(&req.file),
-        search: req.search.clone(),
-        replace: req.replace.clone(),
+        search: req.search,
+        replace: req.replace,
         reason: "Browser suggestion".to_string(),
         author: editorial_types::Author::Human("browser".to_string()),
-    }) {
-        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 /// Browser-friendly representation of a suggestion.
@@ -369,19 +367,14 @@ async fn suggest_slot_edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestSlotEditRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SuggestSlotEdit {
+    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestSlotEdit {
         file: editorial_types::ContentPath::new(&req.file),
         slot: editorial_types::SlotName::new(&req.slot),
         search: req.search,
         replace: req.replace,
         reason: "Browser suggestion".to_string(),
         author: editorial_types::Author::Human("browser".to_string()),
-    }) {
-        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -445,28 +438,18 @@ async fn accept_suggestion_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::AcceptSuggestion {
+    conductor_edit_response(state.conductor.send(&conductor::Command::AcceptSuggestion {
         id: editorial_types::SuggestionId::from(req.id),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 async fn reject_suggestion_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::RejectSuggestion {
+    conductor_edit_response(state.conductor.send(&conductor::Command::RejectSuggestion {
         id: editorial_types::SuggestionId::from(req.id),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 async fn dirty_buffers_handler(
@@ -513,12 +496,7 @@ async fn dirty_buffers_handler(
 async fn save_all_handler(
     State(state): State<AppState>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SaveAllBuffers) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers))
 }
 
 async fn suggestion_files_handler(

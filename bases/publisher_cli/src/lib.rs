@@ -1,7 +1,6 @@
 mod error;
 mod lsp;
 mod serve;
-pub mod template_registry;
 
 use rayon::prelude::*;
 
@@ -90,33 +89,8 @@ fn page_address(site_dir: &std::path::Path, schema_stem: &str, content_path: &st
         .and_then(|s| s.to_str())
         .unwrap_or("index")
         .to_string();
-    // When stem is empty (root collection), files are at content/ root.
-    // When the file is named `index.md`, it acts as the directory index for the schema.
-    let (url_path, output_path) = if schema_stem.is_empty() {
-        // Root collection
-        if slug == "index" {
-            let url = "/".to_string();
-            let path = output_dir(site_dir).join("index.html");
-            (url, path)
-        } else {
-            let url = format!("/{slug}");
-            let path = output_dir(site_dir).join(&slug).join("index.html");
-            (url, path)
-        }
-    } else if slug == "index" {
-        let url = format!("/{schema_stem}/");
-        let path = output_dir(site_dir)
-            .join(schema_stem)
-            .join("index.html");
-        (url, path)
-    } else {
-        let url = format!("/{schema_stem}/{slug}");
-        let path = output_dir(site_dir)
-            .join(schema_stem)
-            .join(&slug)
-            .join("index.html");
-        (url, path)
-    };
+    let url_path = site_index::url_for_stem_slug(schema_stem, &slug);
+    let output_path = site_index::output_path_for_stem_slug(&output_dir(site_dir), schema_stem, &slug);
     PageAddress { slug, url_path, output_path }
 }
 
@@ -470,11 +444,7 @@ pub fn build_content_page(
 
     // Add metadata for browser editing: schema stem identifies the content type
     slot_graph.insert("_presemble_stem", template::Value::Text(schema_stem.to_string()));
-    let presemble_file = if schema_stem.is_empty() {
-        format!("content/{}.md", addr.slug)
-    } else {
-        format!("content/{schema_stem}/{}.md", addr.slug)
-    };
+    let presemble_file = site_index::content_file_path(schema_stem, &addr.slug);
     slot_graph.insert(KEY_PRESEMBLE_FILE, template::Value::Text(presemble_file));
 
     // Add url and link to the article graph
@@ -519,31 +489,7 @@ pub fn build_content_page(
 ///
 /// The resolved value replaces the `LinkExpression` in the data graph.
 fn resolve_link_expressions(site_graph: &mut SiteGraph) {
-    // Build a URL → DataGraph index for PathRef lookups
-    let url_index: expressions::UrlIndex = site_graph
-        .iter_pages_by_kind(PageKind::Item)
-        .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
-        .collect();
-
-    // Build a stem → Vec<DataGraph> index for ThreadExpr lookups
-    let mut stem_index: expressions::StemIndex = std::collections::HashMap::new();
-    for node in site_graph.iter_pages_by_kind(PageKind::Item) {
-        if let Some(pd) = node.page_data() {
-            stem_index
-                .entry(pd.schema_stem.clone())
-                .or_default()
-                .push((node.url_path.clone(), pd.data.clone()));
-        }
-    }
-
-    // Build an edge index from all unresolved link expressions (PathRef only)
-    let mut all_edges = Vec::new();
-    for node in site_graph.iter_pages_by_kind(PageKind::Item) {
-        if let Some(pd) = node.page_data() {
-            all_edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
-        }
-    }
-    let edge_index = expressions::build_edge_index(&all_edges);
+    let (url_index, stem_index, edge_index) = expressions::build_indexes_from_graph(site_graph);
 
     // Collect all page URLs to iterate over (avoids borrow conflicts)
     let urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
@@ -594,26 +540,7 @@ fn build_render_context(node: &SiteNode, graph: &SiteGraph) -> template::DataGra
     // All collections by stem name (singular, no pluralization), injected into
     // the input record so templates reference them as `input.<stem>`.
     let mut page_data = pd.data.clone();
-    let mut stems: Vec<SchemaStem> = graph
-        .iter_pages_by_kind(PageKind::Item)
-        .filter_map(|n| n.page_data().map(|d| d.schema_stem.clone()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    for stem in stems {
-        // Don't overwrite page's own slots (e.g., a resolved "author" link)
-        // with the collection of all authors.
-        if page_data.resolve(&[stem.as_str()]).is_some() {
-            continue;
-        }
-        let items: Vec<template::Value> = graph
-            .items_for_stem(&stem)
-            .into_iter()
-            .filter_map(|n| n.page_data().map(|d| template::Value::Record(d.data.clone())))
-            .collect();
-        page_data.insert(stem.as_str(), template::Value::List(items));
-    }
+    expressions::inject_collections(&mut page_data, graph);
 
     // Page's own data (plus injected collections) under "input"
     ctx.insert("input", template::Value::Record(page_data));
@@ -1164,10 +1091,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
 
     // Phase 2: Resolve all cross-content references once
     {
-        let url_index: expressions::UrlIndex = site_graph
-            .iter_pages_by_kind(PageKind::Item)
-            .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
-            .collect();
+        let (url_index, _, _) = expressions::build_indexes_from_graph(&site_graph);
         if !url_index.is_empty() {
             // collect urls to avoid borrow issues
             let urls: Vec<UrlPath> = site_graph.iter().map(|n| n.url_path.clone()).collect();
@@ -1183,10 +1107,7 @@ pub fn build_site(site_dir: &Path, repo: &site_repository::SiteRepository, url_c
 
     // Phase 2: Resolve index graph separately (it may reference item pages added above)
     {
-        let url_index: expressions::UrlIndex = site_graph
-            .iter_pages_by_kind(PageKind::Item)
-            .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
-            .collect();
+        let (url_index, _, _) = expressions::build_indexes_from_graph(&site_graph);
         let index_url = UrlPath::new("/");
         if let Some(node) = site_graph.get_mut(&index_url)
             && let Some(pd) = node.page_data_mut()

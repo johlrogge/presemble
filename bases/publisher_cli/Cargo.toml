@@ -18,6 +18,7 @@ editor_server = { workspace = true }
 mcp_server = { workspace = true }
 site_repository = { workspace = true }
 site_index = { workspace = true }
+template_registry = { workspace = true }
 lsp_capabilities = { workspace = true }
 content_editor = { workspace = true }
 lsp_service = { workspace = true }

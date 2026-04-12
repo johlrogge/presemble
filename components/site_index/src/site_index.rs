@@ -369,6 +369,56 @@ pub fn output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
     site_dir.parent().unwrap_or(site_dir).join("output").join(name)
 }
 
+/// Derive the clean URL path for a content page given its schema stem and slug.
+///
+/// - Root collection (stem == ""): index -> "/", other -> "/{slug}"
+/// - Named collection: index -> "/{stem}/", other -> "/{stem}/{slug}"
+pub fn url_for_stem_slug(stem: &str, slug: &str) -> String {
+    if stem.is_empty() {
+        if slug == "index" { "/".to_string() } else { format!("/{slug}") }
+    } else if slug == "index" {
+        format!("/{stem}/")
+    } else {
+        format!("/{stem}/{slug}")
+    }
+}
+
+/// Derive the output file path for a content page.
+pub fn output_path_for_stem_slug(output_dir: &std::path::Path, stem: &str, slug: &str) -> std::path::PathBuf {
+    if stem.is_empty() {
+        if slug == "index" {
+            output_dir.join("index.html")
+        } else {
+            output_dir.join(slug).join("index.html")
+        }
+    } else if slug == "index" {
+        output_dir.join(stem).join("index.html")
+    } else {
+        output_dir.join(stem).join(slug).join("index.html")
+    }
+}
+
+/// Derive the schema cache key for a stem and slug.
+///
+/// Item pages use the stem directly. Collection index pages use "{stem}/index"
+/// (or just "index" for the root collection).
+pub fn schema_cache_key(stem: &str, slug: &str) -> String {
+    if slug == "index" {
+        if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Derive the site-relative content file path for a stem and slug.
+pub fn content_file_path(stem: &str, slug: &str) -> String {
+    if stem.is_empty() {
+        format!("content/{slug}.md")
+    } else {
+        format!("content/{stem}/{slug}.md")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +431,80 @@ mod tests {
 
     fn index() -> SiteIndex {
         SiteIndex::new(fixture_site())
+    }
+
+    #[test]
+    fn url_for_stem_slug_root_index() {
+        assert_eq!(url_for_stem_slug("", "index"), "/");
+    }
+
+    #[test]
+    fn url_for_stem_slug_root_non_index() {
+        assert_eq!(url_for_stem_slug("", "about"), "/about");
+    }
+
+    #[test]
+    fn url_for_stem_slug_named_index() {
+        assert_eq!(url_for_stem_slug("post", "index"), "/post/");
+    }
+
+    #[test]
+    fn url_for_stem_slug_named_non_index() {
+        assert_eq!(url_for_stem_slug("post", "hello"), "/post/hello");
+    }
+
+    #[test]
+    fn output_path_for_stem_slug_root_index() {
+        let dir = std::path::Path::new("/out");
+        assert_eq!(output_path_for_stem_slug(dir, "", "index"), std::path::PathBuf::from("/out/index.html"));
+    }
+
+    #[test]
+    fn output_path_for_stem_slug_root_non_index() {
+        let dir = std::path::Path::new("/out");
+        assert_eq!(output_path_for_stem_slug(dir, "", "about"), std::path::PathBuf::from("/out/about/index.html"));
+    }
+
+    #[test]
+    fn output_path_for_stem_slug_named_index() {
+        let dir = std::path::Path::new("/out");
+        assert_eq!(output_path_for_stem_slug(dir, "post", "index"), std::path::PathBuf::from("/out/post/index.html"));
+    }
+
+    #[test]
+    fn output_path_for_stem_slug_named_non_index() {
+        let dir = std::path::Path::new("/out");
+        assert_eq!(output_path_for_stem_slug(dir, "post", "hello"), std::path::PathBuf::from("/out/post/hello/index.html"));
+    }
+
+    #[test]
+    fn schema_cache_key_named_non_index() {
+        assert_eq!(schema_cache_key("post", "hello"), "post");
+    }
+
+    #[test]
+    fn schema_cache_key_named_index() {
+        assert_eq!(schema_cache_key("post", "index"), "post/index");
+    }
+
+    #[test]
+    fn schema_cache_key_root_index() {
+        assert_eq!(schema_cache_key("", "index"), "index");
+    }
+
+    #[test]
+    fn schema_cache_key_root_non_index() {
+        assert_eq!(schema_cache_key("", "about"), "");
+    }
+
+    #[test]
+    fn content_file_path_root() {
+        assert_eq!(content_file_path("", "about"), "content/about.md");
+    }
+
+    #[test]
+    fn content_file_path_named() {
+        assert_eq!(content_file_path("post", "hello"), "content/post/hello.md");
     }
 
     #[test]

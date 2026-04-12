@@ -895,24 +895,7 @@ pub fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<templat
 fn repl_build_indexes(
     conductor: &conductor::Conductor,
 ) -> (expressions::UrlIndex, expressions::StemIndex) {
-    use std::collections::HashMap;
-    let graph = conductor.site_graph();
-
-    let url_index: expressions::UrlIndex = graph
-        .iter_pages_by_kind(site_index::PageKind::Item)
-        .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
-        .collect();
-
-    let mut stem_index: expressions::StemIndex = HashMap::new();
-    for node in graph.iter_pages_by_kind(site_index::PageKind::Item) {
-        if let Some(pd) = node.page_data() {
-            stem_index
-                .entry(pd.schema_stem.clone())
-                .or_default()
-                .push((node.url_path.clone(), pd.data.clone()));
-        }
-    }
-
+    let (url_index, stem_index, _) = expressions::build_indexes_from_graph(&conductor.site_graph());
     (url_index, stem_index)
 }
 

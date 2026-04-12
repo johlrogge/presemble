@@ -43,48 +43,6 @@ fn line_to_byte_offset(src: &str, line: u32) -> usize {
         .sum()
 }
 
-/// Used by the conductor's rebuild_page method.
-struct SimpleTemplateRegistry {
-    repo: site_repository::SiteRepository,
-}
-
-impl template::TemplateRegistry for SimpleTemplateRegistry {
-    fn resolve(&self, name: &str) -> Option<Vec<template::dom::Node>> {
-        if let Some((file_part, def_name)) = name.split_once("::") {
-            // File-qualified: load the file, extract definitions, return the named one.
-            // Strip leading "templates/" if present.
-            let file_stem = std::path::Path::new(file_part)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(file_part);
-            let nodes = self.load_nodes(file_stem)?;
-            let (_, defs) = template::extract_definitions(nodes);
-            defs.get(def_name).cloned()
-        } else {
-            // Bare name: return main nodes (non-definition content).
-            let nodes = self.load_nodes(name)?;
-            let (main, _) = template::extract_definitions(nodes);
-            if main.is_empty() { None } else { Some(main) }
-        }
-    }
-}
-
-impl SimpleTemplateRegistry {
-    /// Load and parse a template file by stem using the repo.
-    /// Tries item template first, then partial.
-    fn load_nodes(&self, file_stem: &str) -> Option<Vec<template::dom::Node>> {
-        let stem = site_index::SchemaStem::new(file_stem);
-        let (src, is_hiccup) = self
-            .repo
-            .item_template_source(&stem)
-            .or_else(|| self.repo.partial_template_source(file_stem))?;
-        if is_hiccup {
-            template::parse_template_hiccup(&src).ok()
-        } else {
-            template::parse_template_xml(&src).ok()
-        }
-    }
-}
 
 #[allow(dead_code)]
 pub struct Conductor {
@@ -122,7 +80,7 @@ impl Conductor {
             }
             // Collection schemas keyed as "{stem}/index"
             if let Some(src) = repo.collection_schema_source(&stem) {
-                schema_cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
+                schema_cache.insert(site_index::schema_cache_key(stem.as_str(), "index"), src);
             }
         }
 
@@ -173,9 +131,9 @@ impl Conductor {
             if let Some(src) = repo.schema_source(&stem) {
                 cache.insert(stem.as_str().to_string(), src);
             }
-            // Collection schemas keyed as "{stem}/index" (or "/index" for root)
+            // Collection schemas keyed as "{stem}/index" (or "index" for root)
             if let Some(src) = repo.collection_schema_source(&stem) {
-                cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
+                cache.insert(site_index::schema_cache_key(stem.as_str(), "index"), src);
             }
         }
     }
@@ -242,21 +200,13 @@ impl Conductor {
 
                 let mut data = template::build_article_graph_with_source(&doc, &grammar, &content_src);
 
-                let url_path = if stem.as_str().is_empty() {
-                    site_index::UrlPath::new(format!("/{slug}"))
-                } else {
-                    site_index::UrlPath::new(format!("/{}/{}", stem.as_str(), slug))
-                };
+                let url_path = site_index::UrlPath::new(site_index::url_for_stem_slug(stem.as_str(), &slug));
                 data.insert("url", template::Value::Text(url_path.as_str().to_string()));
                 data.insert(
                     "_presemble_stem",
                     template::Value::Text(stem.as_str().to_string()),
                 );
-                let presemble_file = if stem.as_str().is_empty() {
-                    format!("content/{slug}.md")
-                } else {
-                    format!("content/{}/{}.md", stem.as_str(), slug)
-                };
+                let presemble_file = site_index::content_file_path(stem.as_str(), &slug);
                 data.insert(
                     KEY_PRESEMBLE_FILE,
                     template::Value::Text(presemble_file),
@@ -291,11 +241,7 @@ impl Conductor {
                             .join(format!("{}.html", stem.as_str()))
                     });
 
-                let output_path = self
-                    .output_dir
-                    .join(stem.as_str())
-                    .join(&slug)
-                    .join("index.html");
+                let output_path = site_index::output_path_for_stem_slug(&self.output_dir, stem.as_str(), &slug);
 
                 let node = site_index::SiteNode {
                     url_path: url_path.clone(),
@@ -430,11 +376,7 @@ impl Conductor {
 
         // Load grammar from cache — use collection schema for index files
         let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = if slug == "index" {
-            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
-        } else {
-            stem.clone()
-        };
+        let schema_key = site_index::schema_cache_key(&stem, slug);
         let schema_src = self
             .schema_source(&schema_key)
             .ok_or_else(|| format!("no schema for {schema_key}"))?;
@@ -453,26 +395,12 @@ impl Conductor {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        let url_path = if stem.is_empty() {
-            if slug == "index" {
-                "/".to_string()
-            } else {
-                format!("/{slug}")
-            }
-        } else if slug == "index" {
-            format!("/{stem}/")
-        } else {
-            format!("/{stem}/{slug}")
-        };
+        let url_path = site_index::url_for_stem_slug(&stem, slug);
+        let presemble_file = site_index::content_file_path(&stem, slug);
 
         // Add metadata
         graph.insert("url", template::Value::Text(url_path.clone()));
         graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
-        let presemble_file = if stem.is_empty() {
-            format!("content/{slug}.md")
-        } else {
-            format!("content/{stem}/{slug}.md")
-        };
         graph.insert(
             KEY_PRESEMBLE_FILE,
             template::Value::Text(presemble_file),
@@ -490,27 +418,7 @@ impl Conductor {
         // Resolve link expressions using the current site graph as index
         {
             let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-            let url_index: expressions::UrlIndex = site_graph
-                .iter_pages_by_kind(site_index::PageKind::Item)
-                .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
-                .collect();
-            let mut stem_index: expressions::StemIndex = HashMap::new();
-            for node in site_graph.iter_pages_by_kind(site_index::PageKind::Item) {
-                if let Some(pd) = node.page_data() {
-                    stem_index
-                        .entry(pd.schema_stem.clone())
-                        .or_default()
-                        .push((node.url_path.clone(), pd.data.clone()));
-                }
-            }
-            // Build edge index for RefsTo support
-            let mut all_edges = Vec::new();
-            for node in site_graph.iter_pages_by_kind(site_index::PageKind::Item) {
-                if let Some(pd) = node.page_data() {
-                    all_edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
-                }
-            }
-            let edge_index = expressions::build_edge_index(&all_edges);
+            let (url_index, stem_index, edge_index) = expressions::build_indexes_from_graph(&site_graph);
             let current_url = site_index::UrlPath::new(&url_path);
             expressions::resolve_link_expressions_in_graph(
                 &mut graph,
@@ -524,31 +432,9 @@ impl Conductor {
         }
 
         // Inject collection data so templates can iterate (e.g. data-each="input.post")
-        // Mirrors build_render_context in publisher_cli: for each unique schema stem found
-        // in the site graph's item pages, insert a Value::List of all item data graphs
-        // under that stem key — but only if the page's own data doesn't already have that key.
         {
             let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-            let mut stems: Vec<site_index::SchemaStem> = site_graph
-                .iter_pages_by_kind(site_index::PageKind::Item)
-                .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.clone()))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            for stem_key in stems {
-                // Don't overwrite page's own slots (e.g., a resolved "author" link)
-                // with the collection of all authors.
-                if graph.resolve(&[stem_key.as_str()]).is_some() {
-                    continue;
-                }
-                let items: Vec<template::Value> = site_graph
-                    .items_for_stem(&stem_key)
-                    .into_iter()
-                    .filter_map(|n| n.page_data().map(|pd| template::Value::Record(pd.data.clone())))
-                    .collect();
-                graph.insert(stem_key.as_str(), template::Value::List(items));
-            }
+            expressions::inject_collections(&mut graph, &site_graph);
         }
 
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
@@ -577,9 +463,7 @@ impl Conductor {
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
         // Create render context with fresh repo
-        let registry = SimpleTemplateRegistry {
-            repo: fresh_repo,
-        };
+        let registry = template_registry::FileTemplateRegistry::new(fresh_repo);
         let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
         // Wrap page data under "input" key (template expects input.field paths)
@@ -592,17 +476,7 @@ impl Conductor {
         let html = template::serialize_nodes(&transformed);
 
         // Write output
-        let output_path = if stem.is_empty() {
-            if slug == "index" {
-                self.output_dir.join("index.html")
-            } else {
-                self.output_dir.join(slug).join("index.html")
-            }
-        } else if slug == "index" {
-            self.output_dir.join(&stem).join("index.html")
-        } else {
-            self.output_dir.join(&stem).join(slug).join("index.html")
-        };
+        let output_path = site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("mkdir error: {e}"))?;
@@ -727,11 +601,7 @@ impl Conductor {
 
         // Load grammar from cache — use collection schema for index.md, item schema otherwise
         let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = if slug == "index" {
-            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
-        } else {
-            stem.clone()
-        };
+        let schema_key = site_index::schema_cache_key(&stem, slug);
         let grammar = match self.schema_source(&schema_key) {
             Some(src) => match schema::parse_schema(&src) {
                 Ok(g) => g,
@@ -784,11 +654,7 @@ impl Conductor {
 
         // Load grammar from cache — use collection schema for index files
         let bslug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = if bslug == "index" {
-            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
-        } else {
-            stem.clone()
-        };
+        let schema_key = site_index::schema_cache_key(&stem, bslug);
         let grammar = match self.schema_source(&schema_key) {
             Some(src) => schema::parse_schema(&src).map_err(|e| format!("schema parse error: {e:?}"))?,
             None => return Err(format!("no schema for: {schema_key}")),
@@ -839,14 +705,7 @@ impl Conductor {
             _ => return None,
         };
         let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
-        let url = if stem.is_empty() {
-            if slug == "index" { "/".to_string() } else { format!("/{slug}") }
-        } else if slug == "index" {
-            format!("/{stem}/")
-        } else {
-            format!("/{stem}/{slug}")
-        };
-        Some(url)
+        Some(site_index::url_for_stem_slug(&stem, slug))
     }
 
     /// Handle a command and return a response plus any events to broadcast.

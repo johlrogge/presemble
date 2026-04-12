@@ -15,6 +15,7 @@ site_repository = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
+template_registry = { workspace = true }
 site_index = { workspace = true }
 validation = { workspace = true }
 site_templates = { workspace = true }
