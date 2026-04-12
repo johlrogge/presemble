@@ -87,6 +87,8 @@ components/
   content_editor   — business logic for browser editing and scaffold
   serve_ui         — JS/CSS for the browser editing overlay
   site_templates   — embedded starter sites for the wizard
+  site_builder     — unified graph-building pipeline shared by CLI and conductor
+  template_registry — cached parsed template trees keyed by schema stem
   forms            — EDN form reader
   reader           — Presemble Lisp reader (EDN-based)
   macros           — macro expander (-> and ->> threading)
@@ -125,6 +127,7 @@ ADRs live in `docs/adr/`. The presemble.io site is in `site/` and is built with 
 | `components/conductor` | [components/conductor/README.md](components/conductor/README.md) |
 | `components/lsp_service` | [components/lsp_service/README.md](components/lsp_service/README.md) |
 | `components/lsp_capabilities` | [components/lsp_capabilities/README.md](components/lsp_capabilities/README.md) |
+| `components/site_builder` | [components/site_builder/README.md](components/site_builder/README.md) |
 | `bases/publisher_cli` | [bases/publisher_cli/README.md](bases/publisher_cli/README.md) |
 | `bases/editor_server` | [bases/editor_server/README.md](bases/editor_server/README.md) |
 | `projects/publisher` | [projects/publisher/README.md](projects/publisher/README.md) |
@@ -143,6 +146,6 @@ Requires the Nix devenv shell. Do not install packages with `cargo install -g` o
 
 ## Version
 
-Current release: **0.32.5**
+Current release: **0.33.0**
 
 See [ROADMAP.md](ROADMAP.md) for the milestone plan and [RELEASING.md](RELEASING.md) for the release workflow.

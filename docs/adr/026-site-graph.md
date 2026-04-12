@@ -1,7 +1,7 @@
 # ADR-026: Unified SiteGraph as single source of truth
 
 ## Status
-Proposed
+Accepted
 
 ## Context
 

@@ -350,6 +350,8 @@ conductor-as-repl brainstorm note).
 - [x] Conductor rebuilds affected pages on `FileChanged` — was a no-op before (shipped v0.32.5)
 - [x] Conductor tracks build errors and returns them via `GetBuildErrors` (shipped v0.32.5)
 - [x] DependencyGraph removed from publisher_cli public API (shipped v0.32.5)
+- [x] Unified build pipeline: `site_builder` component eliminates duplicated graph-building between CLI and conductor (ADR-037, shipped v0.33.0)
+- [x] Conductor builds collection/index pages — was missing, causing scaffold-first-serve to fail (shipped v0.33.0)
 - [ ] Version counter and conflict detection — carried forward to M11/M13
 - [ ] Conductor edge index caching — carried forward to M11
 - [ ] Conductor `RefsTo` wiring — carried forward to M11

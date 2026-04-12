@@ -94,6 +94,24 @@ Run these agents in order before cutting a release:
 
 ## Release History
 
+### v0.33.0
+
+Unified build pipeline, scaffold page rendering, and conductor path fixes.
+
+**Unified build pipeline (`site_builder` component)**
+A new `site_builder` polylith component extracts the graph-building phases that previously existed in duplicate across `publisher_cli` and `conductor` (ADR-037). Three functions cover the shared work: `build_graph` (item pages, collection pages, legacy root fallback), `resolve_link_expressions`, and `resolve_cross_references`. A `SourceAttachment` enum controls whether markdown source is embedded in data graph nodes — the conductor passes `Attach` for browser editing; the CLI passes `Omit`. Both callers now share identical build logic; bug fixes and new features apply once.
+
+**`template_registry` component**
+Template parsing and caching extracted into a dedicated polylith component, deduplicated from the previously separate in-process copies in `publisher_cli` and `conductor`.
+
+**Scaffold renders all pages via conductor**
+After the wizard scaffolds a new site, the conductor builds and serves all generated pages immediately. Previously, only partial output was available until the server restarted.
+
+**Conductor resolves relative paths in `FileChanged`**
+The `FileChanged` handler now resolves relative paths before looking up affected graph nodes. This fixes incremental rebuilds that silently missed changes when the watcher reported relative rather than absolute paths.
+
+---
+
 ### v0.32.1
 
 Conductor reliability, scaffold initialization, nREPL output, CI binaries.
