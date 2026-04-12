@@ -63,10 +63,13 @@ Run these agents in order before cutting a release:
 
 5. **Update `ROADMAP.md`** — mark any newly completed deliverables as `[x]` and move semantic-types or other explicitly deferred items out of the current milestone so M2/M3/etc. have a clean definition of done.
 
-6. **release-manager** — start and finish the release branch
+6. **ADR housekeeping** — review all ADRs in `docs/adr/`. Accept implemented ADRs still marked "Proposed." Mark superseded ADRs. Check for conflicts with new decisions. Create new ADRs for significant architectural decisions made since the last release.
+   > "Review all ADRs for relevance and status"
+
+7. **release-manager** — start and finish the release branch
    > "Start release 0.x.0" → confirm → "Finish release 0.x.0"
 
-7. **Human** — push to remote
+8. **Human** — push to remote
    ```
    git push origin master develop --tags
    ```
