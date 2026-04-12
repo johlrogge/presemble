@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Superseded by ADR-031 — serve is now a thin conductor client; the conductor owns build state and the serve process subscribes to rebuild events via IPC.
 
 ## Context
 
