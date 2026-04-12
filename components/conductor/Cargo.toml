@@ -12,6 +12,7 @@ editorial_types = { workspace = true }
 expressions = { workspace = true }
 content_editor = { workspace = true }
 site_repository = { workspace = true }
+site_builder = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }

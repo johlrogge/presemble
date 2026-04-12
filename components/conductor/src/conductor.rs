@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use site_index::DIR_TEMPLATES;
 use template::constants::KEY_PRESEMBLE_FILE;
 
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
@@ -155,267 +154,32 @@ impl Conductor {
         self.site_graph.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Build the full site graph by iterating all schema stems and content slugs.
+    /// Build the full site graph using the shared build pipeline.
     ///
     /// Builds item pages, collection/index pages, and a legacy fallback root
-    /// page — matching the CLI build pipeline (minus rendering and link
-    /// resolution, which happen per-page in `rebuild_page`).
+    /// page — matching the CLI build pipeline. Link resolution happens lazily
+    /// per-page in `rebuild_page`, not here.
     ///
     /// Skips items that fail to parse or have no schema. Errors are logged but
     /// non-fatal.
     pub fn build_full_graph(&self) -> Result<(), String> {
-        let mut graph = site_index::SiteGraph::new();
         // Use a fresh repo to discover current files (self.repo may be stale after scaffold)
         let repo = site_repository::SiteRepository::builder()
             .from_dir(&self.site_dir)
             .build();
 
-        for stem in repo.schema_stems() {
-            let schema_src = match self.schema_source(stem.as_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-            let grammar = match schema::parse_schema(&schema_src) {
-                Ok(g) => g,
-                Err(e) => {
-                    eprintln!("conductor: schema parse error for {}: {e:?}", stem.as_str());
-                    continue;
-                }
-            };
+        let result = site_builder::build_graph(
+            &repo,
+            &self.output_dir,
+            site_builder::SourceAttachment::Attach,
+        );
 
-            for slug in repo.content_slugs(&stem) {
-                let content_src = match repo.content_source(&stem, &slug) {
-                    Some(s) => s,
-                    None => continue,
-                };
-
-                let doc = match content::parse_and_assign(&content_src, &grammar) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!(
-                            "conductor: parse error for {}/{}: {e}",
-                            stem.as_str(),
-                            slug
-                        );
-                        continue;
-                    }
-                };
-
-                let mut data = template::build_article_graph_with_source(&doc, &grammar, &content_src);
-
-                let url_path = site_index::UrlPath::new(site_index::url_for_stem_slug(stem.as_str(), &slug));
-                data.insert("url", template::Value::Text(url_path.as_str().to_string()));
-                data.insert(
-                    "_presemble_stem",
-                    template::Value::Text(stem.as_str().to_string()),
-                );
-                let presemble_file = site_index::content_file_path(stem.as_str(), &slug);
-                data.insert(
-                    KEY_PRESEMBLE_FILE,
-                    template::Value::Text(presemble_file),
-                );
-
-                let title = match data.resolve(&["title"]) {
-                    Some(template::Value::Text(t)) => t.clone(),
-                    _ => slug.clone(),
-                };
-                data.insert(
-                    "link",
-                    template::Value::Record(template::synthesize_link(
-                        &title,
-                        url_path.as_str(),
-                    )),
-                );
-
-                let content_path = repo.content_path(&stem, &slug);
-                let schema_path = repo.schema_path(&stem);
-                let template_path = self
-                    .repo
-                    .item_template_source(&stem)
-                    .map(|_| {
-                        self.site_dir
-                            .join(DIR_TEMPLATES)
-                            .join(stem.as_str())
-                            .join("item")
-                    })
-                    .unwrap_or_else(|| {
-                        self.site_dir
-                            .join(DIR_TEMPLATES)
-                            .join(format!("{}.html", stem.as_str()))
-                    });
-
-                let output_path = site_index::output_path_for_stem_slug(&self.output_dir, stem.as_str(), &slug);
-
-                let node = site_index::SiteNode {
-                    url_path: url_path.clone(),
-                    output_path,
-                    source_path: content_path.clone(),
-                    deps: std::collections::HashSet::from([content_path, schema_path]),
-                    role: site_index::NodeRole::Page(site_index::PageData {
-                        page_kind: site_index::PageKind::Item,
-                        schema_stem: stem.clone(),
-                        template_path,
-                        content_path: repo.content_path(&stem, &slug),
-                        schema_path: repo.schema_path(&stem),
-                        data,
-                    }),
-                };
-
-                graph.insert(node);
-            }
+        // Log parse errors (non-fatal)
+        for (label, msg) in &result.parse_errors {
+            eprintln!("conductor: parse error for {label}: {msg}");
         }
 
-        // Phase 1b: collection/index pages
-        for stem in repo.schema_stems() {
-            // Skip stems with no collection content
-            if repo.collection_content_source(&stem).is_none() {
-                continue;
-            }
-            // Need collection schema
-            let collection_schema_key = site_index::schema_cache_key(stem.as_str(), "index");
-            let schema_src = match self.schema_source(&collection_schema_key) {
-                Some(s) => s,
-                None => {
-                    eprintln!("conductor: collection content exists but no schema for {}/index", stem.as_str());
-                    continue;
-                }
-            };
-            let grammar = match schema::parse_schema(&schema_src) {
-                Ok(g) => g,
-                Err(e) => {
-                    eprintln!("conductor: collection schema parse error for {}/index: {e:?}", stem.as_str());
-                    continue;
-                }
-            };
-            // Need collection template
-            let collection_template_path = {
-                let base = self.site_dir.join(DIR_TEMPLATES).join(stem.as_str()).join("index");
-                match repo.collection_template_source(&stem) {
-                    Some((_, is_hiccup)) => {
-                        if is_hiccup { base.with_extension("hiccup") } else { base.with_extension("html") }
-                    }
-                    None => {
-                        eprintln!("conductor: no collection template for {}/index", stem.as_str());
-                        continue;
-                    }
-                }
-            };
-            let content_src = match repo.collection_content_source(&stem) {
-                Some(s) => s,
-                None => continue,
-            };
-            let doc = match content::parse_and_assign(&content_src, &grammar) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("conductor: collection parse error for {}/index: {e}", stem.as_str());
-                    continue;
-                }
-            };
-            let mut data = template::build_article_graph(&doc, &grammar);
-
-            // Metadata for browser editing
-            let coll_file = if stem.as_str().is_empty() {
-                "content/index.md".to_string()
-            } else {
-                format!("content/{}/index.md", stem.as_str())
-            };
-            data.insert(KEY_PRESEMBLE_FILE, template::Value::Text(coll_file));
-            data.insert("_presemble_stem", template::Value::Text(stem.as_str().to_string()));
-
-            // URL and output path
-            let (url_path_str, output_path) = if stem.as_str().is_empty() {
-                ("/".to_string(), self.output_dir.join("index.html"))
-            } else {
-                let url = format!("/{}/", stem.as_str());
-                let path = self.output_dir.join(stem.as_str()).join("index.html");
-                (url, path)
-            };
-
-            // Dependencies: template, content, schema, plus ALL item content files for this stem
-            let collection_content_path = repo.collection_content_path(&stem);
-            let collection_schema_path = repo.collection_schema_path(&stem);
-            let mut deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-            deps.insert(collection_template_path.clone());
-            deps.insert(collection_content_path.clone());
-            deps.insert(collection_schema_path.clone());
-            for slug in repo.content_slugs(&stem) {
-                deps.insert(repo.content_path(&stem, &slug));
-            }
-
-            let url_path = site_index::UrlPath::new(&url_path_str);
-            data.insert("url", template::Value::Text(url_path.as_str().to_string()));
-
-            // Link record
-            let title = match data.resolve(&["title"]) {
-                Some(template::Value::Text(t)) => t.clone(),
-                _ => if stem.as_str().is_empty() { "Home".to_string() } else { stem.as_str().to_string() },
-            };
-            data.insert("link", template::Value::Record(template::synthesize_link(&title, url_path.as_str())));
-
-            let node = site_index::SiteNode {
-                url_path: url_path.clone(),
-                output_path,
-                source_path: collection_content_path.clone(),
-                deps,
-                role: site_index::NodeRole::Page(site_index::PageData {
-                    page_kind: site_index::PageKind::Collection,
-                    schema_stem: stem.clone(),
-                    template_path: collection_template_path,
-                    content_path: collection_content_path,
-                    schema_path: collection_schema_path,
-                    data,
-                }),
-            };
-            graph.insert(node);
-        }
-
-        // Phase 1c (legacy fallback): root page from templates/index.{ext} when no root collection exists
-        let root_url = site_index::UrlPath::new("/");
-        if graph.get(&root_url).is_none() {
-            let root_stem = site_index::SchemaStem::new("");
-            if let Some((_, is_hiccup)) = repo.collection_template_source(&root_stem) {
-                let base = self.site_dir.join(DIR_TEMPLATES).join("index");
-                let index_tmpl_path = if is_hiccup {
-                    base.with_extension("hiccup")
-                } else {
-                    base.with_extension("html")
-                };
-                let mut root_graph = template::DataGraph::new();
-                // Populate from content/index.md + schemas/index.md if both exist
-                if let Some(schema_src) = repo.collection_schema_source(&root_stem)
-                    && let Ok(grammar) = schema::parse_schema(&schema_src)
-                    && let Some(content_src) = repo.collection_content_source(&root_stem)
-                    && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
-                {
-                    root_graph = template::build_article_graph(&doc, &grammar);
-                    root_graph.insert(KEY_PRESEMBLE_FILE, template::Value::Text("content/index.md".to_string()));
-                    root_graph.insert("_presemble_stem", template::Value::Text(String::new()));
-                }
-                let root_output_path = self.output_dir.join("index.html");
-                let root_content_path = repo.collection_content_path(&root_stem);
-                let mut root_deps: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-                root_deps.insert(index_tmpl_path.clone());
-                root_deps.insert(root_content_path.clone());
-                root_deps.insert(repo.collection_schema_path(&root_stem));
-                let node = site_index::SiteNode {
-                    url_path: root_url,
-                    output_path: root_output_path,
-                    source_path: root_content_path.clone(),
-                    deps: root_deps,
-                    role: site_index::NodeRole::Page(site_index::PageData {
-                        page_kind: site_index::PageKind::Collection,
-                        schema_stem: root_stem,
-                        template_path: index_tmpl_path,
-                        content_path: root_content_path,
-                        schema_path: repo.collection_schema_path(&site_index::SchemaStem::new("")),
-                        data: root_graph,
-                    }),
-                };
-                graph.insert(node);
-            }
-        }
-
-        *self.site_graph.write().unwrap_or_else(|e| e.into_inner()) = graph;
+        *self.site_graph.write().unwrap_or_else(|e| e.into_inner()) = result.graph;
         Ok(())
     }
 
