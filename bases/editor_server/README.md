@@ -1,10 +1,10 @@
 # editor_server
 
-Stub base for the multiplayer editing service (in progress, M4+).
+Stub base for the long-running multiplayer editing service (M4+).
 
-Will host the conductor process that owns the dep_graph, schema cache, file watcher, and in-memory working copies of content files. `presemble lsp` and `presemble serve` will become thin clients of this conductor, connected via nng IPC.
+Will back the `content_management` project — a hosted conductor that multiple authors can connect to simultaneously. The in-process conductor already available in `presemble serve` handles single-author use; `editor_server` extends this for multi-author sessions.
 
-See [ROADMAP.md](../../ROADMAP.md) — M4 for the full design.
+See [ROADMAP.md](../../ROADMAP.md) for the full design.
 
 ---
 

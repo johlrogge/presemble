@@ -111,6 +111,11 @@ impl SiteGraph {
         self.entries.get_mut(url_path)
     }
 
+    /// Remove a node from the graph by URL path. Returns the removed node if present.
+    pub fn remove(&mut self, url_path: &UrlPath) -> Option<SiteNode> {
+        self.entries.remove(url_path)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &SiteNode> {
         self.entries.values()
     }

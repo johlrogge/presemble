@@ -1,7 +1,7 @@
 # ADR-025: Three-tier consumer adapters for content transforms
 
 ## Status
-Proposed
+Accepted
 
 ## Context
 The three-tier code action pipeline (Transform -> Diff -> Adapter) needs consumer-specific output formats. The LSP needs targeted TextEdits to fix the lost-error-markers bug. The file writer needs to serialize documents to disk. The browser client (M5) needs DOM patches.

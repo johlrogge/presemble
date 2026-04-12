@@ -1,7 +1,7 @@
 # ADR-027: Asset store and content browser separation
 
 ## Status
-Proposed
+Superseded by ADR-034
 
 ## Context
 

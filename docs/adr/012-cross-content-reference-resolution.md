@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Superseded by ADR-026 — reference resolution is now part of the SiteGraph; cross-content links are resolved as graph edges rather than a post-build pass over BuiltPage values.
 
 ## Context
 

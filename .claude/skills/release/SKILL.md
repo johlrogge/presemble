@@ -27,12 +27,17 @@ Read `RELEASING.md` and execute the Release Checklist section step by step.
 
 5. **Update ROADMAP.md** — mark completed items, clean up milestones.
 
-6. **Version bump** — spawn code-minion to bump version in all Cargo.toml files.
+6. **ADR housekeeping** — spawn the architect agent:
+   "Review all ADRs for relevance and status. Accept implemented ADRs
+   still marked Proposed. Mark superseded ADRs. Create new ADRs for
+   significant architectural decisions made since the last release."
 
-7. **Release-manager** — spawn the release-manager agent to start and finish
+7. **Version bump** — spawn code-minion to bump version in all Cargo.toml files.
+
+8. **Release-manager** — spawn the release-manager agent to start and finish
    the release branch. Provide the tag message summarizing what shipped.
 
-8. **Human pushes** — remind the user to push: `git push origin master develop --tags`
+9. **Human pushes** — remind the user to push: `git push origin master develop --tags`
 
 Each step must complete successfully before proceeding to the next.
 If any step fails, stop and report the issue.

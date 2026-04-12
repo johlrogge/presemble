@@ -1,6 +1,6 @@
 [package]
 name = "conductor"
-version = "0.31.0"
+version = "0.34.0"
 edition = "2024"
 
 [package.metadata.polylith]
@@ -12,9 +12,11 @@ editorial_types = { workspace = true }
 expressions = { workspace = true }
 content_editor = { workspace = true }
 site_repository = { workspace = true }
+site_builder = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
+template_registry = { workspace = true }
 site_index = { workspace = true }
 validation = { workspace = true }
 site_templates = { workspace = true }

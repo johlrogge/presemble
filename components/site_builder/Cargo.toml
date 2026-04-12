@@ -1,0 +1,18 @@
+[package]
+name = "site_builder"
+version = "0.34.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "site_builder"
+
+[dependencies]
+content = { workspace = true }
+expressions = { workspace = true }
+schema = { workspace = true }
+site_index = { workspace = true }
+site_repository = { workspace = true }
+template = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

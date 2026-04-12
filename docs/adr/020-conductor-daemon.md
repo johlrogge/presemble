@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Superseded by ADR-031 — ADR-031 is the authoritative conductor architecture; nng IPC was replaced by a simpler in-process model with the conductor as the sole build authority.
 
 ## Context
 

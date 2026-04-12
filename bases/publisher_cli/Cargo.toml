@@ -1,6 +1,6 @@
 [package]
 name = "publisher_cli"
-version = "0.31.0"
+version = "0.34.0"
 edition = "2024"
 
 [dependencies]
@@ -17,7 +17,9 @@ editorial_types = { workspace = true }
 editor_server = { workspace = true }
 mcp_server = { workspace = true }
 site_repository = { workspace = true }
+site_builder = { workspace = true }
 site_index = { workspace = true }
+template_registry = { workspace = true }
 lsp_capabilities = { workspace = true }
 content_editor = { workspace = true }
 lsp_service = { workspace = true }

@@ -63,10 +63,13 @@ Run these agents in order before cutting a release:
 
 5. **Update `ROADMAP.md`** — mark any newly completed deliverables as `[x]` and move semantic-types or other explicitly deferred items out of the current milestone so M2/M3/etc. have a clean definition of done.
 
-6. **release-manager** — start and finish the release branch
+6. **ADR housekeeping** — review all ADRs in `docs/adr/`. Accept implemented ADRs still marked "Proposed." Mark superseded ADRs. Check for conflicts with new decisions. Create new ADRs for significant architectural decisions made since the last release.
+   > "Review all ADRs for relevance and status"
+
+7. **release-manager** — start and finish the release branch
    > "Start release 0.x.0" → confirm → "Finish release 0.x.0"
 
-7. **Human** — push to remote
+8. **Human** — push to remote
    ```
    git push origin master develop --tags
    ```
@@ -90,6 +93,24 @@ Run these agents in order before cutting a release:
 ---
 
 ## Release History
+
+### v0.33.0
+
+Unified build pipeline, scaffold page rendering, and conductor path fixes.
+
+**Unified build pipeline (`site_builder` component)**
+A new `site_builder` polylith component extracts the graph-building phases that previously existed in duplicate across `publisher_cli` and `conductor` (ADR-037). Three functions cover the shared work: `build_graph` (item pages, collection pages, legacy root fallback), `resolve_link_expressions`, and `resolve_cross_references`. A `SourceAttachment` enum controls whether markdown source is embedded in data graph nodes — the conductor passes `Attach` for browser editing; the CLI passes `Omit`. Both callers now share identical build logic; bug fixes and new features apply once.
+
+**`template_registry` component**
+Template parsing and caching extracted into a dedicated polylith component, deduplicated from the previously separate in-process copies in `publisher_cli` and `conductor`.
+
+**Scaffold renders all pages via conductor**
+After the wizard scaffolds a new site, the conductor builds and serves all generated pages immediately. Previously, only partial output was available until the server restarted.
+
+**Conductor resolves relative paths in `FileChanged`**
+The `FileChanged` handler now resolves relative paths before looking up affected graph nodes. This fixes incremental rebuilds that silently missed changes when the watcher reported relative rather than absolute paths.
+
+---
 
 ### v0.32.1
 

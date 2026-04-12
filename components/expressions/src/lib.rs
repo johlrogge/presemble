@@ -211,6 +211,59 @@ fn collect_edges_from_value(
     }
 }
 
+/// Build UrlIndex, StemIndex, and EdgeIndex from a SiteGraph in one pass.
+pub fn build_indexes_from_graph(graph: &site_index::SiteGraph) -> (UrlIndex, StemIndex, EdgeIndex) {
+    let url_index: UrlIndex = graph
+        .iter_pages_by_kind(site_index::PageKind::Item)
+        .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
+        .collect();
+
+    let mut stem_index: StemIndex = std::collections::HashMap::new();
+    let mut all_edges = Vec::new();
+    for node in graph.iter_pages_by_kind(site_index::PageKind::Item) {
+        if let Some(pd) = node.page_data() {
+            stem_index
+                .entry(pd.schema_stem.clone())
+                .or_default()
+                .push((node.url_path.clone(), pd.data.clone()));
+            all_edges.extend(extract_edges(&node.url_path, &pd.data));
+        }
+    }
+    let edge_index = build_edge_index(&all_edges);
+
+    (url_index, stem_index, edge_index)
+}
+
+/// Inject collection data into a page's data graph.
+///
+/// For each unique schema stem in the graph's item pages, inserts a
+/// `Value::List` of all item data graphs under that stem key — unless
+/// the page's own data already has a value for that key (avoids
+/// overwriting resolved links like "author" with the full author collection).
+pub fn inject_collections(
+    page_data: &mut template::DataGraph,
+    site_graph: &site_index::SiteGraph,
+) {
+    let mut stems: Vec<site_index::SchemaStem> = site_graph
+        .iter_pages_by_kind(site_index::PageKind::Item)
+        .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.clone()))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    for stem in stems {
+        if page_data.resolve(&[stem.as_str()]).is_some() {
+            continue;
+        }
+        let items: Vec<template::Value> = site_graph
+            .items_for_stem(&stem)
+            .into_iter()
+            .filter_map(|n| n.page_data().map(|pd| template::Value::Record(pd.data.clone())))
+            .collect();
+        page_data.insert(stem.as_str(), template::Value::List(items));
+    }
+}
+
 /// Produce a sort key for a DataGraph field.
 /// Returns a `SortKey` enum that compares numeric values numerically
 /// and falls back to string comparison.
@@ -599,6 +652,146 @@ mod tests {
         let index = build_edge_index(&edges);
         assert_eq!(index.get(&UrlPath::new("/author/alice")).map(|v| v.len()), Some(2));
         assert_eq!(index.get(&UrlPath::new("/author/bob")).map(|v| v.len()), Some(1));
+    }
+
+    // ── build_indexes_from_graph ─────────────────────────────────────────────
+
+    fn make_item_site_node(stem: &str, url: &str, data: template::DataGraph) -> site_index::SiteNode {
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+        site_index::SiteNode {
+            url_path: UrlPath::new(url),
+            output_path: PathBuf::from(format!("output{url}/index.html")),
+            source_path: PathBuf::from(format!("content/{stem}/item.md")),
+            deps: HashSet::new(),
+            role: site_index::NodeRole::Page(site_index::PageData {
+                page_kind: site_index::PageKind::Item,
+                schema_stem: site_index::SchemaStem::new(stem),
+                template_path: PathBuf::from(format!("templates/{stem}/item.html")),
+                content_path: PathBuf::from(format!("content/{stem}/item.md")),
+                schema_path: PathBuf::from(format!("schemas/{stem}/schema.md")),
+                data,
+            }),
+        }
+    }
+
+    #[test]
+    fn build_indexes_from_graph_populates_all_three_indexes() {
+        let mut graph = site_index::SiteGraph::new();
+
+        let mut post_data = template::DataGraph::new();
+        post_data.insert("title", template::Value::Text("Post One".to_string()));
+        graph.insert(make_item_site_node("post", "/post/one", post_data));
+
+        let mut author_data = template::DataGraph::new();
+        author_data.insert("name", template::Value::Text("Alice".to_string()));
+        // Add a PathRef link expression so we can verify edge_index
+        author_data.insert(
+            "featured",
+            template::Value::LinkExpression {
+                text: content::LinkText::Empty,
+                target: content::LinkTarget::PathRef("/post/one".to_string()),
+            },
+        );
+        graph.insert(make_item_site_node("author", "/author/alice", author_data));
+
+        let (url_index, stem_index, edge_index) = build_indexes_from_graph(&graph);
+
+        // url_index: both pages present
+        assert!(url_index.contains_key(&UrlPath::new("/post/one")), "url_index missing /post/one");
+        assert!(
+            url_index.contains_key(&UrlPath::new("/author/alice")),
+            "url_index missing /author/alice"
+        );
+
+        // stem_index: two distinct stems, each with one entry
+        assert!(
+            stem_index.contains_key(&site_index::SchemaStem::new("post")),
+            "stem_index missing 'post'"
+        );
+        assert!(
+            stem_index.contains_key(&site_index::SchemaStem::new("author")),
+            "stem_index missing 'author'"
+        );
+        let post_entries = stem_index.get(&site_index::SchemaStem::new("post")).unwrap();
+        assert_eq!(post_entries.len(), 1, "expected 1 post entry");
+        let author_entries = stem_index.get(&site_index::SchemaStem::new("author")).unwrap();
+        assert_eq!(author_entries.len(), 1, "expected 1 author entry");
+
+        // edge_index: /author/alice → /post/one edge captured
+        let edges_to_post_one = edge_index.get(&UrlPath::new("/post/one"));
+        assert!(edges_to_post_one.is_some(), "edge_index missing target /post/one");
+        let edges = edges_to_post_one.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source, UrlPath::new("/author/alice"));
+        assert_eq!(edges[0].target, UrlPath::new("/post/one"));
+    }
+
+    #[test]
+    fn build_indexes_from_graph_empty_graph_returns_empty_indexes() {
+        let graph = site_index::SiteGraph::new();
+        let (url_index, stem_index, edge_index) = build_indexes_from_graph(&graph);
+        assert!(url_index.is_empty());
+        assert!(stem_index.is_empty());
+        assert!(edge_index.is_empty());
+    }
+
+    // ── inject_collections ───────────────────────────────────────────────────
+
+    #[test]
+    fn inject_collections_inserts_lists_for_each_stem() {
+        let mut graph = site_index::SiteGraph::new();
+
+        let mut post1 = template::DataGraph::new();
+        post1.insert("title", template::Value::Text("Post One".to_string()));
+        graph.insert(make_item_site_node("post", "/post/one", post1));
+
+        let mut post2 = template::DataGraph::new();
+        post2.insert("title", template::Value::Text("Post Two".to_string()));
+        graph.insert(make_item_site_node("post", "/post/two", post2));
+
+        let mut author1 = template::DataGraph::new();
+        author1.insert("name", template::Value::Text("Alice".to_string()));
+        graph.insert(make_item_site_node("author", "/author/alice", author1));
+
+        let mut page_data = template::DataGraph::new();
+        inject_collections(&mut page_data, &graph);
+
+        match page_data.resolve(&["post"]) {
+            Some(template::Value::List(items)) => assert_eq!(items.len(), 2, "expected 2 posts"),
+            other => panic!("expected post List, got: {other:?}"),
+        }
+        match page_data.resolve(&["author"]) {
+            Some(template::Value::List(items)) => assert_eq!(items.len(), 1, "expected 1 author"),
+            other => panic!("expected author List, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inject_collections_does_not_overwrite_existing_key() {
+        let mut graph = site_index::SiteGraph::new();
+
+        let mut post1 = template::DataGraph::new();
+        post1.insert("title", template::Value::Text("Post One".to_string()));
+        graph.insert(make_item_site_node("post", "/post/one", post1));
+
+        let mut post2 = template::DataGraph::new();
+        post2.insert("title", template::Value::Text("Post Two".to_string()));
+        graph.insert(make_item_site_node("post", "/post/two", post2));
+
+        // page_data already has a "post" key — simulate a resolved link
+        let mut existing = template::DataGraph::new();
+        existing.insert("href", template::Value::Text("/post/one".to_string()));
+        let mut page_data = template::DataGraph::new();
+        page_data.insert("post", template::Value::Record(existing));
+
+        inject_collections(&mut page_data, &graph);
+
+        // The "post" key should still be a Record, not a List
+        assert!(
+            matches!(page_data.resolve(&["post"]), Some(template::Value::Record(_))),
+            "inject_collections should not overwrite existing 'post' key"
+        );
     }
 
     #[test]

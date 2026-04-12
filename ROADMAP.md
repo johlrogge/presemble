@@ -283,89 +283,7 @@ Shipped in v0.21.0.
 
 ---
 
-## M5: "Browser editing"
-
-**Goal:** The served page IS the editor. Content authors who never touch a terminal can create
-and edit content directly in the browser.
-
-**Depends on:** M3.5 code action transformation model — browser edits use the Transform pipeline,
-structural diff, and browser adapter defined there.
-
-**Why now:** Suggestion nodes shipped in M3 Phase 5 are the direct foundation. `presemble serve` already has WebSocket and content in memory — no conductor needed to start.
-
-**The Presemble mascot:**
-- Floating overlay in the corner of every served page
-- View mode: hugging face / peace sign — shows validation count badge
-- Edit mode: pen icon — content nodes become inline-editable
-- Suggest mode: speech bubble — annotations and suggestions for other editors
-- All clear: thumbs up — page is ready to publish
-
-**Three interaction modes:**
-
-*View mode* — just browsing, no editing possible. Default.
-
-*Edit mode* — content nodes are inline-editable:
-- Click suggestion nodes (from M3 Phase 5) to fill in missing content
-- Simple fields: contenteditable, what you type is what gets stored
-- Link fields with bounded options: select/dropdown
-- Basic inline markdown (`*bold*`, `_italic_`) in text content
-- Submit writes through conductor to disk, live reload rebuilds, page updates
-
-*Suggest mode* — for editorial review:
-- Mark for correction: click a node to flag it (optional comment). Flag becomes a diagnostic in Helix.
-- Suggest changes: propose alternative text. Arrives in Helix as a quickfix action.
-- Browser is just another author in the conductor pipeline.
-
-**Suggestion persistence:**
-- Suggestions live in `.presemble/suggestions/` as files
-- Survive conductor restarts — conductor reads on startup, re-emits as LSP diagnostics
-- Committed to git if the site uses git (part of the editorial record)
-- Not git-dependent — works with plain folders too
-
-**Deliverables:**
-- [x] Presemble mascot overlay with mode toggle (shipped v0.21.0)
-- [x] Edit mode: inline editing of simple content fields (Phase A: suggestion nodes interactive)
-- [x] Edit mode: header folding — collapse/expand sections under headings (shipped v0.29.0)
-- [x] Guided site wizard — 6-step browser creation with font/color/palette customization and live CSS preview (shipped v0.30.0)
-- [x] Navigation — shared nav partials, breadcrumbs, collection index pages (shipped v0.30.0)
-- [x] Content creation — publisher rebuild after creation, event-driven navigation (shipped v0.30.0)
-- [x] Edge-first graph architecture — edges extracted from link expressions, indexed by target URL for reverse lookup (shipped v0.31.0)
-- [x] `(refs-to self)` link expressions — reverse references declared in schemas, populated via content (shipped v0.31.0)
-- [x] REPL edge query builtins — `(refs-to "/url")` and `(refs-from "/url")` (shipped v0.31.0)
-- [x] Suggest mode: slot-scoped search/replace (SlotEdit), suggest buttons, suggest-mode-only editing (shipped v0.32.0)
-- [ ] Suggestion persistence in `.presemble/suggestions/`
-- [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol
-
-**Success gate:** A content author can open a served page, click the mascot to enter edit mode,
-fill in missing content via suggestion nodes, and see the page update live. An editor in Helix
-sees browser suggestions as diagnostics with quickfixes.
-
----
-
-## Done — M6: "CSS asset tracking"
-
-Shipped in v0.18.3+ (ADR-029).
-
-**Goal:** Close the asset-discovery gap for CSS. Stylesheets become first-class nodes in the
-SiteGraph with typed `@import` and `url()` dependency edges, symmetric with content nodes.
-
-**Deliverables:**
-- [x] New `stylesheet` polylith component — CSS parsing with `cssparser` crate
-- [x] Parse CSS files and discover `url()` references (fonts, images, cursors)
-- [x] Recursive `@import` walking — follow import chains to discover all referenced assets
-- [x] Feed discovered CSS assets into dep_graph alongside template-discovered assets
-- [x] Error on missing assets referenced from CSS (same behavior as template asset references)
-- [x] Copy only what is used — no blind copying of the asset directory
-- [x] `FileKind::Stylesheet` and `FileKind::Asset` classification in site_index
-- [x] Incremental rebuild: changing an imported CSS file triggers rebuild of all importing stylesheets
-
-**Success gate:** A site with fonts or images referenced only from CSS `url()` builds correctly.
-Missing CSS-referenced assets produce clear build errors. No assets are copied that are not
-referenced. ✓
-
----
-
-## M4 — "The conductor"
+## Done — M4: "The conductor" (success gate met v0.32.5, ADR-031 complete)
 
 **Goal:** Unify all Presemble processes under a single shared-state conductor. Today `presemble lsp`
 and `presemble serve` are separate processes with separate state. The conductor makes them thin
@@ -432,51 +350,252 @@ conductor-as-repl brainstorm note).
 - [x] Conductor rebuilds affected pages on `FileChanged` — was a no-op before (shipped v0.32.5)
 - [x] Conductor tracks build errors and returns them via `GetBuildErrors` (shipped v0.32.5)
 - [x] DependencyGraph removed from publisher_cli public API (shipped v0.32.5)
-- [ ] Version counter and conflict detection
-- [ ] Conductor edge index caching (currently rebuilds per query)
-- [ ] Conductor `RefsTo` wiring (currently no-op — publisher handles it)
-- [ ] IPC socket lifecycle: SocketGuard cleanup, signal handling, sweep_stale_sockets
+- [x] Unified build pipeline: `site_builder` component eliminates duplicated graph-building between CLI and conductor (ADR-037, shipped v0.33.0)
+- [x] Conductor builds collection/index pages — was missing, causing scaffold-first-serve to fail (shipped v0.33.0)
+- [ ] Version counter and conflict detection — carried forward to M11/M13
+- [ ] Conductor edge index caching — carried forward to M11
+- [ ] Conductor `RefsTo` wiring — carried forward to M11
+- [ ] IPC socket lifecycle: SocketGuard cleanup, signal handling, sweep_stale_sockets — carried forward to M11
 
 **Success gate:** `presemble lsp` and `presemble serve` share state through the conductor.
-Editing a file in Helix updates the browser preview before save.
+Editing a file in Helix updates the browser preview before save. ✓ (v0.32.5)
 
 ---
 
-## M7 — "Asset store and content browsers"
+## Done — M5: "Browser editing" (demo April 11 2026 — all deliverables shipped)
 
-**Goal:** Decouple asset storage from the filesystem. Authors discover and insert media from
-the browser without leaving the page. Support large sites with remote assets.
+**Goal:** The served page IS the editor. Content authors who never touch a terminal can create
+and edit content directly in the browser.
 
-**Two separate concerns:**
+**Depends on:** M3.5 code action transformation model — browser edits use the Transform pipeline,
+structural diff, and browser adapter defined there.
 
-*Asset Store* — where assets live (storage + URL resolution):
-- `fs_asset_store` — local filesystem (default, bundled)
-- `s3_asset_store` — S3/compatible object storage
-- `cdn_asset_store` — upload to CDN, return CDN URL
-- Interface: `store(bytes, path) → url`, `resolve(path) → url`, `list(prefix) → paths`
+**Why now:** Suggestion nodes shipped in M3 Phase 5 are the direct foundation. `presemble serve` already has WebSocket and content in memory — no conductor needed to start.
 
-*Content Browser* — where assets come from (discovery + search):
-- `local_browser` — browse what's already in the store
-- `unsplash_browser` — search Unsplash photos
-- `youtube_browser` — search/embed YouTube videos
-- Interface: `search(query, constraints) → previews`, `fetch(selection) → bytes`
+**The Presemble mascot:**
+- Floating overlay in the corner of every served page
+- View mode: hugging face / peace sign — shows validation count badge
+- Edit mode: pen icon — content nodes become inline-editable
+- Suggest mode: speech bubble — annotations and suggestions for other editors
+- All clear: thumbs up — page is ready to publish
 
-**The flow:** browser finds → store saves → template gets URL.
+**Three interaction modes:**
 
-Directory-governed configuration: schemas or site config declare which store handles which
-asset path. `presemble serve` resolves asset URLs through the store — local serves directly,
-remote stores return CDN URLs.
+*View mode* — just browsing, no editing possible. Default.
+
+*Edit mode* — content nodes are inline-editable:
+- Click suggestion nodes (from M3 Phase 5) to fill in missing content
+- Simple fields: contenteditable, what you type is what gets stored
+- Link fields with bounded options: select/dropdown
+- Basic inline markdown (`*bold*`, `_italic_`) in text content
+- Submit writes through conductor to disk, live reload rebuilds, page updates
+
+*Suggest mode* — for editorial review:
+- Mark for correction: click a node to flag it (optional comment). Flag becomes a diagnostic in Helix.
+- Suggest changes: propose alternative text. Arrives in Helix as a quickfix action.
+- Browser is just another author in the conductor pipeline.
+
+**Suggestion persistence:**
+- Suggestions live in `.presemble/suggestions/` as files — carried forward to M11 (critical path)
+- Survive conductor restarts — conductor reads on startup, re-emits as LSP diagnostics
+- Committed to git if the site uses git (part of the editorial record)
+- Not git-dependent — works with plain folders too
 
 **Deliverables:**
-- [ ] Asset store interface with `fs_asset_store` default implementation
-- [ ] Unsplash content browser with server-side API proxy (API key stays server-side)
-- [ ] Browser editing integration: click image slot → search panel → select → insert
-- [ ] Schema-aware constraints: orientation, alt text, format validation
-- [ ] Directory-governed store configuration in site config
+- [x] Presemble mascot overlay with mode toggle (shipped v0.21.0)
+- [x] Edit mode: inline editing of simple content fields (Phase A: suggestion nodes interactive)
+- [x] Edit mode: header folding — collapse/expand sections under headings (shipped v0.29.0)
+- [x] Guided site wizard — 6-step browser creation with font/color/palette customization and live CSS preview (shipped v0.30.0)
+- [x] Navigation — shared nav partials, breadcrumbs, collection index pages (shipped v0.30.0)
+- [x] Content creation — publisher rebuild after creation, event-driven navigation (shipped v0.30.0)
+- [x] Edge-first graph architecture — edges extracted from link expressions, indexed by target URL for reverse lookup (shipped v0.31.0)
+- [x] `(refs-to self)` link expressions — reverse references declared in schemas, populated via content (shipped v0.31.0)
+- [x] REPL edge query builtins — `(refs-to "/url")` and `(refs-from "/url")` (shipped v0.31.0)
+- [x] Suggest mode: slot-scoped search/replace (SlotEdit), suggest buttons, suggest-mode-only editing (shipped v0.32.0)
+- [ ] Suggestion persistence in `.presemble/suggestions/` — moved to M11 critical path
+- [ ] Conductor integration: browser edits are transforms sent over the conductor's EDN protocol — moved to M11
 
-**Success gate:** Author clicks an image slot in edit mode, searches Unsplash, selects an image,
-and it is inserted with correct metadata and attribution. The store handles placement; the
-template gets a URL.
+**Success gate:** A content author can open a served page, click the mascot to enter edit mode,
+fill in missing content via suggestion nodes, and see the page update live. An editor in Helix
+sees browser suggestions as diagnostics with quickfixes. ✓ (April 11 2026 demo)
+
+---
+
+## Done — M6: "CSS asset tracking"
+
+Shipped in v0.18.3+ (ADR-029).
+
+**Goal:** Close the asset-discovery gap for CSS. Stylesheets become first-class nodes in the
+SiteGraph with typed `@import` and `url()` dependency edges, symmetric with content nodes.
+
+**Deliverables:**
+- [x] New `stylesheet` polylith component — CSS parsing with `cssparser` crate
+- [x] Parse CSS files and discover `url()` references (fonts, images, cursors)
+- [x] Recursive `@import` walking — follow import chains to discover all referenced assets
+- [x] Feed discovered CSS assets into dep_graph alongside template-discovered assets
+- [x] Error on missing assets referenced from CSS (same behavior as template asset references)
+- [x] Copy only what is used — no blind copying of the asset directory
+- [x] `FileKind::Stylesheet` and `FileKind::Asset` classification in site_index
+- [x] Incremental rebuild: changing an imported CSS file triggers rebuild of all importing stylesheets
+
+**Success gate:** A site with fonts or images referenced only from CSS `url()` builds correctly.
+Missing CSS-referenced assets produce clear build errors. No assets are copied that are not
+referenced. ✓
+
+---
+
+## M11 — "Hosted multiplayer demo"
+
+**Target:** mid-May 2026
+
+**Goal:** Carry the April 11 demo to a hosted, shareable state. Multiple browser clients can
+collaborate live. Suggestion persistence closes the editorial loop between browser and Helix.
+Conductor hardening items carried from M4 land here.
+
+**Deliverables:**
+
+*Suggestion persistence (M5 carry-forward, critical path):*
+- [ ] Suggestions written to `.presemble/suggestions/` as files on submission
+- [ ] Conductor reads suggestion files on startup and re-emits as LSP diagnostics
+- [ ] Suggestions committed to git as part of the editorial record
+
+*Conductor hardening (M4 carry-forward):*
+- [ ] Conductor edge index caching — currently rebuilds per query; cache invalidated on FileChanged
+- [ ] Conductor `RefsTo` wiring — currently a no-op; conductor must populate reverse-reference edges
+- [ ] IPC socket lifecycle: `SocketGuard` cleanup, signal handling, `sweep_stale_sockets`
+
+*Multiplayer:*
+- [ ] PUB/SUB broadcast to multiple browser WebSocket clients — a change from one browser updates all
+- [ ] Conductor tracks connected browser clients; broadcasts page invalidation on rebuild
+
+*Distribution:*
+- [ ] Linux binary distribution via CI (GitHub Actions → GitHub Releases)
+- [ ] Install one-liner for Linux in README
+
+*Hosting and auth:*
+- [ ] Basic deployment story: single binary + site directory on a VPS
+- [ ] Minimal auth layer — shared secret or invite token for edit/suggest access
+- [ ] Serve mode works behind a reverse proxy (X-Forwarded-For, base-path support)
+
+*Wizard UX:*
+- [ ] Single-step wizard UX fix — currently multi-step flow has friction; collapse or streamline
+
+**Success gate:** A hosted Presemble instance is reachable from a public URL. Two browser
+clients can suggest edits simultaneously. Suggestions survive a conductor restart. A Helix user
+sees browser suggestions as LSP diagnostics with quickfixes.
+
+---
+
+## M12 — "NED — Node Editor"
+
+**Goal:** Replace ad-hoc DOM mutation with a principled RISC instruction set for DAG transforms.
+NED (Node EDitor) is a selection-first model: select nodes, then apply an instruction. All
+existing transforms migrate to NED primitives. The conductor speaks NED natively.
+
+**Why now:** M3.5 introduced the Transform trait as a vocabulary. NED formalizes that vocabulary
+into a minimal, composable instruction set that can be driven from the browser, Helix, and the
+REPL without separate code paths.
+
+**Core instructions:**
+- `select` — address nodes by path, attribute, or schema slot
+- `insert` — add a node at a position
+- `replace` — swap a node's content or tag
+- `remove` — delete selected nodes
+- `wrap` — surround selected nodes in a new parent
+- `unwrap` — hoist children of selected node, discard wrapper
+- `move` — relocate selected nodes to a new position in the tree
+
+**Deliverables:**
+- [ ] NED instruction set ADR
+- [ ] `ned` polylith component — instruction parser and evaluator
+- [ ] Selection model: path expressions that address DOM nodes
+- [ ] Core instructions implemented and tested
+- [ ] Conductor dispatches NED instructions from the EDN protocol
+- [ ] Existing transforms (InsertSlot, Capitalize, InsertSeparator, SlotEdit) migrated to NED primitives
+- [ ] Browser edit submissions send NED instructions instead of raw field values
+
+**Success gate:** All existing code actions execute via NED primitives. A browser edit round-trips
+as a NED instruction through the conductor to disk and back to all connected clients.
+
+---
+
+## M13 — "Per-document versioning"
+
+**Goal:** Add a version counter to each document so concurrent edits can be detected and
+reconciled. This is the conflict model sketched in M4, now implemented.
+
+**Why now:** Multiplayer (M11) exposes concurrent edit races. NED (M12) gives a clean primitive
+layer to attach versions to. Without versioning, two clients editing the same slot silently
+overwrite each other.
+
+**Deliverables:**
+- [ ] Version counter per document — monotonically increasing integer, stored in conductor state
+- [ ] Demand-driven snapshots in `.presemble/snapshots/` — snapshot written when a client checks out a version
+- [ ] NED instructions carry base version — conductor rejects edits against stale versions
+- [ ] Suggestion pinning to base version — suggestions record which version they were made against
+- [ ] Conflict detection: same slot edited from different base versions → conflict diagnostic
+- [ ] Conflict resolution UI in browser — "your version / their version / merged" panel
+- [ ] LSP diagnostic for conflicts with quickfix: accept mine / accept theirs / open merge view
+
+**Success gate:** Two browser clients editing the same slot simultaneously receive a conflict
+diagnostic. Each client can resolve the conflict independently. The resolved state is consistent
+on disk.
+
+---
+
+## M14 — "Assets as a concept" (supersedes M7)
+
+**Goal:** Assets (images, video, fonts) become a first-class concept in Presemble. The schema
+declares asset slots with constraints; the publisher validates and gates; the browser lets authors
+pick assets from a content browser. Remote asset stores are a later phase.
+
+**Why supersedes M7:** M7 was designed before the conductor and NED existed. M14 is the same
+vision rearchitected to fit the current model — asset operations are NED instructions, the asset
+store is a conductor-owned service, and the schema drives validation.
+
+**Phase 1 — Asset service (this milestone):**
+- [ ] Asset store trait: `store(bytes, path) → url`, `resolve(path) → url`, `list(prefix) → paths`
+- [ ] `fs_asset_store` — local filesystem default implementation
+- [ ] Schema-driven asset variants: orientation, format, alt text constraints declared in schema
+- [ ] Fragment syntax in templates: `asset.src`, `asset.alt`, `asset.width`
+- [ ] Publish gate: missing or invalid assets → hard build error
+
+**Phase 2 — Browser integration (this milestone):**
+- [ ] Click image slot in edit mode → asset picker panel opens
+- [ ] Browse local asset store from browser
+- [ ] Select asset → NED `replace` instruction updates slot
+- [ ] Alt text prompt on insert
+
+**Phase 3 — Remote stores (deferred):**
+- [ ] `s3_asset_store` and `cdn_asset_store` implementations
+- [ ] Unsplash content browser with server-side API proxy
+
+**Success gate:** A schema declares an image slot with orientation and alt text constraints. The
+publisher hard-errors on missing or non-conforming assets. In serve mode, clicking the image slot
+opens a picker, selecting an asset inserts it with correct metadata.
+
+---
+
+## M15 — "Graphical profile"
+
+**Goal:** Visual design becomes data. A graphical profile schema captures colors, fonts, and
+spacing as structured content. The wizard edits it. The browser offers a live visual panel.
+CSS custom properties bridge profile data to stylesheets.
+
+**Why now:** The wizard (M5) already lets authors pick fonts and palette at creation time. M15
+makes that choice persistent, editable, and schema-validated — not buried in a CSS file.
+
+**Deliverables:**
+- [ ] Graphical profile schema — color palette, font families, spacing scale, border radius declared as schema slots
+- [ ] Garden EDN for CSS — CSS generated from profile data via a Garden-inspired EDN→CSS transform
+- [ ] Profile content file — `content/profile.md` (or `content/site.md` extension) holds profile values
+- [ ] Wizard edits profile — creation wizard writes a valid profile content file
+- [ ] Browser visual panel — floating panel in serve mode shows color swatches and font previews; clicking opens an inline editor
+- [ ] Live CSS preview — editing a profile value regenerates CSS and hot-reloads in the browser without a full rebuild
+
+**Success gate:** A site's primary color is changed via the browser visual panel. The CSS
+regenerates and the browser updates live. The profile change is written to disk as a content
+file edit. The schema validates the color format.
 
 ---
 
@@ -603,6 +722,11 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - The index is a static artifact — no server-side search needed, works with any hosting
 - Could power an in-browser search UI or a `/_presemble/search` endpoint in serve mode
 - The `fst` crate (Rust) implements this — small dependency, battle-tested
+
+**M7 — "Asset store and content browsers" (superseded by M14):**
+- Original M7 design predated the conductor and NED
+- The vision is preserved and rearchitected in M14
+- `s3_asset_store`, `cdn_asset_store`, and Unsplash browser remain on the long-term horizon (M14 Phase 3)
 
 **Other deferred items:**
 - Real-time multiplayer editing

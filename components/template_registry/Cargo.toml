@@ -1,0 +1,15 @@
+[package]
+name = "template_registry"
+version = "0.34.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "template_registry"
+
+[dependencies]
+template = { workspace = true }
+site_repository = { workspace = true }
+site_index = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

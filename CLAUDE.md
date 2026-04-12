@@ -31,6 +31,12 @@ The orchestrator coordinates: reads code, asks questions, dispatches agents,
 routes results. It NEVER decides what is trivial and it NEVER writes code.
 The architect decides scope. The minions implement. The orchestrator routes.
 
+**The orchestrator MUST NOT override expert agent recommendations.** When the
+architect recommends a specific approach (e.g., "create a polylith component,"
+"extract into component X"), the orchestrator passes that recommendation to the
+minion verbatim. The orchestrator may ask the architect for alternatives but
+must not silently substitute its own "simpler" approach.
+
 The orchestrator MAY edit directly ONLY:
 - Memory files: .claude/memory/*
 - Plan files: .claude/plans/*

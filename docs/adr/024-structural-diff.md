@@ -1,7 +1,7 @@
 # ADR-024: Slot-level structural diff for Documents
 
 ## Status
-Proposed
+Accepted
 
 ## Context
 Tier 2 of the three-tier code action pipeline (ADR-023). After applying a Transform to a Document, the system needs to determine what changed to produce targeted output for Tier 3 consumer adapters (LSP TextEdits, file writes, browser DOM patches).

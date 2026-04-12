@@ -81,8 +81,14 @@ struct AppState {
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
+    // Ensure the site directory exists so canonicalize produces an absolute path.
+    // In serve mode the dir will be populated by scaffold or the user.
+    if !site_dir.exists() {
+        std::fs::create_dir_all(site_dir)
+            .map_err(|e| CliError::Render(format!("cannot create site directory {}: {e}", site_dir.display())))?;
+    }
     let site_dir = std::fs::canonicalize(site_dir)
-        .unwrap_or_else(|_| site_dir.to_path_buf());
+        .map_err(|e| CliError::Render(format!("cannot resolve site directory {}: {e}", site_dir.display())))?;
     let site_dir = site_dir.as_path();
 
     let out_dir = crate::output_dir(site_dir);
@@ -212,20 +218,33 @@ struct EditResponse {
     error: Option<String>,
 }
 
+/// Convert a conductor command result into an EditResponse.
+fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum::Json<EditResponse> {
+    match result {
+        Ok(conductor::Response::Ok) | Ok(conductor::Response::SuggestionCreated(_)) => {
+            axum::Json(EditResponse { ok: true, error: None })
+        }
+        Ok(conductor::Response::Error(e)) => {
+            axum::Json(EditResponse { ok: false, error: Some(e) })
+        }
+        Err(e) => {
+            axum::Json(EditResponse { ok: false, error: Some(e) })
+        }
+        _ => {
+            axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) })
+        }
+    }
+}
+
 async fn edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::EditSlot {
-        file: req.file.clone(),
-        slot: req.slot.clone(),
-        value: req.value.clone(),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected response".to_string()) }),
-    }
+    conductor_edit_response(state.conductor.send(&conductor::Command::EditSlot {
+        file: req.file,
+        slot: req.slot,
+        value: req.value,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -239,16 +258,11 @@ async fn edit_body_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditBodyRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::EditBodyElement {
-        file: req.file.clone(),
+    conductor_edit_response(state.conductor.send(&conductor::Command::EditBodyElement {
+        file: req.file,
         body_idx: req.body_idx,
-        content: req.content.clone(),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+        content: req.content,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -271,36 +285,26 @@ async fn suggest_slot_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestSlotRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SuggestSlotValue {
+    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestSlotValue {
         file: editorial_types::ContentPath::new(&req.file),
         slot: editorial_types::SlotName::new(&req.slot),
-        value: req.value.clone(),
+        value: req.value,
         reason: "Browser suggestion".to_string(),
         author: editorial_types::Author::Human("browser".to_string()),
-    }) {
-        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 async fn suggest_body_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestBodyRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SuggestBodyEdit {
+    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestBodyEdit {
         file: editorial_types::ContentPath::new(&req.file),
-        search: req.search.clone(),
-        replace: req.replace.clone(),
+        search: req.search,
+        replace: req.replace,
         reason: "Browser suggestion".to_string(),
         author: editorial_types::Author::Human("browser".to_string()),
-    }) {
-        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 /// Browser-friendly representation of a suggestion.
@@ -369,19 +373,14 @@ async fn suggest_slot_edit_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestSlotEditRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SuggestSlotEdit {
+    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestSlotEdit {
         file: editorial_types::ContentPath::new(&req.file),
         slot: editorial_types::SlotName::new(&req.slot),
         search: req.search,
         replace: req.replace,
         reason: "Browser suggestion".to_string(),
         author: editorial_types::Author::Human("browser".to_string()),
-    }) {
-        Ok(conductor::Response::SuggestionCreated(_)) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -445,28 +444,18 @@ async fn accept_suggestion_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::AcceptSuggestion {
+    conductor_edit_response(state.conductor.send(&conductor::Command::AcceptSuggestion {
         id: editorial_types::SuggestionId::from(req.id),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 async fn reject_suggestion_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<SuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::RejectSuggestion {
+    conductor_edit_response(state.conductor.send(&conductor::Command::RejectSuggestion {
         id: editorial_types::SuggestionId::from(req.id),
-    }) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    }))
 }
 
 async fn dirty_buffers_handler(
@@ -513,12 +502,7 @@ async fn dirty_buffers_handler(
 async fn save_all_handler(
     State(state): State<AppState>,
 ) -> axum::Json<EditResponse> {
-    match state.conductor.send(&conductor::Command::SaveAllBuffers) {
-        Ok(conductor::Response::Ok) => axum::Json(EditResponse { ok: true, error: None }),
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) }),
-    }
+    conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers))
 }
 
 async fn suggestion_files_handler(
@@ -682,10 +666,6 @@ async fn scaffold_handler(
         theme: req.theme.clone(),
     }) {
         Ok(conductor::Response::Ok) => {
-            // Tell conductor about new files so it renders them
-            if let Ok(conductor::Response::ContentList(paths)) = state.conductor.send(&conductor::Command::ListContent) {
-                let _ = state.conductor.send(&conductor::Command::FileChanged { paths });
-            }
             axum::Json(EditResponse { ok: true, error: None })
         }
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
@@ -1109,8 +1089,10 @@ fn watch_and_rebuild(
 
     loop {
         // Wait for the first RELEVANT event (skip access events and non-source files).
+        // Use recv_timeout so we can periodically re-scan for new directories to watch
+        // (e.g. created by the scaffold wizard after startup).
         let first_paths: Vec<std::path::PathBuf> = loop {
-            match rx.recv() {
+            match rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(Ok(event)) if is_relevant_event(&event) => {
                     let paths: Vec<_> = event.paths.iter()
                         .filter(|p| is_relevant_path(p))
@@ -1121,7 +1103,23 @@ fn watch_and_rebuild(
                     }
                 }
                 Ok(Ok(_)) => continue, // irrelevant event kind or path — keep waiting
-                Ok(Err(_)) | Err(_) => return, // channel closed
+                Ok(Err(_)) => return,  // watcher error
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Periodic re-scan: watch any subdirectories that now exist
+                    for subdir in &subdirs {
+                        let path = site_dir.join(subdir);
+                        if path.exists() && !watched_dirs.contains(&path) {
+                            if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+                                eprintln!("Warning: could not watch {}: {e}", path.display());
+                            } else {
+                                println!("  watching: {}", path.display());
+                                watched_dirs.insert(path);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
         };
 
@@ -1153,9 +1151,16 @@ fn watch_and_rebuild(
             continue;
         }
 
-        // Convert dirty paths to site-relative strings for the conductor
+        // Convert dirty paths to site-relative strings for the conductor.
+        // The notify watcher returns absolute paths; strip the site_dir prefix
+        // so the conductor can join them with its own site_dir cleanly.
         let paths: Vec<String> = dirty.iter()
-            .filter_map(|p| p.to_str().map(|s| s.to_string()))
+            .filter_map(|p| {
+                p.strip_prefix(site_dir)
+                    .unwrap_or(p)
+                    .to_str()
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         println!("  rebuild: {} file(s) changed [{}]",

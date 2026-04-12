@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use site_index::DIR_TEMPLATES;
 use template::constants::KEY_PRESEMBLE_FILE;
 
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
@@ -43,48 +42,6 @@ fn line_to_byte_offset(src: &str, line: u32) -> usize {
         .sum()
 }
 
-/// Used by the conductor's rebuild_page method.
-struct SimpleTemplateRegistry {
-    repo: site_repository::SiteRepository,
-}
-
-impl template::TemplateRegistry for SimpleTemplateRegistry {
-    fn resolve(&self, name: &str) -> Option<Vec<template::dom::Node>> {
-        if let Some((file_part, def_name)) = name.split_once("::") {
-            // File-qualified: load the file, extract definitions, return the named one.
-            // Strip leading "templates/" if present.
-            let file_stem = std::path::Path::new(file_part)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(file_part);
-            let nodes = self.load_nodes(file_stem)?;
-            let (_, defs) = template::extract_definitions(nodes);
-            defs.get(def_name).cloned()
-        } else {
-            // Bare name: return main nodes (non-definition content).
-            let nodes = self.load_nodes(name)?;
-            let (main, _) = template::extract_definitions(nodes);
-            if main.is_empty() { None } else { Some(main) }
-        }
-    }
-}
-
-impl SimpleTemplateRegistry {
-    /// Load and parse a template file by stem using the repo.
-    /// Tries item template first, then partial.
-    fn load_nodes(&self, file_stem: &str) -> Option<Vec<template::dom::Node>> {
-        let stem = site_index::SchemaStem::new(file_stem);
-        let (src, is_hiccup) = self
-            .repo
-            .item_template_source(&stem)
-            .or_else(|| self.repo.partial_template_source(file_stem))?;
-        if is_hiccup {
-            template::parse_template_hiccup(&src).ok()
-        } else {
-            template::parse_template_xml(&src).ok()
-        }
-    }
-}
 
 #[allow(dead_code)]
 pub struct Conductor {
@@ -122,7 +79,7 @@ impl Conductor {
             }
             // Collection schemas keyed as "{stem}/index"
             if let Some(src) = repo.collection_schema_source(&stem) {
-                schema_cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
+                schema_cache.insert(site_index::schema_cache_key(stem.as_str(), "index"), src);
             }
         }
 
@@ -173,9 +130,9 @@ impl Conductor {
             if let Some(src) = repo.schema_source(&stem) {
                 cache.insert(stem.as_str().to_string(), src);
             }
-            // Collection schemas keyed as "{stem}/index" (or "/index" for root)
+            // Collection schemas keyed as "{stem}/index" (or "index" for root)
             if let Some(src) = repo.collection_schema_source(&stem) {
-                cache.insert(if stem.as_str().is_empty() { "index".to_string() } else { format!("{}/index", stem.as_str()) }, src);
+                cache.insert(site_index::schema_cache_key(stem.as_str(), "index"), src);
             }
         }
     }
@@ -197,126 +154,32 @@ impl Conductor {
         self.site_graph.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Build the full site graph by iterating all schema stems and content slugs.
+    /// Build the full site graph using the shared build pipeline.
+    ///
+    /// Builds item pages, collection/index pages, and a legacy fallback root
+    /// page — matching the CLI build pipeline. Link resolution happens lazily
+    /// per-page in `rebuild_page`, not here.
     ///
     /// Skips items that fail to parse or have no schema. Errors are logged but
-    /// non-fatal. This is intentionally a simplified build: it covers item pages
-    /// only (no collection pages, no site index, no link expression resolution).
+    /// non-fatal.
     pub fn build_full_graph(&self) -> Result<(), String> {
-        let mut graph = site_index::SiteGraph::new();
         // Use a fresh repo to discover current files (self.repo may be stale after scaffold)
         let repo = site_repository::SiteRepository::builder()
             .from_dir(&self.site_dir)
             .build();
 
-        for stem in repo.schema_stems() {
-            let schema_src = match self.schema_source(stem.as_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-            let grammar = match schema::parse_schema(&schema_src) {
-                Ok(g) => g,
-                Err(e) => {
-                    eprintln!("conductor: schema parse error for {}: {e:?}", stem.as_str());
-                    continue;
-                }
-            };
+        let result = site_builder::build_graph(
+            &repo,
+            &self.output_dir,
+            site_builder::SourceAttachment::Attach,
+        );
 
-            for slug in repo.content_slugs(&stem) {
-                let content_src = match repo.content_source(&stem, &slug) {
-                    Some(s) => s,
-                    None => continue,
-                };
-
-                let doc = match content::parse_and_assign(&content_src, &grammar) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!(
-                            "conductor: parse error for {}/{}: {e}",
-                            stem.as_str(),
-                            slug
-                        );
-                        continue;
-                    }
-                };
-
-                let mut data = template::build_article_graph_with_source(&doc, &grammar, &content_src);
-
-                let url_path = if stem.as_str().is_empty() {
-                    site_index::UrlPath::new(format!("/{slug}"))
-                } else {
-                    site_index::UrlPath::new(format!("/{}/{}", stem.as_str(), slug))
-                };
-                data.insert("url", template::Value::Text(url_path.as_str().to_string()));
-                data.insert(
-                    "_presemble_stem",
-                    template::Value::Text(stem.as_str().to_string()),
-                );
-                let presemble_file = if stem.as_str().is_empty() {
-                    format!("content/{slug}.md")
-                } else {
-                    format!("content/{}/{}.md", stem.as_str(), slug)
-                };
-                data.insert(
-                    KEY_PRESEMBLE_FILE,
-                    template::Value::Text(presemble_file),
-                );
-
-                let title = match data.resolve(&["title"]) {
-                    Some(template::Value::Text(t)) => t.clone(),
-                    _ => slug.clone(),
-                };
-                data.insert(
-                    "link",
-                    template::Value::Record(template::synthesize_link(
-                        &title,
-                        url_path.as_str(),
-                    )),
-                );
-
-                let content_path = repo.content_path(&stem, &slug);
-                let schema_path = repo.schema_path(&stem);
-                let template_path = self
-                    .repo
-                    .item_template_source(&stem)
-                    .map(|_| {
-                        self.site_dir
-                            .join(DIR_TEMPLATES)
-                            .join(stem.as_str())
-                            .join("item")
-                    })
-                    .unwrap_or_else(|| {
-                        self.site_dir
-                            .join(DIR_TEMPLATES)
-                            .join(format!("{}.html", stem.as_str()))
-                    });
-
-                let output_path = self
-                    .output_dir
-                    .join(stem.as_str())
-                    .join(&slug)
-                    .join("index.html");
-
-                let node = site_index::SiteNode {
-                    url_path: url_path.clone(),
-                    output_path,
-                    source_path: content_path.clone(),
-                    deps: std::collections::HashSet::from([content_path, schema_path]),
-                    role: site_index::NodeRole::Page(site_index::PageData {
-                        page_kind: site_index::PageKind::Item,
-                        schema_stem: stem.clone(),
-                        template_path,
-                        content_path: repo.content_path(&stem, &slug),
-                        schema_path: repo.schema_path(&stem),
-                        data,
-                    }),
-                };
-
-                graph.insert(node);
-            }
+        // Log parse errors (non-fatal)
+        for (label, msg) in &result.parse_errors {
+            eprintln!("conductor: parse error for {label}: {msg}");
         }
 
-        *self.site_graph.write().unwrap_or_else(|e| e.into_inner()) = graph;
+        *self.site_graph.write().unwrap_or_else(|e| e.into_inner()) = result.graph;
         Ok(())
     }
 
@@ -430,11 +293,7 @@ impl Conductor {
 
         // Load grammar from cache — use collection schema for index files
         let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = if slug == "index" {
-            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
-        } else {
-            stem.clone()
-        };
+        let schema_key = site_index::schema_cache_key(&stem, slug);
         let schema_src = self
             .schema_source(&schema_key)
             .ok_or_else(|| format!("no schema for {schema_key}"))?;
@@ -453,26 +312,12 @@ impl Conductor {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
-        let url_path = if stem.is_empty() {
-            if slug == "index" {
-                "/".to_string()
-            } else {
-                format!("/{slug}")
-            }
-        } else if slug == "index" {
-            format!("/{stem}/")
-        } else {
-            format!("/{stem}/{slug}")
-        };
+        let url_path = site_index::url_for_stem_slug(&stem, slug);
+        let presemble_file = site_index::content_file_path(&stem, slug);
 
         // Add metadata
         graph.insert("url", template::Value::Text(url_path.clone()));
         graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
-        let presemble_file = if stem.is_empty() {
-            format!("content/{slug}.md")
-        } else {
-            format!("content/{stem}/{slug}.md")
-        };
         graph.insert(
             KEY_PRESEMBLE_FILE,
             template::Value::Text(presemble_file),
@@ -490,27 +335,7 @@ impl Conductor {
         // Resolve link expressions using the current site graph as index
         {
             let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-            let url_index: expressions::UrlIndex = site_graph
-                .iter_pages_by_kind(site_index::PageKind::Item)
-                .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
-                .collect();
-            let mut stem_index: expressions::StemIndex = HashMap::new();
-            for node in site_graph.iter_pages_by_kind(site_index::PageKind::Item) {
-                if let Some(pd) = node.page_data() {
-                    stem_index
-                        .entry(pd.schema_stem.clone())
-                        .or_default()
-                        .push((node.url_path.clone(), pd.data.clone()));
-                }
-            }
-            // Build edge index for RefsTo support
-            let mut all_edges = Vec::new();
-            for node in site_graph.iter_pages_by_kind(site_index::PageKind::Item) {
-                if let Some(pd) = node.page_data() {
-                    all_edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
-                }
-            }
-            let edge_index = expressions::build_edge_index(&all_edges);
+            let (url_index, stem_index, edge_index) = expressions::build_indexes_from_graph(&site_graph);
             let current_url = site_index::UrlPath::new(&url_path);
             expressions::resolve_link_expressions_in_graph(
                 &mut graph,
@@ -524,31 +349,9 @@ impl Conductor {
         }
 
         // Inject collection data so templates can iterate (e.g. data-each="input.post")
-        // Mirrors build_render_context in publisher_cli: for each unique schema stem found
-        // in the site graph's item pages, insert a Value::List of all item data graphs
-        // under that stem key — but only if the page's own data doesn't already have that key.
         {
             let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-            let mut stems: Vec<site_index::SchemaStem> = site_graph
-                .iter_pages_by_kind(site_index::PageKind::Item)
-                .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.clone()))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            stems.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            for stem_key in stems {
-                // Don't overwrite page's own slots (e.g., a resolved "author" link)
-                // with the collection of all authors.
-                if graph.resolve(&[stem_key.as_str()]).is_some() {
-                    continue;
-                }
-                let items: Vec<template::Value> = site_graph
-                    .items_for_stem(&stem_key)
-                    .into_iter()
-                    .filter_map(|n| n.page_data().map(|pd| template::Value::Record(pd.data.clone())))
-                    .collect();
-                graph.insert(stem_key.as_str(), template::Value::List(items));
-            }
+            expressions::inject_collections(&mut graph, &site_graph);
         }
 
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
@@ -577,9 +380,7 @@ impl Conductor {
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
         // Create render context with fresh repo
-        let registry = SimpleTemplateRegistry {
-            repo: fresh_repo,
-        };
+        let registry = template_registry::FileTemplateRegistry::new(fresh_repo);
         let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
         // Wrap page data under "input" key (template expects input.field paths)
@@ -592,17 +393,7 @@ impl Conductor {
         let html = template::serialize_nodes(&transformed);
 
         // Write output
-        let output_path = if stem.is_empty() {
-            if slug == "index" {
-                self.output_dir.join("index.html")
-            } else {
-                self.output_dir.join(slug).join("index.html")
-            }
-        } else if slug == "index" {
-            self.output_dir.join(&stem).join("index.html")
-        } else {
-            self.output_dir.join(&stem).join(slug).join("index.html")
-        };
+        let output_path = site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("mkdir error: {e}"))?;
@@ -727,11 +518,7 @@ impl Conductor {
 
         // Load grammar from cache — use collection schema for index.md, item schema otherwise
         let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = if slug == "index" {
-            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
-        } else {
-            stem.clone()
-        };
+        let schema_key = site_index::schema_cache_key(&stem, slug);
         let grammar = match self.schema_source(&schema_key) {
             Some(src) => match schema::parse_schema(&src) {
                 Ok(g) => g,
@@ -784,11 +571,7 @@ impl Conductor {
 
         // Load grammar from cache — use collection schema for index files
         let bslug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = if bslug == "index" {
-            if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
-        } else {
-            stem.clone()
-        };
+        let schema_key = site_index::schema_cache_key(&stem, bslug);
         let grammar = match self.schema_source(&schema_key) {
             Some(src) => schema::parse_schema(&src).map_err(|e| format!("schema parse error: {e:?}"))?,
             None => return Err(format!("no schema for: {schema_key}")),
@@ -831,6 +614,65 @@ impl Conductor {
         self.rebuild_page(&abs_path, &new_source)
     }
 
+    /// Render a list of content files, returning rebuilt pages, failed pages, and errors.
+    fn render_pages(&self, content_paths: &[PathBuf]) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
+        let mut rebuilt_pages = Vec::new();
+        let mut failed_pages = Vec::new();
+        let mut new_errors = HashMap::new();
+
+        for content_path in content_paths {
+            let text = match std::fs::read_to_string(content_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("conductor: cannot read {}: {e}", content_path.display());
+                    continue;
+                }
+            };
+            match self.rebuild_page(content_path, &text) {
+                Ok(pages) => rebuilt_pages.extend(pages),
+                Err(e) => {
+                    eprintln!("conductor: rebuild failed for {}: {e}", content_path.display());
+                    if let Some(url) = self.url_for_content_path(content_path) {
+                        new_errors.insert(url.clone(), vec![e]);
+                        failed_pages.push(url);
+                    }
+                }
+            }
+        }
+        (rebuilt_pages, failed_pages, new_errors)
+    }
+
+    /// Update build errors and create events from render results.
+    fn finalize_render(
+        &self,
+        rebuilt_pages: Vec<String>,
+        failed_pages: Vec<String>,
+        new_errors: HashMap<String, Vec<String>>,
+        has_stylesheet_change: bool,
+    ) -> Vec<ConductorEvent> {
+        // Update build errors
+        {
+            let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
+            for page in &rebuilt_pages {
+                let bare = page.trim_end_matches('/').to_string();
+                errors.remove(&bare);
+                errors.remove(&format!("{bare}/"));
+            }
+            for (url, msgs) in new_errors {
+                errors.insert(url, msgs);
+            }
+        }
+
+        let mut events = Vec::new();
+        if !rebuilt_pages.is_empty() || has_stylesheet_change {
+            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
+        }
+        if !failed_pages.is_empty() {
+            events.push(ConductorEvent::BuildFailed { error_pages: failed_pages });
+        }
+        events
+    }
+
     /// Derive the URL path for a content file (for error tracking).
     fn url_for_content_path(&self, content_path: &Path) -> Option<String> {
         let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
@@ -839,14 +681,7 @@ impl Conductor {
             _ => return None,
         };
         let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
-        let url = if stem.is_empty() {
-            if slug == "index" { "/".to_string() } else { format!("/{slug}") }
-        } else if slug == "index" {
-            format!("/{stem}/")
-        } else {
-            format!("/{stem}/{slug}")
-        };
-        Some(url)
+        Some(site_index::url_for_stem_slug(&stem, slug))
     }
 
     /// Handle a command and return a response plus any events to broadcast.
@@ -943,10 +778,12 @@ impl Conductor {
                 let mut has_stylesheet_change = false;
 
                 for p in &paths {
-                    let path = Path::new(p);
-                    match site_idx.classify(path) {
+                    // Resolve relative paths (e.g. from ListContent) against site_dir
+                    let raw = Path::new(p);
+                    let path = if raw.is_absolute() { raw.to_path_buf() } else { self.site_dir.join(raw) };
+                    match site_idx.classify(&path) {
                         site_index::FileKind::Content { schema_stem } => {
-                            content_to_rebuild.push(PathBuf::from(p));
+                            content_to_rebuild.push(path.clone());
                             stems_to_rebuild.insert(schema_stem.as_str().to_string());
                         }
                         site_index::FileKind::Schema { stem } => {
@@ -980,54 +817,10 @@ impl Conductor {
                 }
 
                 // 6. Rebuild each content file
-                let mut rebuilt_pages: Vec<String> = Vec::new();
-                let mut failed_pages: Vec<String> = Vec::new();
-                let mut new_errors: HashMap<String, Vec<String>> = HashMap::new();
+                let (rebuilt_pages, failed_pages, new_errors) = self.render_pages(&content_to_rebuild);
 
-                for content_path in &content_to_rebuild {
-                    let text = match std::fs::read_to_string(content_path) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            eprintln!("conductor: cannot read {}: {e}", content_path.display());
-                            continue;
-                        }
-                    };
-
-                    match self.rebuild_page(content_path, &text) {
-                        Ok(pages) => {
-                            rebuilt_pages.extend(pages);
-                        }
-                        Err(e) => {
-                            eprintln!("conductor: rebuild failed for {}: {e}", content_path.display());
-                            if let Some(url) = self.url_for_content_path(content_path) {
-                                new_errors.insert(url.clone(), vec![e]);
-                                failed_pages.push(url);
-                            }
-                        }
-                    }
-                }
-
-                // 7. Update build errors
-                {
-                    let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
-                    for page in &rebuilt_pages {
-                        let bare = page.trim_end_matches('/').to_string();
-                        errors.remove(&bare);
-                        errors.remove(&format!("{bare}/"));
-                    }
-                    for (url, msgs) in new_errors {
-                        errors.insert(url, msgs);
-                    }
-                }
-
-                // 8. Build events
-                let mut events = Vec::new();
-                if !rebuilt_pages.is_empty() || has_stylesheet_change {
-                    events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
-                }
-                if !failed_pages.is_empty() {
-                    events.push(ConductorEvent::BuildFailed { error_pages: failed_pages });
-                }
+                // 7-8. Update build errors and build events
+                let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, has_stylesheet_change);
 
                 if events.is_empty() {
                     CommandResult::ok()
@@ -1460,7 +1253,27 @@ impl Conductor {
                                 self.refresh_site_index();
                                 // Rebuild the full graph with the new content
                                 let _ = self.build_full_graph();
-                                CommandResult::ok()
+
+                                // Render all pages in the site graph
+                                let content_paths: Vec<PathBuf> = {
+                                    let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+                                    graph.iter()
+                                        .filter_map(|node| {
+                                            node.page_data()
+                                                .and_then(|pd| pd.data.resolve(&[KEY_PRESEMBLE_FILE]))
+                                                .and_then(|v| if let template::Value::Text(f) = v { Some(self.site_dir.join(f)) } else { None })
+                                        })
+                                        .collect()
+                                };
+
+                                let (rebuilt, failed, errors) = self.render_pages(&content_paths);
+                                let events = self.finalize_render(rebuilt, failed, errors, false);
+
+                                if events.is_empty() {
+                                    CommandResult::ok()
+                                } else {
+                                    CommandResult::ok_with_events(events)
+                                }
                             }
                             Err(e) => CommandResult::error(e),
                         }
@@ -2110,5 +1923,173 @@ mod smoke_tests {
             }
             other => panic!("expected DocumentText(Some(_)), got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod build_full_graph_collection_tests {
+    use super::*;
+
+    const ITEM_SCHEMA_SRC: &str =
+        "# Post title {#title}\noccurs\n: exactly once\n";
+    const COLLECTION_SCHEMA_SRC: &str =
+        "# Heading {#heading}\noccurs\n: exactly once\n";
+    const ITEM_TEMPLATE_SRC: &str = "[:div]";
+    const COLLECTION_TEMPLATE_SRC: &str = "[:div]";
+    const ITEM_CONTENT_SRC: &str = "title: Hello\n";
+    const COLLECTION_CONTENT_SRC: &str = "heading: Posts\n";
+
+    /// Create a conductor for a tempdir (filesystem-backed).
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 1: collection_page_in_graph
+    // -------------------------------------------------------------------------
+
+    /// Build a site with a post schema, item content, and a collection index.
+    ///
+    /// After build_full_graph() the site_graph must contain a node at
+    /// `/post/` with PageKind::Collection.
+    fn build_site_with_collection() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
+        std::fs::create_dir_all(root.join("templates/post")).expect("create templates/post");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
+
+        // Item schema + template + content
+        std::fs::write(root.join("schemas/post/item.md"), ITEM_SCHEMA_SRC).expect("write item schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), ITEM_TEMPLATE_SRC).expect("write item template");
+        std::fs::write(root.join("content/post/hello.md"), ITEM_CONTENT_SRC).expect("write item content");
+
+        // Collection schema + template + content
+        std::fs::write(root.join("schemas/post/index.md"), COLLECTION_SCHEMA_SRC).expect("write collection schema");
+        std::fs::write(root.join("templates/post/index.hiccup"), COLLECTION_TEMPLATE_SRC).expect("write collection template");
+        std::fs::write(root.join("content/post/index.md"), COLLECTION_CONTENT_SRC).expect("write collection content");
+
+        tmp
+    }
+
+    #[test]
+    fn collection_page_in_graph() {
+        let tmp = build_site_with_collection();
+        let conductor = make_conductor(&tmp);
+
+        let graph = conductor.site_graph();
+        let url = site_index::UrlPath::new("/post/");
+        let node = graph.get(&url)
+            .unwrap_or_else(|| panic!("expected node at /post/ in site graph; keys: {:?}",
+                graph.iter().map(|n| n.url_path.as_str()).collect::<Vec<_>>()));
+
+        assert!(
+            matches!(node.role, site_index::NodeRole::Page(site_index::PageData { page_kind: site_index::PageKind::Collection, .. })),
+            "node at /post/ should have PageKind::Collection, got role: {:?}",
+            node.role
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 2: root_collection_page_in_graph
+    // -------------------------------------------------------------------------
+
+    fn build_root_collection_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas")).expect("create schemas");
+        std::fs::create_dir_all(root.join("templates")).expect("create templates");
+        std::fs::create_dir_all(root.join("content")).expect("create content");
+
+        // Root collection schema, content, template
+        std::fs::write(root.join("schemas/index.md"), COLLECTION_SCHEMA_SRC).expect("write root schema");
+        std::fs::write(root.join("templates/index.hiccup"), COLLECTION_TEMPLATE_SRC).expect("write root template");
+        std::fs::write(root.join("content/index.md"), "heading: Home\n").expect("write root content");
+
+        tmp
+    }
+
+    #[test]
+    fn root_collection_page_in_graph() {
+        let tmp = build_root_collection_site();
+        let conductor = make_conductor(&tmp);
+
+        let graph = conductor.site_graph();
+        let url = site_index::UrlPath::new("/");
+        let node = graph.get(&url)
+            .unwrap_or_else(|| panic!("expected node at / in site graph; keys: {:?}",
+                graph.iter().map(|n| n.url_path.as_str()).collect::<Vec<_>>()));
+
+        assert!(
+            matches!(node.role, site_index::NodeRole::Page(site_index::PageData { page_kind: site_index::PageKind::Collection, .. })),
+            "node at / should have PageKind::Collection"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 3: legacy_fallback_root_page
+    // -------------------------------------------------------------------------
+
+    /// A site with item pages and a root collection template but NO root schema
+    /// or root content. After build_full_graph() the root `/` node should still
+    /// appear (legacy fallback behaviour).
+    fn build_legacy_fallback_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
+        std::fs::create_dir_all(root.join("templates")).expect("create templates");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
+
+        // Item schema + content (no collection schema/content for root)
+        std::fs::write(root.join("schemas/post/item.md"), ITEM_SCHEMA_SRC).expect("write item schema");
+        std::fs::write(root.join("content/post/hello.md"), ITEM_CONTENT_SRC).expect("write item content");
+
+        // Root collection template only — no root schema or content
+        std::fs::write(root.join("templates/index.hiccup"), COLLECTION_TEMPLATE_SRC).expect("write root template");
+
+        tmp
+    }
+
+    #[test]
+    fn legacy_fallback_root_page() {
+        let tmp = build_legacy_fallback_site();
+        let conductor = make_conductor(&tmp);
+
+        let graph = conductor.site_graph();
+        let url = site_index::UrlPath::new("/");
+        assert!(
+            graph.get(&url).is_some(),
+            "expected legacy fallback node at / even without root schema/content; keys: {:?}",
+            graph.iter().map(|n| n.url_path.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test 4: collection_deps_include_item_content
+    // -------------------------------------------------------------------------
+
+    /// The collection node at /post/ should list content/post/hello.md as a dep.
+    #[test]
+    fn collection_deps_include_item_content() {
+        let tmp = build_site_with_collection();
+        let conductor = make_conductor(&tmp);
+
+        let graph = conductor.site_graph();
+        let url = site_index::UrlPath::new("/post/");
+        let node = graph.get(&url)
+            .unwrap_or_else(|| panic!("expected node at /post/"));
+
+        let expected = tmp.path().join("content/post/hello.md");
+        assert!(
+            node.deps.contains(&expected),
+            "deps of /post/ should contain content/post/hello.md; deps: {:?}",
+            node.deps
+        );
     }
 }
