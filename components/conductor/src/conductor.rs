@@ -697,6 +697,65 @@ impl Conductor {
         self.rebuild_page(&abs_path, &new_source)
     }
 
+    /// Render a list of content files, returning rebuilt pages, failed pages, and errors.
+    fn render_pages(&self, content_paths: &[PathBuf]) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
+        let mut rebuilt_pages = Vec::new();
+        let mut failed_pages = Vec::new();
+        let mut new_errors = HashMap::new();
+
+        for content_path in content_paths {
+            let text = match std::fs::read_to_string(content_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("conductor: cannot read {}: {e}", content_path.display());
+                    continue;
+                }
+            };
+            match self.rebuild_page(content_path, &text) {
+                Ok(pages) => rebuilt_pages.extend(pages),
+                Err(e) => {
+                    eprintln!("conductor: rebuild failed for {}: {e}", content_path.display());
+                    if let Some(url) = self.url_for_content_path(content_path) {
+                        new_errors.insert(url.clone(), vec![e]);
+                        failed_pages.push(url);
+                    }
+                }
+            }
+        }
+        (rebuilt_pages, failed_pages, new_errors)
+    }
+
+    /// Update build errors and create events from render results.
+    fn finalize_render(
+        &self,
+        rebuilt_pages: Vec<String>,
+        failed_pages: Vec<String>,
+        new_errors: HashMap<String, Vec<String>>,
+        has_stylesheet_change: bool,
+    ) -> Vec<ConductorEvent> {
+        // Update build errors
+        {
+            let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
+            for page in &rebuilt_pages {
+                let bare = page.trim_end_matches('/').to_string();
+                errors.remove(&bare);
+                errors.remove(&format!("{bare}/"));
+            }
+            for (url, msgs) in new_errors {
+                errors.insert(url, msgs);
+            }
+        }
+
+        let mut events = Vec::new();
+        if !rebuilt_pages.is_empty() || has_stylesheet_change {
+            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
+        }
+        if !failed_pages.is_empty() {
+            events.push(ConductorEvent::BuildFailed { error_pages: failed_pages });
+        }
+        events
+    }
+
     /// Derive the URL path for a content file (for error tracking).
     fn url_for_content_path(&self, content_path: &Path) -> Option<String> {
         let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
@@ -841,54 +900,10 @@ impl Conductor {
                 }
 
                 // 6. Rebuild each content file
-                let mut rebuilt_pages: Vec<String> = Vec::new();
-                let mut failed_pages: Vec<String> = Vec::new();
-                let mut new_errors: HashMap<String, Vec<String>> = HashMap::new();
+                let (rebuilt_pages, failed_pages, new_errors) = self.render_pages(&content_to_rebuild);
 
-                for content_path in &content_to_rebuild {
-                    let text = match std::fs::read_to_string(content_path) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            eprintln!("conductor: cannot read {}: {e}", content_path.display());
-                            continue;
-                        }
-                    };
-
-                    match self.rebuild_page(content_path, &text) {
-                        Ok(pages) => {
-                            rebuilt_pages.extend(pages);
-                        }
-                        Err(e) => {
-                            eprintln!("conductor: rebuild failed for {}: {e}", content_path.display());
-                            if let Some(url) = self.url_for_content_path(content_path) {
-                                new_errors.insert(url.clone(), vec![e]);
-                                failed_pages.push(url);
-                            }
-                        }
-                    }
-                }
-
-                // 7. Update build errors
-                {
-                    let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
-                    for page in &rebuilt_pages {
-                        let bare = page.trim_end_matches('/').to_string();
-                        errors.remove(&bare);
-                        errors.remove(&format!("{bare}/"));
-                    }
-                    for (url, msgs) in new_errors {
-                        errors.insert(url, msgs);
-                    }
-                }
-
-                // 8. Build events
-                let mut events = Vec::new();
-                if !rebuilt_pages.is_empty() || has_stylesheet_change {
-                    events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
-                }
-                if !failed_pages.is_empty() {
-                    events.push(ConductorEvent::BuildFailed { error_pages: failed_pages });
-                }
+                // 7-8. Update build errors and build events
+                let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, has_stylesheet_change);
 
                 if events.is_empty() {
                     CommandResult::ok()
@@ -1321,7 +1336,27 @@ impl Conductor {
                                 self.refresh_site_index();
                                 // Rebuild the full graph with the new content
                                 let _ = self.build_full_graph();
-                                CommandResult::ok()
+
+                                // Render all pages in the site graph
+                                let content_paths: Vec<PathBuf> = {
+                                    let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+                                    graph.iter()
+                                        .filter_map(|node| {
+                                            node.page_data()
+                                                .and_then(|pd| pd.data.resolve(&[KEY_PRESEMBLE_FILE]))
+                                                .and_then(|v| if let template::Value::Text(f) = v { Some(self.site_dir.join(f)) } else { None })
+                                        })
+                                        .collect()
+                                };
+
+                                let (rebuilt, failed, errors) = self.render_pages(&content_paths);
+                                let events = self.finalize_render(rebuilt, failed, errors, false);
+
+                                if events.is_empty() {
+                                    CommandResult::ok()
+                                } else {
+                                    CommandResult::ok_with_events(events)
+                                }
                             }
                             Err(e) => CommandResult::error(e),
                         }

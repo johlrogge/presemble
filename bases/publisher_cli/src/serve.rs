@@ -660,10 +660,6 @@ async fn scaffold_handler(
         theme: req.theme.clone(),
     }) {
         Ok(conductor::Response::Ok) => {
-            // Tell conductor about new files so it renders them
-            if let Ok(conductor::Response::ContentList(paths)) = state.conductor.send(&conductor::Command::ListContent) {
-                let _ = state.conductor.send(&conductor::Command::FileChanged { paths });
-            }
             axum::Json(EditResponse { ok: true, error: None })
         }
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
@@ -1087,8 +1083,10 @@ fn watch_and_rebuild(
 
     loop {
         // Wait for the first RELEVANT event (skip access events and non-source files).
+        // Use recv_timeout so we can periodically re-scan for new directories to watch
+        // (e.g. created by the scaffold wizard after startup).
         let first_paths: Vec<std::path::PathBuf> = loop {
-            match rx.recv() {
+            match rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(Ok(event)) if is_relevant_event(&event) => {
                     let paths: Vec<_> = event.paths.iter()
                         .filter(|p| is_relevant_path(p))
@@ -1099,7 +1097,23 @@ fn watch_and_rebuild(
                     }
                 }
                 Ok(Ok(_)) => continue, // irrelevant event kind or path — keep waiting
-                Ok(Err(_)) | Err(_) => return, // channel closed
+                Ok(Err(_)) => return,  // watcher error
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Periodic re-scan: watch any subdirectories that now exist
+                    for subdir in &subdirs {
+                        let path = site_dir.join(subdir);
+                        if path.exists() && !watched_dirs.contains(&path) {
+                            if let Err(e) = watcher.watch(&path, RecursiveMode::Recursive) {
+                                eprintln!("Warning: could not watch {}: {e}", path.display());
+                            } else {
+                                println!("  watching: {}", path.display());
+                                watched_dirs.insert(path);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
         };
 
