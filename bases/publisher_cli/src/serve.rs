@@ -81,8 +81,14 @@ struct AppState {
 }
 
 async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
+    // Ensure the site directory exists so canonicalize produces an absolute path.
+    // In serve mode the dir will be populated by scaffold or the user.
+    if !site_dir.exists() {
+        std::fs::create_dir_all(site_dir)
+            .map_err(|e| CliError::Render(format!("cannot create site directory {}: {e}", site_dir.display())))?;
+    }
     let site_dir = std::fs::canonicalize(site_dir)
-        .unwrap_or_else(|_| site_dir.to_path_buf());
+        .map_err(|e| CliError::Render(format!("cannot resolve site directory {}: {e}", site_dir.display())))?;
     let site_dir = site_dir.as_path();
 
     let out_dir = crate::output_dir(site_dir);
@@ -1145,9 +1151,16 @@ fn watch_and_rebuild(
             continue;
         }
 
-        // Convert dirty paths to site-relative strings for the conductor
+        // Convert dirty paths to site-relative strings for the conductor.
+        // The notify watcher returns absolute paths; strip the site_dir prefix
+        // so the conductor can join them with its own site_dir cleanly.
         let paths: Vec<String> = dirty.iter()
-            .filter_map(|p| p.to_str().map(|s| s.to_string()))
+            .filter_map(|p| {
+                p.strip_prefix(site_dir)
+                    .unwrap_or(p)
+                    .to_str()
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         println!("  rebuild: {} file(s) changed [{}]",
