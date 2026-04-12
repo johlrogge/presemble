@@ -802,10 +802,12 @@ impl Conductor {
                 let mut has_stylesheet_change = false;
 
                 for p in &paths {
-                    let path = Path::new(p);
-                    match site_idx.classify(path) {
+                    // Resolve relative paths (e.g. from ListContent) against site_dir
+                    let raw = Path::new(p);
+                    let path = if raw.is_absolute() { raw.to_path_buf() } else { self.site_dir.join(raw) };
+                    match site_idx.classify(&path) {
                         site_index::FileKind::Content { schema_stem } => {
-                            content_to_rebuild.push(PathBuf::from(p));
+                            content_to_rebuild.push(path.clone());
                             stems_to_rebuild.insert(schema_stem.as_str().to_string());
                         }
                         site_index::FileKind::Schema { stem } => {
