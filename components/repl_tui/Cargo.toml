@@ -1,0 +1,20 @@
+[package]
+name = "repl_tui"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.polylith]
+interface = "repl_tui"
+
+[dependencies]
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+evaluator = { workspace = true }
+reader = { workspace = true }
+forms = { workspace = true }
+edn = { workspace = true }
+nrepl = { workspace = true }
+conductor = { workspace = true }
+site_repository = { workspace = true }
+macros = { workspace = true }
+template = { workspace = true }

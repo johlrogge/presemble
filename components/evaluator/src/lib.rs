@@ -44,6 +44,29 @@ pub fn eval_str(code: &str, conductor: &conductor::Conductor) -> Result<template
     eval(&form, conductor)
 }
 
+/// Evaluate a string expression against a persistent root environment.
+/// Used by the REPL so that `def` forms accumulate across evaluations.
+/// The caller is responsible for initializing `root` with `register_builtins`,
+/// `register_macro_docs`, and `load_prelude` before the first call.
+pub fn eval_str_with_root(
+    code: &str,
+    root: &RootEnv,
+    conductor: &conductor::Conductor,
+) -> Result<template::Value, String> {
+    let form = reader::read(code).map_err(|e| format!("read error: {e}"))?;
+    let expanded = macros::macroexpand(form);
+    let env = root.snapshot();
+    eval_in_env(&expanded, &env, root, conductor)
+}
+
+/// Initialise a `RootEnv` with builtins, macro docs, and the prelude.
+/// Returns `Err` if the prelude fails to load.
+pub fn init_root(root: &RootEnv, conductor: &conductor::Conductor) -> Result<(), String> {
+    primitives::register_builtins(root);
+    register_macro_docs(&root.doc_registry);
+    load_prelude(root, conductor)
+}
+
 /// Internal evaluation entry point — used by closures calling back into the evaluator.
 /// Takes an explicit lexical environment and root env in addition to the conductor.
 pub(crate) fn eval_in_env(

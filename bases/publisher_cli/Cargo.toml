@@ -25,6 +25,7 @@ content_editor = { workspace = true }
 lsp_service = { workspace = true }
 stylesheet = { workspace = true }
 site_templates = { workspace = true }
+repl_tui = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync"] }

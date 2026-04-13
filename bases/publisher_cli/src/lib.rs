@@ -197,6 +197,8 @@ enum Command {
         /// Path to the site directory (optional — each tool call can specify its own site)
         site_dir: Option<String>,
     },
+    /// Start an interactive REPL for exploring the Presemble expression language
+    Repl,
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -243,6 +245,10 @@ pub fn run() -> Result<(), CliError> {
         Some(Command::Mcp { site_dir }) => {
             let dir = site_dir.as_deref().unwrap_or("site/");
             mcp_server::run(Path::new(dir)).map_err(CliError::Render)
+        }
+        Some(Command::Repl) => {
+            let backend = repl_tui::DirectBackend::new().map_err(CliError::Render)?;
+            repl_tui::run_repl(Box::new(backend)).map_err(|e| CliError::Render(e.to_string()))
         }
         None => {
             // backward compat: presemble <site-dir>
