@@ -13,6 +13,7 @@ Content is data. Templates are data. Schemas are the contracts between them.
 - **Editorial suggestions** — Claude and human editors push suggestions via the MCP server or conductor; each appears as an LSP diagnostic with accept/reject code actions
 - **Presemble Lisp** — content files include link expressions that assemble collections at build time: `(->> :post (sort-by :published :desc) (take 5))`. Reverse references (`(refs-to self)`) populate a slot with all pages that link to the current page.
 - **nREPL** — Calva and CIDER can jack in and evaluate expressions against the live content graph
+- **TUI REPL** — `presemble repl` opens a full-screen terminal REPL with EDN syntax highlighting, completion popup, doc panel, and command history; runs standalone with no conductor required, or connects automatically to a running one
 - **Site wizard** — point `presemble serve` at an empty directory for a browser-based starter scaffold
 - **Deployment URL rewriting** — authors write root-relative paths; the publisher rewrites them to relative, root-relative with base path, or absolute at build time
 
@@ -71,6 +72,26 @@ presemble nrepl my-site/
 
 Starts an nREPL server. Connect with Calva, CIDER, or `rep` and evaluate Presemble Lisp expressions against the live site graph.
 
+## TUI REPL
+
+```
+presemble repl               # standalone — no conductor needed
+presemble repl --port 1667   # connect to a conductor on a specific port
+```
+
+Opens a full-screen terminal REPL. With no flag, the REPL auto-discovers `.nrepl-port` in the current directory and its parents. If a conductor is found it connects automatically; otherwise it starts in standalone mode evaluating language primitives only.
+
+| Key | Action |
+|---|---|
+| Enter | Eval (when delimiters balanced), insert newline otherwise |
+| Ctrl+J | Force-eval regardless of balance |
+| Ctrl+O | Force-insert newline |
+| Tab | Trigger completion popup |
+| Ctrl+D | Quit |
+| Ctrl+L | Clear output panel |
+
+Features: EDN syntax highlighting, completion popup with inline doc hints, doc panel, and command history (Up/Down).
+
 ## Architecture
 
 Rust monorepo using [polylith](https://polylith.gitbook.io/polylith/). Components are shared libraries; bases are runtime wiring; projects are deployable binaries.
@@ -97,6 +118,7 @@ components/
   edn              — EDN parser
   bencode          — bencode codec for nREPL wire protocol
   nrepl            — nREPL server
+  repl_tui         — ratatui TUI REPL (standalone and connected modes)
   editorial_types  — shared types for the suggestion protocol
   fs_site_repository  — filesystem-backed SiteRepository
   mem_site_repository — in-memory SiteRepository for tests
@@ -128,6 +150,7 @@ ADRs live in `docs/adr/`. The presemble.io site is in `site/` and is built with 
 | `components/lsp_service` | [components/lsp_service/README.md](components/lsp_service/README.md) |
 | `components/lsp_capabilities` | [components/lsp_capabilities/README.md](components/lsp_capabilities/README.md) |
 | `components/site_builder` | [components/site_builder/README.md](components/site_builder/README.md) |
+| `components/repl_tui` | [components/repl_tui/README.md](components/repl_tui/README.md) |
 | `bases/publisher_cli` | [bases/publisher_cli/README.md](bases/publisher_cli/README.md) |
 | `bases/editor_server` | [bases/editor_server/README.md](bases/editor_server/README.md) |
 | `projects/publisher` | [projects/publisher/README.md](projects/publisher/README.md) |
@@ -146,6 +169,6 @@ Requires the Nix devenv shell. Do not install packages with `cargo install -g` o
 
 ## Version
 
-Current release: **0.33.0**
+Current release: **0.34.0**
 
 See [ROADMAP.md](ROADMAP.md) for the milestone plan and [RELEASING.md](RELEASING.md) for the release workflow.

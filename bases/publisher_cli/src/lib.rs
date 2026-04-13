@@ -197,6 +197,12 @@ enum Command {
         /// Path to the site directory (optional — each tool call can specify its own site)
         site_dir: Option<String>,
     },
+    /// Start an interactive REPL for exploring the Presemble expression language
+    Repl {
+        /// Connect to nREPL on this port instead of auto-discovering
+        #[arg(long)]
+        port: Option<u16>,
+    },
 }
 
 pub fn run() -> Result<(), CliError> {
@@ -244,6 +250,25 @@ pub fn run() -> Result<(), CliError> {
             let dir = site_dir.as_deref().unwrap_or("site/");
             mcp_server::run(Path::new(dir)).map_err(CliError::Render)
         }
+        Some(Command::Repl { port }) => {
+            let resolved_port = port.or_else(discover_nrepl_port);
+            match resolved_port {
+                Some(p) => {
+                    eprintln!("Connecting to conductor nREPL on port {p}...");
+                    let backend = repl_tui::NreplBackend::connect(p)
+                        .map_err(CliError::Render)?;
+                    repl_tui::run_repl(Box::new(backend))
+                        .map_err(|e| CliError::Render(e.to_string()))
+                }
+                None => {
+                    eprintln!("No running conductor found. Starting standalone REPL (no site context).");
+                    let backend = repl_tui::DirectBackend::new()
+                        .map_err(CliError::Render)?;
+                    repl_tui::run_repl(Box::new(backend))
+                        .map_err(|e| CliError::Render(e.to_string()))
+                }
+            }
+        }
         None => {
             // backward compat: presemble <site-dir>
             let site_dir = cli.site_dir
@@ -253,6 +278,20 @@ pub fn run() -> Result<(), CliError> {
                 std::process::exit(1);
             }
             Ok(())
+        }
+    }
+}
+
+fn discover_nrepl_port() -> Option<u16> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let port_file = dir.join(".nrepl-port");
+        if port_file.exists() {
+            let content = std::fs::read_to_string(&port_file).ok()?;
+            return content.trim().parse().ok();
+        }
+        if !dir.pop() {
+            return None;
         }
     }
 }

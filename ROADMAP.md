@@ -444,6 +444,28 @@ referenced. ✓
 
 ---
 
+## Done — "Self-contained REPL" (ADR-039)
+
+Shipped in v0.35.0.
+
+**Goal:** Make the evaluator discoverable and interactive. Authors and developers can explore
+the expression language, query site data, and test transforms from a TUI REPL — either standalone
+or connected to a running conductor via nREPL.
+
+**Deliverables:**
+- [x] Documentation metadata system — `DocRegistry`, `DocEntry`, docstrings preserved through macro expansion
+- [x] nREPL `completions` and `info` ops wired to the doc registry
+- [x] ratatui TUI REPL with output panel, doc panel, EDN syntax highlighting, completion popup
+- [x] Two backends: `DirectBackend` (standalone) and `NreplBackend` (conductor-connected via nREPL)
+- [x] nREPL client in `nrepl::client` — TCP jack-in with `.nrepl-port` auto-discovery
+- [x] Smart Enter with balanced-delimiter detection, Ctrl+J force-eval, Ctrl+O force-newline
+- [x] `presemble repl` CLI with `--port` flag and automatic conductor discovery
+
+**Success gate:** `presemble repl` launches a TUI, evaluates expressions, shows completions and
+docs. When a conductor is running, the REPL jacks in automatically and can query live site data. ✓
+
+---
+
 ## M11 — "Hosted multiplayer demo"
 
 **Target:** mid-May 2026
@@ -676,11 +698,10 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - Schema-to-template scaffolding (drag schema into template, auto-populate insert nodes)
 - Homoiconic editing: the edit surface and the content model are the same structure
 
-**REPL CLI client:**
-- The conductor (M4) already speaks an S-expression protocol — the REPL runtime exists
-- This deferred item is adding a CLI/editor client that jacks into the conductor
-- Calva and CIDER integration is possible because the protocol is nREPL-shaped
-- Evolution path: fixed vocabulary (M4) → composition and conditionals → embedded Lisp engine
+**REPL CLI client:** ✓ Shipped in v0.35.0 (ADR-039)
+- TUI REPL with nREPL jack-in to the conductor, standalone fallback
+- Calva and CIDER integration remains possible — the protocol is nREPL-shaped
+- Future: NED-based structural navigation with `E` to eval current form
 
 **Named body sections (brainstorm):**
 - The `----` separator could be extended with named sections: `---- {#named-section}`
