@@ -849,6 +849,42 @@ Each result is a list of edge records with `:source` and `:target` keys. Use the
 (->> (refs-to "/author/alice") (map :source))
 ```
 
+## TUI REPL
+
+```
+presemble repl
+presemble repl --port 1667
+```
+
+Opens a full-screen terminal REPL with three panels: output history, a doc panel, and an input editor.
+
+**Auto-discovery:** with no port flag, the REPL walks the current directory and its parents looking for a `.nrepl-port` file. If a running conductor is found it connects automatically in connected mode. If no conductor is running it starts in standalone mode — language primitives and prelude functions work fully; site-specific operations (e.g. `query`, `get-content`) return informative errors.
+
+### Key bindings
+
+| Key | Action |
+|---|---|
+| Enter | Eval when delimiters are balanced; insert newline otherwise |
+| Ctrl+J | Force-eval regardless of balance |
+| Ctrl+O | Force-insert newline |
+| Tab | Trigger completion popup |
+| Up / Down | Navigate completion popup (when open) or command history |
+| Esc | Dismiss completion popup |
+| Ctrl+L | Clear output panel |
+| Ctrl+D | Quit |
+
+### Features
+
+**EDN syntax highlighting** colours keywords (green), strings (yellow), numbers (magenta), and brackets and comments (dim).
+
+**Completion popup:** Tab on a partial symbol shows matching completions with inline doc hints. Enter accepts the selected candidate. The same completions are available whether the backend is standalone or connected — in connected mode they reflect the live conductor's symbol registry.
+
+**Doc panel:** updates automatically as you type. Shows the arglists and full doc string for the symbol immediately before the cursor.
+
+**Delimiter balancing:** Enter only evaluates when all `(`, `[`, `{` are closed and no string literal is left open (respecting `"…\"…"` escaping and `;` line comments). Use Ctrl+J to evaluate regardless.
+
+**Command history:** Up/Down navigate previous expressions when the completion popup is not open.
+
 ## Site wizard
 
 Point `presemble serve` at an empty directory and the browser opens a guided setup wizard. Six steps take you from zero to a fully styled, working site.

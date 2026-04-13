@@ -1,20 +1,42 @@
 # The Presemble REPL
 
-Evaluate expressions against your live site content from Calva, CIDER, or the command line.
+Evaluate expressions against your live site content — from the terminal, from Calva, CIDER, or the command line.
 
-`presemble nrepl site/` starts an nREPL server. Any nREPL-compatible client can connect: Calva in VS Code, CIDER in Emacs, or `rep` from the command line. Once connected, you evaluate Presemble Lisp expressions against the live content graph.
+`presemble repl` opens a full-screen terminal REPL. `presemble nrepl site/` starts an nREPL server for Calva, CIDER, or `rep`. Both evaluate Presemble Lisp expressions against the live content graph.
 
 ----
 
-### Connecting
+### TUI REPL
 
-Start the server:
+```
+presemble repl
+presemble repl --port 1667
+```
+
+The TUI REPL runs in the terminal with three panels: an output history, a doc panel, and an input editor.
+
+**Auto-discovery:** with no flag, the REPL walks the current directory and its parents looking for a `.nrepl-port` file written by a running conductor. If one is found it connects automatically. If no conductor is running it starts in standalone mode, where language primitives and prelude functions work fully and site-specific operations return informative errors.
+
+**Key bindings:**
+
+| Key | Action |
+|---|---|
+| Enter | Eval when delimiters are balanced; insert newline otherwise |
+| Ctrl+J | Force-eval regardless of balance |
+| Ctrl+O | Force-insert newline |
+| Tab | Completion popup |
+| Ctrl+D | Quit |
+| Ctrl+L | Clear output |
+
+**EDN syntax highlighting** colours keywords, strings, numbers, brackets, and comments. The **completion popup** shows matching symbols with inline doc hints. The **doc panel** shows arglists and the full doc string for the symbol under the cursor. **Command history** navigates with Up/Down.
+
+### nREPL
 
 ```
 presemble nrepl site/
 ```
 
-Connect with `rep` (command-line nREPL client):
+Starts an nREPL server. Connect with `rep` (command-line nREPL client):
 
 ```
 rep '(->> :post (sort-by :published :desc) (take 3))'
