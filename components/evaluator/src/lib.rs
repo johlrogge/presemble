@@ -56,20 +56,8 @@ pub(crate) fn eval_in_env(
         Form::Bool(b) => Ok(template::Value::Bool(*b)),
         Form::Nil => Ok(template::Value::Absent),
 
-        // Unnamespaced keywords: stem query (legacy; Phase 6 migrates to `query` fn)
-        Form::Keyword { namespace: None, name } => {
-            let items = conductor.query_items_for_stem(name);
-            let values: Vec<template::Value> = items
-                .into_iter()
-                .map(|(url, mut graph)| {
-                    graph.insert("url", template::Value::Text(url));
-                    template::Value::Record(graph)
-                })
-                .collect();
-            Ok(template::Value::List(values))
-        }
-
-        // Namespaced keywords are first-class values
+        // Keywords are first-class values (ADR-036 Phase 6)
+        // Use (query :stem) for explicit stem queries.
         Form::Keyword { namespace, name } => Ok(template::Value::Keyword {
             namespace: namespace.clone(),
             name: name.clone(),
@@ -280,16 +268,8 @@ pub(crate) fn eval_in_env(
                 "every?" => builtin_every(&items[1..], env, root, conductor),
                 "some" => builtin_some(&items[1..], env, root, conductor),
 
-                // Keyword-argument operations — keep here because unnamespaced `:key`
-                // evaluates to a stem query, not a Keyword value. These inspect Form
-                // directly via as_keyword_name() before evaluating.
-                "get" => builtin_get(&items[1..], env, root, conductor),
-                "get-in" => builtin_get_in(&items[1..], env, root, conductor),
-                "assoc" => builtin_assoc(&items[1..], env, root, conductor),
-                "dissoc" => builtin_dissoc(&items[1..], env, root, conductor),
-                "contains?" => builtin_contains(&items[1..], env, root, conductor),
-                "select-keys" => builtin_select_keys(&items[1..], env, root, conductor),
-                "name" => builtin_name(&items[1..], env, root, conductor),
+                // Stem query (Phase 6: explicit function replaces bare keyword)
+                "query" => builtin_query(&items[1..], env, root, conductor),
 
                 // Data access (conductor-specific)
                 "get-content" => builtin_get_content(&items[1..], env, root, conductor),
@@ -739,167 +719,31 @@ fn builtin_some(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor:
     }
 }
 
-/// Extract keyword name from a Form (unnamespaced keyword → name, or evaluate as string).
-fn form_keyword_name(form: &Form) -> Option<String> {
-    match form {
-        Form::Keyword { name, .. } => Some(name.clone()),
-        Form::Str(s) => Some(s.clone()),
-        _ => None,
+/// (query :stem) — explicit stem query, replacing the old bare keyword behavior.
+fn builtin_query(
+    args: &[Form],
+    env: &Arc<Env>,
+    root: &RootEnv,
+    cond: &conductor::Conductor,
+) -> Result<template::Value, String> {
+    if args.is_empty() {
+        return Err("query requires 1 argument: a keyword or string".into());
     }
-}
-
-/// (get map :key) or (get map :key default) — Form-based keyword arg.
-fn builtin_get(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
-    if args.len() < 2 {
-        return Err("get requires at least 2 arguments: map and key".into());
-    }
-    let map_val = eval_in_env(&args[0], env, root, cond)?;
-    let key = form_keyword_name(&args[1])
-        .ok_or_else(|| format!("get: key must be a keyword, got: {}", args[1]))?;
-    let default = if args.len() > 2 {
-        eval_in_env(&args[2], env, root, cond)?
-    } else {
-        template::Value::Absent
+    let kw = eval_in_env(&args[0], env, root, cond)?;
+    let stem = match &kw {
+        template::Value::Keyword { name, .. } => name.clone(),
+        template::Value::Text(s) => s.clone(),
+        _ => return Err("query expects a keyword or string".into()),
     };
-    match map_val {
-        template::Value::Record(r) => Ok(r.resolve(&[key.as_str()]).cloned().unwrap_or(default)),
-        _ => Ok(default),
-    }
-}
-
-/// (get-in map [:k1 :k2 ...]) — Form-based nested access.
-fn builtin_get_in(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
-    if args.len() < 2 {
-        return Err("get-in requires at least 2 arguments: map and key-path".into());
-    }
-    let map_val = eval_in_env(&args[0], env, root, cond)?;
-    // Second arg is a vector literal of keywords
-    let key_forms = match &args[1] {
-        Form::Vector(ks) => ks.clone(),
-        other => return Err(format!("get-in: second argument must be a vector of keys, got: {other}")),
-    };
-    let default = if args.len() > 2 {
-        eval_in_env(&args[2], env, root, cond)?
-    } else {
-        template::Value::Absent
-    };
-
-    let mut current = map_val;
-    for k in &key_forms {
-        let key = form_keyword_name(k)
-            .ok_or_else(|| format!("get-in: key must be a keyword, got: {k}"))?;
-        current = match current {
-            template::Value::Record(r) => r.resolve(&[key.as_str()]).cloned().unwrap_or(template::Value::Absent),
-            _ => template::Value::Absent,
-        };
-    }
-
-    if matches!(current, template::Value::Absent) && !matches!(default, template::Value::Absent) {
-        Ok(default)
-    } else {
-        Ok(current)
-    }
-}
-
-/// (assoc map :key val ...) — Form-based keyword arg.
-fn builtin_assoc(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
-    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
-        return Err("assoc requires map followed by key-value pairs".into());
-    }
-    let map_val = eval_in_env(&args[0], env, root, cond)?;
-    let mut graph = match map_val {
-        template::Value::Record(r) => r,
-        template::Value::Absent => template::DataGraph::new(),
-        other => return Err(format!("assoc expects a map or nil as first argument, got: {other:?}")),
-    };
-    let pairs: Vec<_> = args[1..].chunks(2).collect();
-    for chunk in pairs {
-        let key = form_keyword_name(&chunk[0])
-            .ok_or_else(|| format!("assoc: key must be a keyword, got: {}", chunk[0]))?;
-        let val = eval_in_env(&chunk[1], env, root, cond)?;
-        graph.insert(key, val);
-    }
-    Ok(template::Value::Record(graph))
-}
-
-/// (dissoc map :key ...) — Form-based keyword arg.
-fn builtin_dissoc(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
-    if args.len() < 2 {
-        return Err("dissoc requires at least 2 arguments: map and key(s)".into());
-    }
-    let map_val = eval_in_env(&args[0], env, root, cond)?;
-    let source = match map_val {
-        template::Value::Record(r) => r,
-        other => return Err(format!("dissoc expects a map, got: {other:?}")),
-    };
-    let keys_to_remove: Vec<String> = args[1..]
-        .iter()
-        .map(|k| form_keyword_name(k).ok_or_else(|| format!("dissoc: key must be a keyword, got: {k}")))
-        .collect::<Result<_, _>>()?;
-    let mut new_graph = template::DataGraph::new();
-    for (k, v) in source.iter() {
-        if !keys_to_remove.contains(k) {
-            new_graph.insert(k.clone(), v.clone());
-        }
-    }
-    Ok(template::Value::Record(new_graph))
-}
-
-/// (contains? map :key) — Form-based keyword arg.
-fn builtin_contains(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
-    if args.len() != 2 {
-        return Err("contains? requires 2 arguments: map and key".into());
-    }
-    let map_val = eval_in_env(&args[0], env, root, cond)?;
-    let key = form_keyword_name(&args[1])
-        .ok_or_else(|| format!("contains?: key must be a keyword, got: {}", args[1]))?;
-    match map_val {
-        template::Value::Record(r) => Ok(template::Value::Bool(r.resolve(&[key.as_str()]).is_some())),
-        _ => Ok(template::Value::Bool(false)),
-    }
-}
-
-/// (select-keys map [:k1 :k2 ...]) — Form-based keyword args in vector.
-fn builtin_select_keys(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
-    if args.len() != 2 {
-        return Err("select-keys requires 2 arguments: map and key-list".into());
-    }
-    let map_val = eval_in_env(&args[0], env, root, cond)?;
-    let source = match map_val {
-        template::Value::Record(r) => r,
-        other => return Err(format!("select-keys expects a map, got: {other:?}")),
-    };
-    let key_forms = match &args[1] {
-        Form::Vector(ks) => ks.clone(),
-        other => return Err(format!("select-keys: second argument must be a vector of keys, got: {other}")),
-    };
-    let mut result = template::DataGraph::new();
-    for k in &key_forms {
-        let key = form_keyword_name(k)
-            .ok_or_else(|| format!("select-keys: key must be a keyword, got: {k}"))?;
-        if let Some(v) = source.resolve(&[key.as_str()]) {
-            result.insert(key, v.clone());
-        }
-    }
-    Ok(template::Value::Record(result))
-}
-
-/// (name :kw) or (name "str") — Form-based to handle unnamespaced keywords directly.
-fn builtin_name(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
-    if args.len() != 1 {
-        return Err("name requires 1 argument".into());
-    }
-    // Try to extract keyword name from the form directly first
-    if let Some(kw_name) = form_keyword_name(&args[0]) {
-        return Ok(template::Value::Text(kw_name));
-    }
-    // Otherwise evaluate and check for keyword/string value
-    let val = eval_in_env(&args[0], env, root, cond)?;
-    match val {
-        template::Value::Keyword { name, .. } => Ok(template::Value::Text(name)),
-        template::Value::Text(s) => Ok(template::Value::Text(s)),
-        other => Err(format!("name expects a keyword or string, got: {other:?}")),
-    }
+    let items = cond.query_items_for_stem(&stem);
+    let values: Vec<template::Value> = items
+        .into_iter()
+        .map(|(url, mut graph)| {
+            graph.insert("url", template::Value::Text(url));
+            template::Value::Record(graph)
+        })
+        .collect();
+    Ok(template::Value::List(values))
 }
 
 fn builtin_get_content(
@@ -1723,9 +1567,16 @@ mod tests {
     // ── conductor-backed queries ──────────────────────────────────────────────
 
     #[test]
-    fn keyword_returns_list_of_records() {
-        let (_dir, cond) = two_post_conductor();
+    fn keyword_evaluates_to_keyword_value() {
+        let cond = empty_conductor();
         let result = eval_str(":post", &cond).unwrap();
+        assert!(matches!(&result, template::Value::Keyword { namespace: None, name } if name == "post"));
+    }
+
+    #[test]
+    fn query_returns_list_of_records() {
+        let (_dir, cond) = two_post_conductor();
+        let result = eval_str("(query :post)", &cond).unwrap();
         assert!(matches!(&result, template::Value::List(items) if items.len() == 2));
     }
 

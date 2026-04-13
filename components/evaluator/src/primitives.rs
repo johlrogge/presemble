@@ -468,6 +468,142 @@ pub fn register_builtins(root: &RootEnv) {
     // NOTE: apply, every?, some, map, filter, reduce, sort-by are in the
     // conductor-aware legacy dispatch in lib.rs because they need to invoke
     // user-defined closures (Closure::apply requires a conductor reference).
+
+    // ── Map/record operations (Phase 6: keywords are now values) ────────────
+
+    root.def("get", prim("get", |args| {
+        if args.len() < 2 {
+            return Err("get requires at least 2 arguments: map and key".into());
+        }
+        let key = keyword_name(&args[1])?;
+        let default = args.get(2).cloned().unwrap_or(Value::Absent);
+        match &args[0] {
+            Value::Record(r) => Ok(r.resolve(&[key.as_str()]).cloned().unwrap_or(default)),
+            _ => Ok(default),
+        }
+    }));
+
+    root.def("get-in", prim("get-in", |args| {
+        // (get-in map [:key1 :key2]) — Clojure convention: vector of keys
+        if args.len() < 2 {
+            return Err("get-in requires at least 2 arguments: map and key-vector".into());
+        }
+        let keys = match &args[1] {
+            Value::List(ks) => ks.clone(),
+            _ => return Err("get-in: second argument must be a vector of keys".into()),
+        };
+        let default = args.get(2).cloned().unwrap_or(Value::Absent);
+        let mut current = args[0].clone();
+        for k in &keys {
+            let key = keyword_name(k)?;
+            current = match current {
+                Value::Record(ref r) => {
+                    r.resolve(&[key.as_str()]).cloned().unwrap_or(Value::Absent)
+                }
+                _ => Value::Absent,
+            };
+        }
+        if matches!(current, Value::Absent) {
+            Ok(default)
+        } else {
+            Ok(current)
+        }
+    }));
+
+    root.def("assoc", prim("assoc", |args| {
+        if args.len() < 3 {
+            return Err("assoc requires at least 3 arguments: map, key, value".into());
+        }
+        let mut result = match &args[0] {
+            Value::Record(r) => r.clone(),
+            Value::Absent => template::DataGraph::new(),
+            _ => return Err("assoc expects a map as first argument".into()),
+        };
+        let mut i = 1;
+        while i + 1 < args.len() {
+            let key = keyword_name(&args[i])?;
+            let val = args[i + 1].clone();
+            result.insert(key, val);
+            i += 2;
+        }
+        Ok(Value::Record(result))
+    }));
+
+    root.def("dissoc", prim("dissoc", |args| {
+        if args.len() < 2 {
+            return Err("dissoc requires at least 2 arguments: map and key".into());
+        }
+        let source = match &args[0] {
+            Value::Record(r) => r.clone(),
+            _ => return Err("dissoc expects a map as first argument".into()),
+        };
+        let keys_to_remove: Vec<String> = args[1..]
+            .iter()
+            .map(keyword_name)
+            .collect::<Result<_, _>>()?;
+        let mut result = template::DataGraph::new();
+        for (k, v) in source.iter() {
+            if !keys_to_remove.contains(k) {
+                result.insert(k.clone(), v.clone());
+            }
+        }
+        Ok(Value::Record(result))
+    }));
+
+    root.def("contains?", prim("contains?", |args| {
+        if args.len() != 2 {
+            return Err("contains? requires exactly 2 arguments: map and key".into());
+        }
+        let key = keyword_name(&args[1])?;
+        match &args[0] {
+            Value::Record(r) => Ok(Value::Bool(r.resolve(&[key.as_str()]).is_some())),
+            _ => Ok(Value::Bool(false)),
+        }
+    }));
+
+    root.def("select-keys", prim("select-keys", |args| {
+        if args.len() != 2 {
+            return Err("select-keys requires exactly 2 arguments: map and key-vector".into());
+        }
+        let keys = match &args[1] {
+            Value::List(ks) => ks.clone(),
+            _ => return Err("select-keys: second argument must be a vector of keys".into()),
+        };
+        let mut result = template::DataGraph::new();
+        if let Value::Record(r) = &args[0] {
+            for k in &keys {
+                let key = keyword_name(k)?;
+                if let Some(v) = r.resolve(&[key.as_str()]) {
+                    result.insert(key, v.clone());
+                }
+            }
+        }
+        Ok(Value::Record(result))
+    }));
+
+    root.def("name", prim("name", |args| {
+        if args.len() != 1 {
+            return Err("name requires 1 argument".into());
+        }
+        match &args[0] {
+            Value::Keyword { name, .. } => Ok(Value::Text(name.clone())),
+            Value::Text(s) => Ok(Value::Text(s.clone())),
+            _ => Err("name expects a keyword or string".into()),
+        }
+    }));
+
+    root.def("namespace", prim("namespace", |args| {
+        if args.len() != 1 {
+            return Err("namespace requires 1 argument".into());
+        }
+        match &args[0] {
+            Value::Keyword { namespace, .. } => match namespace {
+                Some(ns) => Ok(Value::Text(ns.clone())),
+                None => Ok(Value::Absent),
+            },
+            _ => Err("namespace expects a keyword".into()),
+        }
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +621,15 @@ pub(crate) fn value_to_i64(v: &Value, op: &str) -> Result<i64, String> {
         Value::Integer(n) => Ok(*n),
         Value::Text(s) => s.parse::<i64>().map_err(|_| format!("{op}: not a number: {s}")),
         other => Err(format!("{op}: expected a number, got: {other:?}")),
+    }
+}
+
+/// Extract a key name from a Value (keyword or string).
+pub(crate) fn keyword_name(v: &Value) -> Result<String, String> {
+    match v {
+        Value::Keyword { name, .. } => Ok(name.clone()),
+        Value::Text(s) => Ok(s.clone()),
+        _ => Err(format!("expected keyword or string, got: {v:?}")),
     }
 }
 

@@ -1,14 +1,6 @@
 ;; Presemble core library — evaluated at nREPL startup.
 ;; Defines standard functions in terms of Rust primitives.
 ;; Inspired by Clojure's core, reimplemented for Presemble.
-;;
-;; NOTE: Some Clojure functions cannot be defined here due to evaluator
-;; limitations in Phase 5:
-;;   - `group-by`, `frequencies`, `update`, `update-in`, `assoc-in`:
-;;     require dynamic keyword-variable access (get/assoc with non-literal keys).
-;;     These require Phase 6 keyword semantics migration.
-;;   - `zipmap` with 2-arg map: `(map f coll1 coll2)` not yet supported.
-;;   - `comp` 0-arity: needs `identity` defined first (handled by ordering).
 
 ;; ── Identity & Constants ──────────────────────────────
 (defn identity [x] x)
@@ -147,3 +139,54 @@
       (fn [acc x] (str acc sep (str x)))
       (str (first coll))
       (rest coll))))
+
+;; ── Map operations (Phase 6: keywords are first-class values) ────
+;; These require (get m k) to work when k is a variable holding a
+;; keyword value — enabled by the Phase 6 keyword semantics migration.
+
+(defn update [m k f]
+  (assoc m k (f (get m k))))
+
+(defn update-in [m ks f]
+  (let [k (first ks)
+        rest-ks (rest ks)]
+    (if (empty? rest-ks)
+      (update m k f)
+      (assoc m k (update-in (get m k {}) rest-ks f)))))
+
+(defn assoc-in [m ks v]
+  (let [k (first ks)
+        rest-ks (rest ks)]
+    (if (empty? rest-ks)
+      (assoc m k v)
+      (assoc m k (assoc-in (get m k {}) rest-ks v)))))
+
+(defn group-by [f coll]
+  (reduce
+    (fn [acc x]
+      (let [k (f x)
+            existing (get acc k [])]
+        (assoc acc k (conj existing x))))
+    {}
+    coll))
+
+(defn frequencies [coll]
+  (reduce
+    (fn [acc x]
+      (let [n (get acc x 0)]
+        (assoc acc x (inc n))))
+    {}
+    coll))
+
+(defn merge-with [f & maps]
+  (reduce
+    (fn [acc m]
+      (reduce
+        (fn [a k]
+          (if (contains? a k)
+            (assoc a k (f (get a k) (get m k)))
+            (assoc a k (get m k))))
+        acc
+        (keys m)))
+    {}
+    maps))
