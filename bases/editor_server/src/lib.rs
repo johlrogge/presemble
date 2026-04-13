@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 struct PresembleNreplHandler {
     conductor: Arc<Conductor>,
+    doc_registry: evaluator::DocRegistry,
 }
 
 impl nrepl::NreplHandler for PresembleNreplHandler {
@@ -21,6 +22,28 @@ impl nrepl::NreplHandler for PresembleNreplHandler {
         }
         Ok(nrepl::EvalResult { value: edn_str, out: None })
     }
+
+    fn completions(&self, _session: &str, prefix: &str) -> Vec<nrepl::CompletionEntry> {
+        let doc_entries = self.doc_registry.completions(prefix);
+        doc_entries
+            .into_iter()
+            .map(|e| nrepl::CompletionEntry {
+                candidate: e.name,
+                doc: Some(e.doc),
+                arglists: e.arglists,
+            })
+            .collect()
+    }
+
+    fn doc_lookup(&self, _session: &str, symbol: &str) -> Option<nrepl::DocInfo> {
+        let entry = self.doc_registry.lookup(symbol)?;
+        Some(nrepl::DocInfo {
+            name: entry.name,
+            doc: entry.doc,
+            arglists: entry.arglists,
+            source: format!("{:?}", entry.source),
+        })
+    }
 }
 
 /// Run the conductor daemon for a site directory.
@@ -34,9 +57,20 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     // Create conductor with full site build
     let conductor = Arc::new(Conductor::new(site_dir.to_path_buf())?);
 
+    // Build a doc registry populated with primitive and macro docs.
+    // Prelude docs are not yet available here (prelude requires a live conductor
+    // eval pass); this gives completions for all built-in primitives and macros.
+    let doc_registry = {
+        let root = evaluator::RootEnv::new();
+        evaluator::primitives::register_builtins(&root);
+        evaluator::register_macro_docs(&root.doc_registry);
+        root.doc_registry.clone()
+    };
+
     // Spawn the nREPL server thread before the nng event loop
     let nrepl_handler = Arc::new(PresembleNreplHandler {
         conductor: Arc::clone(&conductor),
+        doc_registry,
     });
     let nrepl_server = nrepl::NreplServer::new(nrepl_handler);
     // Write .nrepl-port to the workspace root (site_dir's parent), not the site dir.

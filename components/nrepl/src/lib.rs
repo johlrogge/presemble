@@ -10,9 +10,36 @@ pub struct EvalResult {
     pub out: Option<String>,
 }
 
+/// A completion candidate returned by the completions op.
+#[derive(Debug, Clone)]
+pub struct CompletionEntry {
+    pub candidate: String,
+    pub doc: Option<String>,
+    pub arglists: Vec<String>,
+}
+
+/// Documentation info returned by the info op.
+#[derive(Debug, Clone)]
+pub struct DocInfo {
+    pub name: String,
+    pub doc: String,
+    pub arglists: Vec<String>,
+    pub source: String,
+}
+
 /// Trait for evaluating nREPL ops. Implemented by the conductor wiring.
 pub trait NreplHandler: Send + Sync {
     fn eval(&self, session: &str, code: &str) -> Result<EvalResult, String>;
+
+    /// Return completions matching the given prefix.
+    fn completions(&self, _session: &str, _prefix: &str) -> Vec<CompletionEntry> {
+        vec![]
+    }
+
+    /// Look up documentation for a symbol.
+    fn doc_lookup(&self, _session: &str, _symbol: &str) -> Option<DocInfo> {
+        None
+    }
 }
 
 struct SessionStore {
@@ -142,6 +169,8 @@ impl NreplServer {
                         ("clone", bencode::Value::dict(vec![])),
                         ("close", bencode::Value::dict(vec![])),
                         ("describe", bencode::Value::dict(vec![])),
+                        ("completions", bencode::Value::dict(vec![])),
+                        ("info", bencode::Value::dict(vec![])),
                     ]),
                 ),
                 (
@@ -205,6 +234,71 @@ impl NreplServer {
                         bencode::Value::List(vec![bencode::Value::string("done")]),
                     ),
                 ])]
+            }
+            "completions" => {
+                let prefix = msg.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+                let entries = self.handler.completions(session, prefix);
+
+                let completions_list: Vec<bencode::Value> = entries.iter().map(|e| {
+                    let mut pairs = vec![
+                        ("candidate", bencode::Value::string(&e.candidate)),
+                    ];
+                    if let Some(doc) = &e.doc {
+                        pairs.push(("doc", bencode::Value::string(doc)));
+                    }
+                    if !e.arglists.is_empty() {
+                        let arglists: Vec<bencode::Value> = e.arglists.iter()
+                            .map(|a| bencode::Value::string(a))
+                            .collect();
+                        pairs.push(("arglists", bencode::Value::List(arglists)));
+                    }
+                    bencode::Value::dict(pairs)
+                }).collect();
+
+                vec![bencode::Value::dict(vec![
+                    ("id", bencode::Value::string(id)),
+                    ("session", bencode::Value::string(session)),
+                    ("completions", bencode::Value::List(completions_list)),
+                    (
+                        "status",
+                        bencode::Value::List(vec![bencode::Value::string("done")]),
+                    ),
+                ])]
+            }
+            "info" => {
+                let symbol = msg.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+                match self.handler.doc_lookup(session, symbol) {
+                    Some(info) => {
+                        let arglists: Vec<bencode::Value> = info.arglists.iter()
+                            .map(|a| bencode::Value::string(a))
+                            .collect();
+                        vec![bencode::Value::dict(vec![
+                            ("id", bencode::Value::string(id)),
+                            ("session", bencode::Value::string(session)),
+                            ("name", bencode::Value::string(&info.name)),
+                            ("doc", bencode::Value::string(&info.doc)),
+                            ("arglists", bencode::Value::List(arglists)),
+                            ("source", bencode::Value::string(&info.source)),
+                            (
+                                "status",
+                                bencode::Value::List(vec![bencode::Value::string("done")]),
+                            ),
+                        ])]
+                    }
+                    None => {
+                        vec![bencode::Value::dict(vec![
+                            ("id", bencode::Value::string(id)),
+                            ("session", bencode::Value::string(session)),
+                            (
+                                "status",
+                                bencode::Value::List(vec![
+                                    bencode::Value::string("done"),
+                                    bencode::Value::string("no-info"),
+                                ]),
+                            ),
+                        ])]
+                    }
+                }
             }
             _ => vec![bencode::Value::dict(vec![
                 ("id", bencode::Value::string(id)),
@@ -346,5 +440,164 @@ mod tests {
         let a = store.create();
         let b = store.create();
         assert_ne!(a, b);
+    }
+
+    // --- completions op ---
+
+    #[test]
+    fn completions_op_returns_list() {
+        let server = make_server();
+        let msg = make_msg(vec![
+            ("op", bencode::Value::string("completions")),
+            ("id", bencode::Value::string("5")),
+            ("prefix", bencode::Value::string("ma")),
+            ("session", bencode::Value::string("presemble-0")),
+        ]);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
+        let completions = resp.get("completions").and_then(|v| v.as_list());
+        assert!(completions.is_some(), "completions key should be present");
+        // EchoHandler returns empty completions by default
+        assert_eq!(completions.unwrap().len(), 0);
+        let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
+        assert_eq!(status, &[bencode::Value::string("done")]);
+    }
+
+    #[test]
+    fn completions_op_missing_prefix_uses_empty_string() {
+        let server = make_server();
+        let msg = make_msg(vec![
+            ("op", bencode::Value::string("completions")),
+            ("id", bencode::Value::string("5b")),
+            ("session", bencode::Value::string("presemble-0")),
+        ]);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
+        let completions = resp.get("completions").and_then(|v| v.as_list());
+        assert!(completions.is_some(), "completions key should be present even without prefix");
+        let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
+        assert_eq!(status, &[bencode::Value::string("done")]);
+    }
+
+    // --- info op ---
+
+    #[test]
+    fn info_op_returns_no_info_for_unknown() {
+        let server = make_server();
+        let msg = make_msg(vec![
+            ("op", bencode::Value::string("info")),
+            ("id", bencode::Value::string("6")),
+            ("symbol", bencode::Value::string("nonexistent")),
+            ("session", bencode::Value::string("presemble-0")),
+        ]);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
+        let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
+        assert!(status.contains(&bencode::Value::string("no-info")));
+        assert!(status.contains(&bencode::Value::string("done")));
+    }
+
+    // --- handler with completions and doc_lookup ---
+
+    struct DocAwareHandler;
+
+    impl NreplHandler for DocAwareHandler {
+        fn eval(&self, _session: &str, code: &str) -> Result<EvalResult, String> {
+            Ok(EvalResult { value: code.to_string(), out: None })
+        }
+
+        fn completions(&self, _session: &str, prefix: &str) -> Vec<CompletionEntry> {
+            let names = ["map", "mapcat", "max", "min", "merge"];
+            names.iter()
+                .filter(|n| n.starts_with(prefix))
+                .map(|n| CompletionEntry {
+                    candidate: n.to_string(),
+                    doc: Some(format!("doc for {n}")),
+                    arglists: vec![format!("[{n}-args]")],
+                })
+                .collect()
+        }
+
+        fn doc_lookup(&self, _session: &str, symbol: &str) -> Option<DocInfo> {
+            if symbol == "map" {
+                Some(DocInfo {
+                    name: "map".to_string(),
+                    doc: "Apply f to each element.".to_string(),
+                    arglists: vec!["[f coll]".to_string()],
+                    source: "Primitive".to_string(),
+                })
+            } else {
+                None
+            }
+        }
+    }
+
+    fn make_doc_server() -> NreplServer {
+        NreplServer::new(Arc::new(DocAwareHandler))
+    }
+
+    #[test]
+    fn completions_op_returns_matching_entries() {
+        let server = make_doc_server();
+        let msg = make_msg(vec![
+            ("op", bencode::Value::string("completions")),
+            ("id", bencode::Value::string("c1")),
+            ("prefix", bencode::Value::string("ma")),
+            ("session", bencode::Value::string("presemble-0")),
+        ]);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
+        let completions = resp.get("completions").and_then(|v| v.as_list()).unwrap();
+        // "ma" matches "map", "mapcat", "max" (3 entries)
+        assert_eq!(completions.len(), 3, "should match 'map', 'mapcat', and 'max'");
+        // First entry should have candidate key
+        let first = &completions[0];
+        let candidate = first.get("candidate").and_then(|v| v.as_str());
+        assert!(candidate.is_some(), "candidate key should be present");
+        // doc should be present
+        let doc = first.get("doc").and_then(|v| v.as_str());
+        assert!(doc.is_some(), "doc key should be present");
+        // arglists should be present
+        let arglists = first.get("arglists").and_then(|v| v.as_list());
+        assert!(arglists.is_some(), "arglists key should be present");
+    }
+
+    #[test]
+    fn info_op_returns_full_entry_for_known_symbol() {
+        let server = make_doc_server();
+        let msg = make_msg(vec![
+            ("op", bencode::Value::string("info")),
+            ("id", bencode::Value::string("i1")),
+            ("symbol", bencode::Value::string("map")),
+            ("session", bencode::Value::string("presemble-0")),
+        ]);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
+        let name = resp.get("name").and_then(|v| v.as_str());
+        assert_eq!(name, Some("map"));
+        let doc = resp.get("doc").and_then(|v| v.as_str());
+        assert_eq!(doc, Some("Apply f to each element."));
+        let source = resp.get("source").and_then(|v| v.as_str());
+        assert_eq!(source, Some("Primitive"));
+        let arglists = resp.get("arglists").and_then(|v| v.as_list()).unwrap();
+        assert_eq!(arglists.len(), 1);
+        let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
+        assert_eq!(status, &[bencode::Value::string("done")]);
+    }
+
+    // --- describe includes new ops ---
+
+    #[test]
+    fn describe_includes_completions_and_info_ops() {
+        let server = make_server();
+        let msg = make_msg(vec![
+            ("op", bencode::Value::string("describe")),
+            ("id", bencode::Value::string("7")),
+        ]);
+        let msgs = server.handle_message(&msg);
+        let resp = &msgs[0];
+        let ops = resp.get("ops").unwrap();
+        assert!(ops.get("completions").is_some(), "completions op should be advertised");
+        assert!(ops.get("info").is_some(), "info op should be advertised");
     }
 }
