@@ -465,65 +465,9 @@ pub fn register_builtins(root: &RootEnv) {
         Ok(Value::Keyword { namespace: None, name: kw.to_string() })
     }));
 
-    // ── Higher-order (no-closure versions) ───────────────────────────────────
-    // NOTE: map, filter, reduce, sort-by remain in legacy dispatch because they
-    // need conductor to invoke user closures. The versions below work only when
-    // the function argument is a Keyword or a PrimitiveFn (not a Closure).
-
-    root.def("apply", prim("apply", |args| {
-        if args.len() < 2 {
-            return Err("apply requires at least 2 arguments: fn and args-list".into());
-        }
-        let func = &args[0];
-        // Last arg must be a list; prepend any intermediate args
-        let last = args.last().unwrap();
-        let extra_args = &args[1..args.len() - 1];
-        let coll_args = match last {
-            Value::List(items) => items.clone(),
-            _ => return Err("apply: last argument must be a list".into()),
-        };
-        let mut all_args: Vec<Value> = extra_args.to_vec();
-        all_args.extend(coll_args);
-        apply_value_fn(func, all_args)
-    }));
-
-    root.def("every?", prim("every?", |args| {
-        if args.len() != 2 {
-            return Err("every? requires 2 arguments: pred and coll".into());
-        }
-        let func = args[0].clone();
-        match &args[1] {
-            Value::List(items) => {
-                for item in items {
-                    let result = apply_value_fn(&func, vec![item.clone()])?;
-                    if matches!(result, Value::Bool(false) | Value::Absent) {
-                        return Ok(Value::Bool(false));
-                    }
-                }
-                Ok(Value::Bool(true))
-            }
-            _ => Err("every? expects a list as second argument".into()),
-        }
-    }));
-
-    root.def("some", prim("some", |args| {
-        if args.len() != 2 {
-            return Err("some requires 2 arguments: pred and coll".into());
-        }
-        let func = args[0].clone();
-        match &args[1] {
-            Value::List(items) => {
-                for item in items {
-                    let result = apply_value_fn(&func, vec![item.clone()])?;
-                    if !matches!(result, Value::Bool(false) | Value::Absent) {
-                        return Ok(result);
-                    }
-                }
-                Ok(Value::Absent)
-            }
-            _ => Err("some requires a list as second argument".into()),
-        }
-    }));
+    // NOTE: apply, every?, some, map, filter, reduce, sort-by are in the
+    // conductor-aware legacy dispatch in lib.rs because they need to invoke
+    // user-defined closures (Closure::apply requires a conductor reference).
 }
 
 // ---------------------------------------------------------------------------
@@ -549,23 +493,5 @@ pub(crate) fn value_to_string(v: &Value) -> String {
     match v.display_text() {
         Some(s) => s,
         None => edn::value_to_edn(v),
-    }
-}
-
-/// Apply a `Value` as a function to a list of already-evaluated arguments.
-/// Works for:
-/// - `Value::Keyword` — field accessor on the first argument (must be a Record)
-/// - `Value::Fn(PrimitiveFn)` — calls the primitive directly
-/// - `Value::Fn(Closure)` — returns an error (needs conductor; use legacy dispatch)
-pub(crate) fn apply_value_fn(func: &Value, args: Vec<Value>) -> Result<Value, String> {
-    match func {
-        Value::Keyword { name, .. } => {
-            match args.first() {
-                Some(Value::Record(r)) => Ok(r.resolve(&[name.as_str()]).cloned().unwrap_or(Value::Absent)),
-                _ => Ok(Value::Absent),
-            }
-        }
-        Value::Fn(callable) => callable.call(args),
-        other => Err(format!("not a function: {other:?}")),
     }
 }

@@ -8,12 +8,29 @@ pub use closure::{Closure, FnArity, PrimitiveFn};
 use std::sync::Arc;
 use forms::Form;
 
+/// The core.clj prelude — embedded at compile time.
+const PRELUDE: &str = include_str!("core.clj");
+
+/// Load the core.clj prelude into the root environment.
+/// Called once after `register_builtins`, before any user evaluation.
+fn load_prelude(root: &RootEnv, conductor: &conductor::Conductor) -> Result<(), String> {
+    let forms = reader::read_all(PRELUDE)
+        .map_err(|e| format!("prelude read error: {e}"))?;
+    let env = root.snapshot();
+    for form in forms {
+        let expanded = macros::macroexpand(form);
+        eval_in_env(&expanded, &env, root, conductor)?;
+    }
+    Ok(())
+}
+
 /// Evaluate a form against the conductor's live state.
 pub fn eval(form: &Form, conductor: &conductor::Conductor) -> Result<template::Value, String> {
     // First, macroexpand
     let expanded = macros::macroexpand(form.clone());
     let root = RootEnv::new();
     primitives::register_builtins(&root);
+    load_prelude(&root, conductor).map_err(|e| format!("prelude load failed: {e}"))?;
     let env = root.snapshot();
     eval_in_env(&expanded, &env, &root, conductor)
 }
@@ -259,6 +276,9 @@ pub(crate) fn eval_in_env(
                 "sort-by" => builtin_sort_by(&items[1..], env, root, conductor),
                 "filter" => builtin_filter(&items[1..], env, root, conductor),
                 "reduce" => builtin_reduce(&items[1..], env, root, conductor),
+                "apply" => builtin_apply(&items[1..], env, root, conductor),
+                "every?" => builtin_every(&items[1..], env, root, conductor),
+                "some" => builtin_some(&items[1..], env, root, conductor),
 
                 // Keyword-argument operations — keep here because unnamespaced `:key`
                 // evaluates to a stem query, not a Keyword value. These inspect Form
@@ -434,6 +454,27 @@ fn value_to_string(v: &template::Value) -> String {
 }
 
 // ── Built-in functions (legacy — higher-order needing conductor) ────────────
+
+/// Apply a `Value` (already evaluated) to a list of already-evaluated args.
+/// Handles both `Closure` (needs conductor) and `PrimitiveFn` (no conductor needed).
+fn call_value_fn(func: &template::Value, args: Vec<template::Value>, cond: &conductor::Conductor) -> Result<template::Value, String> {
+    match func {
+        template::Value::Keyword { name, .. } => {
+            match args.first() {
+                Some(template::Value::Record(r)) => Ok(r.resolve(&[name.as_str()]).cloned().unwrap_or(template::Value::Absent)),
+                _ => Ok(template::Value::Absent),
+            }
+        }
+        template::Value::Fn(callable) => {
+            if let Some(closure) = callable.as_any().downcast_ref::<Closure>() {
+                closure.apply(args, cond)
+            } else {
+                callable.call(args)
+            }
+        }
+        other => Err(format!("not a function: {other:?}")),
+    }
+}
 
 /// Apply a form (keyword or fn value) to a Value directly.
 /// For keywords: (:title record) → get the field.
@@ -634,6 +675,68 @@ fn builtin_reduce(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conducto
     }
 
     Ok(acc)
+}
+
+/// (apply f arg1 ... args-list) — apply a function to a list of arguments.
+fn builtin_apply(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.len() < 2 {
+        return Err("apply requires at least 2 arguments: fn and args-list".into());
+    }
+    let func_val = eval_in_env(&args[0], env, root, cond)?;
+    // Last arg must be a list; prepend any intermediate args
+    let last_val = eval_in_env(args.last().unwrap(), env, root, cond)?;
+    let coll_args = match last_val {
+        template::Value::List(items) => items,
+        _ => return Err("apply: last argument must be a list".into()),
+    };
+    let mut all_args: Vec<template::Value> = args[1..args.len() - 1]
+        .iter()
+        .map(|a| eval_in_env(a, env, root, cond))
+        .collect::<Result<_, _>>()?;
+    all_args.extend(coll_args);
+    call_value_fn(&func_val, all_args, cond)
+}
+
+/// (every? pred coll) — true if pred returns truthy for all items.
+fn builtin_every(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.len() != 2 {
+        return Err("every? requires 2 arguments: pred and coll".into());
+    }
+    let func_val = eval_in_env(&args[0], env, root, cond)?;
+    let coll = eval_in_env(&args[1], env, root, cond)?;
+    match coll {
+        template::Value::List(items) => {
+            for item in items {
+                let result = call_value_fn(&func_val, vec![item], cond)?;
+                if matches!(result, template::Value::Bool(false) | template::Value::Absent) {
+                    return Ok(template::Value::Bool(false));
+                }
+            }
+            Ok(template::Value::Bool(true))
+        }
+        _ => Err("every? expects a list as second argument".into()),
+    }
+}
+
+/// (some pred coll) — first truthy result of pred applied to items, or nil.
+fn builtin_some(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
+    if args.len() != 2 {
+        return Err("some requires 2 arguments: pred and coll".into());
+    }
+    let func_val = eval_in_env(&args[0], env, root, cond)?;
+    let coll = eval_in_env(&args[1], env, root, cond)?;
+    match coll {
+        template::Value::List(items) => {
+            for item in items {
+                let result = call_value_fn(&func_val, vec![item], cond)?;
+                if !matches!(result, template::Value::Bool(false) | template::Value::Absent) {
+                    return Ok(result);
+                }
+            }
+            Ok(template::Value::Absent)
+        }
+        _ => Err("some requires a list as second argument".into()),
+    }
 }
 
 /// Extract keyword name from a Form (unnamespaced keyword → name, or evaluate as string).
@@ -1612,14 +1715,7 @@ mod tests {
 
     #[test]
     fn every_with_prim_fn() {
-        // every? with a PrimitiveFn predicate (not a Closure)
-        // We use a keyword accessor to test: all items must have :a
-        // Actually, let's use apply to test every? with a known primitive check
         let cond = empty_conductor();
-        // (every? (fn [x] (= x 1)) [1 1 1]) → true - this uses a Closure, so skip
-        // Instead test with range result: all items in (range 3) should be < 5
-        // Can't do that without closure either... use direct primitive check
-        // Use (empty? []) as a workaround: every? on empty list is true
         let result = eval_str("(every? not [])", &cond).unwrap();
         assert!(matches!(&result, template::Value::Bool(true)));
     }
@@ -2264,12 +2360,82 @@ mod tests {
     #[test]
     fn filter_with_pred_fn() {
         let cond = empty_conductor();
-        // filter with a 2-arg form: (filter pred coll) using a simple keyword accessor
-        // Use map to create records, then filter by a keyword
-        // Actually test with 2-arg filter and a keyword: items where :a is truthy
-        // Create a simpler test: filter even numbers (but need closure for that)
-        // Use filter 3-arg legacy form
         let result = eval_str(r#"(filter :title "Alpha Post" [{:title "Alpha Post"} {:title "Beta Post"}])"#, &cond).unwrap();
         assert!(matches!(&result, template::Value::List(items) if items.len() == 1));
+    }
+
+    // ── Phase 5: prelude tests ────────────────────────────────────────────────
+
+    #[test]
+    fn prelude_identity() {
+        let cond = empty_conductor();
+        let result = eval_str("(identity 42)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(42)));
+    }
+
+    #[test]
+    fn prelude_inc_dec() {
+        let cond = empty_conductor();
+        assert!(matches!(eval_str("(inc 5)", &cond).unwrap(), template::Value::Integer(6)));
+        assert!(matches!(eval_str("(dec 5)", &cond).unwrap(), template::Value::Integer(4)));
+    }
+
+    #[test]
+    fn prelude_predicates() {
+        let cond = empty_conductor();
+        assert!(matches!(eval_str("(nil? nil)", &cond).unwrap(), template::Value::Bool(true)));
+        assert!(matches!(eval_str("(nil? 1)", &cond).unwrap(), template::Value::Bool(false)));
+        assert!(matches!(eval_str("(zero? 0)", &cond).unwrap(), template::Value::Bool(true)));
+        assert!(matches!(eval_str("(even? 4)", &cond).unwrap(), template::Value::Bool(true)));
+        assert!(matches!(eval_str("(odd? 3)", &cond).unwrap(), template::Value::Bool(true)));
+    }
+
+    #[test]
+    fn prelude_comp() {
+        let cond = empty_conductor();
+        let result = eval_str("((comp inc inc) 1)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(3)));
+    }
+
+    #[test]
+    fn prelude_complement() {
+        let cond = empty_conductor();
+        let result = eval_str("((complement zero?) 0)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Bool(false)));
+    }
+
+    #[test]
+    fn prelude_second() {
+        let cond = empty_conductor();
+        let result = eval_str("(second [1 2 3])", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(2)));
+    }
+
+    #[test]
+    fn prelude_drop() {
+        let cond = empty_conductor();
+        let result = eval_str("(drop 2 [1 2 3 4])", &cond).unwrap();
+        assert!(matches!(&result, template::Value::List(items) if items.len() == 2));
+    }
+
+    #[test]
+    fn prelude_str_join() {
+        let cond = empty_conductor();
+        let result = eval_str(r#"(str-join ", " ["a" "b" "c"])"#, &cond).unwrap();
+        assert!(matches!(&result, template::Value::Text(s) if s == "a, b, c"));
+    }
+
+    #[test]
+    fn prelude_distinct() {
+        let cond = empty_conductor();
+        let result = eval_str("(distinct [1 2 1 3 2])", &cond).unwrap();
+        assert!(matches!(&result, template::Value::List(items) if items.len() == 3));
+    }
+
+    #[test]
+    fn prelude_max_min() {
+        let cond = empty_conductor();
+        assert!(matches!(eval_str("(max 3 7)", &cond).unwrap(), template::Value::Integer(7)));
+        assert!(matches!(eval_str("(min 3 7)", &cond).unwrap(), template::Value::Integer(3)));
     }
 }
