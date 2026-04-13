@@ -36,13 +36,13 @@ struct ReplState {
 }
 
 impl ReplState {
-    fn new() -> Self {
+    fn new(mode_label: &str) -> Self {
         Self {
             input: String::new(),
             cursor_pos: 0,
-            output_lines: vec![OutputLine::Result(
-                "Presemble REPL  |  Tab: complete  |  Ctrl-Enter: eval  |  Ctrl-D: quit".into(),
-            )],
+            output_lines: vec![OutputLine::Result(format!(
+                "Presemble REPL ({mode_label})  |  Tab: complete  |  Ctrl-Enter: eval  |  Ctrl-D: quit"
+            ))],
             history: Vec::new(),
             history_idx: None,
             doc_text: String::new(),
@@ -61,7 +61,7 @@ pub fn run_repl(mut backend: Box<dyn ReplBackend>) -> io::Result<()> {
     let term_backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(term_backend)?;
 
-    let mut state = ReplState::new();
+    let mut state = ReplState::new(backend.mode_label());
     let mut quit = false;
 
     while !quit {

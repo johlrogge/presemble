@@ -20,6 +20,7 @@ pub trait ReplBackend: Send + Sync {
     fn completions(&self, prefix: &str) -> Vec<Completion>;
     fn doc_lookup(&self, symbol: &str) -> Option<String>;
     fn all_symbols(&self) -> Vec<String>;
+    fn mode_label(&self) -> &str;
 }
 
 /// Direct backend — in-process evaluator, no external conductor.
@@ -123,6 +124,114 @@ impl ReplBackend for DirectBackend {
             .into_iter()
             .map(|e| e.name)
             .collect()
+    }
+
+    fn mode_label(&self) -> &str {
+        "standalone"
+    }
+}
+
+/// nREPL backend — delegates evaluation and doc lookup to a remote conductor
+/// over TCP using the nREPL protocol.
+///
+/// `completions` and `doc_lookup` take `&self` on the trait, but
+/// `NreplClient` requires `&mut self`. A `Mutex` provides interior mutability
+/// while keeping the struct `Send + Sync`.
+pub struct NreplBackend {
+    client: std::sync::Mutex<nrepl::client::NreplClient>,
+    #[allow(dead_code)]
+    port: u16,
+    label: String,
+}
+
+impl NreplBackend {
+    /// Connect to a running nREPL server on `port`.
+    pub fn connect(port: u16) -> Result<Self, String> {
+        let client = nrepl::client::NreplClient::connect(port)?;
+        Ok(Self {
+            client: std::sync::Mutex::new(client),
+            port,
+            label: format!("conductor port {port}"),
+        })
+    }
+}
+
+impl ReplBackend for NreplBackend {
+    fn eval(&mut self, code: &str) -> EvalResult {
+        let mut guard = match self.client.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return EvalResult {
+                    value: "mutex poisoned".to_string(),
+                    is_error: true,
+                }
+            }
+        };
+        match guard.eval(code) {
+            Ok(resp) => {
+                if resp.is_error {
+                    EvalResult {
+                        value: resp.err.unwrap_or_else(|| "error".to_string()),
+                        is_error: true,
+                    }
+                } else {
+                    let base = resp.value.unwrap_or_default();
+                    let value = match resp.out {
+                        Some(out) => format!("{out}{base}"),
+                        None => base,
+                    };
+                    EvalResult { value, is_error: false }
+                }
+            }
+            Err(e) => EvalResult { value: e, is_error: true },
+        }
+    }
+
+    fn completions(&self, prefix: &str) -> Vec<Completion> {
+        let mut guard = match self.client.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard
+            .completions(prefix)
+            .into_iter()
+            .map(|e| Completion {
+                candidate: e.candidate,
+                doc: e.doc,
+                arglists: e.arglists,
+            })
+            .collect()
+    }
+
+    fn doc_lookup(&self, symbol: &str) -> Option<String> {
+        let mut guard = self.client.lock().ok()?;
+        let info = guard.doc_lookup(symbol)?;
+        let mut out = format!("{}\n", info.name);
+        for arglist in &info.arglists {
+            out.push_str(&format!("  {arglist}\n"));
+        }
+        if let Some(doc) = &info.doc {
+            if !doc.is_empty() {
+                out.push_str(&format!("  {doc}\n"));
+            }
+        }
+        Some(out)
+    }
+
+    fn all_symbols(&self) -> Vec<String> {
+        let mut guard = match self.client.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        guard
+            .completions("")
+            .into_iter()
+            .map(|e| e.candidate)
+            .collect()
+    }
+
+    fn mode_label(&self) -> &str {
+        &self.label
     }
 }
 

@@ -4,6 +4,8 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+pub mod client;
+
 /// Result of an nREPL eval — value plus optional printed output.
 pub struct EvalResult {
     pub value: String,
