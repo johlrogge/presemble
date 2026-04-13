@@ -37,7 +37,7 @@ impl DirectBackend {
     ///
     /// Returns an error string if the prelude fails to compile.
     pub fn new() -> Result<Self, String> {
-        let repo = site_repository::SiteRepository::builder().build();
+        let repo = site_repository::SiteRepository::new("/repl-scratch");
         let conductor =
             conductor::Conductor::with_repo(PathBuf::from("/repl-scratch"), repo)
                 .map_err(|e| format!("conductor init failed: {e}"))?;
