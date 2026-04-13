@@ -26,8 +26,8 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
     match form {
         // Literals evaluate to themselves
         Form::Str(s) => Ok(template::Value::Text(s.clone())),
-        Form::Integer(n) => Ok(template::Value::Text(n.to_string())),
-        Form::Bool(b) => Ok(template::Value::Text(b.to_string())),
+        Form::Integer(n) => Ok(template::Value::Integer(*n)),
+        Form::Bool(b) => Ok(template::Value::Bool(*b)),
         Form::Nil => Ok(template::Value::Absent),
 
         // Keywords evaluate as stem lookups: :post → all items for stem "post"
@@ -43,8 +43,11 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
             Ok(template::Value::List(values))
         }
 
-        // Namespaced keywords are just data
-        Form::Keyword { namespace: Some(_), .. } => Ok(template::Value::Text(form.to_string())),
+        // Namespaced keywords are keyword values
+        Form::Keyword { namespace: namespace @ Some(_), name } => Ok(template::Value::Keyword {
+            namespace: namespace.clone(),
+            name: name.clone(),
+        }),
 
         // Vectors evaluate each element
         Form::Vector(items) => {
@@ -253,6 +256,9 @@ fn builtin_take(args: &[Form], cond: &conductor::Conductor) -> Result<template::
     // Clojure convention: (take n coll) — count first, collection second
     let n_val = eval_expanded(&args[0], cond)?;
     let n: usize = match &n_val {
+        template::Value::Integer(n) => {
+            usize::try_from(*n).map_err(|_| format!("take count must be non-negative, got: {n}"))?
+        }
         template::Value::Text(s) => s
             .parse::<usize>()
             .map_err(|_| format!("take count must be a number, got: {s}"))?,
@@ -339,8 +345,8 @@ fn builtin_count(args: &[Form], cond: &conductor::Conductor) -> Result<template:
     }
     let collection = eval_expanded(&args[0], cond)?;
     match collection {
-        template::Value::List(items) => Ok(template::Value::Text(items.len().to_string())),
-        template::Value::Text(s) => Ok(template::Value::Text(s.len().to_string())),
+        template::Value::List(items) => Ok(template::Value::Integer(items.len() as i64)),
+        template::Value::Text(s) => Ok(template::Value::Integer(s.len() as i64)),
         _ => Err("count expects a list or string".into()),
     }
 }
@@ -627,19 +633,26 @@ fn builtin_get_suggestions(
 
 // ── Arithmetic ───────────────────────────────────────────────────────────────
 
+/// Extract an i64 from a Value for arithmetic operations.
+/// Accepts Value::Integer directly, and Value::Text containing a parseable number
+/// for backward compatibility.
+fn value_to_i64(val: &template::Value, op: &str) -> Result<i64, String> {
+    match val {
+        template::Value::Integer(n) => Ok(*n),
+        template::Value::Text(s) => s
+            .parse::<i64>()
+            .map_err(|_| format!("{op} expects numbers, got: {s}")),
+        _ => Err(format!("{op} expects numbers")),
+    }
+}
+
 fn builtin_add(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
     let mut sum: i64 = 0;
     for arg in args {
         let val = eval_expanded(arg, cond)?;
-        let n: i64 = match &val {
-            template::Value::Text(s) => s
-                .parse()
-                .map_err(|_| format!("not a number: {s}"))?,
-            _ => return Err("+ expects numbers".into()),
-        };
-        sum += n;
+        sum += value_to_i64(&val, "+")?;
     }
-    Ok(template::Value::Text(sum.to_string()))
+    Ok(template::Value::Integer(sum))
 }
 
 fn builtin_sub(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
@@ -647,41 +660,24 @@ fn builtin_sub(args: &[Form], cond: &conductor::Conductor) -> Result<template::V
         return Err("- requires at least 1 argument".into());
     }
     let first = eval_expanded(&args[0], cond)?;
-    let mut result: i64 = match &first {
-        template::Value::Text(s) => s
-            .parse()
-            .map_err(|_| format!("not a number: {s}"))?,
-        _ => return Err("- expects numbers".into()),
-    };
+    let mut result: i64 = value_to_i64(&first, "-")?;
     if args.len() == 1 {
-        return Ok(template::Value::Text((-result).to_string()));
+        return Ok(template::Value::Integer(-result));
     }
     for arg in &args[1..] {
         let val = eval_expanded(arg, cond)?;
-        let n: i64 = match &val {
-            template::Value::Text(s) => s
-                .parse()
-                .map_err(|_| format!("not a number: {s}"))?,
-            _ => return Err("- expects numbers".into()),
-        };
-        result -= n;
+        result -= value_to_i64(&val, "-")?;
     }
-    Ok(template::Value::Text(result.to_string()))
+    Ok(template::Value::Integer(result))
 }
 
 fn builtin_mul(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
     let mut product: i64 = 1;
     for arg in args {
         let val = eval_expanded(arg, cond)?;
-        let n: i64 = match &val {
-            template::Value::Text(s) => s
-                .parse()
-                .map_err(|_| format!("not a number: {s}"))?,
-            _ => return Err("* expects numbers".into()),
-        };
-        product *= n;
+        product *= value_to_i64(&val, "*")?;
     }
-    Ok(template::Value::Text(product.to_string()))
+    Ok(template::Value::Integer(product))
 }
 
 fn builtin_eq(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
@@ -689,14 +685,26 @@ fn builtin_eq(args: &[Form], cond: &conductor::Conductor) -> Result<template::Va
         return Err("= requires at least 2 arguments".into());
     }
     let first = eval_expanded(&args[0], cond)?;
-    let first_str = value_to_string(&first);
     for arg in &args[1..] {
         let val = eval_expanded(arg, cond)?;
-        if first_str != value_to_string(&val) {
-            return Ok(template::Value::Text("false".into()));
+        if !values_equal(&first, &val) {
+            return Ok(template::Value::Bool(false));
         }
     }
-    Ok(template::Value::Text("true".into()))
+    Ok(template::Value::Bool(true))
+}
+
+/// Structural equality for Values.
+fn values_equal(a: &template::Value, b: &template::Value) -> bool {
+    match (a, b) {
+        (template::Value::Integer(x), template::Value::Integer(y)) => x == y,
+        (template::Value::Bool(x), template::Value::Bool(y)) => x == y,
+        (template::Value::Text(x), template::Value::Text(y)) => x == y,
+        (template::Value::Absent, template::Value::Absent) => true,
+        (template::Value::Keyword { namespace: ns1, name: n1 }, template::Value::Keyword { namespace: ns2, name: n2 }) => ns1 == ns2 && n1 == n2,
+        // Fall back to string comparison for mixed types (backward compat)
+        _ => value_to_string(a) == value_to_string(b),
+    }
 }
 
 fn builtin_str(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
@@ -978,8 +986,8 @@ mod tests {
         let cond = empty_conductor();
         let result = eval_str("(+ 1 2)", &cond).unwrap();
         assert!(
-            matches!(&result, template::Value::Text(s) if s == "3"),
-            "expected Text(\"3\"), got {result:?}"
+            matches!(&result, template::Value::Integer(3)),
+            "expected Integer(3), got {result:?}"
         );
     }
 
@@ -987,35 +995,35 @@ mod tests {
     fn subtract_two_numbers() {
         let cond = empty_conductor();
         let result = eval_str("(- 10 3)", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "7"));
+        assert!(matches!(&result, template::Value::Integer(7)));
     }
 
     #[test]
     fn multiply_two_numbers() {
         let cond = empty_conductor();
         let result = eval_str("(* 4 5)", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "20"));
+        assert!(matches!(&result, template::Value::Integer(20)));
     }
 
     #[test]
     fn negate_single_number() {
         let cond = empty_conductor();
         let result = eval_str("(- 5)", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "-5"));
+        assert!(matches!(&result, template::Value::Integer(-5)));
     }
 
     #[test]
     fn equality_true() {
         let cond = empty_conductor();
         let result = eval_str("(= 1 1)", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "true"));
+        assert!(matches!(&result, template::Value::Bool(true)));
     }
 
     #[test]
     fn equality_false() {
         let cond = empty_conductor();
         let result = eval_str("(= 1 2)", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "false"));
+        assert!(matches!(&result, template::Value::Bool(false)));
     }
 
     #[test]
@@ -1035,10 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn integer_literal_evaluates_to_text() {
+    fn integer_literal_evaluates_to_integer() {
         let cond = empty_conductor();
         let result = eval_str("42", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "42"));
+        assert!(matches!(&result, template::Value::Integer(42)));
     }
 
     #[test]
@@ -1062,7 +1070,7 @@ mod tests {
         // (-> 1 (+ 2) (* 3)) → (* (+ 1 2) 3) → 9
         let cond = empty_conductor();
         let result = eval_str("(-> 1 (+ 2) (* 3))", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "9"));
+        assert!(matches!(&result, template::Value::Integer(9)));
     }
 
     #[test]
@@ -1079,14 +1087,14 @@ mod tests {
     fn count_vector() {
         let cond = empty_conductor();
         let result = eval_str("(count [1 2 3])", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "3"));
+        assert!(matches!(&result, template::Value::Integer(3)));
     }
 
     #[test]
     fn first_vector() {
         let cond = empty_conductor();
         let result = eval_str("(first [1 2 3])", &cond).unwrap();
-        assert!(matches!(&result, template::Value::Text(s) if s == "1"));
+        assert!(matches!(&result, template::Value::Integer(1)));
     }
 
     #[test]
@@ -1102,7 +1110,7 @@ mod tests {
         let result = eval_str("(reverse [1 2 3])", &cond).unwrap();
         if let template::Value::List(items) = result {
             assert_eq!(items.len(), 3);
-            assert!(matches!(&items[0], template::Value::Text(s) if s == "3"));
+            assert!(matches!(&items[0], template::Value::Integer(3)));
         } else {
             panic!("expected list");
         }

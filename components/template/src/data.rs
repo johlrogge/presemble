@@ -41,6 +41,12 @@ pub enum Value {
     List(Vec<Value>),
     /// Absent — slot not present or optional field not filled
     Absent,
+    /// A proper integer value (replaces Text("42") pattern)
+    Integer(i64),
+    /// A proper boolean value (replaces Text("true") pattern)
+    Bool(bool),
+    /// A keyword value: `:name` or `:ns/name`
+    Keyword { namespace: Option<String>, name: String },
     /// A suggestion placeholder for missing content, driven by schema hint_text.
     /// Rendered as a visually distinct placeholder in the output.
     Suggestion {
@@ -78,6 +84,10 @@ impl Value {
                 if texts.is_empty() { None } else { Some(texts.join(" ")) }
             }
             Value::Absent => None,
+            Value::Integer(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Keyword { namespace: Some(ns), name } => Some(format!(":{ns}/{name}")),
+            Value::Keyword { namespace: None, name } => Some(format!(":{name}")),
             Value::Suggestion { .. } => None,
             Value::LinkExpression { text, .. } => match text {
                 content::LinkText::Static(s) => Some(s.clone()),

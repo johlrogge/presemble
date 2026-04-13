@@ -176,6 +176,10 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &DataGraph) -> String {
                 Some(Value::Record(_)) => String::new(),
                 Some(Value::Suggestion { hint, .. }) => hint.clone(),
                 Some(Value::LinkExpression { .. }) => String::new(),
+                Some(Value::Integer(n)) => n.to_string(),
+                Some(Value::Bool(b)) => b.to_string(),
+                Some(Value::Keyword { namespace: Some(ns), name }) => format!(":{ns}/{name}"),
+                Some(Value::Keyword { namespace: None, name }) => format!(":{name}"),
             }
         }
         Expr::Pipe(inner, transform) => {
@@ -527,6 +531,54 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
         }
 
         Some(Value::LinkExpression { .. }) => Ok(Vec::new()),
+
+        Some(Value::Integer(n)) => {
+            let text = n.to_string();
+            let tag = as_tag.unwrap_or("span").to_string();
+            let element = Element {
+                name: tag,
+                attrs: vec![
+                    ("class".to_string(), Form::Str(class)),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file)),
+                ],
+                children: vec![Node::Text(text)],
+            };
+            Ok(vec![Node::Element(element)])
+        }
+
+        Some(Value::Bool(b)) => {
+            let text = b.to_string();
+            let tag = as_tag.unwrap_or("span").to_string();
+            let element = Element {
+                name: tag,
+                attrs: vec![
+                    ("class".to_string(), Form::Str(class)),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file)),
+                ],
+                children: vec![Node::Text(text)],
+            };
+            Ok(vec![Node::Element(element)])
+        }
+
+        Some(Value::Keyword { namespace, name }) => {
+            let text = match namespace {
+                Some(ns) => format!(":{ns}/{name}"),
+                None => format!(":{name}"),
+            };
+            let tag = as_tag.unwrap_or("span").to_string();
+            let element = Element {
+                name: tag,
+                attrs: vec![
+                    ("class".to_string(), Form::Str(class)),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file)),
+                ],
+                children: vec![Node::Text(text)],
+            };
+            Ok(vec![Node::Element(element)])
+        }
     }
 }
 
@@ -727,6 +779,49 @@ fn render_list_item(
         Value::Suggestion { .. } => Ok(Vec::new()),
 
         Value::LinkExpression { .. } => Ok(Vec::new()),
+
+        Value::Integer(n) => {
+            let element = Element {
+                name: tag.to_string(),
+                attrs: vec![
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+                ],
+                children: vec![Node::Text(n.to_string())],
+            };
+            Ok(vec![Node::Element(element)])
+        }
+
+        Value::Bool(b) => {
+            let element = Element {
+                name: tag.to_string(),
+                attrs: vec![
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+                ],
+                children: vec![Node::Text(b.to_string())],
+            };
+            Ok(vec![Node::Element(element)])
+        }
+
+        Value::Keyword { namespace, name } => {
+            let text = match namespace {
+                Some(ns) => format!(":{ns}/{name}"),
+                None => format!(":{name}"),
+            };
+            let element = Element {
+                name: tag.to_string(),
+                attrs: vec![
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+                ],
+                children: vec![Node::Text(text)],
+            };
+            Ok(vec![Node::Element(element)])
+        }
     }
 }
 
