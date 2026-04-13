@@ -210,10 +210,10 @@ pub fn run_repl(mut backend: Box<dyn ReplBackend>) -> io::Result<()> {
 
                     // Update doc panel for symbol under cursor
                     let word = current_word(&state.input, state.cursor_pos);
-                    if !word.is_empty() {
-                        if let Some(doc) = backend.doc_lookup(&word) {
-                            state.doc_text = doc;
-                        }
+                    if !word.is_empty()
+                        && let Some(doc) = backend.doc_lookup(&word)
+                    {
+                        state.doc_text = doc;
                     }
                 }
 

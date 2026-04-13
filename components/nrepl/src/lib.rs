@@ -179,7 +179,7 @@ impl NreplServer {
                     "versions",
                     bencode::Value::dict(vec![(
                         "presemble",
-                        bencode::Value::string("0.23.0"),
+                        bencode::Value::string(env!("CARGO_PKG_VERSION")),
                     )]),
                 ),
                 (

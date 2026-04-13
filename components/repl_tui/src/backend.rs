@@ -210,10 +210,10 @@ impl ReplBackend for NreplBackend {
         for arglist in &info.arglists {
             out.push_str(&format!("  {arglist}\n"));
         }
-        if let Some(doc) = &info.doc {
-            if !doc.is_empty() {
-                out.push_str(&format!("  {doc}\n"));
-            }
+        if let Some(doc) = &info.doc
+            && !doc.is_empty()
+        {
+            out.push_str(&format!("  {doc}\n"));
         }
         Some(out)
     }
