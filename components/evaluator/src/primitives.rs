@@ -9,6 +9,7 @@ use std::sync::Arc;
 use template::Value;
 use crate::closure::PrimitiveFn;
 use crate::env::RootEnv;
+use crate::doc_registry::{DocEntry, DocSource};
 
 // ---------------------------------------------------------------------------
 // Registration entry point
@@ -18,15 +19,15 @@ use crate::env::RootEnv;
 /// Called once at the start of each `eval` call.
 pub fn register_builtins(root: &RootEnv) {
     // ── Arithmetic ───────────────────────────────────────────────────────────
-    root.def("+", prim("+", |args| {
+    prim_doc(root, "+", "(+ a b ...)", "Add numbers.", |args| {
         let mut sum: i64 = 0;
         for a in &args {
             sum += value_to_i64(a, "+")?;
         }
         Ok(Value::Integer(sum))
-    }));
+    });
 
-    root.def("-", prim("-", |args| {
+    prim_doc(root, "-", "(- a b ...) or (- a)", "Subtract numbers. With one arg, negates.", |args| {
         if args.is_empty() {
             return Err("- requires at least 1 argument".into());
         }
@@ -38,17 +39,17 @@ pub fn register_builtins(root: &RootEnv) {
             result -= value_to_i64(a, "-")?;
         }
         Ok(Value::Integer(result))
-    }));
+    });
 
-    root.def("*", prim("*", |args| {
+    prim_doc(root, "*", "(* a b ...)", "Multiply numbers.", |args| {
         let mut product: i64 = 1;
         for a in &args {
             product *= value_to_i64(a, "*")?;
         }
         Ok(Value::Integer(product))
-    }));
+    });
 
-    root.def("/", prim("/", |args| {
+    prim_doc(root, "/", "(/ a b ...)", "Divide numbers (integer division).", |args| {
         if args.len() < 2 {
             return Err("/ requires at least 2 arguments".into());
         }
@@ -61,9 +62,9 @@ pub fn register_builtins(root: &RootEnv) {
             result /= n;
         }
         Ok(Value::Integer(result))
-    }));
+    });
 
-    root.def("mod", prim("mod", |args| {
+    prim_doc(root, "mod", "(mod a b)", "Modulo — remainder of a divided by b.", |args| {
         if args.len() != 2 {
             return Err("mod requires exactly 2 arguments".into());
         }
@@ -73,10 +74,10 @@ pub fn register_builtins(root: &RootEnv) {
             return Err("mod division by zero".into());
         }
         Ok(Value::Integer(n % d))
-    }));
+    });
 
     // ── Comparison ───────────────────────────────────────────────────────────
-    root.def("=", prim("=", |args| {
+    prim_doc(root, "=", "(= a b ...)", "Check equality of two or more values.", |args| {
         if args.len() < 2 {
             return Err("= requires at least 2 arguments".into());
         }
@@ -87,9 +88,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
         }
         Ok(Value::Bool(true))
-    }));
+    });
 
-    root.def("<", prim("<", |args| {
+    prim_doc(root, "<", "(< a b ...)", "Return true if arguments are in strictly increasing order.", |args| {
         if args.len() < 2 {
             return Err("< requires at least 2 arguments".into());
         }
@@ -102,9 +103,9 @@ pub fn register_builtins(root: &RootEnv) {
             prev = cur;
         }
         Ok(Value::Bool(true))
-    }));
+    });
 
-    root.def(">", prim(">", |args| {
+    prim_doc(root, ">", "(> a b ...)", "Return true if arguments are in strictly decreasing order.", |args| {
         if args.len() < 2 {
             return Err("> requires at least 2 arguments".into());
         }
@@ -117,18 +118,18 @@ pub fn register_builtins(root: &RootEnv) {
             prev = cur;
         }
         Ok(Value::Bool(true))
-    }));
+    });
 
-    root.def("not", prim("not", |args| {
+    prim_doc(root, "not", "(not x)", "Logical negation — returns true if x is false or nil.", |args| {
         if args.len() != 1 {
             return Err("not requires exactly 1 argument".into());
         }
         let falsy = matches!(&args[0], Value::Bool(false) | Value::Absent);
         Ok(Value::Bool(falsy))
-    }));
+    });
 
     // ── Collection operations ─────────────────────────────────────────────────
-    root.def("first", prim("first", |args| {
+    prim_doc(root, "first", "(first coll)", "Return the first item of a collection, or nil if empty.", |args| {
         if args.len() != 1 {
             return Err("first requires 1 argument".into());
         }
@@ -139,9 +140,9 @@ pub fn register_builtins(root: &RootEnv) {
                 .unwrap_or(Value::Absent)),
             _ => Err("first expects a list or string".into()),
         }
-    }));
+    });
 
-    root.def("rest", prim("rest", |args| {
+    prim_doc(root, "rest", "(rest coll)", "Return all items except the first, or [] if empty.", |args| {
         if args.len() != 1 {
             return Err("rest requires 1 argument".into());
         }
@@ -155,9 +156,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
             _ => Err("rest expects a list".into()),
         }
-    }));
+    });
 
-    root.def("last", prim("last", |args| {
+    prim_doc(root, "last", "(last coll)", "Return the last item of a collection, or nil if empty.", |args| {
         if args.len() != 1 {
             return Err("last requires 1 argument".into());
         }
@@ -165,9 +166,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::List(items) => Ok(items.last().cloned().unwrap_or(Value::Absent)),
             _ => Err("last expects a list".into()),
         }
-    }));
+    });
 
-    root.def("count", prim("count", |args| {
+    prim_doc(root, "count", "(count coll)", "Return the number of items in a collection or string.", |args| {
         if args.len() != 1 {
             return Err("count requires 1 argument".into());
         }
@@ -177,9 +178,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Absent => Ok(Value::Integer(0)),
             _ => Err("count expects a list or string".into()),
         }
-    }));
+    });
 
-    root.def("reverse", prim("reverse", |args| {
+    prim_doc(root, "reverse", "(reverse coll)", "Return a collection with items in reversed order.", |args| {
         if args.len() != 1 {
             return Err("reverse requires 1 argument".into());
         }
@@ -191,9 +192,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
             _ => Err("reverse expects a list".into()),
         }
-    }));
+    });
 
-    root.def("take", prim("take", |args| {
+    prim_doc(root, "take", "(take n coll)", "Take the first n items from a collection.", |args| {
         if args.len() != 2 {
             return Err("take requires 2 arguments: count and collection".into());
         }
@@ -202,9 +203,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::List(items) => Ok(Value::List(items.iter().take(n).cloned().collect())),
             _ => Err("take expects a list as second argument".into()),
         }
-    }));
+    });
 
-    root.def("nth", prim("nth", |args| {
+    prim_doc(root, "nth", "(nth coll n) or (nth coll n default)", "Get item at index n (0-based). Returns default or errors if out of bounds.", |args| {
         if args.len() < 2 {
             return Err("nth requires at least 2 arguments: coll and index".into());
         }
@@ -223,9 +224,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
             _ => Err("nth expects a list".into()),
         }
-    }));
+    });
 
-    root.def("conj", prim("conj", |args| {
+    prim_doc(root, "conj", "(conj coll item ...)", "Append one or more items to a collection.", |args| {
         if args.len() < 2 {
             return Err("conj requires at least 2 arguments: coll and item".into());
         }
@@ -242,9 +243,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
             _ => Err("conj expects a list or nil".into()),
         }
-    }));
+    });
 
-    root.def("cons", prim("cons", |args| {
+    prim_doc(root, "cons", "(cons item coll)", "Prepend an item to a collection.", |args| {
         if args.len() != 2 {
             return Err("cons requires 2 arguments: item and coll".into());
         }
@@ -257,9 +258,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Absent => Ok(Value::List(vec![args[0].clone()])),
             _ => Err("cons expects a list as second argument".into()),
         }
-    }));
+    });
 
-    root.def("concat", prim("concat", |args| {
+    prim_doc(root, "concat", "(concat coll ...)", "Concatenate collections into a single list.", |args| {
         let mut result = Vec::new();
         for a in &args {
             match a {
@@ -269,9 +270,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
         }
         Ok(Value::List(result))
-    }));
+    });
 
-    root.def("empty?", prim("empty?", |args| {
+    prim_doc(root, "empty?", "(empty? coll)", "Return true if the collection or string is empty.", |args| {
         if args.len() != 1 {
             return Err("empty? requires 1 argument".into());
         }
@@ -282,12 +283,12 @@ pub fn register_builtins(root: &RootEnv) {
             _ => false,
         };
         Ok(Value::Bool(empty))
-    }));
+    });
 
     // NOTE: contains? is in legacy dispatch (lib.rs) because keyword args evaluate
     // to stem queries when unnamespaced (e.g., `:a` → `List([])`)
 
-    root.def("vec", prim("vec", |args| {
+    prim_doc(root, "vec", "(vec x)", "Convert a value to a vector/list.", |args| {
         if args.len() != 1 {
             return Err("vec requires 1 argument".into());
         }
@@ -296,9 +297,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Absent => Ok(Value::List(vec![])),
             _ => Ok(Value::List(vec![args[0].clone()])),
         }
-    }));
+    });
 
-    root.def("range", prim("range", |args| {
+    prim_doc(root, "range", "(range end) or (range start end) or (range start end step)", "Generate a range of integers.", |args| {
         match args.len() {
             1 => {
                 let end = value_to_i64(&args[0], "range")?;
@@ -326,21 +327,21 @@ pub fn register_builtins(root: &RootEnv) {
             }
             _ => Err("range requires 1, 2, or 3 arguments".into()),
         }
-    }));
+    });
 
-    root.def("repeat", prim("repeat", |args| {
+    prim_doc(root, "repeat", "(repeat n val)", "Return a list of val repeated n times.", |args| {
         if args.len() != 2 {
             return Err("repeat requires 2 arguments: n and value".into());
         }
         let n = value_to_i64(&args[0], "repeat")? as usize;
         Ok(Value::List(vec![args[1].clone(); n]))
-    }));
+    });
 
     // ── Map/record operations ─────────────────────────────────────────────────
     // NOTE: get, get-in, assoc, dissoc are in legacy dispatch (lib.rs) because
     // keyword args (e.g., `:key`) evaluate to stem queries when unnamespaced.
 
-    root.def("merge", prim("merge", |args| {
+    prim_doc(root, "merge", "(merge map1 map2 ...)", "Merge records; later maps override earlier ones.", |args| {
         let mut result = template::DataGraph::new();
         for a in &args {
             match a {
@@ -354,12 +355,12 @@ pub fn register_builtins(root: &RootEnv) {
             }
         }
         Ok(Value::Record(result))
-    }));
+    });
 
     // NOTE: select-keys is in legacy dispatch (lib.rs) because keyword args
     // evaluate to stem queries when unnamespaced.
 
-    root.def("keys", prim("keys", |args| {
+    prim_doc(root, "keys", "(keys map)", "Return all keys of a record as keywords.", |args| {
         if args.len() != 1 {
             return Err("keys requires 1 argument".into());
         }
@@ -373,9 +374,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
             _ => Err("keys expects a map".into()),
         }
-    }));
+    });
 
-    root.def("vals", prim("vals", |args| {
+    prim_doc(root, "vals", "(vals map)", "Return all values of a record.", |args| {
         if args.len() != 1 {
             return Err("vals requires 1 argument".into());
         }
@@ -389,18 +390,18 @@ pub fn register_builtins(root: &RootEnv) {
             }
             _ => Err("vals expects a map".into()),
         }
-    }));
+    });
 
     // ── String operations ─────────────────────────────────────────────────────
-    root.def("str", prim("str", |args| {
+    prim_doc(root, "str", "(str a b ...)", "Concatenate values as strings.", |args| {
         let mut result = String::new();
         for a in &args {
             result.push_str(&value_to_string(a));
         }
         Ok(Value::Text(result))
-    }));
+    });
 
-    root.def("subs", prim("subs", |args| {
+    prim_doc(root, "subs", "(subs s start) or (subs s start end)", "Return a substring of s.", |args| {
         if args.len() < 2 {
             return Err("subs requires at least 2 arguments: string, start".into());
         }
@@ -415,12 +416,12 @@ pub fn register_builtins(root: &RootEnv) {
             let end = value_to_i64(&args[2], "subs")? as usize;
             Ok(Value::Text(s.chars().skip(start).take(end - start).collect()))
         }
-    }));
+    });
 
     // NOTE: name is in legacy dispatch (lib.rs) because keyword args evaluate
     // to stem queries when unnamespaced (e.g., `:foo` → `List([])`).
 
-    root.def("keyword", prim("keyword", |args| {
+    prim_doc(root, "keyword", "(keyword \"name\") or (keyword \"ns\" \"name\")", "Create a keyword from a string, optionally with a namespace.", |args| {
         if args.is_empty() || args.len() > 2 {
             return Err("keyword requires 1 or 2 arguments".into());
         }
@@ -442,10 +443,10 @@ pub fn register_builtins(root: &RootEnv) {
             };
             Ok(Value::Keyword { namespace: Some(namespace), name })
         }
-    }));
+    });
 
     // ── Type operations ───────────────────────────────────────────────────────
-    root.def("type", prim("type", |args| {
+    prim_doc(root, "type", "(type x)", "Return the type of a value as a keyword (:integer, :string, :list, :map, :fn, :boolean, :keyword, or :nil).", |args| {
         if args.len() != 1 {
             return Err("type requires 1 argument".into());
         }
@@ -463,7 +464,7 @@ pub fn register_builtins(root: &RootEnv) {
             Value::LinkExpression { .. } => "nil",
         };
         Ok(Value::Keyword { namespace: None, name: kw.to_string() })
-    }));
+    });
 
     // NOTE: apply, every?, some, map, filter, reduce, sort-by are in the
     // conductor-aware legacy dispatch in lib.rs because they need to invoke
@@ -471,7 +472,7 @@ pub fn register_builtins(root: &RootEnv) {
 
     // ── Map/record operations (Phase 6: keywords are now values) ────────────
 
-    root.def("get", prim("get", |args| {
+    prim_doc(root, "get", "(get map :key) or (get map :key default)", "Get a value from a record by keyword, returning default or nil if missing.", |args| {
         if args.len() < 2 {
             return Err("get requires at least 2 arguments: map and key".into());
         }
@@ -481,9 +482,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Record(r) => Ok(r.resolve(&[key.as_str()]).cloned().unwrap_or(default)),
             _ => Ok(default),
         }
-    }));
+    });
 
-    root.def("get-in", prim("get-in", |args| {
+    prim_doc(root, "get-in", "(get-in map [:k1 :k2 ...]) or (get-in map keys default)", "Get a nested value from a record by a path of keys.", |args| {
         // (get-in map [:key1 :key2]) — Clojure convention: vector of keys
         if args.len() < 2 {
             return Err("get-in requires at least 2 arguments: map and key-vector".into());
@@ -508,9 +509,9 @@ pub fn register_builtins(root: &RootEnv) {
         } else {
             Ok(current)
         }
-    }));
+    });
 
-    root.def("assoc", prim("assoc", |args| {
+    prim_doc(root, "assoc", "(assoc map :key val ...)", "Associate key-value pairs into a record, returning a new record.", |args| {
         if args.len() < 3 {
             return Err("assoc requires at least 3 arguments: map, key, value".into());
         }
@@ -527,9 +528,9 @@ pub fn register_builtins(root: &RootEnv) {
             i += 2;
         }
         Ok(Value::Record(result))
-    }));
+    });
 
-    root.def("dissoc", prim("dissoc", |args| {
+    prim_doc(root, "dissoc", "(dissoc map :key ...)", "Remove keys from a record, returning a new record.", |args| {
         if args.len() < 2 {
             return Err("dissoc requires at least 2 arguments: map and key".into());
         }
@@ -548,9 +549,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
         }
         Ok(Value::Record(result))
-    }));
+    });
 
-    root.def("contains?", prim("contains?", |args| {
+    prim_doc(root, "contains?", "(contains? map :key)", "Return true if the record contains the given key.", |args| {
         if args.len() != 2 {
             return Err("contains? requires exactly 2 arguments: map and key".into());
         }
@@ -559,9 +560,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Record(r) => Ok(Value::Bool(r.resolve(&[key.as_str()]).is_some())),
             _ => Ok(Value::Bool(false)),
         }
-    }));
+    });
 
-    root.def("select-keys", prim("select-keys", |args| {
+    prim_doc(root, "select-keys", "(select-keys map [:k1 :k2 ...])", "Return a new record containing only the specified keys.", |args| {
         if args.len() != 2 {
             return Err("select-keys requires exactly 2 arguments: map and key-vector".into());
         }
@@ -579,9 +580,9 @@ pub fn register_builtins(root: &RootEnv) {
             }
         }
         Ok(Value::Record(result))
-    }));
+    });
 
-    root.def("name", prim("name", |args| {
+    prim_doc(root, "name", "(name :kw) or (name \"str\")", "Return the name portion of a keyword, or the string itself.", |args| {
         if args.len() != 1 {
             return Err("name requires 1 argument".into());
         }
@@ -590,9 +591,9 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Text(s) => Ok(Value::Text(s.clone())),
             _ => Err("name expects a keyword or string".into()),
         }
-    }));
+    });
 
-    root.def("namespace", prim("namespace", |args| {
+    prim_doc(root, "namespace", "(namespace :ns/kw)", "Return the namespace portion of a keyword, or nil if unqualified.", |args| {
         if args.len() != 1 {
             return Err("namespace requires 1 argument".into());
         }
@@ -603,7 +604,7 @@ pub fn register_builtins(root: &RootEnv) {
             },
             _ => Err("namespace expects a keyword".into()),
         }
-    }));
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -613,6 +614,27 @@ pub fn register_builtins(root: &RootEnv) {
 /// Create a `Value::Fn` backed by the given pure function.
 fn prim(name: &str, func: impl Fn(Vec<Value>) -> Result<Value, String> + Send + Sync + 'static) -> Value {
     Value::Fn(Arc::new(PrimitiveFn::new(name, func)))
+}
+
+/// Register a primitive with documentation metadata.
+fn prim_doc(
+    root: &RootEnv,
+    name: &str,
+    sig: &str,
+    doc: &str,
+    func: impl Fn(Vec<Value>) -> Result<Value, String> + Send + Sync + 'static,
+) {
+    let value = prim(name, func);
+    root.def_with_doc(
+        name,
+        value,
+        DocEntry {
+            name: name.to_string(),
+            doc: doc.to_string(),
+            arglists: vec![sig.to_string()],
+            source: DocSource::Primitive,
+        },
+    );
 }
 
 /// Extract an i64 from a Value.

@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock};
 use template::Value;
+use crate::doc_registry::{DocEntry, DocRegistry};
 
 /// Lexical environment — immutable scope with parent chain.
 /// Each `let` / `fn` body creates a new child scope via `with_parent`.
@@ -53,6 +54,7 @@ impl Env {
 #[derive(Debug, Clone)]
 pub struct RootEnv {
     inner: Arc<RwLock<Env>>,
+    pub doc_registry: DocRegistry,
 }
 
 impl Default for RootEnv {
@@ -65,6 +67,7 @@ impl RootEnv {
     pub fn new() -> Self {
         RootEnv {
             inner: Arc::new(RwLock::new(Env::new())),
+            doc_registry: DocRegistry::new(),
         }
     }
 
@@ -72,6 +75,13 @@ impl RootEnv {
     pub fn def(&self, name: impl Into<String>, value: Value) {
         let mut env = self.inner.write().unwrap();
         env.bindings = env.bindings.update(name.into(), value);
+    }
+
+    /// Define a binding with documentation metadata.
+    pub fn def_with_doc(&self, name: impl Into<String>, value: Value, doc: DocEntry) {
+        let name = name.into();
+        self.def(&name, value);
+        self.doc_registry.register(doc);
     }
 
     /// Get a snapshot of the current root as an immutable `Arc<Env>`.

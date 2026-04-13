@@ -1,9 +1,11 @@
 mod env;
 mod closure;
 pub mod primitives;
+pub mod doc_registry;
 
 pub use env::{Env, RootEnv};
 pub use closure::{Closure, FnArity, PrimitiveFn};
+pub use doc_registry::{DocEntry, DocRegistry, DocSource};
 
 use std::sync::Arc;
 use forms::Form;
@@ -30,6 +32,7 @@ pub fn eval(form: &Form, conductor: &conductor::Conductor) -> Result<template::V
     let expanded = macros::macroexpand(form.clone());
     let root = RootEnv::new();
     primitives::register_builtins(&root);
+    register_macro_docs(&root.doc_registry);
     load_prelude(&root, conductor).map_err(|e| format!("prelude load failed: {e}"))?;
     let env = root.snapshot();
     eval_in_env(&expanded, &env, &root, conductor)
@@ -212,6 +215,31 @@ pub(crate) fn eval_in_env(
                         return Err("recur is not yet implemented — use named recursion via def".into());
                     }
 
+                    // ── (def-doc! name "docstring" "[args]" ...) ─────────────
+                    "def-doc!" => {
+                        if items.len() < 3 {
+                            return Err("def-doc! requires at least name and docstring".into());
+                        }
+                        let name = items[1]
+                            .as_symbol()
+                            .ok_or_else(|| "def-doc!: first argument must be a symbol".to_string())?;
+                        let doc = match &items[2] {
+                            Form::Str(s) => s.clone(),
+                            _ => return Err("def-doc!: second argument must be a docstring".into()),
+                        };
+                        let arglists: Vec<String> = items[3..]
+                            .iter()
+                            .filter_map(|f| f.as_str().map(String::from))
+                            .collect();
+                        root.doc_registry.register(crate::doc_registry::DocEntry {
+                            name: name.to_string(),
+                            doc,
+                            arglists,
+                            source: crate::doc_registry::DocSource::Prelude,
+                        });
+                        return Ok(template::Value::Absent);
+                    }
+
                     _ => {} // fall through to function call dispatch
                 }
             }
@@ -287,7 +315,7 @@ pub(crate) fn eval_in_env(
                 "println" => builtin_println(&items[1..], env, root, conductor),
 
                 // Help
-                "doc" => builtin_doc(&items[1..]),
+                "doc" => builtin_doc_registry(&items[1..], root),
 
                 _ => Err(format!("unknown function: {func_name}")),
             }
@@ -952,97 +980,112 @@ fn builtin_println(
 
 // ── Documentation ───────────────────────────────────────────────────────────
 
-const DOCS: &[(&str, &str, &str)] = &[
-    // Collections
-    ("map", "(map :field coll)", "Apply a keyword accessor to each item."),
-    ("sort-by", "(sort-by :field coll) or (sort-by :field :desc coll)", "Sort a collection by a field."),
-    ("filter", "(filter pred coll) or (filter :field \"value\" coll)", "Keep items matching predicate or field value."),
-    ("reduce", "(reduce f coll) or (reduce f init coll)", "Fold over a collection."),
-    ("take", "(take n coll)", "Take the first n items from a collection."),
-    ("first", "(first coll)", "Return the first item of a collection."),
-    ("rest", "(rest coll)", "Return all items except the first."),
-    ("last", "(last coll)", "Return the last item of a collection."),
-    ("count", "(count coll)", "Return the number of items in a collection or string."),
-    ("reverse", "(reverse coll)", "Reverse a collection."),
-    ("conj", "(conj coll item ...)", "Append items to a collection."),
-    ("cons", "(cons item coll)", "Prepend an item to a collection."),
-    ("concat", "(concat coll ...)", "Concatenate collections."),
-    ("nth", "(nth coll n)", "Get item at index n."),
-    ("empty?", "(empty? coll)", "Check if a collection is empty."),
-    ("contains?", "(contains? map :key)", "Check if a map has a key."),
-    ("vec", "(vec x)", "Convert to a vector/list."),
-    ("range", "(range end) or (range start end) or (range start end step)", "Generate a range of integers."),
-    ("repeat", "(repeat n val)", "Repeat a value n times."),
-    ("every?", "(every? pred coll)", "Check if all items satisfy a predicate."),
-    ("some", "(some pred coll)", "Find first truthy result."),
-    ("apply", "(apply f args-list)", "Apply a function to a list of arguments."),
-    // Data access
-    ("get", "(get map :key) or (get map :key default)", "Get a value from a record by keyword."),
-    ("get-in", "(get-in map [:k1 :k2 ...])", "Get a nested value from a record."),
-    ("assoc", "(assoc map :key val ...)", "Set key-value pairs in a record."),
-    ("dissoc", "(dissoc map :key ...)", "Remove keys from a record."),
-    ("merge", "(merge map1 map2 ...)", "Merge records; later maps win."),
-    ("select-keys", "(select-keys map [:k1 :k2 ...])", "Keep only specified keys."),
-    ("keys", "(keys map)", "Return all keys of a record as keywords."),
-    ("vals", "(vals map)", "Return all values of a record."),
-    // Conductor-specific
-    ("get-content", "(get-content \"content/post/hello.md\")", "Get the live content of a file."),
-    ("get-schema", "(get-schema :post)", "Get the schema source for a content type."),
-    ("list-content", "(list-content)", "List all content page URLs."),
-    ("list-schemas", "(list-schemas)", "List all schema stem names."),
-    ("suggest", "(suggest \"file\" \"slot\" \"value\" \"reason\")", "Create an editorial suggestion."),
-    ("get-suggestions", "(get-suggestions \"file\")", "Get pending suggestions for a file."),
-    ("refs-to", "(refs-to \"/author/alice\")", "Returns all edges pointing to the given URL."),
-    ("refs-from", "(refs-from \"/post/hello\")", "Returns all edges originating from the given URL."),
-    // Arithmetic
-    ("+", "(+ a b ...)", "Add numbers."),
-    ("-", "(- a b ...)", "Subtract numbers. (- a) negates."),
-    ("*", "(* a b ...)", "Multiply numbers."),
-    ("/", "(/ a b ...)", "Divide numbers (integer division)."),
-    ("mod", "(mod a b)", "Modulo."),
-    // Comparison
-    ("=", "(= a b ...)", "Check equality."),
-    ("<", "(< a b ...)", "Less than."),
-    (">", "(> a b ...)", "Greater than."),
-    ("not", "(not x)", "Logical negation."),
-    // String
-    ("str", "(str a b ...)", "Concatenate values as strings."),
-    ("subs", "(subs s start) or (subs s start end)", "Substring."),
-    ("name", "(name :kw)", "Get the name portion of a keyword or string."),
-    ("keyword", "(keyword \"name\")", "Create a keyword from a string."),
-    // Type
-    ("type", "(type x)", "Return the type of a value as a keyword."),
-    // Output
-    ("println", "(println a b ...)", "Print values to stderr."),
-    // Help
-    ("doc", "(doc) or (doc fn-name)", "Show documentation for a function, or list all functions."),
-    // Macros
-    ("->", "(-> x (f a) (g b))", "Thread-first."),
-    ("->>", "(->> x (f a) (g b))", "Thread-last."),
-    // Keywords
-    (":keyword", ":post", "A bare keyword evaluates to all items for that schema stem."),
-];
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("")
+}
 
-fn builtin_doc(args: &[Form]) -> Result<template::Value, String> {
+fn builtin_doc_registry(args: &[Form], root: &RootEnv) -> Result<template::Value, String> {
     if args.is_empty() {
+        // (doc) — list all documented symbols grouped by source
+        let entries = root.doc_registry.all_entries();
         let mut help = String::from("Available functions:\n\n");
-        for (name, sig, desc) in DOCS {
-            help.push_str(&format!("  {name:<16} {desc}\n"));
-            help.push_str(&format!("  {:<16} {sig}\n\n", ""));
+
+        let primitives: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(e.source, crate::doc_registry::DocSource::Primitive))
+            .collect();
+        let prelude: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(e.source, crate::doc_registry::DocSource::Prelude))
+            .collect();
+        let user: Vec<_> = entries
+            .iter()
+            .filter(|e| matches!(e.source, crate::doc_registry::DocSource::User))
+            .collect();
+
+        if !primitives.is_empty() {
+            help.push_str("── Primitives ──\n");
+            for e in &primitives {
+                help.push_str(&format!("  {:<20} {}\n", e.name, first_line(&e.doc)));
+            }
+            help.push('\n');
         }
+        if !prelude.is_empty() {
+            help.push_str("── Core library ──\n");
+            for e in &prelude {
+                help.push_str(&format!("  {:<20} {}\n", e.name, first_line(&e.doc)));
+            }
+            help.push('\n');
+        }
+        if !user.is_empty() {
+            help.push_str("── User-defined ──\n");
+            for e in &user {
+                help.push_str(&format!("  {:<20} {}\n", e.name, first_line(&e.doc)));
+            }
+        }
+
         return Ok(template::Value::Text(help));
     }
+
     let name = match &args[0] {
         Form::Symbol(s) => s.as_str(),
         Form::Str(s) => s.as_str(),
         other => return Err(format!("doc expects a symbol or string, got: {other}")),
     };
-    for (doc_name, sig, desc) in DOCS {
-        if *doc_name == name {
-            return Ok(template::Value::Text(format!("{doc_name}\n  {sig}\n  {desc}")));
+
+    match root.doc_registry.lookup(name) {
+        Some(entry) => {
+            let mut result = format!("{}\n", entry.name);
+            for arglist in &entry.arglists {
+                result.push_str(&format!("  {}\n", arglist));
+            }
+            result.push_str(&format!("  {}\n", entry.doc));
+            result.push_str(&format!("  Source: {:?}\n", entry.source));
+            Ok(template::Value::Text(result))
         }
+        None => Err(format!("no documentation for: {name}")),
     }
-    Err(format!("no documentation for: {name}"))
+}
+
+/// Register documentation for macros and special forms into the doc registry.
+pub fn register_macro_docs(registry: &crate::doc_registry::DocRegistry) {
+    use crate::doc_registry::{DocEntry, DocSource};
+
+    let macros: &[(&str, &str, &str)] = &[
+        ("->",      "(-> x (f a) (g b) ...)",      "Thread-first: insert x as first arg of each form left-to-right."),
+        ("->>",     "(->> x (f a) (g b) ...)",     "Thread-last: insert x as last arg of each form left-to-right."),
+        ("as->",    "(as-> expr name form ...)",    "Thread expr as name through each form."),
+        ("some->",  "(some-> x (f a) ...)",         "Thread-first, short-circuiting on nil."),
+        ("some->>", "(some->> x (f a) ...)",        "Thread-last, short-circuiting on nil."),
+        ("cond->",  "(cond-> x test (f a) ...)",    "Thread-first conditionally; does not short-circuit."),
+        ("cond->>", "(cond->> x test (f a) ...)",   "Thread-last conditionally; does not short-circuit."),
+        ("when",    "(when test body ...)",          "Evaluate body forms when test is truthy, else nil."),
+        ("when-not","(when-not test body ...)",      "Evaluate body forms when test is falsy, else nil."),
+        ("if-not",  "(if-not test then else?)",      "If test is falsy, evaluate then; otherwise else."),
+        ("if-let",  "(if-let [x expr] then else?)", "Bind expr to x; if truthy evaluate then, else else."),
+        ("when-let","(when-let [x expr] body ...)", "Bind expr to x; if truthy evaluate body forms."),
+        ("cond",    "(cond test expr ... :else expr)", "Evaluate first expr whose test is truthy."),
+        ("and",     "(and x y ...)",                 "Short-circuit logical and; returns last truthy value or false."),
+        ("or",      "(or x y ...)",                  "Short-circuit logical or; returns first truthy value or nil."),
+        ("defn",    "(defn name \"doc?\" [args] body ...)", "Define a named function, optionally with a docstring."),
+        // Special forms
+        ("if",      "(if test then else?)",          "If test is truthy evaluate then, otherwise else or nil."),
+        ("let",     "(let [x v ...] body ...)",      "Bind names to values in local scope."),
+        ("do",      "(do form ...)",                 "Evaluate forms in sequence; return last value."),
+        ("def",     "(def name value)",              "Define a global binding."),
+        ("fn",      "(fn [args] body ...)",          "Create an anonymous function."),
+        ("quote",   "(quote form)",                  "Return form unevaluated."),
+        ("query",   "(query :stem)",                 "Query all content items for the given schema stem."),
+    ];
+
+    for (name, sig, doc) in macros {
+        registry.register(DocEntry {
+            name: name.to_string(),
+            doc: doc.to_string(),
+            arglists: vec![sig.to_string()],
+            source: DocSource::Primitive,
+        });
+    }
 }
 
 // ── Legacy string-based REPL evaluator ───────────────────────────────────────
@@ -2288,5 +2331,122 @@ mod tests {
         let cond = empty_conductor();
         assert!(matches!(eval_str("(max 3 7)", &cond).unwrap(), template::Value::Integer(7)));
         assert!(matches!(eval_str("(min 3 7)", &cond).unwrap(), template::Value::Integer(3)));
+    }
+
+    // ── DocRegistry and doc special form tests (ADR-039 Phase A) ─────────────
+
+    #[test]
+    fn doc_primitive_shows_documentation() {
+        let cond = empty_conductor();
+        // (doc +) should return text containing the name and doc
+        let result = eval_str("(doc +)", &cond).unwrap();
+        if let template::Value::Text(s) = result {
+            assert!(s.contains('+'), "doc output should contain the symbol name");
+            assert!(s.contains("Add numbers"), "doc output should contain the description");
+        } else {
+            panic!("expected Text from (doc +), got {result:?}");
+        }
+    }
+
+    #[test]
+    fn doc_prelude_function_shows_documentation() {
+        let cond = empty_conductor();
+        // (doc identity) should return text with the docstring
+        let result = eval_str("(doc identity)", &cond).unwrap();
+        if let template::Value::Text(s) = result {
+            assert!(s.contains("identity"), "doc output should contain 'identity'");
+            assert!(s.contains("unchanged") || s.contains("argument"), "doc should contain the docstring");
+        } else {
+            panic!("expected Text from (doc identity), got {result:?}");
+        }
+    }
+
+    #[test]
+    fn doc_no_args_lists_all_functions() {
+        let cond = empty_conductor();
+        let result = eval_str("(doc)", &cond).unwrap();
+        if let template::Value::Text(s) = result {
+            assert!(s.contains("Primitives"), "doc() should list Primitives section");
+            assert!(s.contains("Core library"), "doc() should list Core library section");
+            assert!(s.contains('+'), "doc() should list '+' primitive");
+            assert!(s.contains("identity"), "doc() should list 'identity' from prelude");
+        } else {
+            panic!("expected Text from (doc), got {result:?}");
+        }
+    }
+
+    #[test]
+    fn doc_threading_macro_shows_documentation() {
+        let cond = empty_conductor();
+        let result = eval_str("(doc ->)", &cond).unwrap();
+        if let template::Value::Text(s) = result {
+            assert!(s.contains("->") || s.contains("Thread"), "doc should mention threading");
+        } else {
+            panic!("expected Text from (doc ->), got {result:?}");
+        }
+    }
+
+    #[test]
+    fn defn_with_docstring_registers_in_doc_registry() {
+        let cond = empty_conductor();
+        // Define a function with a docstring, then doc it
+        let result = eval_str(
+            r#"(do (defn my-fn "does the thing" [x] x) (doc my-fn))"#,
+            &cond,
+        ).unwrap();
+        if let template::Value::Text(s) = result {
+            assert!(s.contains("my-fn"), "doc should contain function name");
+            assert!(s.contains("does the thing"), "doc should contain the docstring");
+        } else {
+            panic!("expected Text from (doc my-fn), got {result:?}");
+        }
+    }
+
+    #[test]
+    fn doc_registry_completions_prefix() {
+        // Test the DocRegistry completions method directly
+        let registry = crate::doc_registry::DocRegistry::new();
+        registry.register(crate::doc_registry::DocEntry {
+            name: "map".to_string(),
+            doc: "Apply f to each item.".to_string(),
+            arglists: vec!["(map f coll)".to_string()],
+            source: crate::doc_registry::DocSource::Primitive,
+        });
+        registry.register(crate::doc_registry::DocEntry {
+            name: "mapcat".to_string(),
+            doc: "Map and concatenate results.".to_string(),
+            arglists: vec!["(mapcat f coll)".to_string()],
+            source: crate::doc_registry::DocSource::Prelude,
+        });
+        registry.register(crate::doc_registry::DocEntry {
+            name: "max".to_string(),
+            doc: "Return the larger of two values.".to_string(),
+            arglists: vec!["(max a b)".to_string()],
+            source: crate::doc_registry::DocSource::Prelude,
+        });
+        registry.register(crate::doc_registry::DocEntry {
+            name: "filter".to_string(),
+            doc: "Filter a collection.".to_string(),
+            arglists: vec!["(filter pred coll)".to_string()],
+            source: crate::doc_registry::DocSource::Primitive,
+        });
+
+        let matches = registry.completions("ma");
+        let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"map"), "completions('ma') should include 'map'");
+        assert!(names.contains(&"mapcat"), "completions('ma') should include 'mapcat'");
+        assert!(names.contains(&"max"), "completions('ma') should include 'max'");
+        assert!(!names.contains(&"filter"), "completions('ma') should not include 'filter'");
+    }
+
+    #[test]
+    fn doc_unknown_symbol_returns_error() {
+        let cond = empty_conductor();
+        let result = eval_str("(doc totally-unknown-fn)", &cond);
+        assert!(result.is_err(), "doc of unknown symbol should return error");
+        assert!(
+            result.unwrap_err().contains("no documentation for"),
+            "error should mention 'no documentation for'"
+        );
     }
 }

@@ -486,7 +486,8 @@ fn expand_or(args: Vec<Form>) -> Form {
 }
 
 /// `(defn name [args] body...)` → `(def name (fn name [args] body...))`
-/// `(defn name "docstring" [args] body...)` → same, drops docstring
+/// `(defn name "docstring" [args] body...)` →
+///   `(do (def name (fn name [args] body...)) (def-doc! name "docstring" "[args]"))`
 fn expand_defn(args: Vec<Form>) -> Form {
     if args.len() < 2 {
         return Form::Nil;
@@ -494,32 +495,116 @@ fn expand_defn(args: Vec<Form>) -> Form {
     let name = args[0].clone();
 
     // Check if second element is a docstring (string) or params (vector)
-    let (params_idx, params) = if let Form::Str(_) = &args[1] {
-        // Has docstring — skip it
+    let (has_doc, doc_str, params_idx) = if let Form::Str(doc) = &args[1] {
         if args.len() < 3 {
             return Form::Nil;
         }
-        (2, args[2].clone())
+        (true, Some(doc.clone()), 2usize)
     } else {
-        (1, args[1].clone())
+        (false, None, 1usize)
     };
 
-    let body: Vec<Form> = args[params_idx + 1..].iter().map(|f| macroexpand(f.clone())).collect();
+    let body_forms = &args[params_idx..];
+    let params = body_forms[0].clone();
+    let body: Vec<Form> = body_forms[1..].iter().map(|f| macroexpand(f.clone())).collect();
 
-    // Build (fn name [args] body...)
-    let mut fn_form = vec![
-        Form::Symbol("fn".into()),
-        name.clone(),
-        params,
-    ];
-    fn_form.extend(body);
+    // Build (fn name [args] body...) — for single arity
+    // or (fn name ([args1] body1) ([args2] body2) ...) for multi-arity
+    let fn_form = match &params {
+        Form::Vector(_) => {
+            // Single-arity
+            let mut parts = vec![
+                Form::Symbol("fn".into()),
+                name.clone(),
+                params,
+            ];
+            parts.extend(body);
+            Form::List(parts)
+        }
+        Form::List(_) => {
+            // Multi-arity: params is actually the first clause, body_forms has all clauses
+            let mut parts = vec![
+                Form::Symbol("fn".into()),
+                name.clone(),
+            ];
+            for clause in body_forms {
+                parts.push(macroexpand(clause.clone()));
+            }
+            Form::List(parts)
+        }
+        _ => {
+            // Malformed — pass through
+            let mut parts = vec![
+                Form::Symbol("fn".into()),
+                name.clone(),
+                params,
+            ];
+            parts.extend(body);
+            Form::List(parts)
+        }
+    };
 
-    // Build (def name (fn name [args] body...))
-    macroexpand(Form::List(vec![
+    // Build (def name (fn name ...))
+    let def_form = Form::List(vec![
         Form::Symbol("def".into()),
-        name,
-        Form::List(fn_form),
-    ]))
+        name.clone(),
+        fn_form,
+    ]);
+
+    if has_doc {
+        let doc = doc_str.unwrap();
+        // Extract arglist strings
+        let arglists = extract_arglists(body_forms);
+
+        // Build (def-doc! name "doc" "[args]" ...)
+        let mut doc_form_items = vec![
+            Form::Symbol("def-doc!".into()),
+            name,
+            Form::Str(doc),
+        ];
+        for arglist in arglists {
+            doc_form_items.push(Form::Str(arglist));
+        }
+
+        // Expand as (do def_form doc_form)
+        macroexpand(Form::List(vec![
+            Form::Symbol("do".into()),
+            def_form,
+            Form::List(doc_form_items),
+        ]))
+    } else {
+        macroexpand(def_form)
+    }
+}
+
+/// Extract arglist strings from defn body forms (everything after the optional docstring).
+/// For single-arity `(defn name "doc" [x y] body)`: body_forms = `[[x y] body]` → `["[x y]"]`
+/// For multi-arity `(defn name "doc" ([x] body1) ([x y] body2))`:
+///   body_forms = `[([x] body1) ([x y] body2)]` → `["[x]", "[x y]"]`
+fn extract_arglists(body_forms: &[Form]) -> Vec<String> {
+    if body_forms.is_empty() {
+        return vec![];
+    }
+    match &body_forms[0] {
+        Form::Vector(_) => {
+            // Single arity: first form is the param vector
+            vec![body_forms[0].to_string()]
+        }
+        Form::List(items) if !items.is_empty() && matches!(&items[0], Form::Vector(_)) => {
+            // Multi-arity: each form in body_forms is a clause starting with a param vector
+            body_forms
+                .iter()
+                .filter_map(|f| {
+                    if let Form::List(clause_items) = f {
+                        clause_items.first().map(|v| v.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 #[cfg(test)]
@@ -863,10 +948,14 @@ mod tests {
 
     #[test]
     fn defn_with_docstring() {
-        // (defn add "adds two numbers" [x y] (+ x y)) → (def add (fn add [x y] (+ x y)))
+        // (defn add "adds two numbers" [x y] (+ x y)) →
+        // (do (def add (fn add [x y] (+ x y))) (def-doc! add "adds two numbers" "[x y]"))
         let form = read(r#"(defn add "adds two numbers" [x y] (+ x y))"#).unwrap();
         let expanded = macroexpand(form);
-        assert_eq!(expanded.to_string(), "(def add (fn add [x y] (+ x y)))");
+        assert_eq!(
+            expanded.to_string(),
+            r#"(do (def add (fn add [x y] (+ x y))) (def-doc! add "adds two numbers" "[x y]"))"#
+        );
     }
 
     #[test]
