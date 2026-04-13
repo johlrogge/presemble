@@ -1,10 +1,19 @@
+mod env;
+mod closure;
+
+pub use env::{Env, RootEnv};
+pub use closure::{Closure, FnArity, PrimitiveFn};
+
+use std::sync::Arc;
 use forms::Form;
 
 /// Evaluate a form against the conductor's live state.
 pub fn eval(form: &Form, conductor: &conductor::Conductor) -> Result<template::Value, String> {
     // First, macroexpand
     let expanded = macros::macroexpand(form.clone());
-    eval_expanded(&expanded, conductor)
+    let root = RootEnv::new();
+    let env = root.snapshot();
+    eval_in_env(&expanded, &env, &root, conductor)
 }
 
 /// Evaluate a string expression (read + macroexpand + eval).
@@ -13,24 +22,22 @@ pub fn eval_str(code: &str, conductor: &conductor::Conductor) -> Result<template
     eval(&form, conductor)
 }
 
-/// Convert a `Value` to a plain string for comparison / concatenation purposes.
-/// Uses `display_text()` for text-bearing values, `edn::value_to_edn` as fallback.
-fn value_to_string(v: &template::Value) -> String {
-    match v.display_text() {
-        Some(s) => s,
-        None => edn::value_to_edn(v),
-    }
-}
-
-fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<template::Value, String> {
+/// Internal evaluation entry point — used by closures calling back into the evaluator.
+/// Takes an explicit lexical environment and root env in addition to the conductor.
+pub(crate) fn eval_in_env(
+    form: &Form,
+    env: &Arc<Env>,
+    root: &RootEnv,
+    conductor: &conductor::Conductor,
+) -> Result<template::Value, String> {
     match form {
-        // Literals evaluate to themselves
+        // Literals evaluate to themselves (ADR-036 Phase 2: proper types)
         Form::Str(s) => Ok(template::Value::Text(s.clone())),
         Form::Integer(n) => Ok(template::Value::Integer(*n)),
         Form::Bool(b) => Ok(template::Value::Bool(*b)),
         Form::Nil => Ok(template::Value::Absent),
 
-        // Keywords evaluate as stem lookups: :post → all items for stem "post"
+        // Unnamespaced keywords: stem query (legacy; Phase 6 migrates to `query` fn)
         Form::Keyword { namespace: None, name } => {
             let items = conductor.query_items_for_stem(name);
             let values: Vec<template::Value> = items
@@ -43,8 +50,8 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
             Ok(template::Value::List(values))
         }
 
-        // Namespaced keywords are keyword values
-        Form::Keyword { namespace: namespace @ Some(_), name } => Ok(template::Value::Keyword {
+        // Namespaced keywords are first-class values
+        Form::Keyword { namespace, name } => Ok(template::Value::Keyword {
             namespace: namespace.clone(),
             name: name.clone(),
         }),
@@ -53,7 +60,7 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
         Form::Vector(items) => {
             let values: Vec<template::Value> = items
                 .iter()
-                .map(|item| eval_expanded(item, conductor))
+                .map(|item| eval_in_env(item, env, root, conductor))
                 .collect::<Result<_, _>>()?;
             Ok(template::Value::List(values))
         }
@@ -67,27 +74,31 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
                     Form::Str(s) => s.clone(),
                     other => other.to_string(),
                 };
-                let val = eval_expanded(v, conductor)?;
+                let val = eval_in_env(v, env, root, conductor)?;
                 graph.insert(&key, val);
             }
             Ok(template::Value::Record(graph))
         }
 
-        // Symbols look up in the environment (not implemented yet — error)
-        Form::Symbol(name) => Err(format!("unbound symbol: {name}")),
+        // Symbols: check lexical env, then root env, then error
+        Form::Symbol(name) => {
+            env.get(name)
+                .or_else(|| root.get(name))
+                .ok_or_else(|| format!("unbound symbol: {name}"))
+        }
 
-        // Lists are function calls
+        // Lists: special forms and function calls
         Form::List(items) if !items.is_empty() => {
             let func_form = &items[0];
 
-            // Keywords in function position act as get: (:title record) → (get record :title)
+            // Keywords in function position: (:title record) → (get record :title)
             if let Form::Keyword { namespace: None, name } = func_form {
                 if items.len() < 2 {
                     return Err(format!("keyword as function requires an argument: (:{name} map)"));
                 }
-                let map_val = eval_expanded(&items[1], conductor)?;
+                let map_val = eval_in_env(&items[1], env, root, conductor)?;
                 let default = if items.len() > 2 {
-                    eval_expanded(&items[2], conductor)?
+                    eval_in_env(&items[2], env, root, conductor)?
                 } else {
                     template::Value::Absent
                 };
@@ -99,49 +110,183 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
                 };
             }
 
-            let func_name = match func_form {
-                Form::Symbol(s) => s.as_str(),
-                _ => return Err(format!("expected function name, got: {func_form}")),
-            };
+            // Special forms — checked before evaluating the function position
+            if let Some(sym) = func_form.as_symbol() {
+                match sym {
+                    // ── (if test then [else]) ────────────────────────────────
+                    "if" => {
+                        if items.len() < 3 {
+                            return Err("if requires at least 2 arguments: test and then-branch".into());
+                        }
+                        let test = eval_in_env(&items[1], env, root, conductor)?;
+                        let is_truthy = !matches!(&test, template::Value::Bool(false) | template::Value::Absent);
+                        if is_truthy {
+                            return eval_in_env(&items[2], env, root, conductor);
+                        } else if items.len() > 3 {
+                            return eval_in_env(&items[3], env, root, conductor);
+                        } else {
+                            return Ok(template::Value::Absent);
+                        }
+                    }
+
+                    // ── (do form...) ─────────────────────────────────────────
+                    "do" => {
+                        let mut result = template::Value::Absent;
+                        for form in &items[1..] {
+                            result = eval_in_env(form, env, root, conductor)?;
+                        }
+                        return Ok(result);
+                    }
+
+                    // ── (def name value) ─────────────────────────────────────
+                    "def" => {
+                        if items.len() < 3 {
+                            return Err("def requires 2 arguments: name and value".into());
+                        }
+                        let name = items[1]
+                            .as_symbol()
+                            .ok_or("def: first argument must be a symbol")?
+                            .to_string();
+                        let val = eval_in_env(&items[2], env, root, conductor)?;
+                        root.def(name, val.clone());
+                        return Ok(val);
+                    }
+
+                    // ── (let [x v ...] body...) ──────────────────────────────
+                    "let" => {
+                        if items.len() < 2 {
+                            return Err("let requires a binding vector".into());
+                        }
+                        let bindings = match &items[1] {
+                            Form::Vector(v) => v,
+                            _ => return Err("let: first argument must be a binding vector".into()),
+                        };
+                        if bindings.len() % 2 != 0 {
+                            return Err("let: binding vector must have an even number of forms".into());
+                        }
+
+                        let mut local = Env::with_parent(env.clone());
+                        let chunks: Vec<_> = bindings.chunks(2).collect();
+                        for chunk in chunks {
+                            let bind_name = chunk[0]
+                                .as_symbol()
+                                .ok_or("let: binding names must be symbols")?
+                                .to_string();
+                            let local_arc = Arc::new(local.clone());
+                            let val = eval_in_env(&chunk[1], &local_arc, root, conductor)?;
+                            local = local.set(bind_name, val);
+                        }
+
+                        let local = Arc::new(local);
+                        let mut result = template::Value::Absent;
+                        for form in &items[2..] {
+                            result = eval_in_env(form, &local, root, conductor)?;
+                        }
+                        return Ok(result);
+                    }
+
+                    // ── (fn name? [params...] body...) ───────────────────────
+                    // ── (fn name? ([params...] body...) ...) — multi-arity ───
+                    "fn" => {
+                        return eval_fn_form(&items[1..], env, root);
+                    }
+
+                    // ── (quote form) ─────────────────────────────────────────
+                    "quote" => {
+                        if items.len() < 2 {
+                            return Err("quote requires an argument".into());
+                        }
+                        return form_to_value(&items[1]);
+                    }
+
+                    // ── (recur args...) ──────────────────────────────────────
+                    // TODO(ADR-036): implement tail-call recur in Phase 3
+                    "recur" => {
+                        return Err("recur is not yet implemented — use named recursion via def".into());
+                    }
+
+                    _ => {} // fall through to function call dispatch
+                }
+            }
+
+            // ── Function call dispatch ───────────────────────────────────────
+
+            // Evaluate the function position (may be a symbol, lambda, etc.)
+            let func_val = eval_in_env(func_form, env, root, conductor);
+
+            // If symbol lookup succeeded and produced a Value::Fn, call it.
+            match func_val {
+                Ok(template::Value::Fn(ref callable)) => {
+                    let args: Vec<template::Value> = items[1..]
+                        .iter()
+                        .map(|a| eval_in_env(a, env, root, conductor))
+                        .collect::<Result<_, _>>()?;
+
+                    // Check if the callable is a Closure (needs conductor for eval).
+                    if let Some(closure) = callable.as_any().downcast_ref::<Closure>() {
+                        return closure.apply(args, conductor);
+                    }
+                    // Otherwise, call the primitive directly.
+                    return callable.call(args);
+                }
+
+                // Symbol not in env/root — fall through to legacy name dispatch.
+                Err(_) if func_form.as_symbol().is_some() => {}
+
+                // Evaluation produced a non-fn value — error.
+                Ok(other) => {
+                    return Err(format!(
+                        "not a function: {other:?} (from {func_form})"
+                    ));
+                }
+
+                // Propagate other errors.
+                Err(e) => return Err(e),
+            }
+
+            // Legacy name-based dispatch for builtins not yet in root env.
+            let func_name = func_form
+                .as_symbol()
+                .expect("already verified this is a symbol");
 
             match func_name {
                 // Collection operations
-                "map" => builtin_map(&items[1..], conductor),
-                "sort-by" => builtin_sort_by(&items[1..], conductor),
-                "take" => builtin_take(&items[1..], conductor),
-                "filter" => builtin_filter(&items[1..], conductor),
-                "first" => builtin_first(&items[1..], conductor),
-                "rest" => builtin_rest(&items[1..], conductor),
-                "count" => builtin_count(&items[1..], conductor),
-                "reverse" => builtin_reverse(&items[1..], conductor),
+                "map" => builtin_map(&items[1..], env, root, conductor),
+                "sort-by" => builtin_sort_by(&items[1..], env, root, conductor),
+                "take" => builtin_take(&items[1..], env, root, conductor),
+                "filter" => builtin_filter(&items[1..], env, root, conductor),
+                "first" => builtin_first(&items[1..], env, root, conductor),
+                "rest" => builtin_rest(&items[1..], env, root, conductor),
+                "count" => builtin_count(&items[1..], env, root, conductor),
+                "reverse" => builtin_reverse(&items[1..], env, root, conductor),
 
                 // Data access
-                "get" => builtin_get(&items[1..], conductor),
-                "get-in" => builtin_get_in(&items[1..], conductor),
-                "get-content" => builtin_get_content(&items[1..], conductor),
+                "get" => builtin_get(&items[1..], env, root, conductor),
+                "get-in" => builtin_get_in(&items[1..], env, root, conductor),
+                "get-content" => builtin_get_content(&items[1..], env, root, conductor),
                 "get-schema" => builtin_get_schema(&items[1..], conductor),
                 "list-content" => builtin_list_content(conductor),
                 "list-schemas" => builtin_list_schemas(conductor),
-                "refs-to" => builtin_refs_to(&items[1..], conductor),
-                "refs-from" => builtin_refs_from(&items[1..], conductor),
-                "keys" => builtin_keys(&items[1..], conductor),
-                "vals" => builtin_vals(&items[1..], conductor),
+                "refs-to" => builtin_refs_to(&items[1..], env, root, conductor),
+                "refs-from" => builtin_refs_from(&items[1..], env, root, conductor),
+                "keys" => builtin_keys(&items[1..], env, root, conductor),
+                "vals" => builtin_vals(&items[1..], env, root, conductor),
 
                 // Editorial
-                "suggest" => builtin_suggest(&items[1..], conductor),
-                "get-suggestions" => builtin_get_suggestions(&items[1..], conductor),
+                "suggest" => builtin_suggest(&items[1..], env, root, conductor),
+                "get-suggestions" => builtin_get_suggestions(&items[1..], env, root, conductor),
 
-                // Arithmetic (useful for REPL)
-                "+" => builtin_add(&items[1..], conductor),
-                "-" => builtin_sub(&items[1..], conductor),
-                "*" => builtin_mul(&items[1..], conductor),
+                // Arithmetic
+                "+" => builtin_add(&items[1..], env, root, conductor),
+                "-" => builtin_sub(&items[1..], env, root, conductor),
+                "*" => builtin_mul(&items[1..], env, root, conductor),
 
                 // Comparison
-                "=" => builtin_eq(&items[1..], conductor),
+                "=" => builtin_eq(&items[1..], env, root, conductor),
 
                 // String
-                "str" => builtin_str(&items[1..], conductor),
-                "println" => builtin_println(&items[1..], conductor),
+                "str" => builtin_str(&items[1..], env, root, conductor),
+                "println" => builtin_println(&items[1..], env, root, conductor),
 
                 // Help
                 "doc" => builtin_doc(&items[1..]),
@@ -155,17 +300,166 @@ fn eval_expanded(form: &Form, conductor: &conductor::Conductor) -> Result<templa
     }
 }
 
+// ---------------------------------------------------------------------------
+// Special form helpers
+// ---------------------------------------------------------------------------
+
+/// Parse and construct a `fn` closure from the remaining items after the `fn` symbol.
+fn eval_fn_form(
+    items: &[Form],
+    env: &Arc<Env>,
+    root: &RootEnv,
+) -> Result<template::Value, String> {
+    if items.is_empty() {
+        return Err("fn requires at least a parameter vector".into());
+    }
+
+    // Optional name: (fn my-name [params] body)
+    let (name, rest) = if let Form::Symbol(s) = &items[0] {
+        (Some(s.clone()), &items[1..])
+    } else {
+        (None, items)
+    };
+
+    if rest.is_empty() {
+        return Err("fn requires a parameter vector".into());
+    }
+
+    let arities = match &rest[0] {
+        // Single-arity: (fn [params] body...)
+        Form::Vector(_) => {
+            let arity = parse_fn_arity(rest)?;
+            vec![arity]
+        }
+        // Multi-arity: (fn ([params] body...) ([params] body...) ...)
+        Form::List(_) => {
+            rest.iter()
+                .map(|clause| {
+                    let inner = match clause {
+                        Form::List(items) => items.as_slice(),
+                        _ => return Err("fn multi-arity clause must be a list".into()),
+                    };
+                    parse_fn_arity(inner)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        other => return Err(format!("fn: expected parameter vector, got: {other}")),
+    };
+
+    let closure = Closure {
+        name,
+        arities,
+        env: env.clone(),
+        root: root.clone(),
+    };
+    Ok(template::Value::Fn(Arc::new(closure)))
+}
+
+/// Parse a single fn arity from `[params] body...`
+fn parse_fn_arity(items: &[Form]) -> Result<FnArity, String> {
+    let param_vec = match items.first() {
+        Some(Form::Vector(v)) => v,
+        other => return Err(format!("fn arity must start with a parameter vector, got: {other:?}")),
+    };
+
+    let mut params = Vec::new();
+    let mut rest_param = None;
+    let mut saw_amp = false;
+
+    for p in param_vec {
+        match p {
+            Form::Symbol(s) if s == "&" => {
+                saw_amp = true;
+            }
+            Form::Symbol(s) if saw_amp => {
+                rest_param = Some(s.clone());
+            }
+            Form::Symbol(s) => {
+                params.push(s.clone());
+            }
+            other => {
+                return Err(format!("fn parameter must be a symbol, got: {other}"));
+            }
+        }
+    }
+
+    let body = items[1..].to_vec();
+    Ok(FnArity { params, rest_param, body })
+}
+
+/// Convert a `Form` to a `Value` for `quote`.
+fn form_to_value(form: &Form) -> Result<template::Value, String> {
+    match form {
+        Form::Str(s) => Ok(template::Value::Text(s.clone())),
+        Form::Integer(n) => Ok(template::Value::Integer(*n)),
+        Form::Bool(b) => Ok(template::Value::Bool(*b)),
+        Form::Nil => Ok(template::Value::Absent),
+        Form::Symbol(s) => Ok(template::Value::Text(s.clone())),
+        Form::Keyword { namespace, name } => Ok(template::Value::Keyword {
+            namespace: namespace.clone(),
+            name: name.clone(),
+        }),
+        Form::Vector(items) => {
+            let values: Vec<template::Value> = items
+                .iter()
+                .map(form_to_value)
+                .collect::<Result<_, _>>()?;
+            Ok(template::Value::List(values))
+        }
+        Form::List(items) => {
+            let values: Vec<template::Value> = items
+                .iter()
+                .map(form_to_value)
+                .collect::<Result<_, _>>()?;
+            Ok(template::Value::List(values))
+        }
+        Form::Map(pairs) => {
+            let mut graph = template::DataGraph::new();
+            for (k, v) in pairs {
+                let key = match k {
+                    Form::Keyword { name, .. } => name.clone(),
+                    Form::Str(s) => s.clone(),
+                    Form::Symbol(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                graph.insert(&key, form_to_value(v)?);
+            }
+            Ok(template::Value::Record(graph))
+        }
+        Form::Set(_) => Err("cannot quote a set".into()),
+    }
+}
+
+/// Convert a `Value` to a plain string for comparison / concatenation purposes.
+fn value_to_string(v: &template::Value) -> String {
+    match v.display_text() {
+        Some(s) => s,
+        None => edn::value_to_edn(v),
+    }
+}
+
+/// Extract an i64 from a Value for arithmetic operations.
+fn value_to_i64(v: &template::Value, op: &str) -> Result<i64, String> {
+    match v {
+        template::Value::Integer(n) => Ok(*n),
+        template::Value::Text(s) => s
+            .parse::<i64>()
+            .map_err(|_| format!("{op}: not a number: {s}")),
+        other => Err(format!("{op}: expected a number, got: {other:?}")),
+    }
+}
+
 // ── Built-in functions ───────────────────────────────────────────────────────
 
 /// (map f coll) — apply f to each item. f can be a keyword or function name.
 /// (map :title posts) → list of titles
 /// (->> :post (map :title)) → same with threading
-fn builtin_map(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_map(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.len() < 2 {
         return Err("map requires 2 arguments: function and collection".into());
     }
     let func = &args[0];
-    let collection = eval_expanded(args.last().unwrap(), cond)?;
+    let collection = eval_in_env(args.last().unwrap(), env, root, cond)?;
 
     let items = match collection {
         template::Value::List(items) => items,
@@ -174,16 +468,16 @@ fn builtin_map(args: &[Form], cond: &conductor::Conductor) -> Result<template::V
 
     let results: Vec<template::Value> = items
         .into_iter()
-        .map(|item| apply_to_value(func, &item, cond))
+        .map(|item| apply_to_value(func, &item, env, root, cond))
         .collect::<Result<_, _>>()?;
 
     Ok(template::Value::List(results))
 }
 
-/// Apply a form (keyword or function name) to a Value directly.
+/// Apply a form (keyword or fn value) to a Value directly.
 /// For keywords: (:title record) → get the field.
-/// For symbols: (first items) → call the function.
-fn apply_to_value(func: &Form, val: &template::Value, _cond: &conductor::Conductor) -> Result<template::Value, String> {
+/// For fn values (closures / primitives): call them with the item.
+fn apply_to_value(func: &Form, val: &template::Value, env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     match func {
         Form::Keyword { namespace: None, name } => {
             // Keyword as accessor: (:title record) → get the field
@@ -194,10 +488,19 @@ fn apply_to_value(func: &Form, val: &template::Value, _cond: &conductor::Conduct
                 _ => Ok(template::Value::Absent),
             }
         }
-        Form::Symbol(fname) => {
-            // For simple functions like count, str, etc — evaluate with the value
-            // We'd need to thread the value through. For now, support keyword access only.
-            Err(format!("map with function '{fname}' not yet supported — use a keyword like :title"))
+        Form::Symbol(_) | Form::List(_) => {
+            // Evaluate the func form to get a callable, then apply it.
+            let callable_val = eval_in_env(func, env, root, cond)?;
+            match callable_val {
+                template::Value::Fn(ref f) => {
+                    if let Some(closure) = f.as_any().downcast_ref::<Closure>() {
+                        closure.apply(vec![val.clone()], cond)
+                    } else {
+                        f.call(vec![val.clone()])
+                    }
+                }
+                _ => Err(format!("map: {func} is not a function")),
+            }
         }
         _ => Err(format!("map function must be a keyword or symbol, got: {func}")),
     }
@@ -205,6 +508,8 @@ fn apply_to_value(func: &Form, val: &template::Value, _cond: &conductor::Conduct
 
 fn builtin_sort_by(
     args: &[Form],
+    env: &Arc<Env>,
+    root: &RootEnv,
     cond: &conductor::Conductor,
 ) -> Result<template::Value, String> {
     // (sort-by :field coll) or (sort-by :field :desc coll)
@@ -212,7 +517,7 @@ fn builtin_sort_by(
     if args.len() < 2 {
         return Err("sort-by requires at least 2 arguments: field and collection".into());
     }
-    let collection = eval_expanded(args.last().unwrap(), cond)?;
+    let collection = eval_in_env(args.last().unwrap(), env, root, cond)?;
     let field = args[0]
         .as_keyword_name()
         .ok_or_else(|| "sort-by field must be a keyword".to_string())?
@@ -249,22 +554,20 @@ fn builtin_sort_by(
     Ok(template::Value::List(items))
 }
 
-fn builtin_take(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_take(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.len() < 2 {
         return Err("take requires 2 arguments: count and collection (Clojure convention)".into());
     }
     // Clojure convention: (take n coll) — count first, collection second
-    let n_val = eval_expanded(&args[0], cond)?;
+    let n_val = eval_in_env(&args[0], env, root, cond)?;
     let n: usize = match &n_val {
-        template::Value::Integer(n) => {
-            usize::try_from(*n).map_err(|_| format!("take count must be non-negative, got: {n}"))?
-        }
+        template::Value::Integer(n) => *n as usize,
         template::Value::Text(s) => s
             .parse::<usize>()
             .map_err(|_| format!("take count must be a number, got: {s}"))?,
         _ => return Err("take count must be a number".into()),
     };
-    let collection = eval_expanded(&args[1], cond)?;
+    let collection = eval_in_env(&args[1], env, root, cond)?;
 
     match collection {
         template::Value::List(items) => {
@@ -274,17 +577,17 @@ fn builtin_take(args: &[Form], cond: &conductor::Conductor) -> Result<template::
     }
 }
 
-fn builtin_filter(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_filter(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     // (filter :field "value" coll) — collection is LAST (works with ->> threading)
     if args.len() < 3 {
         return Err("filter requires 3 arguments: field, value, collection".into());
     }
-    let collection = eval_expanded(args.last().unwrap(), cond)?;
+    let collection = eval_in_env(args.last().unwrap(), env, root, cond)?;
     let field = args[0]
         .as_keyword_name()
         .ok_or_else(|| "filter field must be a keyword".to_string())?
         .to_string();
-    let target = eval_expanded(&args[1], cond)?;
+    let target = eval_in_env(&args[1], env, root, cond)?;
     let target_str = value_to_string(&target);
 
     match collection {
@@ -308,11 +611,11 @@ fn builtin_filter(args: &[Form], cond: &conductor::Conductor) -> Result<template
     }
 }
 
-fn builtin_first(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_first(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("first requires 1 argument".into());
     }
-    let collection = eval_expanded(&args[0], cond)?;
+    let collection = eval_in_env(&args[0], env, root, cond)?;
     match collection {
         template::Value::List(mut items) => Ok(if items.is_empty() {
             template::Value::Absent
@@ -323,11 +626,11 @@ fn builtin_first(args: &[Form], cond: &conductor::Conductor) -> Result<template:
     }
 }
 
-fn builtin_rest(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_rest(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("rest requires 1 argument".into());
     }
-    let collection = eval_expanded(&args[0], cond)?;
+    let collection = eval_in_env(&args[0], env, root, cond)?;
     match collection {
         template::Value::List(mut items) => {
             if !items.is_empty() {
@@ -339,11 +642,11 @@ fn builtin_rest(args: &[Form], cond: &conductor::Conductor) -> Result<template::
     }
 }
 
-fn builtin_count(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_count(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("count requires 1 argument".into());
     }
-    let collection = eval_expanded(&args[0], cond)?;
+    let collection = eval_in_env(&args[0], env, root, cond)?;
     match collection {
         template::Value::List(items) => Ok(template::Value::Integer(items.len() as i64)),
         template::Value::Text(s) => Ok(template::Value::Integer(s.len() as i64)),
@@ -351,11 +654,11 @@ fn builtin_count(args: &[Form], cond: &conductor::Conductor) -> Result<template:
     }
 }
 
-fn builtin_reverse(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_reverse(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("reverse requires 1 argument".into());
     }
-    let collection = eval_expanded(&args[0], cond)?;
+    let collection = eval_in_env(&args[0], env, root, cond)?;
     match collection {
         template::Value::List(mut items) => {
             items.reverse();
@@ -367,12 +670,14 @@ fn builtin_reverse(args: &[Form], cond: &conductor::Conductor) -> Result<templat
 
 fn builtin_get_content(
     args: &[Form],
+    env: &Arc<Env>,
+    root: &RootEnv,
     cond: &conductor::Conductor,
 ) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("get-content requires 1 argument".into());
     }
-    let path = eval_expanded(&args[0], cond)?;
+    let path = eval_in_env(&args[0], env, root, cond)?;
     let path_str = match &path {
         template::Value::Text(s) => s.clone(),
         _ => return Err("get-content path must be a string".into()),
@@ -428,11 +733,11 @@ fn builtin_list_schemas(cond: &conductor::Conductor) -> Result<template::Value, 
 
 /// (refs-to "/author/alice") — returns all edges pointing TO the given URL.
 /// Each edge is returned as a record with keys `source` and `target`.
-fn builtin_refs_to(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_refs_to(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("refs-to requires 1 argument: a URL path string".into());
     }
-    let url = eval_expanded(&args[0], cond)?;
+    let url = eval_in_env(&args[0], env, root, cond)?;
     let url_str = match &url {
         template::Value::Text(s) => s.clone(),
         _ => return Err("refs-to: argument must be a string URL path".into()),
@@ -445,11 +750,11 @@ fn builtin_refs_to(args: &[Form], cond: &conductor::Conductor) -> Result<templat
 
 /// (refs-from "/post/hello") — returns all edges originating FROM the given URL.
 /// Each edge is returned as a record with keys `source` and `target`.
-fn builtin_refs_from(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_refs_from(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("refs-from requires 1 argument: a URL path string".into());
     }
-    let url = eval_expanded(&args[0], cond)?;
+    let url = eval_in_env(&args[0], env, root, cond)?;
     let url_str = match &url {
         template::Value::Text(s) => s.clone(),
         _ => return Err("refs-from: argument must be a string URL path".into()),
@@ -468,16 +773,16 @@ fn edge_to_value(edge: &site_index::Edge) -> template::Value {
 }
 
 /// (get map :key) or (get map :key default)
-fn builtin_get(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_get(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.len() < 2 {
         return Err("get requires at least 2 arguments: map and key".into());
     }
-    let value = eval_expanded(&args[0], cond)?;
+    let value = eval_in_env(&args[0], env, root, cond)?;
     let key = args[1]
         .as_keyword_name()
         .ok_or_else(|| "get key must be a keyword".to_string())?;
     let default = if args.len() > 2 {
-        eval_expanded(&args[2], cond)?
+        eval_in_env(&args[2], env, root, cond)?
     } else {
         template::Value::Absent
     };
@@ -490,11 +795,11 @@ fn builtin_get(args: &[Form], cond: &conductor::Conductor) -> Result<template::V
 }
 
 /// (keys map) — return all keys of a record as a list of strings
-fn builtin_keys(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_keys(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("keys requires 1 argument".into());
     }
-    let value = eval_expanded(&args[0], cond)?;
+    let value = eval_in_env(&args[0], env, root, cond)?;
     match value {
         template::Value::Record(ref r) => {
             let keys: Vec<template::Value> = r
@@ -509,11 +814,11 @@ fn builtin_keys(args: &[Form], cond: &conductor::Conductor) -> Result<template::
 }
 
 /// (vals map) — return all values of a record as a list
-fn builtin_vals(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_vals(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("vals requires 1 argument".into());
     }
-    let value = eval_expanded(&args[0], cond)?;
+    let value = eval_in_env(&args[0], env, root, cond)?;
     match value {
         template::Value::Record(ref r) => {
             let vals: Vec<template::Value> = r
@@ -527,11 +832,11 @@ fn builtin_vals(args: &[Form], cond: &conductor::Conductor) -> Result<template::
     }
 }
 
-fn builtin_get_in(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_get_in(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.len() < 2 {
         return Err("get-in requires at least 2 arguments: value and key(s)".into());
     }
-    let value = eval_expanded(&args[0], cond)?;
+    let value = eval_in_env(&args[0], env, root, cond)?;
     let mut current = value;
     for key_form in &args[1..] {
         let key = key_form
@@ -549,16 +854,18 @@ fn builtin_get_in(args: &[Form], cond: &conductor::Conductor) -> Result<template
 
 fn builtin_suggest(
     args: &[Form],
+    env: &Arc<Env>,
+    root: &RootEnv,
     cond: &conductor::Conductor,
 ) -> Result<template::Value, String> {
     // (suggest "file" "slot" "value" "reason")
     if args.len() < 4 {
         return Err("suggest requires 4 arguments: file, slot, value, reason".into());
     }
-    let file = eval_expanded(&args[0], cond)?;
-    let slot = eval_expanded(&args[1], cond)?;
-    let value = eval_expanded(&args[2], cond)?;
-    let reason = eval_expanded(&args[3], cond)?;
+    let file = eval_in_env(&args[0], env, root, cond)?;
+    let slot = eval_in_env(&args[1], env, root, cond)?;
+    let value = eval_in_env(&args[2], env, root, cond)?;
+    let reason = eval_in_env(&args[3], env, root, cond)?;
 
     let file_str = match &file {
         template::Value::Text(s) => s.clone(),
@@ -597,12 +904,14 @@ fn builtin_suggest(
 
 fn builtin_get_suggestions(
     args: &[Form],
+    env: &Arc<Env>,
+    root: &RootEnv,
     cond: &conductor::Conductor,
 ) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("get-suggestions requires 1 argument: file".into());
     }
-    let file = eval_expanded(&args[0], cond)?;
+    let file = eval_in_env(&args[0], env, root, cond)?;
     let file_str = match &file {
         template::Value::Text(s) => s.clone(),
         _ => return Err("get-suggestions: file must be a string".into()),
@@ -633,84 +942,59 @@ fn builtin_get_suggestions(
 
 // ── Arithmetic ───────────────────────────────────────────────────────────────
 
-/// Extract an i64 from a Value for arithmetic operations.
-/// Accepts Value::Integer directly, and Value::Text containing a parseable number
-/// for backward compatibility.
-fn value_to_i64(val: &template::Value, op: &str) -> Result<i64, String> {
-    match val {
-        template::Value::Integer(n) => Ok(*n),
-        template::Value::Text(s) => s
-            .parse::<i64>()
-            .map_err(|_| format!("{op} expects numbers, got: {s}")),
-        _ => Err(format!("{op} expects numbers")),
-    }
-}
-
-fn builtin_add(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_add(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     let mut sum: i64 = 0;
     for arg in args {
-        let val = eval_expanded(arg, cond)?;
+        let val = eval_in_env(arg, env, root, cond)?;
         sum += value_to_i64(&val, "+")?;
     }
     Ok(template::Value::Integer(sum))
 }
 
-fn builtin_sub(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_sub(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.is_empty() {
         return Err("- requires at least 1 argument".into());
     }
-    let first = eval_expanded(&args[0], cond)?;
+    let first = eval_in_env(&args[0], env, root, cond)?;
     let mut result: i64 = value_to_i64(&first, "-")?;
     if args.len() == 1 {
         return Ok(template::Value::Integer(-result));
     }
     for arg in &args[1..] {
-        let val = eval_expanded(arg, cond)?;
+        let val = eval_in_env(arg, env, root, cond)?;
         result -= value_to_i64(&val, "-")?;
     }
     Ok(template::Value::Integer(result))
 }
 
-fn builtin_mul(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_mul(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     let mut product: i64 = 1;
     for arg in args {
-        let val = eval_expanded(arg, cond)?;
+        let val = eval_in_env(arg, env, root, cond)?;
         product *= value_to_i64(&val, "*")?;
     }
     Ok(template::Value::Integer(product))
 }
 
-fn builtin_eq(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_eq(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     if args.len() < 2 {
         return Err("= requires at least 2 arguments".into());
     }
-    let first = eval_expanded(&args[0], cond)?;
+    let first = eval_in_env(&args[0], env, root, cond)?;
+    let first_str = value_to_string(&first);
     for arg in &args[1..] {
-        let val = eval_expanded(arg, cond)?;
-        if !values_equal(&first, &val) {
+        let val = eval_in_env(arg, env, root, cond)?;
+        if first_str != value_to_string(&val) {
             return Ok(template::Value::Bool(false));
         }
     }
     Ok(template::Value::Bool(true))
 }
 
-/// Structural equality for Values.
-fn values_equal(a: &template::Value, b: &template::Value) -> bool {
-    match (a, b) {
-        (template::Value::Integer(x), template::Value::Integer(y)) => x == y,
-        (template::Value::Bool(x), template::Value::Bool(y)) => x == y,
-        (template::Value::Text(x), template::Value::Text(y)) => x == y,
-        (template::Value::Absent, template::Value::Absent) => true,
-        (template::Value::Keyword { namespace: ns1, name: n1 }, template::Value::Keyword { namespace: ns2, name: n2 }) => ns1 == ns2 && n1 == n2,
-        // Fall back to string comparison for mixed types (backward compat)
-        _ => value_to_string(a) == value_to_string(b),
-    }
-}
-
-fn builtin_str(args: &[Form], cond: &conductor::Conductor) -> Result<template::Value, String> {
+fn builtin_str(args: &[Form], env: &Arc<Env>, root: &RootEnv, cond: &conductor::Conductor) -> Result<template::Value, String> {
     let mut result = String::new();
     for arg in args {
-        let val = eval_expanded(arg, cond)?;
+        let val = eval_in_env(arg, env, root, cond)?;
         result.push_str(&value_to_string(&val));
     }
     Ok(template::Value::Text(result))
@@ -718,11 +1002,13 @@ fn builtin_str(args: &[Form], cond: &conductor::Conductor) -> Result<template::V
 
 fn builtin_println(
     args: &[Form],
+    env: &Arc<Env>,
+    root: &RootEnv,
     cond: &conductor::Conductor,
 ) -> Result<template::Value, String> {
     let mut parts = Vec::new();
     for arg in args {
-        let val = eval_expanded(arg, cond)?;
+        let val = eval_in_env(arg, env, root, cond)?;
         parts.push(value_to_string(&val));
     }
     eprintln!("{}", parts.join(" "));
@@ -1094,6 +1380,7 @@ mod tests {
     fn first_vector() {
         let cond = empty_conductor();
         let result = eval_str("(first [1 2 3])", &cond).unwrap();
+        // Integers in a vector evaluate to Value::Integer
         assert!(matches!(&result, template::Value::Integer(1)));
     }
 
@@ -1110,6 +1397,7 @@ mod tests {
         let result = eval_str("(reverse [1 2 3])", &cond).unwrap();
         if let template::Value::List(items) = result {
             assert_eq!(items.len(), 3);
+            // After reverse, first item should be Integer(3) (was the last)
             assert!(matches!(&items[0], template::Value::Integer(3)));
         } else {
             panic!("expected list");
@@ -1410,6 +1698,302 @@ mod tests {
         assert!(matches!(result, template::Value::List(_)));
         if let template::Value::List(items) = result {
             assert_eq!(items.len(), 2, "expected 2 post items from thread expr");
+        }
+    }
+
+    // ── Phase 2: Env, closures, and special forms (ADR-036) ──────────────────
+
+    // ── let ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn let_single_binding() {
+        let cond = empty_conductor();
+        let result = eval_str("(let [x 1] x)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(1)));
+    }
+
+    #[test]
+    fn let_multiple_bindings() {
+        let cond = empty_conductor();
+        let result = eval_str("(let [x 1 y 2] (+ x y))", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(3)));
+    }
+
+    #[test]
+    fn let_sequential_bindings() {
+        // y can see x because bindings are sequential
+        let cond = empty_conductor();
+        let result = eval_str("(let [x 5 y (+ x 1)] y)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(6)));
+    }
+
+    #[test]
+    fn let_multi_body_returns_last() {
+        let cond = empty_conductor();
+        let result = eval_str("(let [x 1] x x 42)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(42)));
+    }
+
+    // ── if ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn if_true_branch() {
+        let cond = empty_conductor();
+        let result = eval_str("(if true 1 2)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(1)));
+    }
+
+    #[test]
+    fn if_false_branch() {
+        let cond = empty_conductor();
+        let result = eval_str("(if false 1 2)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(2)));
+    }
+
+    #[test]
+    fn if_nil_is_falsy() {
+        let cond = empty_conductor();
+        let result = eval_str("(if nil 1 2)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(2)));
+    }
+
+    #[test]
+    fn if_zero_is_truthy() {
+        // 0 is truthy in Clojure (only false and nil are falsy)
+        let cond = empty_conductor();
+        let result = eval_str("(if 0 1 2)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(1)));
+    }
+
+    #[test]
+    fn if_no_else_returns_absent() {
+        let cond = empty_conductor();
+        let result = eval_str("(if false 1)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    // ── do ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn do_returns_last_value() {
+        let cond = empty_conductor();
+        let result = eval_str("(do 1 2 3)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(3)));
+    }
+
+    #[test]
+    fn do_empty_returns_absent() {
+        let cond = empty_conductor();
+        let result = eval_str("(do)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    // ── fn and closures ──────────────────────────────────────────────────────
+
+    #[test]
+    fn fn_immediate_application() {
+        // ((fn [x] (+ x 1)) 10) → 11
+        let cond = empty_conductor();
+        let result = eval_str("((fn [x] (+ x 1)) 10)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(11)));
+    }
+
+    #[test]
+    fn fn_captures_lexical_scope() {
+        // (let [n 5] ((fn [x] (+ x n)) 3)) → 8
+        let cond = empty_conductor();
+        let result = eval_str("(let [n 5] ((fn [x] (+ x n)) 3))", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(8)));
+    }
+
+    #[test]
+    fn fn_stored_in_let() {
+        // (let [f (fn [x] (* x 2))] (f 5)) → 10
+        let cond = empty_conductor();
+        let result = eval_str("(let [f (fn [x] (* x 2))] (f 5))", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(10)));
+    }
+
+    #[test]
+    fn fn_variadic_rest_param() {
+        // ((fn [x & rest] rest) 1 2 3) → [2 3]
+        let cond = empty_conductor();
+        let result = eval_str("((fn [x & rest] rest) 1 2 3)", &cond).unwrap();
+        assert!(
+            matches!(&result, template::Value::List(items) if items.len() == 2),
+            "expected List of 2, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fn_produces_fn_value() {
+        let cond = empty_conductor();
+        let result = eval_str("(fn [x] x)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Fn(_)));
+    }
+
+    // ── def ─────────────────────────────────────────────────────────────────
+    // Note: def bindings are per-eval call (root env is not persisted across calls).
+    // Within a single expression, def+usage works if we use let or fn body.
+
+    #[test]
+    fn def_in_do_block() {
+        // (do (def x 42) x) — def persists within the same eval call's root
+        let cond = empty_conductor();
+        let result = eval_str("(do (def x 42) x)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(42)));
+    }
+
+    // ── defn macro ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn defn_defines_and_calls_function() {
+        // (do (defn double [x] (* x 2)) (double 5)) → 10
+        let cond = empty_conductor();
+        let result = eval_str("(do (defn double [x] (* x 2)) (double 5))", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(10)));
+    }
+
+    // ── quote ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn quote_returns_form_as_data() {
+        let cond = empty_conductor();
+        // (quote (+ 1 2)) → a List value, not the result of addition
+        let result = eval_str("(quote (+ 1 2))", &cond).unwrap();
+        // The quoted form should be a List with 3 elements
+        assert!(
+            matches!(&result, template::Value::List(items) if items.len() == 3),
+            "expected List of 3, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn quote_keyword() {
+        let cond = empty_conductor();
+        let result = eval_str("(quote :foo)", &cond).unwrap();
+        assert!(
+            matches!(&result, template::Value::Keyword { name, .. } if name == "foo"),
+            "got {result:?}"
+        );
+    }
+
+    // ── Value::Integer, Value::Bool, Value::Keyword ──────────────────────────
+
+    #[test]
+    fn bool_literal_true() {
+        let cond = empty_conductor();
+        let result = eval_str("true", &cond).unwrap();
+        assert!(matches!(result, template::Value::Bool(true)));
+    }
+
+    #[test]
+    fn bool_literal_false() {
+        let cond = empty_conductor();
+        let result = eval_str("false", &cond).unwrap();
+        assert!(matches!(result, template::Value::Bool(false)));
+    }
+
+    // ── macro expansions (when, cond, and, or) ───────────────────────────────
+
+    #[test]
+    fn when_true_evaluates_body() {
+        let cond = empty_conductor();
+        let result = eval_str("(when true 42)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(42)));
+    }
+
+    #[test]
+    fn when_false_returns_nil() {
+        let cond = empty_conductor();
+        let result = eval_str("(when false 42)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    #[test]
+    fn when_not_true_returns_nil() {
+        let cond = empty_conductor();
+        let result = eval_str("(when-not true 42)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    #[test]
+    fn when_not_false_evaluates_body() {
+        let cond = empty_conductor();
+        let result = eval_str("(when-not false 42)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(42)));
+    }
+
+    #[test]
+    fn cond_first_matching_clause() {
+        let cond = empty_conductor();
+        let result = eval_str("(cond false 1 true 2 true 3)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(2)));
+    }
+
+    #[test]
+    fn cond_no_match_returns_nil() {
+        let cond = empty_conductor();
+        let result = eval_str("(cond false 1 false 2)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    #[test]
+    fn and_all_true() {
+        let cond = empty_conductor();
+        let result = eval_str("(and 1 2 3)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(3)));
+    }
+
+    #[test]
+    fn and_short_circuits_on_false() {
+        let cond = empty_conductor();
+        let result = eval_str("(and 1 false 3)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Bool(false)));
+    }
+
+    #[test]
+    fn and_empty_returns_true() {
+        let cond = empty_conductor();
+        let result = eval_str("(and)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Bool(true)));
+    }
+
+    #[test]
+    fn or_first_truthy() {
+        let cond = empty_conductor();
+        let result = eval_str("(or false nil 42)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Integer(42)));
+    }
+
+    #[test]
+    fn or_all_false_returns_nil() {
+        let cond = empty_conductor();
+        let result = eval_str("(or false nil)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    #[test]
+    fn or_empty_returns_nil() {
+        let cond = empty_conductor();
+        let result = eval_str("(or)", &cond).unwrap();
+        assert!(matches!(result, template::Value::Absent));
+    }
+
+    // ── map with fn ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_with_fn_value() {
+        // (map (fn [x] (+ x 1)) [1 2 3]) → [2 3 4]
+        let cond = empty_conductor();
+        let result = eval_str("(map (fn [x] (+ x 1)) [1 2 3])", &cond).unwrap();
+        if let template::Value::List(items) = result {
+            assert_eq!(items.len(), 3);
+            assert!(matches!(items[0], template::Value::Integer(2)));
+            assert!(matches!(items[1], template::Value::Integer(3)));
+            assert!(matches!(items[2], template::Value::Integer(4)));
+        } else {
+            panic!("expected list");
         }
     }
 

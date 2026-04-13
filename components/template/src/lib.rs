@@ -10,7 +10,7 @@ pub mod registry;
 pub mod transformer;
 
 pub use ast::{Expr, Transform};
-pub use data::{build_article_graph, build_article_graph_with_source, synthesize_link, DataGraph, SuggestionKind, Value};
+pub use data::{build_article_graph, build_article_graph_with_source, synthesize_link, Callable, DataGraph, SuggestionKind, Value};
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};

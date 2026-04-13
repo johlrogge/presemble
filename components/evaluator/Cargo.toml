@@ -17,6 +17,7 @@ site_index = { workspace = true }
 editorial_types = { workspace = true }
 reader = { workspace = true }
 edn = { workspace = true }
+im = { workspace = true }
 
 [dev-dependencies]
 site_repository = { workspace = true }

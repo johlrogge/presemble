@@ -1,6 +1,16 @@
 use content::{ContentElement, Document};
 use schema::{Element, Grammar, Spanned};
 use pulldown_cmark;
+use std::sync::Arc;
+
+/// Trait for callable values (closures and primitive functions).
+/// Defined in template to avoid circular dependency with evaluator.
+pub trait Callable: Send + Sync + std::fmt::Debug {
+    fn call(&self, args: Vec<Value>) -> Result<Value, String>;
+    fn name(&self) -> Option<&str>;
+    /// Downcast hook — allows evaluator to detect Closure behind Arc<dyn Callable>.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
 
 /// Strip HTML tags from a string, returning only text content.
 fn strip_html_tags(html: &str) -> String {
@@ -29,7 +39,7 @@ pub enum SuggestionKind {
 }
 
 /// A value in the data graph.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Value {
     /// Plain text (heading text, paragraph text, etc.)
     Text(String),
@@ -41,12 +51,6 @@ pub enum Value {
     List(Vec<Value>),
     /// Absent — slot not present or optional field not filled
     Absent,
-    /// A proper integer value (replaces Text("42") pattern)
-    Integer(i64),
-    /// A proper boolean value (replaces Text("true") pattern)
-    Bool(bool),
-    /// A keyword value: `:name` or `:ns/name`
-    Keyword { namespace: Option<String>, name: String },
     /// A suggestion placeholder for missing content, driven by schema hint_text.
     /// Rendered as a visually distinct placeholder in the output.
     Suggestion {
@@ -59,6 +63,38 @@ pub enum Value {
         text: content::LinkText,
         target: content::LinkTarget,
     },
+    /// A proper integer value (Phase 2: ADR-036)
+    Integer(i64),
+    /// A proper boolean value (Phase 2: ADR-036)
+    Bool(bool),
+    /// A keyword as a first-class value (Phase 2: ADR-036)
+    Keyword {
+        namespace: Option<String>,
+        name: String,
+    },
+    /// A callable function — closure or primitive (Phase 2: ADR-036)
+    Fn(Arc<dyn Callable>),
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Text(s) => write!(f, "Text({s:?})"),
+            Value::Html(s) => write!(f, "Html({s:?})"),
+            Value::Record(g) => write!(f, "Record({g:?})"),
+            Value::List(items) => write!(f, "List({items:?})"),
+            Value::Absent => write!(f, "Absent"),
+            Value::Suggestion { hint, .. } => write!(f, "Suggestion({hint:?})"),
+            Value::LinkExpression { .. } => write!(f, "LinkExpression(..)"),
+            Value::Integer(n) => write!(f, "Integer({n})"),
+            Value::Bool(b) => write!(f, "Bool({b})"),
+            Value::Keyword { namespace, name } => match namespace {
+                Some(ns) => write!(f, "Keyword(:{ns}/{name})"),
+                None => write!(f, "Keyword(:{name})"),
+            },
+            Value::Fn(c) => write!(f, "Fn({})", c.name().unwrap_or("anonymous")),
+        }
+    }
 }
 
 impl Value {
@@ -84,16 +120,19 @@ impl Value {
                 if texts.is_empty() { None } else { Some(texts.join(" ")) }
             }
             Value::Absent => None,
-            Value::Integer(n) => Some(n.to_string()),
-            Value::Bool(b) => Some(b.to_string()),
-            Value::Keyword { namespace: Some(ns), name } => Some(format!(":{ns}/{name}")),
-            Value::Keyword { namespace: None, name } => Some(format!(":{name}")),
             Value::Suggestion { .. } => None,
             Value::LinkExpression { text, .. } => match text {
                 content::LinkText::Static(s) => Some(s.clone()),
                 content::LinkText::Binding(b) => Some(b.clone()),
                 content::LinkText::Empty => None,
             },
+            Value::Integer(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Keyword { namespace, name } => match namespace {
+                Some(ns) => Some(format!(":{ns}/{name}")),
+                None => Some(format!(":{name}")),
+            },
+            Value::Fn(c) => Some(format!("#<fn {}>", c.name().unwrap_or("anonymous"))),
         }
     }
 }

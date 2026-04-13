@@ -9,14 +9,17 @@ pub fn value_to_edn(value: &template::Value) -> String {
             format!("[{}]", inner.join(" "))
         }
         template::Value::Absent => "nil".to_string(),
-        template::Value::Integer(n) => n.to_string(),
-        template::Value::Bool(b) => b.to_string(),
-        template::Value::Keyword { namespace: Some(ns), name } => format!(":{ns}/{name}"),
-        template::Value::Keyword { namespace: None, name } => format!(":{name}"),
         template::Value::Suggestion { hint, .. } => {
             format!("\"<suggestion: {}>\"", escape_edn_string(hint))
         }
         template::Value::LinkExpression { .. } => "nil".to_string(),
+        template::Value::Integer(n) => n.to_string(),
+        template::Value::Bool(b) => b.to_string(),
+        template::Value::Keyword { namespace, name } => match namespace {
+            Some(ns) => format!(":{ns}/{name}"),
+            None => format!(":{name}"),
+        },
+        template::Value::Fn(c) => format!("\"#<fn {}>\"", c.name().unwrap_or("anonymous")),
     }
 }
 
