@@ -41,7 +41,7 @@ impl ReplState {
             input: String::new(),
             cursor_pos: 0,
             output_lines: vec![OutputLine::Result(format!(
-                "Presemble REPL ({mode_label})  |  Tab: complete  |  Ctrl-Enter: eval  |  Ctrl-D: quit"
+                "Presemble REPL ({mode_label})  |  Tab: complete  |  Enter: eval | Ctrl-J: force eval  |  Ctrl-D: quit"
             ))],
             history: Vec::new(),
             history_idx: None,
@@ -74,30 +74,15 @@ pub fn run_repl(mut backend: Box<dyn ReplBackend>) -> io::Result<()> {
                     quit = true;
                 }
 
-                // Evaluate — Ctrl-Enter or Alt-Enter
-                (m, KeyCode::Enter)
-                    if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) =>
-                {
-                    let code = state.input.trim().to_string();
-                    if !code.is_empty() {
-                        state.output_lines.push(OutputLine::Input(format!("> {code}")));
-                        let result = backend.eval(&code);
-                        if result.is_error {
-                            state.output_lines.push(OutputLine::Error(result.value));
-                        } else {
-                            state.output_lines.push(OutputLine::Result(result.value));
-                        }
-                        if !state.history.last().map(|l: &String| l == &code).unwrap_or(false) {
-                            state.history.push(code);
-                        }
-                        state.history_idx = None;
-                        state.input.clear();
-                        state.cursor_pos = 0;
-                        state.completion_visible = false;
-                    }
+                // Force-eval — Ctrl+J (portable) or Alt+Enter
+                (m, KeyCode::Char('j')) if m.contains(KeyModifiers::CONTROL) => {
+                    eval_input(&mut state, &mut backend);
+                }
+                (m, KeyCode::Enter) if m.contains(KeyModifiers::ALT) => {
+                    eval_input(&mut state, &mut backend);
                 }
 
-                // Enter — accept completion or insert newline
+                // Enter — accept completion, balanced-eval, or insert newline
                 (_, KeyCode::Enter) => {
                     if state.completion_visible {
                         let candidate = state
@@ -108,10 +93,18 @@ pub fn run_repl(mut backend: Box<dyn ReplBackend>) -> io::Result<()> {
                             accept_completion(&mut state, &c);
                         }
                         state.completion_visible = false;
+                    } else if !state.input.trim().is_empty() && delimiters_balanced(&state.input) {
+                        eval_input(&mut state, &mut backend);
                     } else {
                         state.input.insert(state.cursor_pos, '\n');
                         state.cursor_pos += 1;
                     }
+                }
+
+                // Force newline — Ctrl+O
+                (m, KeyCode::Char('o')) if m.contains(KeyModifiers::CONTROL) => {
+                    state.input.insert(state.cursor_pos, '\n');
+                    state.cursor_pos += 1;
                 }
 
                 // Tab — trigger completion
@@ -282,8 +275,13 @@ fn draw_ui(f: &mut ratatui::Frame, state: &ReplState) {
 
     // Input panel with EDN syntax highlighting
     let highlighted = highlight_edn(&state.input);
+    let input_title = if state.input.trim().is_empty() || delimiters_balanced(&state.input) {
+        " Input (Enter to eval) "
+    } else {
+        " Input (...Enter for newline, Ctrl-J to eval) "
+    };
     let input_widget = Paragraph::new(highlighted)
-        .block(Block::default().borders(Borders::ALL).title(" Input (Ctrl-Enter to eval) "));
+        .block(Block::default().borders(Borders::ALL).title(input_title));
     f.render_widget(input_widget, input_area);
 
     // Cursor position inside input box
@@ -493,6 +491,65 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }
 
+/// Evaluate the current input buffer and push output lines.
+fn eval_input(state: &mut ReplState, backend: &mut Box<dyn ReplBackend>) {
+    let code = state.input.trim().to_string();
+    if !code.is_empty() {
+        state.output_lines.push(OutputLine::Input(format!("> {code}")));
+        let result = backend.eval(&code);
+        if result.is_error {
+            state.output_lines.push(OutputLine::Error(result.value));
+        } else {
+            state.output_lines.push(OutputLine::Result(result.value));
+        }
+        if !state.history.last().map(|l: &String| l == &code).unwrap_or(false) {
+            state.history.push(code);
+        }
+        state.history_idx = None;
+        state.input.clear();
+        state.cursor_pos = 0;
+        state.completion_visible = false;
+    }
+}
+
+/// Returns `true` when all `(`/`[`/`{` delimiters are closed and no string
+/// literal is left open. Respects `"…\"…"` escaping and `;` line comments.
+fn delimiters_balanced(input: &str) -> bool {
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    for c in input.chars() {
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            ';' => in_comment = true,
+            '"' => in_string = true,
+            '(' | '[' | '{' => stack.push(c),
+            ')' => { if stack.last() == Some(&'(') { stack.pop(); } else { return false; } }
+            ']' => { if stack.last() == Some(&'[') { stack.pop(); } else { return false; } }
+            '}' => { if stack.last() == Some(&'{') { stack.pop(); } else { return false; } }
+            _ => {}
+        }
+    }
+    stack.is_empty() && !in_string
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +585,55 @@ mod tests {
         let lines = highlight_edn("");
         // empty input — may produce 0 or 1 empty line, just must not panic
         let _ = lines;
+    }
+
+    #[test]
+    fn balanced_empty() {
+        assert!(delimiters_balanced(""));
+    }
+
+    #[test]
+    fn balanced_simple_form() {
+        assert!(delimiters_balanced("(+ 1 2)"));
+    }
+
+    #[test]
+    fn balanced_unmatched_open() {
+        assert!(!delimiters_balanced("(+ 1"));
+    }
+
+    #[test]
+    fn balanced_multiline() {
+        assert!(delimiters_balanced("(let [x 1]\n  x)"));
+    }
+
+    #[test]
+    fn balanced_nested() {
+        assert!(delimiters_balanced("{:a [1 2]}"));
+    }
+
+    #[test]
+    fn balanced_string_with_escaped_quote() {
+        assert!(delimiters_balanced(r#"(str "hello\"")"#));
+    }
+
+    #[test]
+    fn balanced_unclosed_string() {
+        assert!(!delimiters_balanced(r#"(str "hello"#));
+    }
+
+    #[test]
+    fn balanced_comment_hides_parens() {
+        assert!(delimiters_balanced("; (unmatched"));
+    }
+
+    #[test]
+    fn balanced_comment_mid_expression() {
+        assert!(delimiters_balanced("(foo ; comment\n  bar)"));
+    }
+
+    #[test]
+    fn balanced_mismatched_closer() {
+        assert!(!delimiters_balanced("(]"));
     }
 }

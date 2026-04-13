@@ -111,11 +111,15 @@ A ratatui-based TUI rather than readline. Key reasons:
 ```
 
 **Key interactions:**
-- Multi-line input: Enter inserts newline; Ctrl-Enter evaluates
-- Tab: completion popup
+- **Enter**: evaluates when delimiters are balanced and input is non-empty; otherwise inserts newline
+- **Ctrl+J**: force-eval regardless of balance state
+- **Alt+Enter**: force-eval (terminals that support it)
+- **Ctrl+O**: force-insert newline regardless of balance state
+- **Tab**: trigger completion
+- **Ctrl+D**: quit
+- **Ctrl+L**: clear output
 - EDN syntax highlighting in input
 - Up/Down: history navigation
-- Ctrl-D: quit
 
 ### 5. Component structure
 
