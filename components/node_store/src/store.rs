@@ -174,11 +174,6 @@ impl NodeStore {
         self.edges_from.get(&id)
     }
 
-    /// Raw reverse edges to a node (with their source NodeIds).
-    pub fn edges_to(&self, id: NodeId) -> Option<&Vector<ReverseEdge>> {
-        self.edges_to.get(&id)
-    }
-
     /// Nodes that have a Child edge targeting this node.
     pub fn parents(&self, id: NodeId) -> Vec<NodeId> {
         self.edges_to
