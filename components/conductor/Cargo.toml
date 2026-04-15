@@ -29,4 +29,5 @@ nng = { workspace = true }
 notify = { workspace = true }
 
 [dev-dependencies]
+im = { workspace = true }
 tempfile = "3"

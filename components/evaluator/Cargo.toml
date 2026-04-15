@@ -23,4 +23,6 @@ node_store = { workspace = true }
 
 [dev-dependencies]
 site_repository = { workspace = true }
+node_store_bridge = { workspace = true }
+schema = { workspace = true }
 tempfile = "3"

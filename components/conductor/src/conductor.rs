@@ -60,6 +60,56 @@ pub struct Conductor {
     stem_to_roots: RwLock<HashMap<String, Vec<node_store::NodeId>>>,
 }
 
+/// Extract the title from a document's preamble in the NodeStore.
+/// Walks: document → preamble → slot(name="title") → first child element → first child text.
+fn find_document_title(store: &node_store::NodeStore, doc_root: node_store::NodeId) -> Option<String> {
+    let preamble = node_store_bridge::content_bridge::find_child_by_name(store, doc_root, "preamble")?;
+
+    // Look through slots for one named "title"
+    for child_id in store.children(preamble) {
+        if let Some(node_store::Node::Element(name)) = store.get(child_id)
+            && store.resolve_name(*name) == "slot"
+            && let Some(slot_name) = node_store_bridge::content_bridge::find_attr_text(store, child_id, "name")
+            && slot_name == "title"
+        {
+            for grandchild in store.children(child_id) {
+                for text_child in store.children(grandchild) {
+                    if let Some(node_store::Node::Text(s)) = store.get(text_child) {
+                        return Some(s.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Recursively walk a node tree collecting link expression edges.
+fn collect_edges_from_node(
+    store: &node_store::NodeStore,
+    node: node_store::NodeId,
+    source_url: &str,
+    edges: &mut Vec<site_index::Edge>,
+) {
+    if let Some(node_store::Node::Element(name)) = store.get(node)
+        && store.resolve_name(*name) == "link-expression"
+        && let Some(target_node) = node_store_bridge::content_bridge::find_child_by_name(store, node, "link-target")
+        && let Some(kind) = node_store_bridge::content_bridge::find_attr_text(store, target_node, "kind")
+        && kind == "path-ref"
+        && let Some(target_url) = node_store_bridge::content_bridge::find_attr_text(store, target_node, "value")
+    {
+        edges.push(site_index::Edge {
+            source: site_index::UrlPath::new(source_url),
+            target: site_index::UrlPath::new(&target_url),
+        });
+    }
+
+    // Recurse into children
+    for child in store.children(node) {
+        collect_edges_from_node(store, child, source_url, edges);
+    }
+}
+
 impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
@@ -390,6 +440,13 @@ impl Conductor {
         self.site_graph.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Insert a URL→NodeId mapping into the conductor's url_to_root index.
+    /// Used in tests to populate the NodeStore without going through the full
+    /// site-repository pipeline.
+    pub fn insert_url_root(&self, url: &str, root: node_store::NodeId) {
+        self.url_to_root.write().unwrap_or_else(|e| e.into_inner()).insert(url.to_string(), root);
+    }
+
     /// Build the full site graph using the shared build pipeline.
     ///
     /// Builds item pages, collection/index pages, and a legacy fallback root
@@ -423,17 +480,7 @@ impl Conductor {
     ///
     /// Returns a vec of `(url_path, data_graph)` pairs, one per item page.
     pub fn query_items_for_stem(&self, stem: &str) -> Vec<(String, template::DataGraph)> {
-        let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-        let schema_stem = site_index::SchemaStem::new(stem);
-        graph
-            .items_for_stem(&schema_stem)
-            .into_iter()
-            .filter_map(|node| {
-                node.page_data().map(|pd| {
-                    (node.url_path.as_str().to_string(), pd.data.clone())
-                })
-            })
-            .collect()
+        self.query_items_from_store(stem)
     }
 
     /// Return all edges pointing TO the given URL path.
@@ -462,12 +509,12 @@ impl Conductor {
 
     /// Walk all page nodes and extract `PathRef` link expression edges.
     fn collect_all_edges(&self) -> Vec<site_index::Edge> {
-        let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
         let mut edges = Vec::new();
-        for node in graph.iter_pages() {
-            if let Some(pd) = node.page_data() {
-                edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
-            }
+
+        for (url, &root) in url_to_root.iter() {
+            collect_edges_from_node(&store, root, url, &mut edges);
         }
         edges
     }
@@ -482,23 +529,32 @@ impl Conductor {
 
     /// List all link completion options for a given schema stem.
     ///
-    /// Reads from the site graph (in-memory) and extracts title from the data graph.
+    /// Reads from the NodeStore and extracts title from the document's preamble.
     /// Falls back to the slug if no title is found.
     pub fn list_link_options(&self, stem: &str) -> Vec<crate::protocol::LinkOption> {
-        let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-        let schema_stem = site_index::SchemaStem::new(stem);
-        let mut options: Vec<crate::protocol::LinkOption> = graph
-            .items_for_stem(&schema_stem)
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let roots = self.documents_for_stem(stem);
+        let mut options: Vec<crate::protocol::LinkOption> = roots
             .into_iter()
-            .filter_map(|node| {
-                let pd = node.page_data()?;
-                let url = node.url_path.as_str().to_string();
+            .filter_map(|root| {
+                // Only item documents (not collections)
+                let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                if page_kind != "item" {
+                    return None;
+                }
+
+                let url = node_store_bridge::content_bridge::find_attr_text(&store, root, "url")?;
                 let slug = url.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
-                let title = match pd.data.resolve(&["title"]) {
-                    Some(template::Value::Text(t)) => t.clone(),
-                    _ => slug.clone(),
-                };
-                Some(crate::protocol::LinkOption { stem: stem.to_string(), slug, title, url })
+
+                // Get title from the document's preamble
+                let title = find_document_title(&store, root).unwrap_or_else(|| slug.clone());
+
+                Some(crate::protocol::LinkOption {
+                    stem: stem.to_string(),
+                    slug,
+                    title,
+                    url,
+                })
             })
             .collect();
         options.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -1773,56 +1829,81 @@ mod query_edges_tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Build a minimal SiteNode with resolved link data (Record with href).
-    fn make_page_node_with_resolved_link(
-        source_url: &str,
-        target_href: &str,
-    ) -> site_index::SiteNode {
-        let mut data = template::DataGraph::new();
-        // Simulate a resolved link expression — a Record with an href field
-        let mut linked = template::DataGraph::new();
-        linked.insert("href", template::Value::Text(target_href.to_string()));
-        linked.insert("title", template::Value::Text("Target Title".to_string()));
-        data.insert("related", template::Value::Record(linked));
-
-        site_index::SiteNode {
-            url_path: site_index::UrlPath::new(source_url),
-            output_path: PathBuf::from(format!("output{source_url}/index.html")),
-            source_path: PathBuf::from(format!("content/post/hello.md")),
-            deps: std::collections::HashSet::new(),
-            role: site_index::NodeRole::Page(site_index::PageData {
-                page_kind: site_index::PageKind::Item,
-                schema_stem: site_index::SchemaStem::new("post"),
-                template_path: PathBuf::from("templates/post/item.hiccup"),
-                content_path: PathBuf::from("content/post/hello.md"),
-                schema_path: PathBuf::from("schemas/post/item.md"),
-                data,
-            }),
-        }
-    }
-
-    fn make_conductor_with_nodes(nodes: Vec<site_index::SiteNode>) -> Conductor {
+    /// Build a conductor with a document in the NodeStore that contains a
+    /// link-expression with a path-ref target.
+    fn make_conductor_with_link_expression(source_url: &str, target_url: &str) -> Conductor {
         let repo = site_repository::SiteRepository::builder().build();
         let conductor = Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap();
-        let mut graph = site_index::SiteGraph::new();
-        for node in nodes {
-            graph.insert(node);
-        }
-        conductor.set_site_graph(graph);
+
+        let doc = content::Document {
+            preamble: im::vector![],
+            body: im::vector![schema::Spanned {
+                node: content::ContentElement::LinkExpression {
+                    text: content::LinkText::Empty,
+                    target: content::LinkTarget::PathRef(target_url.to_string()),
+                },
+                span: schema::Span { start: 0, end: 0 },
+            }],
+            has_separator: false,
+            separator_span: None,
+        };
+
+        let meta = node_store_bridge::content_bridge::DocumentMeta {
+            url: source_url.to_string(),
+            stem: "post".to_string(),
+            file: format!("content/post/{}.md", source_url.rsplit('/').next().unwrap_or("x")),
+            page_kind: "item".to_string(),
+        };
+
+        let mut store = conductor.node_store.write().unwrap();
+        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+        drop(store);
+
+        conductor.url_to_root.write().unwrap().insert(source_url.to_string(), root);
+
+        conductor
+    }
+
+    /// Build a conductor with a document that has no link-expression.
+    fn make_conductor_with_no_link_expression(source_url: &str) -> Conductor {
+        let repo = site_repository::SiteRepository::builder().build();
+        let conductor = Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap();
+
+        let doc = content::Document {
+            preamble: im::vector![],
+            body: im::vector![schema::Spanned {
+                node: content::ContentElement::Paragraph { text: "No links here.".to_string() },
+                span: schema::Span { start: 0, end: 0 },
+            }],
+            has_separator: false,
+            separator_span: None,
+        };
+
+        let meta = node_store_bridge::content_bridge::DocumentMeta {
+            url: source_url.to_string(),
+            stem: "post".to_string(),
+            file: format!("content/post/{}.md", source_url.rsplit('/').next().unwrap_or("x")),
+            page_kind: "item".to_string(),
+        };
+
+        let mut store = conductor.node_store.write().unwrap();
+        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+        drop(store);
+
+        conductor.url_to_root.write().unwrap().insert(source_url.to_string(), root);
+
         conductor
     }
 
     #[test]
-    fn query_edges_to_finds_resolved_records_with_href() {
-        // /post/alpha has a resolved Record link to /author/alice
-        let node = make_page_node_with_resolved_link("/post/alpha", "/author/alice");
-        let conductor = make_conductor_with_nodes(vec![node]);
+    fn query_edges_to_finds_path_ref_link_expressions() {
+        let conductor = make_conductor_with_link_expression("/post/alpha", "/author/alice");
 
         let edges = conductor.query_edges_to("/author/alice");
         assert_eq!(
             edges.len(),
             1,
-            "expected 1 edge to /author/alice from resolved Record, got {}",
+            "expected 1 edge to /author/alice from link-expression, got {}",
             edges.len()
         );
         assert_eq!(edges[0].source, site_index::UrlPath::new("/post/alpha"));
@@ -1830,16 +1911,14 @@ mod query_edges_tests {
     }
 
     #[test]
-    fn query_edges_from_finds_resolved_records_with_href() {
-        // /post/alpha has a resolved Record link to /author/alice
-        let node = make_page_node_with_resolved_link("/post/alpha", "/author/alice");
-        let conductor = make_conductor_with_nodes(vec![node]);
+    fn query_edges_from_finds_path_ref_link_expressions() {
+        let conductor = make_conductor_with_link_expression("/post/alpha", "/author/alice");
 
         let edges = conductor.query_edges_from("/post/alpha");
         assert_eq!(
             edges.len(),
             1,
-            "expected 1 edge from /post/alpha via resolved Record, got {}",
+            "expected 1 edge from /post/alpha via link-expression, got {}",
             edges.len()
         );
         assert_eq!(edges[0].source, site_index::UrlPath::new("/post/alpha"));
@@ -1847,31 +1926,12 @@ mod query_edges_tests {
     }
 
     #[test]
-    fn query_edges_to_no_false_positives_for_other_records() {
-        // A record that has no href field should NOT produce an edge
-        let mut data = template::DataGraph::new();
-        let mut rec = template::DataGraph::new();
-        rec.insert("title", template::Value::Text("Just a title".to_string()));
-        data.insert("meta", template::Value::Record(rec));
-
-        let node = site_index::SiteNode {
-            url_path: site_index::UrlPath::new("/post/beta"),
-            output_path: std::path::PathBuf::from("output/post/beta/index.html"),
-            source_path: std::path::PathBuf::from("content/post/beta.md"),
-            deps: std::collections::HashSet::new(),
-            role: site_index::NodeRole::Page(site_index::PageData {
-                page_kind: site_index::PageKind::Item,
-                schema_stem: site_index::SchemaStem::new("post"),
-                template_path: std::path::PathBuf::from("templates/post/item.hiccup"),
-                content_path: std::path::PathBuf::from("content/post/beta.md"),
-                schema_path: std::path::PathBuf::from("schemas/post/item.md"),
-                data,
-            }),
-        };
-        let conductor = make_conductor_with_nodes(vec![node]);
+    fn query_edges_to_no_false_positives_for_documents_without_links() {
+        // A document with no link-expression should NOT produce any edges
+        let conductor = make_conductor_with_no_link_expression("/post/beta");
 
         let edges = conductor.query_edges_to("/any/target");
-        assert!(edges.is_empty(), "records without href should not produce edges");
+        assert!(edges.is_empty(), "documents without link-expressions should not produce edges");
     }
 }
 

@@ -48,7 +48,7 @@ pub fn find_attr_bool(store: &NodeStore, node: NodeId, attr_name: &str) -> Optio
     None
 }
 
-pub(crate) fn find_child_by_name(
+pub fn find_child_by_name(
     store: &NodeStore,
     parent: NodeId,
     element_name: &str,
@@ -63,7 +63,7 @@ pub(crate) fn find_child_by_name(
     None
 }
 
-pub(crate) fn children_by_name(
+pub fn children_by_name(
     store: &NodeStore,
     parent: NodeId,
     element_name: &str,

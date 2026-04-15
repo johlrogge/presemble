@@ -1595,60 +1595,66 @@ mod tests {
     // ── refs-to / refs-from ──────────────────────────────────────────────────
 
     fn linked_conductor() -> Arc<conductor::Conductor> {
-        use std::collections::HashSet;
+        use schema::Spanned;
+
         let repo = site_repository::SiteRepository::builder()
             .schema("post", POST_SCHEMA_SRC)
             .build();
         let cond = Arc::new(conductor::Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap());
 
-        let mut graph = site_index::SiteGraph::new();
+        // Build document with a link-expression targeting /author/alice
+        let doc_with_link = content::Document {
+            preamble: im::vector![],
+            body: im::vector![Spanned {
+                node: content::ContentElement::LinkExpression {
+                    text: content::LinkText::Empty,
+                    target: content::LinkTarget::PathRef("/author/alice".to_string()),
+                },
+                span: schema::Span { start: 0, end: 0 },
+            }],
+            has_separator: false,
+            separator_span: None,
+        };
 
-        let mut data_with_link = template::DataGraph::new();
-        data_with_link.insert("title", template::Value::Text("Post With Link".into()));
-        data_with_link.insert(
-            "author",
-            template::Value::LinkExpression {
-                text: content::LinkText::Empty,
-                target: content::LinkTarget::PathRef("/author/alice".to_string()),
-            },
-        );
+        let meta_with_link = node_store_bridge::content_bridge::DocumentMeta {
+            url: "/post/with-link".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/with-link.md".to_string(),
+            page_kind: "item".to_string(),
+        };
 
-        let url_with_link = site_index::UrlPath::new("/post/with-link");
-        graph.insert(site_index::SiteNode {
-            url_path: url_with_link,
-            output_path: PathBuf::from("output/post/with-link/index.html"),
-            source_path: PathBuf::from("content/post/with-link.md"),
-            deps: HashSet::new(),
-            role: site_index::NodeRole::Page(site_index::PageData {
-                page_kind: site_index::PageKind::Item,
-                schema_stem: site_index::SchemaStem::new("post"),
-                template_path: PathBuf::from("templates/post/item.hiccup"),
-                content_path: PathBuf::from("content/post/with-link.md"),
-                schema_path: PathBuf::from("schemas/post/item.md"),
-                data: data_with_link,
-            }),
-        });
+        let doc_no_link = content::Document {
+            preamble: im::vector![],
+            body: im::vector![Spanned {
+                node: content::ContentElement::Paragraph { text: "No links here.".to_string() },
+                span: schema::Span { start: 0, end: 0 },
+            }],
+            has_separator: false,
+            separator_span: None,
+        };
 
-        let mut data_no_link = template::DataGraph::new();
-        data_no_link.insert("title", template::Value::Text("Post Without Link".into()));
+        let meta_no_link = node_store_bridge::content_bridge::DocumentMeta {
+            url: "/post/no-link".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/no-link.md".to_string(),
+            page_kind: "item".to_string(),
+        };
 
-        let url_no_link = site_index::UrlPath::new("/post/no-link");
-        graph.insert(site_index::SiteNode {
-            url_path: url_no_link,
-            output_path: PathBuf::from("output/post/no-link/index.html"),
-            source_path: PathBuf::from("content/post/no-link.md"),
-            deps: HashSet::new(),
-            role: site_index::NodeRole::Page(site_index::PageData {
-                page_kind: site_index::PageKind::Item,
-                schema_stem: site_index::SchemaStem::new("post"),
-                template_path: PathBuf::from("templates/post/item.hiccup"),
-                content_path: PathBuf::from("content/post/no-link.md"),
-                schema_path: PathBuf::from("schemas/post/item.md"),
-                data: data_no_link,
-            }),
-        });
+        {
+            let node_store_arc = cond.node_store();
+            let mut store = node_store_arc.write().unwrap();
+            let root_with_link = node_store_bridge::content_bridge::document_to_store(
+                &doc_with_link, &mut store, Some(&meta_with_link),
+            );
+            let root_no_link = node_store_bridge::content_bridge::document_to_store(
+                &doc_no_link, &mut store, Some(&meta_no_link),
+            );
+            drop(store);
 
-        cond.set_site_graph(graph);
+            cond.insert_url_root("/post/with-link", root_with_link);
+            cond.insert_url_root("/post/no-link", root_no_link);
+        }
+
         cond
     }
 
