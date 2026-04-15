@@ -4,7 +4,7 @@ use ned::selection::{self, Selection};
 use node_store::NodeStore;
 use std::sync::{Arc, RwLock};
 use node_store_bridge::{
-    content_bridge::{document_to_store, store_to_document},
+    content_bridge::{document_to_store, store_to_document, DocumentMeta},
     schema_bridge::{grammar_to_store, store_to_grammar},
     template_bridge::{store_to_template, template_to_store},
 };
@@ -193,6 +193,7 @@ fn round_trip_content(
     path: &Path,
     grammar: Option<&Grammar>,
     store: &mut NodeStore,
+    meta: Option<&DocumentMeta>,
 ) -> ContentResult {
     let display = path.display().to_string();
     let src = match std::fs::read_to_string(path) {
@@ -255,7 +256,7 @@ fn round_trip_content(
     let preamble_slots = doc.preamble.len();
     let body_elements = doc.body.len();
 
-    let root = document_to_store(&doc, store, None);
+    let root = document_to_store(&doc, store, meta);
     let reconstructed = store_to_document(store, root);
 
     // Re-serialize both and compare text
@@ -460,7 +461,27 @@ pub fn run() {
             grammars.get("index")
         };
 
-        let result = round_trip_content(path, grammar, &mut store);
+        // Build DocumentMeta from path context
+        let stem = content_stem(&content_dir, path).unwrap_or_default();
+        let file_stem_str = path.file_stem().and_then(|s| s.to_str()).unwrap_or("index");
+        let is_index = file_stem_str == "index";
+        let url = if stem.is_empty() {
+            "/".to_string()
+        } else if is_index {
+            format!("/{stem}/")
+        } else {
+            format!("/{stem}/{file_stem_str}")
+        };
+        let file_display = path.strip_prefix(site_dir).map(|p| p.display().to_string()).unwrap_or_else(|_| path.display().to_string());
+        let page_kind = if is_index { "collection" } else { "item" };
+        let meta = DocumentMeta {
+            url,
+            stem: stem.clone(),
+            file: file_display,
+            page_kind: page_kind.to_string(),
+        };
+
+        let result = round_trip_content(path, grammar, &mut store, Some(&meta));
         if result.diffs.is_empty() {
             println!(
                 "  [OK] {} ({} preamble slots, {} body elements)",
@@ -702,6 +723,11 @@ pub fn run() {
         ("(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/ancestors)))", "heading ancestors"),
         // Documents -> descendants -> paragraphs
         ("(ned/count (-> (ned/all-documents) (ned/descendants) (ned/filter :kind \"paragraph\")))", "paragraphs via descendants"),
+        // Metadata queries
+        ("(ned/count (ned/posts))", "post documents (via ned.clj)"),
+        ("(ned/count (ned/features))", "feature documents (via ned.clj)"),
+        ("(ned/url-of (ned/posts))", "post URLs"),
+        ("(ned/count (-> (ned/posts) (ned/descendants) (ned/filter :kind \"heading\")))", "headings in posts"),
     ];
 
     for (expr, label) in &tests {

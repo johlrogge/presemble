@@ -257,6 +257,36 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
         Ok(wrap_selection(a.difference(&b)))
     });
 
+    // ── Attribute access ──────────────────────────────────────────────────────
+
+    let s = store.clone();
+    reg(root, "ned/attr-of", "(ned/attr-of sel attr-name)", "Get attribute values of selected nodes by attribute name.", move |args| {
+        if args.len() < 2 { return Err("ned/attr-of requires selection and attribute name".into()); }
+        let sel = extract_selection(&args[0])?;
+        let attr_name = match &args[1] {
+            Value::Text(s) => s.clone(),
+            Value::Keyword { name, .. } => name.clone(),
+            _ => return Err("ned/attr-of: attribute name must be a string or keyword".into()),
+        };
+        let st = s.read().map_err(|e| e.to_string())?;
+        let values: Vec<Value> = sel.iter()
+            .filter_map(|id| {
+                for (name, vid) in st.attributes(id) {
+                    if st.resolve_name(name) == attr_name {
+                        return match st.get(vid) {
+                            Some(Node::Text(s)) => Some(Value::Text(s.clone())),
+                            Some(Node::Integer(n)) => Some(Value::Integer(*n)),
+                            Some(Node::Boolean(b)) => Some(Value::Bool(*b)),
+                            _ => None,
+                        };
+                    }
+                }
+                None
+            })
+            .collect();
+        Ok(Value::List(values))
+    });
+
     // ── Mutations ─────────────────────────────────────────────────────────────
 
     let s = store.clone();
@@ -473,5 +503,62 @@ mod tests {
             _ => panic!("expected integer"),
         };
         assert_eq!(count_all, count_union);
+    }
+
+    #[test]
+    fn ned_attr_of_returns_attribute_values() {
+        let store = make_store_with_tree();
+        let root = setup(store);
+        // Get all headings, then extract their "level" attribute
+        let all = call(&root, "ned/all", vec![]).unwrap();
+        let heading_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let heading_name = Value::Text("heading".to_string());
+        let headings = call(&root, "ned/filter", vec![all, heading_kw, heading_name]).unwrap();
+        let attr_name = Value::Text("level".to_string());
+        let levels = call(&root, "ned/attr-of", vec![headings, attr_name]).unwrap();
+        match levels {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(items[0], Value::Integer(1)));
+            }
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn ned_attr_of_returns_empty_for_nodes_without_attr() {
+        let store = make_store_with_tree();
+        let root = setup(store);
+        // Paragraphs have no "level" attribute — result should be empty list
+        let all = call(&root, "ned/all", vec![]).unwrap();
+        let para_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let para_name = Value::Text("paragraph".to_string());
+        let paras = call(&root, "ned/filter", vec![all, para_kw, para_name]).unwrap();
+        let attr_name = Value::Text("level".to_string());
+        let levels = call(&root, "ned/attr-of", vec![paras, attr_name]).unwrap();
+        match levels {
+            Value::List(items) => assert_eq!(items.len(), 0),
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn ned_attr_of_accepts_keyword_name() {
+        let store = make_store_with_tree();
+        let root = setup(store);
+        let all = call(&root, "ned/all", vec![]).unwrap();
+        let heading_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let heading_name = Value::Text("heading".to_string());
+        let headings = call(&root, "ned/filter", vec![all, heading_kw, heading_name]).unwrap();
+        // Use keyword as attribute name
+        let attr_kw = Value::Keyword { namespace: None, name: "level".to_string() };
+        let levels = call(&root, "ned/attr-of", vec![headings, attr_kw]).unwrap();
+        match levels {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(items[0], Value::Integer(1)));
+            }
+            _ => panic!("expected List"),
+        }
     }
 }

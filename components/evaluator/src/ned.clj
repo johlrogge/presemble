@@ -42,3 +42,27 @@
 
 (def-doc! ned/all-documents "(ned/all-documents)" "All documents in the store.")
 (defn ned/all-documents [] (ned/documents (ned/all)))
+
+;; ── Document metadata queries ────────────────────────────────────────
+
+(def-doc! ned/by-stem "(ned/by-stem stem)" "Select documents with the given schema stem.")
+(defn ned/by-stem [stem]
+  (ned/filter (ned/all-documents) :attr "stem" stem))
+
+(def-doc! ned/by-url "(ned/by-url url)" "Select the document at the given URL.")
+(defn ned/by-url [url]
+  (ned/filter (ned/all-documents) :attr "url" url))
+
+(def-doc! ned/posts "(ned/posts)" "All post documents.")
+(defn ned/posts [] (ned/by-stem "post"))
+
+(def-doc! ned/features "(ned/features)" "All feature documents.")
+(defn ned/features [] (ned/by-stem "feature"))
+
+(def-doc! ned/url-of "(ned/url-of sel)" "Get URLs of selected documents.")
+(defn ned/url-of [sel]
+  (ned/attr-of sel "url"))
+
+(def-doc! ned/stem-of "(ned/stem-of sel)" "Get stems of selected documents.")
+(defn ned/stem-of [sel]
+  (ned/attr-of sel "stem"))
