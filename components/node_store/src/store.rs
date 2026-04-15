@@ -192,6 +192,64 @@ impl NodeStore {
             .unwrap_or_default()
     }
 
+    // --- Mutation helpers ---
+
+    /// Replace the node value at `id`, preserving all edges.
+    /// Returns the old node, or None if `id` doesn't exist.
+    pub fn replace_node(&mut self, id: NodeId, node: Node) -> Option<Node> {
+        self.nodes.insert(id, node)
+    }
+
+    /// Remove the Child edge from `parent` to `child`.
+    /// Updates both forward and reverse indexes.
+    pub fn remove_child_edge(&mut self, parent: NodeId, child: NodeId) {
+        if let Some(fwd) = self.edges_from.get_mut(&parent)
+            && let Some(pos) = fwd
+                .iter()
+                .position(|e| matches!(e, Edge::Child(c) if *c == child))
+        {
+            fwd.remove(pos);
+        }
+        if let Some(rev) = self.edges_to.get_mut(&child)
+            && let Some(pos) = rev.iter().position(|re| {
+                re.source == parent && matches!(re.edge, Edge::Child(_))
+            })
+        {
+            rev.remove(pos);
+        }
+    }
+
+    /// Insert a Child edge at `index` among the Child edges of `parent`.
+    /// If index >= number of existing child edges, appends.
+    pub fn insert_child_at(&mut self, parent: NodeId, index: usize, child: NodeId) {
+        let edge = Edge::Child(child);
+        let rev = ReverseEdge {
+            source: parent,
+            edge: edge.clone(),
+        };
+
+        let fwd = self.edges_from.entry(parent).or_default();
+
+        // Find the insertion position among child edges
+        let mut child_count = 0;
+        let mut insert_pos = fwd.len(); // default: append
+        for (i, e) in fwd.iter().enumerate() {
+            if matches!(e, Edge::Child(_)) {
+                if child_count == index {
+                    insert_pos = i;
+                    break;
+                }
+                child_count += 1;
+            }
+        }
+
+        // im::Vector v15 has insert(index, value)
+        fwd.insert(insert_pos, edge);
+
+        // Reverse index
+        self.edges_to.entry(child).or_default().push_back(rev);
+    }
+
     // --- Stats ---
 
     pub fn node_count(&self) -> usize {
@@ -335,5 +393,71 @@ mod tests {
 
         store.add_edge(a, Edge::Child(b));
         assert_eq!(store.edge_count(), 1);
+    }
+
+    #[test]
+    fn replace_node_preserves_edges() {
+        let mut store = NodeStore::new();
+        let n = store.intern("p");
+        let node = store.add_node(Node::Element(n));
+        let child = store.add_node(Node::Text("old".to_string()));
+        store.add_edge(node, Edge::Child(child));
+
+        // Replace the text node
+        let old = store.replace_node(child, Node::Text("new".to_string()));
+        assert_eq!(old, Some(Node::Text("old".to_string())));
+
+        // Edges preserved
+        assert_eq!(store.children(node), vec![child]);
+        assert_eq!(store.get(child), Some(&Node::Text("new".to_string())));
+    }
+
+    #[test]
+    fn remove_child_edge_cleans_both_indexes() {
+        let mut store = NodeStore::new();
+        let pn = store.intern("div");
+        let cn = store.intern("span");
+        let parent = store.add_node(Node::Element(pn));
+        let child = store.add_node(Node::Element(cn));
+        store.add_edge(parent, Edge::Child(child));
+
+        store.remove_child_edge(parent, child);
+
+        assert_eq!(store.children(parent), vec![]);
+        assert_eq!(store.parents(child), vec![]);
+        // Node still exists
+        assert!(store.get(child).is_some());
+    }
+
+    #[test]
+    fn insert_child_at_middle() {
+        let mut store = NodeStore::new();
+        let pn = store.intern("ul");
+        let parent = store.add_node(Node::Element(pn));
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        let c = store.add_node(Node::Text("c".to_string()));
+
+        store.add_edge(parent, Edge::Child(a));
+        store.add_edge(parent, Edge::Child(c));
+
+        // Insert b between a and c
+        store.insert_child_at(parent, 1, b);
+
+        assert_eq!(store.children(parent), vec![a, b, c]);
+    }
+
+    #[test]
+    fn insert_child_at_beginning() {
+        let mut store = NodeStore::new();
+        let pn = store.intern("ul");
+        let parent = store.add_node(Node::Element(pn));
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+
+        store.add_edge(parent, Edge::Child(b));
+        store.insert_child_at(parent, 0, a);
+
+        assert_eq!(store.children(parent), vec![a, b]);
     }
 }

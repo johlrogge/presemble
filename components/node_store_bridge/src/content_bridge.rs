@@ -97,9 +97,31 @@ fn add_int_attr(store: &mut NodeStore, node: NodeId, attr_name: &str, value: i64
     store.add_edge(node, Edge::Attribute { name, value: value_node });
 }
 
+/// Get the text content from the first child Text node.
+fn child_text(store: &NodeStore, parent: NodeId) -> Option<String> {
+    store.children(parent).iter().find_map(|&cid| {
+        if let Some(Node::Text(s)) = store.get(cid) {
+            Some(s.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn require_child_text(store: &NodeStore, parent: NodeId, context: &str) -> String {
+    child_text(store, parent)
+        .unwrap_or_else(|| panic!("Missing child text node on {context}"))
+}
+
 fn add_child_element(store: &mut NodeStore, parent: NodeId, element_name: &str) -> NodeId {
     let name = store.intern(element_name);
     let child = store.add_node(Node::Element(name));
+    store.add_edge(parent, Edge::Child(child));
+    child
+}
+
+fn add_child_text(store: &mut NodeStore, parent: NodeId, text: &str) -> NodeId {
+    let child = store.add_node(Node::Text(text.to_string()));
     store.add_edge(parent, Edge::Child(child));
     child
 }
@@ -115,11 +137,11 @@ fn content_element_to_store(
         ContentElement::Heading { level, text } => {
             let node = add_child_element(store, parent, "heading");
             add_int_attr(store, node, "level", level.value() as i64);
-            add_text_attr(store, node, "text", text);
+            add_child_text(store, node, text);
         }
         ContentElement::Paragraph { text } => {
             let node = add_child_element(store, parent, "paragraph");
-            add_text_attr(store, node, "text", text);
+            add_child_text(store, node, text);
         }
         ContentElement::Image { alt, path } => {
             let node = add_child_element(store, parent, "image");
@@ -130,7 +152,7 @@ fn content_element_to_store(
         }
         ContentElement::Link { text, href } => {
             let node = add_child_element(store, parent, "link");
-            add_text_attr(store, node, "text", text);
+            add_child_text(store, node, text);
             add_text_attr(store, node, "href", href);
         }
         ContentElement::Separator => {
@@ -138,7 +160,7 @@ fn content_element_to_store(
         }
         ContentElement::CodeBlock { language, code } => {
             let node = add_child_element(store, parent, "code-block");
-            add_text_attr(store, node, "code", code);
+            add_child_text(store, node, code);
             if let Some(lang) = language.as_ref() {
                 add_text_attr(store, node, "language", lang);
             }
@@ -163,15 +185,15 @@ fn content_element_to_store(
         }
         ContentElement::RawHtml { html } => {
             let node = add_child_element(store, parent, "raw-html");
-            add_text_attr(store, node, "html", html);
+            add_child_text(store, node, html);
         }
         ContentElement::Blockquote { text } => {
             let node = add_child_element(store, parent, "blockquote");
-            add_text_attr(store, node, "text", text);
+            add_child_text(store, node, text);
         }
         ContentElement::List { source } => {
             let node = add_child_element(store, parent, "list");
-            add_text_attr(store, node, "source", source);
+            add_child_text(store, node, source);
         }
         ContentElement::LinkExpression { text, target } => {
             let node = add_child_element(store, parent, "link-expression");
@@ -291,11 +313,11 @@ fn content_element_from_node(store: &NodeStore, node: NodeId) -> Option<ContentE
                 .unwrap_or_else(|| panic!("heading missing 'level' attribute"));
             let level = HeadingLevel::new(level_int as u8)
                 .unwrap_or_else(|| panic!("invalid heading level {level_int}"));
-            let text = require_attr_text(store, node, "text");
+            let text = require_child_text(store, node, "heading");
             Some(ContentElement::Heading { level, text })
         }
         "paragraph" => {
-            let text = require_attr_text(store, node, "text");
+            let text = require_child_text(store, node, "paragraph");
             Some(ContentElement::Paragraph { text })
         }
         "image" => {
@@ -304,13 +326,13 @@ fn content_element_from_node(store: &NodeStore, node: NodeId) -> Option<ContentE
             Some(ContentElement::Image { alt, path })
         }
         "link" => {
-            let text = require_attr_text(store, node, "text");
+            let text = require_child_text(store, node, "link");
             let href = require_attr_text(store, node, "href");
             Some(ContentElement::Link { text, href })
         }
         "separator" => Some(ContentElement::Separator),
         "code-block" => {
-            let code = require_attr_text(store, node, "code");
+            let code = require_child_text(store, node, "code-block");
             let language = find_attr_text(store, node, "language");
             Some(ContentElement::CodeBlock { language, code })
         }
@@ -351,15 +373,15 @@ fn content_element_from_node(store: &NodeStore, node: NodeId) -> Option<ContentE
             Some(ContentElement::Table { headers, rows })
         }
         "raw-html" => {
-            let html = require_attr_text(store, node, "html");
+            let html = require_child_text(store, node, "raw-html");
             Some(ContentElement::RawHtml { html })
         }
         "blockquote" => {
-            let text = require_attr_text(store, node, "text");
+            let text = require_child_text(store, node, "blockquote");
             Some(ContentElement::Blockquote { text })
         }
         "list" => {
-            let source = require_attr_text(store, node, "source");
+            let source = require_child_text(store, node, "list");
             Some(ContentElement::List { source })
         }
         "link-expression" => {
