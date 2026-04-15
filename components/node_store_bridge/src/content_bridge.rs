@@ -1,4 +1,4 @@
-use content::document::{
+use content::{
     ContentElement, Document, DocumentSlot, LinkOp, LinkTarget, LinkText, RefsToTarget,
 };
 use node_store::{Edge, Node, NodeId, NodeStore};
@@ -8,10 +8,10 @@ use schema::{HeadingLevel, SlotName, Span, Spanned};
 
 pub(crate) fn find_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<String> {
     for (name, value_id) in store.attributes(node) {
-        if store.resolve_name(name) == attr_name {
-            if let Some(Node::Text(s)) = store.get(value_id) {
-                return Some(s.clone());
-            }
+        if store.resolve_name(name) == attr_name
+            && let Some(Node::Text(s)) = store.get(value_id)
+        {
+            return Some(s.clone());
         }
     }
     None
@@ -19,10 +19,10 @@ pub(crate) fn find_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -
 
 pub(crate) fn find_attr_int(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<i64> {
     for (name, value_id) in store.attributes(node) {
-        if store.resolve_name(name) == attr_name {
-            if let Some(Node::Integer(n)) = store.get(value_id) {
-                return Some(*n);
-            }
+        if store.resolve_name(name) == attr_name
+            && let Some(Node::Integer(n)) = store.get(value_id)
+        {
+            return Some(*n);
         }
     }
     None
@@ -30,10 +30,10 @@ pub(crate) fn find_attr_int(store: &NodeStore, node: NodeId, attr_name: &str) ->
 
 pub(crate) fn find_attr_bool(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<bool> {
     for (name, value_id) in store.attributes(node) {
-        if store.resolve_name(name) == attr_name {
-            if let Some(Node::Boolean(b)) = store.get(value_id) {
-                return Some(*b);
-            }
+        if store.resolve_name(name) == attr_name
+            && let Some(Node::Boolean(b)) = store.get(value_id)
+        {
+            return Some(*b);
         }
     }
     None
@@ -45,10 +45,10 @@ pub(crate) fn find_child_by_name(
     element_name: &str,
 ) -> Option<NodeId> {
     for child_id in store.children(parent) {
-        if let Some(Node::Element(name)) = store.get(child_id) {
-            if store.resolve_name(*name) == element_name {
-                return Some(child_id);
-            }
+        if let Some(Node::Element(name)) = store.get(child_id)
+            && store.resolve_name(*name) == element_name
+        {
+            return Some(child_id);
         }
     }
     None
@@ -124,7 +124,7 @@ fn content_element_to_store(
         ContentElement::Image { alt, path } => {
             let node = add_child_element(store, parent, "image");
             add_text_attr(store, node, "path", path);
-            if let Some(alt_text) = alt {
+            if let Some(alt_text) = alt.as_ref() {
                 add_text_attr(store, node, "alt", alt_text);
             }
         }
@@ -139,7 +139,7 @@ fn content_element_to_store(
         ContentElement::CodeBlock { language, code } => {
             let node = add_child_element(store, parent, "code-block");
             add_text_attr(store, node, "code", code);
-            if let Some(lang) = language {
+            if let Some(lang) = language.as_ref() {
                 add_text_attr(store, node, "language", lang);
             }
         }
@@ -147,14 +147,16 @@ fn content_element_to_store(
             let node = add_child_element(store, parent, "table");
             let headers_node = add_child_element(store, node, "headers");
             for header in headers {
-                let text_node = store.add_node(Node::Text(header.clone()));
+                let s: String = header.clone();
+                let text_node = store.add_node(Node::Text(s));
                 store.add_edge(headers_node, Edge::Child(text_node));
             }
             let rows_node = add_child_element(store, node, "rows");
             for row in rows {
                 let row_node = add_child_element(store, rows_node, "row");
                 for cell in row {
-                    let text_node = store.add_node(Node::Text(cell.clone()));
+                    let s: String = cell.clone();
+                    let text_node = store.add_node(Node::Text(s));
                     store.add_edge(row_node, Edge::Child(text_node));
                 }
             }
@@ -498,7 +500,7 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use content::document::{ContentElement, Document, DocumentSlot, LinkOp, LinkTarget, LinkText, RefsToTarget};
+    use content::{ContentElement, Document, DocumentSlot, LinkOp, LinkTarget, LinkText, RefsToTarget};
     use node_store::NodeStore;
     use schema::{HeadingLevel, SlotName, Span, Spanned};
 
