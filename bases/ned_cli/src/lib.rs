@@ -1,4 +1,5 @@
 use content::{ContentElement, Document, parse_and_assign, parse_document, serialize_document};
+use ned::selection::{self, Selection};
 use node_store::NodeStore;
 use node_store_bridge::{
     content_bridge::{document_to_store, store_to_document},
@@ -495,6 +496,47 @@ pub fn run() {
     println!("  Edges: {}", store.edge_count());
     println!("  Interned names: {}", store.name_count());
 
+    // ---- Memory analysis ----------------------------------------------------
+    println!("\nMemory layout:");
+    println!("  size_of::<Node>()   = {} bytes", std::mem::size_of::<node_store::Node>());
+    println!("  size_of::<NodeId>() = {} bytes", std::mem::size_of::<node_store::NodeId>());
+    println!("  size_of::<Edge>()   = {} bytes", std::mem::size_of::<node_store::Edge>());
+    println!("  size_of::<Name>()   = {} bytes", std::mem::size_of::<node_store::Name>());
+
+    // Estimate raw content size (sum of all source file bytes)
+    let mut raw_bytes = 0usize;
+    for path in walk_files(&schemas_dir, "md")
+        .iter()
+        .chain(walk_files(&content_dir, "md").iter())
+        .chain(walk_templates(&templates_dir).iter())
+    {
+        if let Ok(meta) = std::fs::metadata(path) {
+            raw_bytes += meta.len() as usize;
+        }
+    }
+
+    // Estimate node store overhead
+    let node_struct_bytes = store.node_count() * std::mem::size_of::<node_store::Node>();
+    let edge_struct_bytes = store.edge_count() * std::mem::size_of::<node_store::Edge>();
+    // String heap: sum actual text content
+    let mut text_heap_bytes = 0usize;
+    for (_id, node) in store.iter() {
+        if let node_store::Node::Text(s) = node {
+            text_heap_bytes += s.len();
+        }
+    }
+    // im::HashMap overhead: ~2x node storage for HAMT tree nodes
+    let im_overhead_estimate = (node_struct_bytes + edge_struct_bytes) * 2;
+    let total_estimate = node_struct_bytes + edge_struct_bytes + text_heap_bytes + im_overhead_estimate;
+
+    println!("\n  Raw source files:    {:>7} bytes", raw_bytes);
+    println!("  Node structs:        {:>7} bytes ({} nodes x {} B)", node_struct_bytes, store.node_count(), std::mem::size_of::<node_store::Node>());
+    println!("  Edge structs:        {:>7} bytes ({} edges x {} B)", edge_struct_bytes, store.edge_count(), std::mem::size_of::<node_store::Edge>());
+    println!("  Text heap:           {:>7} bytes", text_heap_bytes);
+    println!("  im overhead (~2x):   {:>7} bytes", im_overhead_estimate);
+    println!("  Estimated total:     {:>7} bytes", total_estimate);
+    println!("  Ratio to raw:        {:.1}x", total_estimate as f64 / raw_bytes as f64);
+
     // ---- Duplicate analysis -------------------------------------------------
     println!("\nDuplicate analysis:");
     let mut text_values: HashMap<String, usize> = HashMap::new();
@@ -589,4 +631,41 @@ pub fn run() {
             }
         }
     }
+
+    // ---- NED Selection test -------------------------------------------------
+    println!("\nNED Selection:");
+    let all = Selection::all(&store);
+    println!("  All nodes: {}", all.len());
+
+    let roots = Selection::roots(&store);
+    println!("  Root nodes: {}", roots.len());
+
+    let elements = all.filter(&store, selection::is_any_element());
+    let texts = all.filter(&store, selection::is_text());
+    println!("  Elements: {}, Text: {}", elements.len(), texts.len());
+
+    let headings = all.filter(&store, selection::is_element("heading"));
+    println!("  Headings: {}", headings.len());
+
+    let h2s = headings.filter(&store, selection::has_attr_int("level", 2));
+    println!("  H2 headings: {}", h2s.len());
+
+    let h2_children = h2s.children(&store);
+    println!("  Children of H2s: {}", h2_children.len());
+
+    let documents = all.filter(&store, selection::is_element("document"));
+    println!("  Documents: {}", documents.len());
+
+    let doc_children = documents.children(&store);
+    println!("  Document children (preambles + bodies): {}", doc_children.len());
+
+    // Threading example: all paragraphs inside documents
+    let paragraphs = documents.descendants(&store)
+        .filter(&store, selection::is_element("paragraph"));
+    println!("  Paragraphs (via descendants): {}", paragraphs.len());
+
+    // Ancestors from a heading back to root
+    let first_heading_ancestors = Selection::from_ids(headings.iter().take(1))
+        .ancestors(&store);
+    println!("  Ancestors of first heading: {}", first_heading_ancestors.len());
 }

@@ -1,5 +1,5 @@
 [package]
-name = "ned"
+name = "ned_project"
 version = "0.35.0"
 edition = "2024"
 
