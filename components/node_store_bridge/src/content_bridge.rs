@@ -481,6 +481,115 @@ fn link_op_from_node(store: &NodeStore, node: NodeId) -> Option<LinkOp> {
     }
 }
 
+// ── semantic content ─────────────────────────────────────────────────────────
+
+/// Find a slot node by name within the preamble.
+fn find_slot_by_name(store: &NodeStore, preamble: NodeId, slot_name: &str) -> Option<NodeId> {
+    for child_id in store.children(preamble) {
+        if let Some(Node::Element(name)) = store.get(child_id)
+            && store.resolve_name(*name) == "slot"
+            && let Some(name_val) = find_attr_text(store, child_id, "name")
+            && name_val == slot_name
+        {
+            return Some(child_id);
+        }
+    }
+    None
+}
+
+/// Create a semantic content node from a document and its grammar.
+/// The semantic content node has named Reference edges pointing to
+/// the existing content nodes — no data is copied, just named.
+///
+/// Returns the root NodeId of the semantic content node.
+pub fn create_semantic_content(
+    store: &mut NodeStore,
+    doc_root: NodeId,
+    grammar: &schema::Grammar,
+    meta: &DocumentMeta,
+) -> NodeId {
+    let sem_name = store.intern("semantic-content");
+    let sem = store.add_node(Node::Element(sem_name));
+
+    // Metadata attributes
+    add_text_attr(store, sem, "url", &meta.url);
+    add_text_attr(store, sem, "stem", &meta.stem);
+    add_text_attr(store, sem, "file", &meta.file);
+    add_text_attr(store, sem, "page-kind", &meta.page_kind);
+
+    // Find preamble node
+    let preamble = find_child_by_name(store, doc_root, "preamble");
+
+    for slot in &grammar.preamble {
+        let slot_name = slot.name.as_str().to_string();
+        let max = slot.max_count();
+
+        if let Some(preamble_id) = preamble
+            && let Some(slot_id) = find_slot_by_name(store, preamble_id, &slot_name)
+        {
+                let children = store.children(slot_id);
+
+                if max == 1 {
+                    // Single value: reference the first content element directly
+                    if let Some(&first) = children.first() {
+                        let ref_name = store.intern(&slot_name);
+                        store.add_edge(sem, Edge::Reference { name: ref_name, target: first });
+                    }
+                } else {
+                    // Multi value: create a list node containing the content elements, reference it
+                    if !children.is_empty() {
+                        let list_name = store.intern(&slot_name);
+                        let slot_list_name = store.intern("slot-list");
+                        let list_node = store.add_node(Node::Element(slot_list_name));
+                        for &child in &children {
+                            store.add_edge(list_node, Edge::Child(child));
+                        }
+                        store.add_edge(sem, Edge::Reference { name: list_name, target: list_node });
+                    }
+                }
+        }
+    }
+
+    // Body reference
+    if grammar.body.is_some()
+        && let Some(body_id) = find_child_by_name(store, doc_root, "body")
+    {
+        let body_name = store.intern("body");
+        store.add_edge(sem, Edge::Reference { name: body_name, target: body_id });
+    }
+
+    // Synthesize a link reference (url + title text)
+    // Collect title text first before any mutable borrows
+    let title_text = {
+        let refs = store.references(sem);
+        let title_entry = refs.iter().find(|(n, _)| store.resolve_name(*n) == "title").copied();
+        title_entry.and_then(|(_, title_node)| {
+            // Walk into the content element (e.g. heading) → first child text
+            store
+                .children(title_node)
+                .iter()
+                .find_map(|&c| {
+                    if let Some(Node::Text(s)) = store.get(c) {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+        })
+    };
+
+    let link_elem_name = store.intern("link");
+    let link_node = store.add_node(Node::Element(link_elem_name));
+    let href = meta.url.clone();
+    let text = title_text.unwrap_or_else(|| meta.url.clone());
+    add_text_attr(store, link_node, "href", &href);
+    add_text_attr(store, link_node, "text", &text);
+    let link_name = store.intern("link");
+    store.add_edge(sem, Edge::Reference { name: link_name, target: link_node });
+
+    sem
+}
+
 // ── store_to_document ─────────────────────────────────────────────────────────
 
 fn zero_span() -> Span {
@@ -815,5 +924,230 @@ mod tests {
         // Round-trip still works (meta attrs are ignored during reconstruction)
         let recovered = store_to_document(&store, root);
         compare_documents(&doc, &recovered);
+    }
+
+    // ── semantic content tests ───────────────────────────────────────────────
+
+    fn make_grammar_with_title_summary() -> schema::Grammar {
+        use schema::{BodyRules, Constraint, CountRange, Element, HeadingLevel, HeadingLevelRange, Slot, SlotName};
+        schema::Grammar {
+            preamble: vec![
+                Slot {
+                    name: SlotName::new("title"),
+                    element: Element::Heading {
+                        level: HeadingLevelRange {
+                            min: HeadingLevel::new(1).unwrap(),
+                            max: HeadingLevel::new(2).unwrap(),
+                        },
+                    },
+                    constraints: vec![Constraint::Occurs(CountRange::Exactly(1))],
+                    hint_text: None,
+                    span: schema::Span { start: 0, end: 0 },
+                },
+                Slot {
+                    name: SlotName::new("summary"),
+                    element: Element::Paragraph,
+                    constraints: vec![Constraint::Occurs(CountRange::Exactly(1))],
+                    hint_text: None,
+                    span: schema::Span { start: 0, end: 0 },
+                },
+            ],
+            body: Some(BodyRules { heading_range: None }),
+        }
+    }
+
+    fn make_doc_with_title_and_summary() -> Document {
+        Document {
+            preamble: im::vector![
+                slot(
+                    "title",
+                    vec![ContentElement::Heading {
+                        level: HeadingLevel::new(1).unwrap(),
+                        text: "My Article".to_string(),
+                    }]
+                ),
+                slot(
+                    "summary",
+                    vec![ContentElement::Paragraph {
+                        text: "A short summary.".to_string(),
+                    }]
+                ),
+            ],
+            body: im::vector![zero_spanned(ContentElement::Paragraph {
+                text: "Body text goes here.".to_string(),
+            })],
+            has_separator: true,
+            separator_span: None,
+        }
+    }
+
+    #[test]
+    fn semantic_content_has_metadata_attributes() {
+        let doc = make_doc_with_title_and_summary();
+        let grammar = make_grammar_with_title_summary();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/my-article".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/my-article.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+
+        // semantic-content element exists
+        assert!(
+            matches!(store.get(sem), Some(Node::Element(n)) if store.resolve_name(*n) == "semantic-content"),
+            "Expected semantic-content element"
+        );
+
+        // metadata attributes are present
+        assert_eq!(find_attr_text(&store, sem, "url"), Some("/post/my-article".to_string()));
+        assert_eq!(find_attr_text(&store, sem, "stem"), Some("post".to_string()));
+        assert_eq!(find_attr_text(&store, sem, "file"), Some("content/post/my-article.md".to_string()));
+        assert_eq!(find_attr_text(&store, sem, "page-kind"), Some("item".to_string()));
+    }
+
+    #[test]
+    fn semantic_content_title_reference_points_to_heading_node() {
+        let doc = make_doc_with_title_and_summary();
+        let grammar = make_grammar_with_title_summary();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/my-article".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/my-article.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+
+        // Find Reference("title") on semantic content
+        let refs = store.references(sem);
+        let title_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "title");
+        assert!(title_ref.is_some(), "Expected a 'title' reference edge");
+
+        let (_, heading_id) = title_ref.unwrap();
+        // The referenced node should be a heading element
+        assert!(
+            matches!(store.get(*heading_id), Some(Node::Element(n)) if store.resolve_name(*n) == "heading"),
+            "Expected Reference('title') to point to a heading element"
+        );
+
+        // The heading's child text should be "My Article"
+        let text = store.children(*heading_id).iter().find_map(|&c| {
+            if let Some(Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
+        });
+        assert_eq!(text, Some("My Article".to_string()));
+    }
+
+    #[test]
+    fn semantic_content_summary_reference_points_to_paragraph_node() {
+        let doc = make_doc_with_title_and_summary();
+        let grammar = make_grammar_with_title_summary();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/my-article".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/my-article.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+
+        let refs = store.references(sem);
+        let summary_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
+        assert!(summary_ref.is_some(), "Expected a 'summary' reference edge");
+
+        let (_, para_id) = summary_ref.unwrap();
+        assert!(
+            matches!(store.get(*para_id), Some(Node::Element(n)) if store.resolve_name(*n) == "paragraph"),
+            "Expected Reference('summary') to point to a paragraph element"
+        );
+
+        let text = store.children(*para_id).iter().find_map(|&c| {
+            if let Some(Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
+        });
+        assert_eq!(text, Some("A short summary.".to_string()));
+    }
+
+    #[test]
+    fn semantic_content_body_reference_points_to_body_node() {
+        let doc = make_doc_with_title_and_summary();
+        let grammar = make_grammar_with_title_summary();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/my-article".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/my-article.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+
+        let refs = store.references(sem);
+        let body_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "body");
+        assert!(body_ref.is_some(), "Expected a 'body' reference edge");
+
+        let (_, body_id) = body_ref.unwrap();
+        assert!(
+            matches!(store.get(*body_id), Some(Node::Element(n)) if store.resolve_name(*n) == "body"),
+            "Expected Reference('body') to point to a body element"
+        );
+    }
+
+    #[test]
+    fn semantic_content_link_reference_has_href_and_text() {
+        let doc = make_doc_with_title_and_summary();
+        let grammar = make_grammar_with_title_summary();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/my-article".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/my-article.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+
+        let refs = store.references(sem);
+        let link_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "link");
+        assert!(link_ref.is_some(), "Expected a 'link' reference edge");
+
+        let (_, link_id) = link_ref.unwrap();
+        assert_eq!(find_attr_text(&store, *link_id, "href"), Some("/post/my-article".to_string()));
+        // title text is "My Article"
+        assert_eq!(find_attr_text(&store, *link_id, "text"), Some("My Article".to_string()));
+    }
+
+    #[test]
+    fn semantic_content_title_text_is_same_node_as_heading_child() {
+        // The Reference("title") → heading node, and heading's child text is the same NodeId
+        // as the original document's heading child text (no data is copied)
+        let doc = make_doc_with_title_and_summary();
+        let grammar = make_grammar_with_title_summary();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/my-article".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/my-article.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+
+        // Find the heading in the document tree (preamble → slot("title") → heading)
+        let preamble = find_child_by_name(&store, doc_root, "preamble").unwrap();
+        let title_slot = find_slot_by_name(&store, preamble, "title").unwrap();
+        let doc_heading = store.children(title_slot).into_iter().next().unwrap();
+        let doc_text_node = store.children(doc_heading).into_iter().next().unwrap();
+
+        // Find the heading via semantic content reference
+        let refs = store.references(sem);
+        let (_, sem_heading) = refs.iter().find(|(n, _)| store.resolve_name(*n) == "title").unwrap();
+        let sem_text_node = store.children(*sem_heading).into_iter().next().unwrap();
+
+        // They should be the SAME node (no copy, just reference)
+        assert_eq!(doc_text_node, sem_text_node, "Expected title text to be the same NodeId in both doc and semantic-content");
     }
 }

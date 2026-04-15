@@ -57,6 +57,7 @@ pub struct Conductor {
     build_errors: RwLock<HashMap<String, Vec<String>>>,
     node_store: Arc<RwLock<node_store::NodeStore>>,
     url_to_root: RwLock<HashMap<String, node_store::NodeId>>,
+    url_to_semantic: RwLock<HashMap<String, node_store::NodeId>>,
     stem_to_roots: RwLock<HashMap<String, Vec<node_store::NodeId>>>,
 }
 
@@ -149,6 +150,7 @@ impl Conductor {
             build_errors: RwLock::new(HashMap::new()),
             node_store: Arc::new(RwLock::new(node_store::NodeStore::new())),
             url_to_root: RwLock::new(HashMap::new()),
+            url_to_semantic: RwLock::new(HashMap::new()),
             stem_to_roots: RwLock::new(HashMap::new()),
         };
 
@@ -183,6 +185,7 @@ impl Conductor {
         store.clear();
 
         let mut url_index: HashMap<String, node_store::NodeId> = HashMap::new();
+        let mut semantic_index: HashMap<String, node_store::NodeId> = HashMap::new();
         let mut stem_index: HashMap<String, Vec<node_store::NodeId>> = HashMap::new();
 
         // Parse and store all schemas
@@ -220,7 +223,9 @@ impl Conductor {
                             page_kind: "item".to_string(),
                         };
                         let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
-                        url_index.insert(url, root);
+                        let sem = node_store_bridge::content_bridge::create_semantic_content(&mut store, root, grammar, &meta);
+                        url_index.insert(url.clone(), root);
+                        semantic_index.insert(url, sem);
                         stem_index.entry(stem_str.to_string()).or_default().push(root);
                     }
                 }
@@ -244,7 +249,9 @@ impl Conductor {
                         page_kind: "collection".to_string(),
                     };
                     let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
-                    url_index.insert(url, root);
+                    let sem = node_store_bridge::content_bridge::create_semantic_content(&mut store, root, grammar, &meta);
+                    url_index.insert(url.clone(), root);
+                    semantic_index.insert(url, sem);
                     stem_index.entry(stem_str.to_string()).or_default().push(root);
                 }
             }
@@ -283,6 +290,7 @@ impl Conductor {
         // Commit indexes (drop store lock first to avoid write-write deadlock)
         drop(store);
         *self.url_to_root.write().unwrap_or_else(|e| e.into_inner()) = url_index;
+        *self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner()) = semantic_index;
         *self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner()) = stem_index;
     }
 
@@ -317,6 +325,11 @@ impl Conductor {
     /// Look up a document root NodeId by URL path.
     pub fn document_by_url(&self, url: &str) -> Option<node_store::NodeId> {
         self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
+    }
+
+    /// Look up a semantic content NodeId by URL path.
+    pub fn semantic_content_by_url(&self, url: &str) -> Option<node_store::NodeId> {
+        self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
     }
 
     /// Get all document root NodeIds for a given schema stem.
