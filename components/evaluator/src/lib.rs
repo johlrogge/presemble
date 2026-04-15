@@ -933,10 +933,9 @@ pub fn register_conductor_builtins(root: &RootEnv, conductor: &std::sync::Arc<co
     {
         let cond = std::sync::Arc::clone(conductor);
         prim_reg(root, "list-content", "(list-content)", "List all content item URL paths.", move |_args| {
-            let graph = cond.site_graph();
-            let urls: Vec<template::Value> = graph
-                .iter_pages_by_kind(site_index::PageKind::Item)
-                .map(|n| template::Value::Text(n.url_path.as_str().to_string()))
+            let urls: Vec<template::Value> = cond.list_content_urls()
+                .into_iter()
+                .map(template::Value::Text)
                 .collect();
             Ok(template::Value::List(urls))
         });
@@ -945,13 +944,7 @@ pub fn register_conductor_builtins(root: &RootEnv, conductor: &std::sync::Arc<co
     {
         let cond = std::sync::Arc::clone(conductor);
         prim_reg(root, "list-schemas", "(list-schemas)", "List all unique schema stems in the site.", move |_args| {
-            let graph = cond.site_graph();
-            let mut stems: Vec<String> = graph
-                .iter_pages_by_kind(site_index::PageKind::Item)
-                .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.as_str().to_string()))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
+            let mut stems: Vec<String> = cond.list_schemas();
             stems.sort();
             Ok(template::Value::List(stems.into_iter().map(template::Value::Text).collect()))
         });
@@ -1058,7 +1051,6 @@ pub fn register_conductor_builtins(root: &RootEnv, conductor: &std::sync::Arc<co
 /// Supports a limited set of string-based commands (legacy interface).
 /// New code should prefer `eval_str` instead.
 pub fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<template::Value, String> {
-    use std::collections::HashSet;
     let code = code.trim();
 
     if code.is_empty() {
@@ -1118,28 +1110,16 @@ pub fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<templat
 
     // (list-content)
     if code.starts_with("(list-content") {
-        let graph = conductor.site_graph();
-        let mut urls: Vec<template::Value> = graph
-            .iter_pages_by_kind(site_index::PageKind::Item)
-            .map(|n| template::Value::Text(n.url_path.as_str().to_string()))
+        let urls: Vec<template::Value> = conductor.list_content_urls()
+            .into_iter()
+            .map(template::Value::Text)
             .collect();
-        urls.sort_by(|a, b| {
-            let a = if let template::Value::Text(s) = a { s.as_str() } else { "" };
-            let b = if let template::Value::Text(s) = b { s.as_str() } else { "" };
-            a.cmp(b)
-        });
         return Ok(template::Value::List(urls));
     }
 
     // (list-schemas)
     if code.starts_with("(list-schemas") {
-        let graph = conductor.site_graph();
-        let mut stems: Vec<String> = graph
-            .iter_pages_by_kind(site_index::PageKind::Item)
-            .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.as_str().to_string()))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
+        let mut stems = conductor.list_schemas();
         stems.sort();
         let values: Vec<template::Value> = stems
             .into_iter()
@@ -1151,11 +1131,11 @@ pub fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<templat
     Err(format!("unknown expression: {code}"))
 }
 
-/// Build url_index and stem_index from conductor's SiteGraph (for eval_repl).
+/// Build url_index and stem_index from conductor's NodeStore (for eval_repl).
 fn repl_build_indexes(
     conductor: &conductor::Conductor,
 ) -> (expressions::UrlIndex, expressions::StemIndex) {
-    let (url_index, stem_index, _) = expressions::build_indexes_from_graph(&conductor.site_graph());
+    let (url_index, stem_index, _) = conductor.build_expression_indexes_from_store_pub();
     (url_index, stem_index)
 }
 
