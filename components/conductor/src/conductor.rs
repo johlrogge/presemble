@@ -58,6 +58,11 @@ pub struct Conductor {
     url_to_root: RwLock<HashMap<String, node_store::NodeId>>,
     url_to_semantic: RwLock<HashMap<String, node_store::NodeId>>,
     stem_to_roots: RwLock<HashMap<String, Vec<node_store::NodeId>>>,
+    // Cached expression indexes from the last build_all_pages run.
+    // Used by rebuild_page for incremental single-page updates.
+    cached_url_index: RwLock<expressions::UrlIndex>,
+    cached_stem_index: RwLock<expressions::StemIndex>,
+    cached_edge_index: RwLock<expressions::EdgeIndex>,
 }
 
 /// Extract the title from a document's preamble in the NodeStore.
@@ -150,6 +155,9 @@ impl Conductor {
             url_to_root: RwLock::new(HashMap::new()),
             url_to_semantic: RwLock::new(HashMap::new()),
             stem_to_roots: RwLock::new(HashMap::new()),
+            cached_url_index: RwLock::new(HashMap::new()),
+            cached_stem_index: RwLock::new(HashMap::new()),
+            cached_edge_index: RwLock::new(HashMap::new()),
         };
 
         // Load persisted pending suggestions from disk
@@ -552,6 +560,222 @@ impl Conductor {
         }
     }
 
+    /// Inject collection data into a page's DataGraph from the cached stem index.
+    /// Used by `rebuild_page` for incremental single-page updates.
+    fn inject_collections_from_cache(&self, page_data: &mut template::DataGraph) {
+        let cached = self.cached_stem_index.read().unwrap_or_else(|e| e.into_inner());
+        let mut stems: Vec<String> = cached.keys().map(|s| s.as_str().to_string()).collect();
+        stems.sort();
+
+        for stem in stems {
+            if page_data.resolve(&[stem.as_str()]).is_some() {
+                continue;
+            }
+            let schema_stem = site_index::SchemaStem::new(&stem);
+            if let Some(items_vec) = cached.get(&schema_stem) {
+                let values: Vec<template::Value> = items_vec
+                    .iter()
+                    .map(|(_, data)| template::Value::Record(data.clone()))
+                    .collect();
+                if !values.is_empty() {
+                    page_data.insert(stem.as_str(), template::Value::List(values));
+                }
+            }
+        }
+    }
+
+    /// Batch-render all pages in the site.
+    ///
+    /// Replaces the O(n²) pattern of `render_pages` (which called
+    /// `build_expression_indexes_from_store` once per page) with a single O(n)
+    /// pipeline where each phase visits every page exactly once.
+    ///
+    /// Returns `(rebuilt_pages, failed_pages, errors)`.
+    fn build_all_pages(&self) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
+        // Phase 2a: Materialize DataGraphs for all documents.
+        // Collect url+root pairs first to avoid holding url_to_root read lock
+        // while datagraph_for_document acquires other locks.
+        let url_root_pairs: Vec<(String, node_store::NodeId)> = {
+            let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
+            url_to_root.iter().map(|(url, &root)| (url.clone(), root)).collect()
+        };
+
+        let mut page_data: HashMap<String, template::DataGraph> = HashMap::new();
+        for (url, root) in &url_root_pairs {
+            if let Some(data) = self.datagraph_for_document(*root) {
+                page_data.insert(url.clone(), data);
+            }
+        }
+
+        // Phase 2b: Build indexes in one pass over all pages.
+        // Only item pages go into url_index and stem_index (for link resolution).
+        let mut url_index: expressions::UrlIndex = HashMap::new();
+        let mut stem_index: expressions::StemIndex = HashMap::new();
+        let mut all_edges = Vec::new();
+
+        {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            for (url, data) in &page_data {
+                let url_path = site_index::UrlPath::new(url);
+                // Only item pages (not collection/index pages) go into stem_index
+                let page_kind = {
+                    let root_opt = url_root_pairs.iter().find(|(u, _)| u == url).map(|(_, r)| *r);
+                    root_opt.and_then(|root| {
+                        node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")
+                    })
+                };
+                if page_kind.as_deref() == Some("item") {
+                    all_edges.extend(expressions::extract_edges(&url_path, data));
+                    url_index.insert(url_path.clone(), data.clone());
+                    if let Some(template::Value::Text(stem)) = data.resolve(&["_presemble_stem"]) {
+                        let schema_stem = site_index::SchemaStem::new(stem);
+                        stem_index.entry(schema_stem).or_default().push((url_path, data.clone()));
+                    }
+                }
+            }
+        }
+
+        let edge_index = expressions::build_edge_index(&all_edges);
+
+        // Store indexes in cache so rebuild_page can use them for incremental updates.
+        *self.cached_url_index.write().unwrap_or_else(|e| e.into_inner()) = url_index.clone();
+        *self.cached_stem_index.write().unwrap_or_else(|e| e.into_inner()) = stem_index.clone();
+        *self.cached_edge_index.write().unwrap_or_else(|e| e.into_inner()) = edge_index.clone();
+
+        // Phase 2c: Resolve all link expressions (one pass).
+        for (url, data) in page_data.iter_mut() {
+            let current_url = site_index::UrlPath::new(url);
+            expressions::resolve_link_expressions_in_graph(
+                data,
+                &url_index,
+                &stem_index,
+                &current_url,
+                &edge_index,
+            );
+        }
+
+        // Phase 2d: Resolve cross-references (one pass).
+        for (_, data) in page_data.iter_mut() {
+            expressions::resolve_cross_references(data, &url_index);
+        }
+
+        // Phase 2e: Inject collections (one pass).
+        // Build collection lists from stem_index.
+        let mut collection_lists: HashMap<String, template::Value> = HashMap::new();
+        for (stem, items) in &stem_index {
+            let values: Vec<template::Value> = items
+                .iter()
+                .map(|(_, data)| template::Value::Record(data.clone()))
+                .collect();
+            if !values.is_empty() {
+                collection_lists.insert(stem.as_str().to_string(), template::Value::List(values));
+            }
+        }
+
+        for (_, data) in page_data.iter_mut() {
+            for (stem, list) in &collection_lists {
+                if data.resolve(&[stem.as_str()]).is_none() {
+                    data.insert(stem.as_str(), list.clone());
+                }
+            }
+        }
+
+        // Phase 2f: Apply templates and write output (one pass).
+        let fresh_repo = site_repository::SiteRepository::builder()
+            .from_dir(&self.site_dir)
+            .build();
+        let registry = template_registry::FileTemplateRegistry::new(fresh_repo.clone());
+
+        let mut rebuilt_pages = Vec::new();
+        let mut failed_pages = Vec::new();
+        let mut errors: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (url, data) in &page_data {
+            // Determine stem and slug from the data
+            let stem = match data.resolve(&["_presemble_stem"]) {
+                Some(template::Value::Text(s)) => s.clone(),
+                _ => continue,
+            };
+            let slug = if url.ends_with('/') && url != "/" {
+                // Collection page URL like /post/
+                "index"
+            } else {
+                url.rsplit('/').next().unwrap_or("unknown")
+            };
+            // For root collection /, the url is something like "/index" or just "" — normalize
+            let slug = if slug.is_empty() { "index" } else { slug };
+
+            // Find template
+            let stem_obj = site_index::SchemaStem::new(&stem);
+            let template_result = if slug == "index" {
+                fresh_repo.collection_template_source(&stem_obj)
+                    .or_else(|| fresh_repo.item_template_source(&stem_obj))
+                    .or_else(|| fresh_repo.partial_template_source(&stem))
+            } else {
+                fresh_repo.item_template_source(&stem_obj)
+                    .or_else(|| fresh_repo.partial_template_source(&stem))
+            };
+
+            let (tmpl_src, is_hiccup) = match template_result {
+                Some(t) => t,
+                None => {
+                    failed_pages.push(url.clone());
+                    errors.entry(url.clone()).or_default().push(format!("no template for {stem}"));
+                    continue;
+                }
+            };
+
+            let raw_nodes = if is_hiccup {
+                match template::parse_template_hiccup(&tmpl_src) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        failed_pages.push(url.clone());
+                        errors.entry(url.clone()).or_default().push(format!("{e}"));
+                        continue;
+                    }
+                }
+            } else {
+                match template::parse_template_xml(&tmpl_src) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        failed_pages.push(url.clone());
+                        errors.entry(url.clone()).or_default().push(format!("{e}"));
+                        continue;
+                    }
+                }
+            };
+
+            let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+            let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
+
+            // Wrap under "input" key (templates expect input.field paths)
+            let mut context = template::DataGraph::new();
+            context.insert("input", template::Value::Record(data.clone()));
+
+            match template::transform(nodes, &context, &ctx) {
+                Ok(transformed) => {
+                    let html = template::serialize_nodes(&transformed);
+                    let output_path =
+                        site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
+                    if let Some(parent) = output_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&output_path, &html);
+                    rebuilt_pages.push(url.clone());
+                }
+                Err(e) => {
+                    failed_pages.push(url.clone());
+                    errors
+                        .entry(url.clone())
+                        .or_default()
+                        .push(format!("render error: {e}"));
+                }
+            }
+        }
+
+        (rebuilt_pages, failed_pages, errors)
+    }
+
     /// Refresh the schema cache by re-scanning the filesystem.
     /// Called after scaffolding or when schema files change on disk.
     fn refresh_schema_cache(&self) {
@@ -815,23 +1039,48 @@ impl Conductor {
             template::synthesize_link(&title, &url_path),
         ));
 
-        // Resolve link expressions using the NodeStore as index
+        // Resolve link expressions.
+        // Use cached indexes from the last build_all_pages run when available,
+        // falling back to a fresh build from the NodeStore.
         {
-            let (url_index, stem_index, edge_index) = self.build_expression_indexes_from_store();
+            let cached_url = self.cached_url_index.read().unwrap_or_else(|e| e.into_inner());
+            let cached_stem = self.cached_stem_index.read().unwrap_or_else(|e| e.into_inner());
+            let cached_edge = self.cached_edge_index.read().unwrap_or_else(|e| e.into_inner());
+
+            let (url_index, stem_index, edge_index);
+            let (url_ref, stem_ref, edge_ref) = if !cached_url.is_empty() {
+                (&*cached_url, &*cached_stem, &*cached_edge)
+            } else {
+                drop(cached_url);
+                drop(cached_stem);
+                drop(cached_edge);
+                let built = self.build_expression_indexes_from_store();
+                url_index = built.0;
+                stem_index = built.1;
+                edge_index = built.2;
+                (&url_index, &stem_index, &edge_index)
+            };
+
             let current_url = site_index::UrlPath::new(&url_path);
             expressions::resolve_link_expressions_in_graph(
                 &mut graph,
-                &url_index,
-                &stem_index,
+                url_ref,
+                stem_ref,
                 &current_url,
-                &edge_index,
+                edge_ref,
             );
             // Phase 2: resolve cross-content references (link Records with href matching a page)
-            expressions::resolve_cross_references(&mut graph, &url_index);
+            expressions::resolve_cross_references(&mut graph, url_ref);
         }
 
-        // Inject collection data so templates can iterate (e.g. data-each="input.post")
-        self.inject_collections_from_store(&mut graph);
+        // Inject collection data so templates can iterate (e.g. data-each="input.post").
+        // Use cached stem index when available, otherwise fall back to NodeStore scan.
+        let has_cache = !self.cached_stem_index.read().unwrap_or_else(|e| e.into_inner()).is_empty();
+        if has_cache {
+            self.inject_collections_from_cache(&mut graph);
+        } else {
+            self.inject_collections_from_store(&mut graph);
+        }
 
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
         let fresh_repo = site_repository::SiteRepository::builder()
@@ -1093,34 +1342,6 @@ impl Conductor {
         self.rebuild_page(&abs_path, &new_source)
     }
 
-    /// Render a list of content files, returning rebuilt pages, failed pages, and errors.
-    fn render_pages(&self, content_paths: &[PathBuf]) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
-        let mut rebuilt_pages = Vec::new();
-        let mut failed_pages = Vec::new();
-        let mut new_errors = HashMap::new();
-
-        for content_path in content_paths {
-            let text = match std::fs::read_to_string(content_path) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("conductor: cannot read {}: {e}", content_path.display());
-                    continue;
-                }
-            };
-            match self.rebuild_page(content_path, &text) {
-                Ok(pages) => rebuilt_pages.extend(pages),
-                Err(e) => {
-                    eprintln!("conductor: rebuild failed for {}: {e}", content_path.display());
-                    if let Some(url) = self.url_for_content_path(content_path) {
-                        new_errors.insert(url.clone(), vec![e]);
-                        failed_pages.push(url);
-                    }
-                }
-            }
-        }
-        (rebuilt_pages, failed_pages, new_errors)
-    }
-
     /// Update build errors and create events from render results.
     fn finalize_render(
         &self,
@@ -1251,55 +1472,22 @@ impl Conductor {
                 }
                 self.populate_node_store();
 
-                // 5. Classify changed files and determine which pages to rebuild
-                let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
-                let mut content_to_rebuild: Vec<PathBuf> = Vec::new();
-                let mut stems_to_rebuild: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let mut has_stylesheet_change = false;
+                // 5. Detect stylesheet changes (for reload signalling)
+                let has_stylesheet_change = {
+                    let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
+                    paths.iter().any(|p| {
+                        let raw = Path::new(p);
+                        let path = if raw.is_absolute() {
+                            raw.to_path_buf()
+                        } else {
+                            self.site_dir.join(raw)
+                        };
+                        matches!(site_idx.classify(&path), site_index::FileKind::Stylesheet)
+                    })
+                };
 
-                for p in &paths {
-                    // Resolve relative paths (e.g. from ListContent) against site_dir
-                    let raw = Path::new(p);
-                    let path = if raw.is_absolute() { raw.to_path_buf() } else { self.site_dir.join(raw) };
-                    match site_idx.classify(&path) {
-                        site_index::FileKind::Content { schema_stem } => {
-                            content_to_rebuild.push(path.clone());
-                            stems_to_rebuild.insert(schema_stem.as_str().to_string());
-                        }
-                        site_index::FileKind::Schema { stem } => {
-                            stems_to_rebuild.insert(stem.as_str().to_string());
-                        }
-                        site_index::FileKind::Template { schema_stem } => {
-                            stems_to_rebuild.insert(schema_stem.as_str().to_string());
-                        }
-                        site_index::FileKind::Stylesheet => {
-                            has_stylesheet_change = true;
-                        }
-                        _ => {}
-                    }
-                }
-                drop(site_idx);
-
-                // For stems that changed (schema or template), find ALL content files using that stem
-                if !stems_to_rebuild.is_empty() {
-                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                    let stem_to_roots = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
-                    for stem in &stems_to_rebuild {
-                        if let Some(roots) = stem_to_roots.get(stem.as_str()) {
-                            for &root in roots {
-                                if let Some(file) = node_store_bridge::content_bridge::find_attr_text(&store, root, "file") {
-                                    let abs_path = self.site_dir.join(&file);
-                                    if !content_to_rebuild.contains(&abs_path) {
-                                        content_to_rebuild.push(abs_path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 6. Rebuild each content file
-                let (rebuilt_pages, failed_pages, new_errors) = self.render_pages(&content_to_rebuild);
+                // 6. Batch-render all pages using O(n) pipeline
+                let (rebuilt_pages, failed_pages, new_errors) = self.build_all_pages();
 
                 // 7-8. Update build errors and build events
                 let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, has_stylesheet_change);
@@ -1738,19 +1926,8 @@ impl Conductor {
                                 let _ = self.build_full_graph();
                                 self.populate_node_store();
 
-                                // Render all pages from the NodeStore
-                                let content_paths: Vec<PathBuf> = {
-                                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                                    let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
-                                    url_to_root.values()
-                                        .filter_map(|&root| {
-                                            node_store_bridge::content_bridge::find_attr_text(&store, root, "file")
-                                                .map(|f| self.site_dir.join(f))
-                                        })
-                                        .collect()
-                                };
-
-                                let (rebuilt, failed, errors) = self.render_pages(&content_paths);
+                                // Batch-render all pages using O(n) pipeline
+                                let (rebuilt, failed, errors) = self.build_all_pages();
                                 let events = self.finalize_render(rebuilt, failed, errors, false);
 
                                 if events.is_empty() {
