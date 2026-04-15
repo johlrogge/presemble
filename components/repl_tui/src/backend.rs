@@ -1,5 +1,4 @@
 use evaluator::{DocEntry, RootEnv};
-use std::path::PathBuf;
 
 /// A completion candidate returned by the backend.
 pub struct Completion {
@@ -25,12 +24,12 @@ pub trait ReplBackend: Send + Sync {
 
 /// Direct backend — in-process evaluator, no external conductor.
 ///
-/// Uses a minimal empty conductor (no site content) so that language
-/// primitives and prelude functions work fully, while site-specific
-/// functions (`query`, `get-content`, etc.) return informative errors.
+/// Uses a pure evaluator root (no conductor). Language primitives and prelude
+/// functions work fully. Site-specific functions (`query`, `get-content`, etc.)
+/// are not available; use the nREPL backend (connected to a running conductor)
+/// for those.
 pub struct DirectBackend {
     root: RootEnv,
-    conductor: conductor::Conductor,
 }
 
 impl DirectBackend {
@@ -38,15 +37,10 @@ impl DirectBackend {
     ///
     /// Returns an error string if the prelude fails to compile.
     pub fn new() -> Result<Self, String> {
-        let repo = site_repository::SiteRepository::new("/repl-scratch");
-        let conductor =
-            conductor::Conductor::with_repo(PathBuf::from("/repl-scratch"), repo)
-                .map_err(|e| format!("conductor init failed: {e}"))?;
-
         let root = RootEnv::new();
-        evaluator::init_root(&root, &conductor)?;
+        evaluator::init_root(&root)?;
 
-        Ok(Self { root, conductor })
+        Ok(Self { root })
     }
 
     fn format_value(v: &template::Value) -> String {
@@ -87,7 +81,7 @@ impl DirectBackend {
 
 impl ReplBackend for DirectBackend {
     fn eval(&mut self, code: &str) -> EvalResult {
-        match evaluator::eval_str_with_root(code, &self.root, &self.conductor) {
+        match evaluator::eval_str_with_root(code, &self.root) {
             Ok(value) => EvalResult {
                 value: Self::format_value(&value),
                 is_error: false,

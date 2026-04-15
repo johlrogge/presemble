@@ -71,13 +71,10 @@ impl Closure {
             })
     }
 
-    /// Apply the closure with the given arguments and conductor reference.
-    /// This is distinct from `Callable::call` because it needs the conductor
-    /// for conductor-backed primitives invoked from within the body.
+    /// Apply the closure with the given arguments.
     pub fn apply(
         &self,
         args: Vec<Value>,
-        conductor: &conductor::Conductor,
     ) -> Result<Value, String> {
         let arity = self.match_arity(args.len())?;
 
@@ -100,20 +97,15 @@ impl Closure {
         // Evaluate body forms; return the last.
         let mut result = Value::Absent;
         for form in &arity.body {
-            result = crate::eval_in_env(form, &local, &self.root, conductor)?;
+            result = crate::eval_in_env(form, &local, &self.root)?;
         }
         Ok(result)
     }
 }
 
 impl Callable for Closure {
-    fn call(&self, _args: Vec<Value>) -> Result<Value, String> {
-        // Closures require a conductor for evaluation.
-        // Use `Closure::apply` (dispatched by the evaluator via downcast) instead.
-        Err(format!(
-            "closure '{}' cannot be called without conductor context",
-            self.name.as_deref().unwrap_or("anonymous")
-        ))
+    fn call(&self, args: Vec<Value>) -> Result<Value, String> {
+        self.apply(args)
     }
 
     fn name(&self) -> Option<&str> {
