@@ -493,4 +493,100 @@ pub fn run() {
     println!("\nStore stats:");
     println!("  Nodes: {}", store.node_count());
     println!("  Edges: {}", store.edge_count());
+    println!("  Interned names: {}", store.name_count());
+
+    // ---- Duplicate analysis -------------------------------------------------
+    println!("\nDuplicate analysis:");
+    let mut text_values: HashMap<String, usize> = HashMap::new();
+    let mut element_names: HashMap<String, usize> = HashMap::new();
+    let mut text_count = 0usize;
+    let mut element_count = 0usize;
+
+    for (_id, node) in store.iter() {
+        match node {
+            node_store::Node::Text(s) => {
+                text_count += 1;
+                *text_values.entry(s.clone()).or_default() += 1;
+            }
+            node_store::Node::Element(name) => {
+                element_count += 1;
+                let name_str = store.resolve_name(*name).to_string();
+                *element_names.entry(name_str).or_default() += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let unique_texts = text_values.len();
+    let duplicate_texts = text_count - unique_texts;
+    println!("  Text nodes: {text_count} total, {unique_texts} unique, {duplicate_texts} could be shared");
+
+    // Top duplicated text values
+    let mut top_dupes: Vec<_> = text_values.iter().filter(|(_, c)| **c > 1).collect();
+    top_dupes.sort_by(|a, b| b.1.cmp(a.1));
+    if !top_dupes.is_empty() {
+        println!("  Top duplicated text values:");
+        for (val, count) in top_dupes.iter().take(10) {
+            let display = if val.len() > 40 { &val[..40] } else { val };
+            println!("    {count}x \"{display}\"");
+        }
+    }
+
+    // Element name frequency
+    println!("\n  Element types ({element_count} total):");
+    let mut name_freq: Vec<_> = element_names.iter().collect();
+    name_freq.sort_by(|a, b| b.1.cmp(a.1));
+    for (name, count) in name_freq.iter().take(15) {
+        println!("    {count:>4}x {name}");
+    }
+
+    // ---- Impact resolution --------------------------------------------------
+    println!("\nImpact resolution (samples):");
+    // Find text nodes that have parents (are deep in the tree) and trace to roots
+    let mut samples = 0;
+    for (id, node) in store.iter() {
+        if let node_store::Node::Text(s) = node {
+            let parents = store.parents(id);
+            if !parents.is_empty() && s.len() > 20 {
+                let roots = store.impact_roots(id);
+                let depth = {
+                    let mut d = 0;
+                    let mut current = id;
+                    while let Some(&p) = store.parents(current).first() {
+                        d += 1;
+                        current = p;
+                    }
+                    d
+                };
+                let display = if s.len() > 50 { &s[..50] } else { s.as_str() };
+                println!("  Text \"{display}...\" (depth {depth})");
+                println!("    impacts {} root(s):", roots.len());
+                for root_id in &roots {
+                    if let Some(node_store::Node::Element(name)) = store.get(*root_id) {
+                        // Find the document name by looking for a "name" attribute
+                        let doc_name = store.attributes(*root_id)
+                            .iter()
+                            .find_map(|(n, vid)| {
+                                if matches!(store.resolve_name(*n), "name" | "text")
+                                    && let Some(node_store::Node::Text(s)) = store.get(*vid)
+                                {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                        if let Some(name_val) = doc_name {
+                            println!("    -> {}(\"{}\")", store.resolve_name(*name), name_val);
+                        } else {
+                            println!("    -> Element(\"{}\")", store.resolve_name(*name));
+                        }
+                    }
+                }
+                samples += 1;
+                if samples >= 3 {
+                    break;
+                }
+            }
+        }
+    }
 }

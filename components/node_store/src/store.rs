@@ -201,6 +201,40 @@ impl NodeStore {
     pub fn edge_count(&self) -> usize {
         self.edges_from.values().map(|v| v.len()).sum()
     }
+
+    pub fn name_count(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Iterate all (NodeId, &Node) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &Node)> {
+        self.nodes.iter().map(|(&id, node)| (id, node))
+    }
+
+    /// Find all root nodes reachable by walking reverse Child edges
+    /// from the given node. A root is a node with no parent Child edges.
+    /// Useful for impact resolution: "which top-level documents are
+    /// affected when this node changes?"
+    pub fn impact_roots(&self, changed: NodeId) -> Vec<NodeId> {
+        let mut roots = Vec::new();
+        let mut visited = im::OrdSet::new();
+        let mut queue = vec![changed];
+
+        while let Some(id) = queue.pop() {
+            if visited.contains(&id) {
+                continue;
+            }
+            visited.insert(id);
+
+            let parents = self.parents(id);
+            if parents.is_empty() {
+                roots.push(id);
+            } else {
+                queue.extend(parents);
+            }
+        }
+        roots
+    }
 }
 
 #[cfg(test)]
