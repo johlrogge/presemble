@@ -15,7 +15,7 @@ pub struct DocumentMeta {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-pub(crate) fn find_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<String> {
+pub fn find_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<String> {
     for (name, value_id) in store.attributes(node) {
         if store.resolve_name(name) == attr_name
             && let Some(Node::Text(s)) = store.get(value_id)
@@ -26,7 +26,7 @@ pub(crate) fn find_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -
     None
 }
 
-pub(crate) fn find_attr_int(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<i64> {
+pub fn find_attr_int(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<i64> {
     for (name, value_id) in store.attributes(node) {
         if store.resolve_name(name) == attr_name
             && let Some(Node::Integer(n)) = store.get(value_id)
@@ -37,7 +37,7 @@ pub(crate) fn find_attr_int(store: &NodeStore, node: NodeId, attr_name: &str) ->
     None
 }
 
-pub(crate) fn find_attr_bool(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<bool> {
+pub fn find_attr_bool(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<bool> {
     for (name, value_id) in store.attributes(node) {
         if store.resolve_name(name) == attr_name
             && let Some(Node::Boolean(b)) = store.get(value_id)

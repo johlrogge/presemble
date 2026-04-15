@@ -56,6 +56,8 @@ pub struct Conductor {
     site_graph: RwLock<site_index::SiteGraph>,
     build_errors: RwLock<HashMap<String, Vec<String>>>,
     node_store: Arc<RwLock<node_store::NodeStore>>,
+    url_to_root: RwLock<HashMap<String, node_store::NodeId>>,
+    stem_to_roots: RwLock<HashMap<String, Vec<node_store::NodeId>>>,
 }
 
 impl Conductor {
@@ -96,6 +98,8 @@ impl Conductor {
             site_graph: RwLock::new(site_index::SiteGraph::new()),
             build_errors: RwLock::new(HashMap::new()),
             node_store: Arc::new(RwLock::new(node_store::NodeStore::new())),
+            url_to_root: RwLock::new(HashMap::new()),
+            stem_to_roots: RwLock::new(HashMap::new()),
         };
 
         // Load persisted pending suggestions from disk
@@ -128,6 +132,9 @@ impl Conductor {
         let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
         store.clear();
 
+        let mut url_index: HashMap<String, node_store::NodeId> = HashMap::new();
+        let mut stem_index: HashMap<String, Vec<node_store::NodeId>> = HashMap::new();
+
         // Parse and store all schemas
         let schema_cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
         let mut grammars: HashMap<String, schema::Grammar> = HashMap::new();
@@ -157,12 +164,14 @@ impl Conductor {
                         let url = format!("/{stem_str}/{slug_str}");
                         let file = format!("content/{stem_str}/{slug_str}.md");
                         let meta = node_store_bridge::content_bridge::DocumentMeta {
-                            url,
+                            url: url.clone(),
                             stem: stem_str.to_string(),
                             file,
                             page_kind: "item".to_string(),
                         };
-                        node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+                        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+                        url_index.insert(url, root);
+                        stem_index.entry(stem_str.to_string()).or_default().push(root);
                     }
                 }
             }
@@ -179,12 +188,14 @@ impl Conductor {
                     let url = format!("/{stem_str}/");
                     let file = format!("content/{stem_str}/index.md");
                     let meta = node_store_bridge::content_bridge::DocumentMeta {
-                        url,
+                        url: url.clone(),
                         stem: stem_str.to_string(),
                         file,
                         page_kind: "collection".to_string(),
                     };
-                    node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+                    let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+                    url_index.insert(url, root);
+                    stem_index.entry(stem_str.to_string()).or_default().push(root);
                 }
             }
         }
@@ -218,6 +229,11 @@ impl Conductor {
         if templates_dir.is_dir() {
             Self::walk_and_store_templates(&templates_dir, &mut store);
         }
+
+        // Commit indexes (drop store lock first to avoid write-write deadlock)
+        drop(store);
+        *self.url_to_root.write().unwrap_or_else(|e| e.into_inner()) = url_index;
+        *self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner()) = stem_index;
     }
 
     fn walk_and_store_templates(dir: &std::path::Path, store: &mut node_store::NodeStore) {
@@ -246,6 +262,95 @@ impl Conductor {
     /// Get cached schema source for a stem.
     pub fn schema_source(&self, stem: &str) -> Option<String> {
         self.schema_cache.read().unwrap_or_else(|e| e.into_inner()).get(stem).cloned()
+    }
+
+    /// Look up a document root NodeId by URL path.
+    pub fn document_by_url(&self, url: &str) -> Option<node_store::NodeId> {
+        self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
+    }
+
+    /// Get all document root NodeIds for a given schema stem.
+    pub fn documents_for_stem(&self, stem: &str) -> Vec<node_store::NodeId> {
+        self.stem_to_roots
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(stem)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Materialize a DataGraph from a document's NodeStore subtree.
+    /// Uses the pass-through approach: reconstruct Document from nodes,
+    /// then call the existing build_article_graph.
+    pub fn datagraph_for_document(&self, doc_root: node_store::NodeId) -> Option<template::DataGraph> {
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+
+        // Get the stem attribute to find the grammar
+        let stem = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "stem")?;
+        let url = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "url")?;
+        let file = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "file");
+        let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "page-kind");
+
+        // Reconstruct the Document from the NodeStore
+        let doc = node_store_bridge::content_bridge::store_to_document(&store, doc_root);
+        drop(store);
+
+        // Find the grammar
+        let schema_cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+        let is_collection = page_kind.as_deref() == Some("collection");
+        let grammar_key = if is_collection {
+            site_index::schema_cache_key(&stem, "index")
+        } else {
+            // Try stem/item first, then just stem
+            let item_key = format!("{stem}/item");
+            if schema_cache.contains_key(&item_key) {
+                item_key
+            } else {
+                stem.clone()
+            }
+        };
+
+        let grammar_src = schema_cache.get(&grammar_key)?;
+        let grammar = schema::parse_schema(grammar_src).ok()?;
+        drop(schema_cache);
+
+        // Build the DataGraph using the existing function
+        let mut data = template::build_article_graph(&doc, &grammar);
+
+        // Inject metadata (same as site_builder does)
+        data.insert("_presemble_stem", template::Value::Text(stem.clone()));
+        if let Some(f) = &file {
+            data.insert("_presemble_file", template::Value::Text(f.clone()));
+        }
+        data.insert("url", template::Value::Text(url.clone()));
+
+        // Synthesize link record
+        let title = match data.resolve(&["title"]) {
+            Some(template::Value::Text(t)) => t.clone(),
+            _ => url.split('/').next_back().unwrap_or("").to_string(),
+        };
+        data.insert("link", template::Value::Record(template::synthesize_link(&title, &url)));
+
+        Some(data)
+    }
+
+    /// Query all item documents for a stem, returning materialized DataGraphs.
+    /// This is the NodeStore equivalent of the SiteGraph-based query_items_for_stem.
+    pub fn query_items_from_store(&self, stem: &str) -> Vec<(String, template::DataGraph)> {
+        self.documents_for_stem(stem)
+            .into_iter()
+            .filter_map(|root| {
+                let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                if page_kind != "item" {
+                    return None;
+                }
+                let url = node_store_bridge::content_bridge::find_attr_text(&store, root, "url")?;
+                drop(store); // release read lock before calling datagraph_for_document
+                let data = self.datagraph_for_document(root)?;
+                Some((url, data))
+            })
+            .collect()
     }
 
     /// Refresh the schema cache by re-scanning the filesystem.
@@ -2222,6 +2327,174 @@ mod build_full_graph_collection_tests {
             node.deps.contains(&expected),
             "deps of /post/ should contain content/post/hello.md; deps: {:?}",
             node.deps
+        );
+    }
+}
+
+#[cfg(test)]
+mod node_store_index_tests {
+    use super::*;
+
+    const SCHEMA_SRC: &str = "# Your post title {#title}\noccurs\n: exactly once\n";
+    const TEMPLATE_SRC: &str = "[:div [:h1 title]]";
+    // Use real markdown heading format so the title slot receives just "Hello World"
+    // (not "title: Hello World" from a setext-heading side-effect).
+    const CONTENT_SRC: &str = "# Hello World\n\n----\n\nBody text here\n";
+    const CONTENT_SRC2: &str = "# Second Post\n\n----\n\nMore body text\n";
+
+    fn build_site_with_two_posts() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
+        std::fs::create_dir_all(root.join("templates/post")).expect("create templates/post");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
+
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("content/post/hello.md"), CONTENT_SRC).expect("write content 1");
+        std::fs::write(root.join("content/post/second.md"), CONTENT_SRC2).expect("write content 2");
+
+        tmp
+    }
+
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    #[test]
+    fn document_by_url_finds_item() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let root = conductor.document_by_url("/post/hello");
+        assert!(
+            root.is_some(),
+            "document_by_url('/post/hello') should find a NodeId after populate_node_store"
+        );
+    }
+
+    #[test]
+    fn document_by_url_returns_none_for_unknown() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let root = conductor.document_by_url("/nonexistent/page");
+        assert!(
+            root.is_none(),
+            "document_by_url should return None for unknown URL"
+        );
+    }
+
+    #[test]
+    fn documents_for_stem_finds_all_items() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let roots = conductor.documents_for_stem("post");
+        assert_eq!(
+            roots.len(),
+            2,
+            "documents_for_stem('post') should return 2 roots for two content files, got {}",
+            roots.len()
+        );
+    }
+
+    #[test]
+    fn documents_for_stem_returns_empty_for_unknown() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let roots = conductor.documents_for_stem("nonexistent");
+        assert!(
+            roots.is_empty(),
+            "documents_for_stem should return empty vec for unknown stem"
+        );
+    }
+
+    #[test]
+    fn datagraph_for_document_returns_title() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let root = conductor.document_by_url("/post/hello")
+            .expect("should find /post/hello in index");
+
+        let data = conductor.datagraph_for_document(root)
+            .expect("datagraph_for_document should succeed");
+
+        match data.resolve(&["title"]) {
+            Some(template::Value::Text(t)) => assert_eq!(
+                t, "Hello World",
+                "title should be 'Hello World', got {t:?}"
+            ),
+            other => panic!("expected title Text value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn datagraph_for_document_injects_url_and_link() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let root = conductor.document_by_url("/post/hello")
+            .expect("should find /post/hello in index");
+
+        let data = conductor.datagraph_for_document(root)
+            .expect("datagraph_for_document should succeed");
+
+        // url field
+        assert!(
+            matches!(data.resolve(&["url"]), Some(template::Value::Text(u)) if u == "/post/hello"),
+            "url field should be '/post/hello'"
+        );
+
+        // link record should be present with href
+        assert!(
+            matches!(data.resolve(&["link"]), Some(template::Value::Record(_))),
+            "link field should be a Record"
+        );
+    }
+
+    #[test]
+    fn query_items_from_store_returns_all_items() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let items = conductor.query_items_from_store("post");
+        assert_eq!(
+            items.len(),
+            2,
+            "query_items_from_store('post') should return 2 items, got {}",
+            items.len()
+        );
+
+        // Both URLs should be present
+        let urls: Vec<&str> = items.iter().map(|(u, _)| u.as_str()).collect();
+        assert!(
+            urls.contains(&"/post/hello"),
+            "items should include /post/hello; got {:?}",
+            urls
+        );
+        assert!(
+            urls.contains(&"/post/second"),
+            "items should include /post/second; got {:?}",
+            urls
+        );
+    }
+
+    #[test]
+    fn query_items_from_store_returns_empty_for_unknown_stem() {
+        let tmp = build_site_with_two_posts();
+        let conductor = make_conductor(&tmp);
+
+        let items = conductor.query_items_from_store("nonexistent");
+        assert!(
+            items.is_empty(),
+            "query_items_from_store should return empty vec for unknown stem"
         );
     }
 }
