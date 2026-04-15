@@ -497,9 +497,68 @@ fn find_slot_by_name(store: &NodeStore, preamble: NodeId, slot_name: &str) -> Op
     None
 }
 
+/// Check if a node is a link-expression element.
+fn is_link_expression(store: &NodeStore, node: NodeId) -> bool {
+    matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link-expression")
+}
+
+/// Resolve a link-expression node and create Reference edges on the semantic content node.
+/// PathRef → direct reference to the target document root.
+/// ThreadExpr → references to all item documents matching the stem.
+fn resolve_link_expression_to_refs(
+    store: &mut NodeStore,
+    sem: NodeId,
+    link_expr: NodeId,
+    slot_name: &str,
+    stem_to_roots: &std::collections::HashMap<String, Vec<NodeId>>,
+    url_to_root: &std::collections::HashMap<String, NodeId>,
+) {
+    let target_node = match find_child_by_name(store, link_expr, "link-target") {
+        Some(t) => t,
+        None => return,
+    };
+    let kind = match find_attr_text(store, target_node, "kind") {
+        Some(k) => k,
+        None => return,
+    };
+
+    let ref_name = store.intern(slot_name);
+
+    match kind.as_str() {
+        "path-ref" => {
+            // Direct URL reference — find the document root for that URL
+            if let Some(target_url) = find_attr_text(store, target_node, "value")
+                && let Some(&target_root) = url_to_root.get(&target_url)
+            {
+                store.add_edge(sem, Edge::Reference { name: ref_name, target: target_root });
+            }
+        }
+        "thread-expr" => {
+            // Stem query — reference all item documents for that stem
+            if let Some(stem) = find_attr_text(store, target_node, "source")
+                && let Some(roots) = stem_to_roots.get(&stem)
+            {
+                for &target_root in roots {
+                    // Only reference item documents (not collections)
+                    if let Some(pk) = find_attr_text(store, target_root, "page-kind")
+                        && pk == "item"
+                    {
+                        store.add_edge(sem, Edge::Reference { name: ref_name, target: target_root });
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Create a semantic content node from a document and its grammar.
 /// The semantic content node has named Reference edges pointing to
 /// the existing content nodes — no data is copied, just named.
+///
+/// Link expressions are resolved: PathRef creates a direct Reference,
+/// ThreadExpr resolves via stem_to_roots to create References to all
+/// matching item documents.
 ///
 /// Returns the root NodeId of the semantic content node.
 pub fn create_semantic_content(
@@ -507,6 +566,8 @@ pub fn create_semantic_content(
     doc_root: NodeId,
     grammar: &schema::Grammar,
     meta: &DocumentMeta,
+    stem_to_roots: &std::collections::HashMap<String, Vec<NodeId>>,
+    url_to_root: &std::collections::HashMap<String, NodeId>,
 ) -> NodeId {
     let sem_name = store.intern("semantic-content");
     let sem = store.add_node(Node::Element(sem_name));
@@ -529,15 +590,25 @@ pub fn create_semantic_content(
         {
                 let children = store.children(slot_id);
 
-                if max == 1 {
-                    // Single value: reference the first content element directly
-                    if let Some(&first) = children.first() {
-                        let ref_name = store.intern(&slot_name);
-                        store.add_edge(sem, Edge::Reference { name: ref_name, target: first });
+                // Check if any child is a link-expression that needs resolving
+                let mut resolved = false;
+                for &child in &children {
+                    if is_link_expression(store, child) {
+                        resolve_link_expression_to_refs(
+                            store, sem, child, &slot_name,
+                            stem_to_roots, url_to_root,
+                        );
+                        resolved = true;
                     }
-                } else {
-                    // Multi value: create a list node containing the content elements, reference it
-                    if !children.is_empty() {
+                }
+
+                if !resolved {
+                    if max == 1 {
+                        if let Some(&first) = children.first() {
+                            let ref_name = store.intern(&slot_name);
+                            store.add_edge(sem, Edge::Reference { name: ref_name, target: first });
+                        }
+                    } else if !children.is_empty() {
                         let list_name = store.intern(&slot_name);
                         let slot_list_name = store.intern("slot-list");
                         let list_node = store.add_node(Node::Element(slot_list_name));
@@ -993,7 +1064,9 @@ mod tests {
             page_kind: "item".to_string(),
         };
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
         // semantic-content element exists
         assert!(
@@ -1020,7 +1093,9 @@ mod tests {
             page_kind: "item".to_string(),
         };
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
         // Find Reference("title") on semantic content
         let refs = store.references(sem);
@@ -1053,7 +1128,9 @@ mod tests {
             page_kind: "item".to_string(),
         };
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
         let refs = store.references(sem);
         let summary_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
@@ -1083,7 +1160,9 @@ mod tests {
             page_kind: "item".to_string(),
         };
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
         let refs = store.references(sem);
         let body_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "body");
@@ -1108,7 +1187,9 @@ mod tests {
             page_kind: "item".to_string(),
         };
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
         let refs = store.references(sem);
         let link_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "link");
@@ -1134,7 +1215,9 @@ mod tests {
             page_kind: "item".to_string(),
         };
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta);
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
         // Find the heading in the document tree (preamble → slot("title") → heading)
         let preamble = find_child_by_name(&store, doc_root, "preamble").unwrap();

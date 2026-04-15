@@ -202,7 +202,16 @@ impl Conductor {
         }
         drop(schema_cache);
 
-        // Parse and store all content
+        // Pass 1: Parse and store all content documents (no semantic content yet)
+        // We need all documents indexed before we can resolve link expressions.
+        struct DocEntry {
+            url: String,
+            root: node_store::NodeId,
+            grammar_key: String,
+            meta: node_store_bridge::content_bridge::DocumentMeta,
+        }
+        let mut doc_entries: Vec<DocEntry> = Vec::new();
+
         for stem in repo.schema_stems() {
             let stem_str = stem.as_str();
 
@@ -226,10 +235,9 @@ impl Conductor {
                             page_kind: "item".to_string(),
                         };
                         let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
-                        let sem = node_store_bridge::content_bridge::create_semantic_content(&mut store, root, grammar, &meta);
                         url_index.insert(url.clone(), root);
-                        semantic_index.insert(url, sem);
                         stem_index.entry(stem_str.to_string()).or_default().push(root);
+                        doc_entries.push(DocEntry { url, root, grammar_key, meta });
                     }
                 }
             }
@@ -256,11 +264,24 @@ impl Conductor {
                         page_kind: "collection".to_string(),
                     };
                     let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
-                    let sem = node_store_bridge::content_bridge::create_semantic_content(&mut store, root, grammar, &meta);
                     url_index.insert(url.clone(), root);
-                    semantic_index.insert(url, sem);
                     stem_index.entry(stem_str.to_string()).or_default().push(root);
+                    doc_entries.push(DocEntry { url, root, grammar_key, meta });
                 }
+            }
+        }
+
+        // Pass 2: Create semantic content with resolved link expressions.
+        // Now all documents are indexed, so link expressions can resolve.
+        for entry in &doc_entries {
+            if let Some(grammar) = grammars.get(&entry.grammar_key)
+                .or_else(|| grammars.get(&entry.meta.stem))
+            {
+                let sem = node_store_bridge::content_bridge::create_semantic_content(
+                    &mut store, entry.root, grammar, &entry.meta,
+                    &stem_index, &url_index,
+                );
+                semantic_index.insert(entry.url.clone(), sem);
             }
         }
 
@@ -572,6 +593,13 @@ impl Conductor {
         }
     }
 
+    /// Insert a URL→semantic NodeId mapping.
+    /// Used in tests alongside insert_url_root.
+    pub fn insert_url_semantic(&self, url: &str, sem: node_store::NodeId) {
+        self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner())
+            .insert(url.to_string(), sem);
+    }
+
     /// Build the full site graph using the shared build pipeline.
     ///
     /// Builds item pages, collection/index pages, and a legacy fallback root
@@ -634,15 +662,41 @@ impl Conductor {
             .collect()
     }
 
-    /// Walk all page nodes and extract `PathRef` link expression edges.
+    /// Collect all edges from semantic content and raw content.
+    /// Semantic content has resolved link expressions (preamble slots).
+    /// Raw content walk catches body link expressions (PathRef only).
     fn collect_all_edges(&self) -> Vec<site_index::Edge> {
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let url_to_semantic = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
         let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
+
         let mut edges = Vec::new();
 
+        // Source 1: Semantic content Reference edges (resolved link expressions)
+        let root_to_url: HashMap<node_store::NodeId, &String> = url_to_root.iter()
+            .map(|(url, &root)| (root, url))
+            .collect();
+        for (source_url, &sem_id) in url_to_semantic.iter() {
+            for (_, target) in store.references(sem_id) {
+                if let Some(target_url) = root_to_url.get(&target) {
+                    edges.push(site_index::Edge {
+                        source: site_index::UrlPath::new(source_url),
+                        target: site_index::UrlPath::new(target_url.as_str()),
+                    });
+                }
+            }
+        }
+
+        // Source 2: Raw NodeStore walk for body PathRef link expressions
         for (url, &root) in url_to_root.iter() {
             collect_edges_from_node(&store, root, url, &mut edges);
         }
+
+        // Deduplicate
+        edges.sort_by(|a, b| {
+            (a.source.as_str(), a.target.as_str()).cmp(&(b.source.as_str(), b.target.as_str()))
+        });
+        edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
         edges
     }
 
