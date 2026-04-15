@@ -526,6 +526,13 @@ impl Conductor {
     /// site-repository pipeline.
     pub fn insert_url_root(&self, url: &str, root: node_store::NodeId) {
         self.url_to_root.write().unwrap_or_else(|e| e.into_inner()).insert(url.to_string(), root);
+        // Also update stem index if the node has a stem attribute
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(stem) = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem") {
+            drop(store);
+            self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner())
+                .entry(stem).or_default().push(root);
+        }
     }
 
     /// Build the full site graph using the shared build pipeline.
@@ -1967,7 +1974,7 @@ mod query_edges_tests {
         let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
         drop(store);
 
-        conductor.url_to_root.write().unwrap().insert(source_url.to_string(), root);
+        conductor.insert_url_root(source_url, root);
 
         conductor
     }
