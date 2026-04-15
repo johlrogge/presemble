@@ -597,13 +597,33 @@ impl Conductor {
 
     /// Walk all page nodes and extract `PathRef` link expression edges.
     fn collect_all_edges(&self) -> Vec<site_index::Edge> {
-        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
         let mut edges = Vec::new();
 
-        for (url, &root) in url_to_root.iter() {
-            collect_edges_from_node(&store, root, url, &mut edges);
+        // Source 1: Raw NodeStore walk — finds PathRef link expressions directly
+        {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
+            for (url, &root) in url_to_root.iter() {
+                collect_edges_from_node(&store, root, url, &mut edges);
+            }
         }
+
+        // Source 2: SiteGraph — finds resolved thread expression edges
+        // (thread expressions like (->> :author) are resolved during rebuild_page)
+        {
+            let graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
+            for node in graph.iter_pages() {
+                if let Some(pd) = node.page_data() {
+                    edges.extend(expressions::extract_edges(&node.url_path, &pd.data));
+                }
+            }
+        }
+
+        // Deduplicate
+        edges.sort_by(|a, b| {
+            (a.source.as_str(), a.target.as_str()).cmp(&(b.source.as_str(), b.target.as_str()))
+        });
+        edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
         edges
     }
 
