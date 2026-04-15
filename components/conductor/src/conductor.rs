@@ -55,6 +55,7 @@ pub struct Conductor {
     suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::Suggestion>>,
     site_graph: RwLock<site_index::SiteGraph>,
     build_errors: RwLock<HashMap<String, Vec<String>>>,
+    node_store: Arc<RwLock<node_store::NodeStore>>,
 }
 
 impl Conductor {
@@ -94,6 +95,7 @@ impl Conductor {
             suggestions: RwLock::new(HashMap::new()),
             site_graph: RwLock::new(site_index::SiteGraph::new()),
             build_errors: RwLock::new(HashMap::new()),
+            node_store: Arc::new(RwLock::new(node_store::NodeStore::new())),
         };
 
         // Load persisted pending suggestions from disk
@@ -105,11 +107,122 @@ impl Conductor {
             eprintln!("conductor: initial graph build failed: {e}");
         }
 
+        // Populate the node store from the site repository
+        conductor.populate_node_store();
+
         Ok(conductor)
     }
 
     pub fn site_dir(&self) -> &Path {
         &self.site_dir
+    }
+
+    /// Get a shared reference to the node store.
+    pub fn node_store(&self) -> Arc<RwLock<node_store::NodeStore>> {
+        Arc::clone(&self.node_store)
+    }
+
+    /// Populate the node store from the site repository.
+    /// Walks schemas, content, and templates, converting them to nodes/edges.
+    fn populate_node_store(&self) {
+        let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+
+        // Parse and store all schemas
+        let schema_cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+        let mut grammars: HashMap<String, schema::Grammar> = HashMap::new();
+        for (stem_key, src) in schema_cache.iter() {
+            if let Ok(grammar) = schema::parse_schema(src) {
+                node_store_bridge::schema_bridge::grammar_to_store(&grammar, &mut store);
+                grammars.insert(stem_key.clone(), grammar);
+            }
+        }
+        drop(schema_cache);
+
+        // Parse and store all content
+        for stem in self.repo.schema_stems() {
+            let stem_str = stem.as_str();
+
+            // Item content
+            for slug in self.repo.content_slugs(&stem) {
+                if let Some(src) = self.repo.content_source(&stem, &slug) {
+                    let grammar_key = format!("{stem_str}/item");
+                    let grammar = grammars
+                        .get(&grammar_key)
+                        .or_else(|| grammars.get(stem_str));
+                    if let Some(grammar) = grammar
+                        && let Ok(doc) = content::parse_and_assign(&src, grammar)
+                    {
+                        node_store_bridge::content_bridge::document_to_store(&doc, &mut store);
+                    }
+                }
+            }
+
+            // Collection content
+            if let Some(src) = self.repo.collection_content_source(&stem) {
+                let grammar_key = format!("{stem_str}/index");
+                let grammar = grammars
+                    .get(&grammar_key)
+                    .or_else(|| grammars.get(stem_str));
+                if let Some(grammar) = grammar
+                    && let Ok(doc) = content::parse_and_assign(&src, grammar)
+                {
+                    node_store_bridge::content_bridge::document_to_store(&doc, &mut store);
+                }
+            }
+        }
+
+        // Parse and store all templates
+        for stem in self.repo.schema_stems() {
+            if let Some((src, is_hiccup)) = self.repo.item_template_source(&stem) {
+                let nodes = if is_hiccup {
+                    template::parse_template_hiccup(&src).ok()
+                } else {
+                    template::parse_template_xml(&src).ok()
+                };
+                if let Some(nodes) = nodes {
+                    node_store_bridge::template_bridge::template_to_store(&nodes, &mut store);
+                }
+            }
+            if let Some((src, is_hiccup)) = self.repo.collection_template_source(&stem) {
+                let nodes = if is_hiccup {
+                    template::parse_template_hiccup(&src).ok()
+                } else {
+                    template::parse_template_xml(&src).ok()
+                };
+                if let Some(nodes) = nodes {
+                    node_store_bridge::template_bridge::template_to_store(&nodes, &mut store);
+                }
+            }
+        }
+
+        // Walk the templates directory for partial templates not tied to a schema stem
+        let templates_dir = self.site_dir.join("templates");
+        if templates_dir.is_dir() {
+            Self::walk_and_store_templates(&templates_dir, &mut store);
+        }
+    }
+
+    fn walk_and_store_templates(dir: &std::path::Path, store: &mut node_store::NodeStore) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    Self::walk_and_store_templates(&path, store);
+                } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                    && matches!(ext, "hiccup" | "html")
+                    && let Ok(src) = std::fs::read_to_string(&path)
+                {
+                    let nodes = if ext == "hiccup" {
+                        template::parse_template_hiccup(&src).ok()
+                    } else {
+                        template::parse_template_xml(&src).ok()
+                    };
+                    if let Some(nodes) = nodes {
+                        node_store_bridge::template_bridge::template_to_store(&nodes, store);
+                    }
+                }
+            }
+        }
     }
 
     /// Get cached schema source for a stem.
