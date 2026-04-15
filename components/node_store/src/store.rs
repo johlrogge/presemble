@@ -151,6 +151,24 @@ impl NodeStore {
             .unwrap_or_default()
     }
 
+    /// Named composition parts from ConsistsOf edges.
+    pub fn consists_of(&self, id: NodeId) -> Vec<(Name, NodeId)> {
+        self.edges_from
+            .get(&id)
+            .map(|v| {
+                v.iter()
+                    .filter_map(|e| {
+                        if let Edge::ConsistsOf { name, part } = e {
+                            Some((*name, *part))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Named derived pairs from Derived edges.
     pub fn derived(&self, id: NodeId) -> Vec<(Name, NodeId)> {
         self.edges_from
