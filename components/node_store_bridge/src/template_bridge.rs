@@ -147,7 +147,8 @@ fn store_id_to_tnode(store: &NodeStore, id: NodeId) -> Option<TNode> {
             }
         }
         // Raw value nodes at the top level: not valid template nodes; skip.
-        Node::Keyword(_) | Node::Integer(_) | Node::Boolean(_) | Node::Nil => None,
+        Node::Keyword(_) | Node::Integer(_) | Node::Boolean(_) | Node::Nil
+        | Node::Collection | Node::Opaque(_) => None,
     }
 }
 
@@ -247,6 +248,16 @@ pub fn store_node_to_form(store: &NodeStore, id: NodeId) -> Form {
                     other => Form::Symbol(other.to_string()),
                 }
             }
+            Node::Collection => {
+                // A collection used as a Form — treat as a list of its children
+                let items = store
+                    .children(id)
+                    .into_iter()
+                    .map(|c| store_node_to_form(store, c))
+                    .collect();
+                Form::List(items)
+            }
+            Node::Opaque(_) => Form::Nil, // opaque values can't be represented as forms
         },
     }
 }
