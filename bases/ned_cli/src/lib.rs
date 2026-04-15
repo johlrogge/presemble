@@ -1,6 +1,8 @@
 use content::{ContentElement, Document, parse_and_assign, parse_document, serialize_document};
+use evaluator::{RootEnv, ned_primitives};
 use ned::selection::{self, Selection};
 use node_store::NodeStore;
+use std::sync::{Arc, RwLock};
 use node_store_bridge::{
     content_bridge::{document_to_store, store_to_document},
     schema_bridge::{grammar_to_store, store_to_grammar},
@@ -668,4 +670,62 @@ pub fn run() {
     let first_heading_ancestors = Selection::from_ids(headings.iter().take(1))
         .ancestors(&store);
     println!("  Ancestors of first heading: {}", first_heading_ancestors.len());
+
+    // ---- NED Evaluator test -------------------------------------------------
+    println!("\nNED Evaluator:");
+
+    // Wrap the store for the evaluator
+    let store = Arc::new(RwLock::new(store));
+
+    // Create evaluator with NED builtins
+    let root = RootEnv::new();
+    evaluator::init_root(&root).expect("failed to init evaluator");
+    ned_primitives::register_ned_builtins(&root, store.clone());
+    evaluator::load_ned_prelude(&root).expect("failed to load ned.clj");
+
+    // Test expressions
+    let tests: Vec<(&str, &str)> = vec![
+        ("(ned/node-count)", "node count"),
+        ("(ned/edge-count)", "edge count"),
+        ("(ned/count (ned/all))", "all nodes"),
+        ("(ned/count (ned/roots))", "root nodes"),
+        ("(ned/count (ned/all-headings))", "all headings (via ned.clj)"),
+        ("(ned/count (ned/all-h2s))", "all h2s (via ned.clj)"),
+        ("(ned/count (ned/all-documents))", "all documents (via ned.clj)"),
+        // Threading test
+        ("(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 2)))", "h2s via threading"),
+        // Children of h2s
+        ("(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 2) (ned/children)))", "children of h2s"),
+        // Text content
+        ("(count (ned/text-of (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 1) (ned/children))))", "h1 text nodes count"),
+        // Ancestors
+        ("(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/ancestors)))", "heading ancestors"),
+        // Documents -> descendants -> paragraphs
+        ("(ned/count (-> (ned/all-documents) (ned/descendants) (ned/filter :kind \"paragraph\")))", "paragraphs via descendants"),
+    ];
+
+    for (expr, label) in &tests {
+        match evaluator::eval_str_with_root(expr, &root) {
+            Ok(val) => println!("  {label}: {val:?}"),
+            Err(e) => println!("  {label}: ERROR: {e}"),
+        }
+    }
+
+    // Show some actual text content
+    println!("\n  Sample h1 texts:");
+    match evaluator::eval_str_with_root(
+        "(ned/text-of (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 1) (ned/children)))",
+        &root,
+    ) {
+        Ok(template::Value::List(items)) => {
+            for (i, item) in items.iter().take(5).enumerate() {
+                if let template::Value::Text(s) = item {
+                    let display = if s.len() > 60 { &s[..60] } else { s.as_str() };
+                    println!("    {}: \"{}\"", i + 1, display);
+                }
+            }
+        }
+        Ok(other) => println!("    unexpected: {other:?}"),
+        Err(e) => println!("    ERROR: {e}"),
+    }
 }

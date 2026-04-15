@@ -13,3 +13,4 @@ site_repository = { workspace = true }
 site_index = { workspace = true }
 im = { workspace = true }
 ned = { workspace = true }
+evaluator = { workspace = true }
