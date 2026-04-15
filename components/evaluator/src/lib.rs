@@ -2,6 +2,7 @@ mod env;
 mod closure;
 pub mod primitives;
 pub mod doc_registry;
+pub mod ned_primitives;
 
 pub use env::{Env, RootEnv};
 pub use closure::{Closure, FnArity, PrimitiveFn};
@@ -13,11 +14,27 @@ use forms::Form;
 /// The core.clj prelude — embedded at compile time.
 const PRELUDE: &str = include_str!("core.clj");
 
+/// The ned.clj prelude — embedded at compile time.
+const NED_PRELUDE: &str = include_str!("ned.clj");
+
 /// Load the core.clj prelude into the root environment.
 /// Called once after `register_builtins`, before any user evaluation.
 fn load_prelude(root: &RootEnv) -> Result<(), String> {
     let forms = reader::read_all(PRELUDE)
         .map_err(|e| format!("prelude read error: {e}"))?;
+    let env = root.snapshot();
+    for form in forms {
+        let expanded = macros::macroexpand(form);
+        eval_in_env(&expanded, &env, root)?;
+    }
+    Ok(())
+}
+
+/// Load the ned.clj prelude into the root environment.
+/// Called after `register_ned_builtins`, before any user evaluation.
+pub fn load_ned_prelude(root: &RootEnv) -> Result<(), String> {
+    let forms = reader::read_all(NED_PRELUDE)
+        .map_err(|e| format!("ned prelude read error: {e}"))?;
     let env = root.snapshot();
     for form in forms {
         let expanded = macros::macroexpand(form);

@@ -20,6 +20,7 @@ pub fn value_to_edn(value: &template::Value) -> String {
             None => format!(":{name}"),
         },
         template::Value::Fn(c) => format!("\"#<fn {}>\"", c.name().unwrap_or("anonymous")),
+        template::Value::Opaque(_) => "nil".to_string(),
     }
 }
 

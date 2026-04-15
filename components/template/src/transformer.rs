@@ -183,6 +183,7 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &DataGraph) -> String {
                     None => format!(":{name}"),
                 },
                 Some(Value::Fn(c)) => format!("#<fn {}>", c.name().unwrap_or("anonymous")),
+                Some(Value::Opaque(_)) => String::new(),
             }
         }
         Expr::Pipe(inner, transform) => {
@@ -595,6 +596,8 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             };
             Ok(vec![Node::Element(element)])
         }
+
+        Some(Value::Opaque(_)) => Ok(Vec::new()),
     }
 }
 
@@ -852,6 +855,8 @@ fn render_list_item(
             };
             Ok(vec![Node::Element(element)])
         }
+
+        Value::Opaque(_) => Ok(Vec::new()),
     }
 }
 

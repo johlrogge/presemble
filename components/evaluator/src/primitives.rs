@@ -462,6 +462,7 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Html(_) => "string",
             Value::Suggestion { .. } => "nil",
             Value::LinkExpression { .. } => "nil",
+            Value::Opaque(_) => "opaque",
         };
         Ok(Value::Keyword { namespace: None, name: kw.to_string() })
     });

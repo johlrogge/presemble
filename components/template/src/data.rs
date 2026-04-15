@@ -74,6 +74,9 @@ pub enum Value {
     },
     /// A callable function — closure or primitive (Phase 2: ADR-036)
     Fn(Arc<dyn Callable>),
+    /// An opaque Rust value — used for domain-specific handles (NodeStore, Selection, etc.)
+    /// Not displayed or serialized; used by evaluator primitives via downcast.
+    Opaque(Arc<dyn std::any::Any + Send + Sync>),
 }
 
 impl std::fmt::Debug for Value {
@@ -93,6 +96,7 @@ impl std::fmt::Debug for Value {
                 None => write!(f, "Keyword(:{name})"),
             },
             Value::Fn(c) => write!(f, "Fn({})", c.name().unwrap_or("anonymous")),
+            Value::Opaque(_) => write!(f, "Opaque(..)"),
         }
     }
 }
@@ -133,6 +137,7 @@ impl Value {
                 None => Some(format!(":{name}")),
             },
             Value::Fn(c) => Some(format!("#<fn {}>", c.name().unwrap_or("anonymous"))),
+            Value::Opaque(_) => None,
         }
     }
 }
