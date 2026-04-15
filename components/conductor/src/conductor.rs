@@ -118,7 +118,9 @@ fn collect_edges_from_node(
 impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
-        let repo = site_repository::SiteRepository::new(&site_dir);
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(&site_dir)
+            .build();
         Self::with_repo(site_dir, repo)
     }
 
@@ -171,6 +173,9 @@ impl Conductor {
 
         // Populate the node store from the site repository
         conductor.populate_node_store();
+
+        // Build all pages during startup so the output directory is populated immediately.
+        conductor.build_all_pages();
 
         Ok(conductor)
     }
@@ -323,6 +328,44 @@ impl Conductor {
             Self::walk_and_store_templates(&templates_dir, &mut store);
         }
 
+        // Phase 1c legacy fallback root: if no root URL is registered and a
+        // `templates/index.html` (or `.hiccup`) exists, create a synthetic empty
+        // document node so that `build_all_pages` will render the root index page.
+        if !url_index.contains_key("/") {
+            let root_stem = site_index::SchemaStem::new("");
+            if repo.collection_template_source(&root_stem).is_some() {
+                // Create a minimal document node matching the structure that
+                // document_to_store and store_to_document expect.
+                let doc_name = store.intern("document");
+                let root = store.add_node(node_store::Node::Element(doc_name));
+                // Required metadata attributes
+                let url_name = store.intern("url");
+                let url_val = store.add_node(node_store::Node::Text("/".to_string()));
+                store.add_edge(root, node_store::Edge::Attribute { name: url_name, value: url_val });
+                let stem_name = store.intern("stem");
+                let stem_val = store.add_node(node_store::Node::Text(String::new()));
+                store.add_edge(root, node_store::Edge::Attribute { name: stem_name, value: stem_val });
+                let file_name = store.intern("file");
+                let file_val = store.add_node(node_store::Node::Text(String::new()));
+                store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+                let pk_name = store.intern("page-kind");
+                let pk_val = store.add_node(node_store::Node::Text("collection".to_string()));
+                store.add_edge(root, node_store::Edge::Attribute { name: pk_name, value: pk_val });
+                let sep_name = store.intern("has-separator");
+                let sep_val = store.add_node(node_store::Node::Boolean(false));
+                store.add_edge(root, node_store::Edge::Attribute { name: sep_name, value: sep_val });
+                // Required structural children: empty preamble and body
+                let preamble_name = store.intern("preamble");
+                let preamble = store.add_node(node_store::Node::Element(preamble_name));
+                store.add_edge(root, node_store::Edge::Child(preamble));
+                let body_name = store.intern("body");
+                let body = store.add_node(node_store::Node::Element(body_name));
+                store.add_edge(root, node_store::Edge::Child(body));
+                url_index.insert("/".to_string(), root);
+                stem_index.entry(String::new()).or_default().push(root);
+            }
+        }
+
         // Commit indexes (drop store lock first to avoid write-write deadlock)
         drop(store);
         *self.url_to_root.write().unwrap_or_else(|e| e.into_inner()) = url_index;
@@ -409,12 +452,22 @@ impl Conductor {
             }
         };
 
-        let grammar_src = schema_cache.get(&grammar_key)?;
-        let grammar = schema::parse_schema(grammar_src).ok()?;
+        let grammar_src = schema_cache.get(&grammar_key).cloned();
         drop(schema_cache);
 
-        // Build the DataGraph using the existing function
-        let mut data = template::build_article_graph(&doc, &grammar);
+        // Build the DataGraph using the existing function.
+        // For template-only pages (no associated schema), produce an empty DataGraph
+        // so the template can still render with injected collection data.
+        let mut data = if let Some(ref src) = grammar_src
+            && let Ok(grammar) = schema::parse_schema(src)
+        {
+            template::build_article_graph(&doc, &grammar)
+        } else {
+            // No grammar (template-only page like the legacy root index).
+            // Return an empty DataGraph; collection injection in build_all_pages
+            // will populate it with article lists as needed.
+            template::DataGraph::new()
+        };
 
         // Inject metadata (same as site_builder does)
         data.insert("_presemble_stem", template::Value::Text(stem.clone()));
@@ -591,7 +644,7 @@ impl Conductor {
     /// pipeline where each phase visits every page exactly once.
     ///
     /// Returns `(rebuilt_pages, failed_pages, errors)`.
-    fn build_all_pages(&self) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
+    pub fn build_all_pages(&self) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
         // Phase 2a: Materialize DataGraphs for all documents.
         // Collect url+root pairs first to avoid holding url_to_root read lock
         // while datagraph_for_document acquires other locks.
