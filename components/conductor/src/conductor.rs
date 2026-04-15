@@ -678,10 +678,20 @@ impl Conductor {
             .collect();
         for (source_url, &sem_id) in url_to_semantic.iter() {
             for (_, target) in store.references(sem_id) {
+                // Direct document reference (resolved thread expression)
                 if let Some(target_url) = root_to_url.get(&target) {
                     edges.push(site_index::Edge {
                         source: site_index::UrlPath::new(source_url),
                         target: site_index::UrlPath::new(target_url.as_str()),
+                    });
+                }
+                // Link element with href matching a known page URL
+                if let Some(href) = node_store_bridge::content_bridge::find_attr_text(&store, target, "href")
+                    && url_to_root.contains_key(&href)
+                {
+                    edges.push(site_index::Edge {
+                        source: site_index::UrlPath::new(source_url),
+                        target: site_index::UrlPath::new(&href),
                     });
                 }
             }
