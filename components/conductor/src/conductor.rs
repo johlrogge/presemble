@@ -403,6 +403,87 @@ impl Conductor {
             .collect()
     }
 
+    /// Build the expression indexes (UrlIndex, StemIndex, EdgeIndex) from the NodeStore.
+    /// This is the NodeStore equivalent of `expressions::build_indexes_from_graph`.
+    fn build_expression_indexes_from_store(
+        &self,
+    ) -> (expressions::UrlIndex, expressions::StemIndex, expressions::EdgeIndex) {
+        // Collect all (stem, url, root) tuples for item documents without holding locks
+        let items: Vec<(String, String, node_store::NodeId)> = {
+            let stem_to_roots = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            stem_to_roots
+                .iter()
+                .flat_map(|(stem_str, roots)| {
+                    roots.iter().filter_map(|&root| {
+                        let page_kind =
+                            node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind");
+                        if page_kind.as_deref() != Some("item") {
+                            return None;
+                        }
+                        let url =
+                            node_store_bridge::content_bridge::find_attr_text(&store, root, "url")?;
+                        Some((stem_str.clone(), url, root))
+                    })
+                    .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+
+        // Materialize DataGraphs — each call acquires its own locks
+        let mut url_index: expressions::UrlIndex = std::collections::HashMap::new();
+        let mut stem_index: expressions::StemIndex = std::collections::HashMap::new();
+        let mut all_edges = Vec::new();
+
+        for (stem_str, url, root) in &items {
+            if let Some(data) = self.datagraph_for_document(*root) {
+                let url_path = site_index::UrlPath::new(url);
+                let schema_stem = site_index::SchemaStem::new(stem_str);
+
+                all_edges.extend(expressions::extract_edges(&url_path, &data));
+                url_index.insert(url_path.clone(), data.clone());
+                stem_index.entry(schema_stem).or_default().push((url_path, data));
+            }
+        }
+
+        let edge_index = expressions::build_edge_index(&all_edges);
+        (url_index, stem_index, edge_index)
+    }
+
+    /// Inject collection data from the NodeStore into a page's DataGraph.
+    /// NodeStore equivalent of `expressions::inject_collections`.
+    fn inject_collections_from_store(&self, page_data: &mut template::DataGraph) {
+        let stems: Vec<String> = {
+            let mut v: Vec<String> = self
+                .stem_to_roots
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .cloned()
+                .collect();
+            v.sort();
+            v
+        };
+
+        for stem in stems {
+            // Skip if page already has a value for this stem
+            if page_data.resolve(&[stem.as_str()]).is_some() {
+                continue;
+            }
+
+            // Collect all item DataGraphs for this stem
+            let items: Vec<template::Value> = self
+                .query_items_from_store(&stem)
+                .into_iter()
+                .map(|(_, data)| template::Value::Record(data))
+                .collect();
+
+            if !items.is_empty() {
+                page_data.insert(stem.as_str(), template::Value::List(items));
+            }
+        }
+    }
+
     /// Refresh the schema cache by re-scanning the filesystem.
     /// Called after scaffolding or when schema files change on disk.
     fn refresh_schema_cache(&self) {
@@ -624,10 +705,9 @@ impl Conductor {
             template::synthesize_link(&title, &url_path),
         ));
 
-        // Resolve link expressions using the current site graph as index
+        // Resolve link expressions using the NodeStore as index
         {
-            let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-            let (url_index, stem_index, edge_index) = expressions::build_indexes_from_graph(&site_graph);
+            let (url_index, stem_index, edge_index) = self.build_expression_indexes_from_store();
             let current_url = site_index::UrlPath::new(&url_path);
             expressions::resolve_link_expressions_in_graph(
                 &mut graph,
@@ -641,10 +721,7 @@ impl Conductor {
         }
 
         // Inject collection data so templates can iterate (e.g. data-each="input.post")
-        {
-            let site_graph = self.site_graph.read().unwrap_or_else(|e| e.into_inner());
-            expressions::inject_collections(&mut graph, &site_graph);
-        }
+        self.inject_collections_from_store(&mut graph);
 
         // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
         let fresh_repo = site_repository::SiteRepository::builder()
