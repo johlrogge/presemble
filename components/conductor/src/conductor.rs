@@ -126,6 +126,7 @@ impl Conductor {
     /// Walks schemas, content, and templates, converting them to nodes/edges.
     fn populate_node_store(&self) {
         let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+        store.clear();
 
         // Parse and store all schemas
         let schema_cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
@@ -152,7 +153,16 @@ impl Conductor {
                     if let Some(grammar) = grammar
                         && let Ok(doc) = content::parse_and_assign(&src, grammar)
                     {
-                        node_store_bridge::content_bridge::document_to_store(&doc, &mut store);
+                        let slug_str = slug.as_str();
+                        let url = format!("/{stem_str}/{slug_str}");
+                        let file = format!("content/{stem_str}/{slug_str}.md");
+                        let meta = node_store_bridge::content_bridge::DocumentMeta {
+                            url,
+                            stem: stem_str.to_string(),
+                            file,
+                            page_kind: "item".to_string(),
+                        };
+                        node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
                     }
                 }
             }
@@ -166,7 +176,15 @@ impl Conductor {
                 if let Some(grammar) = grammar
                     && let Ok(doc) = content::parse_and_assign(&src, grammar)
                 {
-                    node_store_bridge::content_bridge::document_to_store(&doc, &mut store);
+                    let url = format!("/{stem_str}/");
+                    let file = format!("content/{stem_str}/index.md");
+                    let meta = node_store_bridge::content_bridge::DocumentMeta {
+                        url,
+                        stem: stem_str.to_string(),
+                        file,
+                        page_kind: "collection".to_string(),
+                    };
+                    node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
                 }
             }
         }
@@ -883,6 +901,7 @@ impl Conductor {
                 if let Err(e) = self.build_full_graph() {
                     eprintln!("conductor: full graph rebuild failed: {e}");
                 }
+                self.populate_node_store();
 
                 // 5. Classify changed files and determine which pages to rebuild
                 let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());

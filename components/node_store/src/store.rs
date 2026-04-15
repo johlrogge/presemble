@@ -250,6 +250,15 @@ impl NodeStore {
         self.edges_to.entry(child).or_default().push_back(rev);
     }
 
+    /// Clear all nodes and edges, resetting the ID counter.
+    /// Preserves the name interner (interned names survive across rebuilds).
+    pub fn clear(&mut self) {
+        self.nodes = HashMap::new();
+        self.edges_from = HashMap::new();
+        self.edges_to = HashMap::new();
+        self.next_id = 0;
+    }
+
     // --- Stats ---
 
     pub fn node_count(&self) -> usize {
@@ -445,6 +454,24 @@ mod tests {
         store.insert_child_at(parent, 1, b);
 
         assert_eq!(store.children(parent), vec![a, b, c]);
+    }
+
+    #[test]
+    fn clear_preserves_interner() {
+        let mut store = NodeStore::new();
+        let name = store.intern("heading");
+        let _id = store.add_node(Node::Element(name));
+        assert_eq!(store.node_count(), 1);
+
+        store.clear();
+
+        assert_eq!(store.node_count(), 0);
+        assert_eq!(store.edge_count(), 0);
+        // Name is still valid
+        assert_eq!(store.resolve_name(name), "heading");
+        // New intern of same string returns same Name
+        let name2 = store.intern("heading");
+        assert_eq!(name, name2);
     }
 
     #[test]

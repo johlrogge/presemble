@@ -255,7 +255,7 @@ fn round_trip_content(
     let preamble_slots = doc.preamble.len();
     let body_elements = doc.body.len();
 
-    let root = document_to_store(&doc, store);
+    let root = document_to_store(&doc, store, None);
     let reconstructed = store_to_document(store, root);
 
     // Re-serialize both and compare text

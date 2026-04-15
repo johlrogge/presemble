@@ -4,6 +4,15 @@ use content::{
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
 
+/// Metadata about a document's site-level identity.
+/// Attached as Attribute edges on the document root node.
+pub struct DocumentMeta {
+    pub url: String,
+    pub stem: String,
+    pub file: String,
+    pub page_kind: String, // "item" or "collection"
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn find_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -> Option<String> {
@@ -270,11 +279,18 @@ fn link_op_to_store(op: &LinkOp, store: &mut NodeStore, parent: NodeId) {
 // ── document_to_store ─────────────────────────────────────────────────────────
 
 /// Convert a [`Document`] into the node store, returning the root node ID.
-pub fn document_to_store(doc: &Document, store: &mut NodeStore) -> NodeId {
+pub fn document_to_store(doc: &Document, store: &mut NodeStore, meta: Option<&DocumentMeta>) -> NodeId {
     let doc_name = store.intern("document");
     let root = store.add_node(Node::Element(doc_name));
 
     add_bool_attr(store, root, "has-separator", doc.has_separator);
+
+    if let Some(meta) = meta {
+        add_text_attr(store, root, "url", &meta.url);
+        add_text_attr(store, root, "stem", &meta.stem);
+        add_text_attr(store, root, "file", &meta.file);
+        add_text_attr(store, root, "page-kind", &meta.page_kind);
+    }
 
     // preamble
     let preamble_node = add_child_element(store, root, "preamble");
@@ -539,7 +555,7 @@ mod tests {
 
     fn round_trip(doc: &Document) -> Document {
         let mut store = NodeStore::new();
-        let root = document_to_store(doc, &mut store);
+        let root = document_to_store(doc, &mut store, None);
         store_to_document(&store, root)
     }
 
@@ -769,6 +785,35 @@ mod tests {
 
         let recovered = round_trip(&doc);
         assert!(!recovered.has_separator);
+        compare_documents(&doc, &recovered);
+    }
+
+    #[test]
+    fn document_meta_attributes() {
+        let doc = Document {
+            preamble: im::vector![],
+            body: im::vector![zero_spanned(ContentElement::Paragraph {
+                text: "Hello".to_string(),
+            })],
+            has_separator: false,
+            separator_span: None,
+        };
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/hello".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/hello.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let root = document_to_store(&doc, &mut store, Some(&meta));
+
+        assert_eq!(find_attr_text(&store, root, "url"), Some("/post/hello".to_string()));
+        assert_eq!(find_attr_text(&store, root, "stem"), Some("post".to_string()));
+        assert_eq!(find_attr_text(&store, root, "file"), Some("content/post/hello.md".to_string()));
+        assert_eq!(find_attr_text(&store, root, "page-kind"), Some("item".to_string()));
+
+        // Round-trip still works (meta attrs are ignored during reconstruction)
+        let recovered = store_to_document(&store, root);
         compare_documents(&doc, &recovered);
     }
 }
