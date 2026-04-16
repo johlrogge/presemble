@@ -2390,14 +2390,35 @@ mod tests {
         fn with_binding(&self, _key: String, _value: Value) -> Box<dyn GraphView> {
             Box::new(DataGraph::new())
         }
+        fn with_node_binding(&self, key: String, id: node_store::NodeId, _store: &node_store::NodeStore) -> Option<Box<dyn GraphView + '_>> {
+            // Create a new NodeStoreGraphView with the bound root
+            // For data-each: the bound item becomes the new root, accessible under `key`
+            // We need a multi-root view but can't import node_store_bridge here.
+            // Simple approach: create a view where resolve_node checks the binding first.
+            Some(Box::new(BoundNodeStoreGraphView {
+                store: &self.store,
+                parent_root: self.root,
+                bound_key: key,
+                bound_root: id,
+            }))
+        }
         fn resolve_node(&self, path: &[&str]) -> Option<crate::graph_view::ResolvedNode<'_>> {
-            // Walk ConsistsOf and Attribute edges for each segment
+            // Walk ConsistsOf, Reference, and Attribute edges for each segment
             let mut current = self.root;
             for (i, segment) in path.iter().enumerate() {
                 let is_last = i == path.len() - 1;
                 // ConsistsOf
                 let parts = self.store.consists_of(current);
                 if let Some((_, id)) = parts.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                    if is_last {
+                        return Some(crate::graph_view::ResolvedNode { id: *id, store: &self.store });
+                    }
+                    current = *id;
+                    continue;
+                }
+                // Reference edges
+                let refs = self.store.references(current);
+                if let Some((_, id)) = refs.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
                     if is_last {
                         return Some(crate::graph_view::ResolvedNode { id: *id, store: &self.store });
                     }
@@ -2416,6 +2437,75 @@ mod tests {
                 return None;
             }
             None
+        }
+    }
+
+    /// A GraphView with one bound key + parent root, for testing data-each iteration.
+    struct BoundNodeStoreGraphView<'a> {
+        store: &'a node_store::NodeStore,
+        parent_root: node_store::NodeId,
+        bound_key: String,
+        bound_root: node_store::NodeId,
+    }
+
+    impl<'a> GraphView for BoundNodeStoreGraphView<'a> {
+        fn resolve(&self, _path: &[&str]) -> Option<crate::graph_view::DataRef<'_>> {
+            None
+        }
+        fn iter_keys(&self) -> Vec<String> {
+            vec![self.bound_key.clone()]
+        }
+        fn clone_scoped(&self, _path: &[&str]) -> Option<Box<dyn GraphView + '_>> {
+            None
+        }
+        fn with_binding(&self, _key: String, _value: Value) -> Box<dyn GraphView> {
+            Box::new(DataGraph::new())
+        }
+        fn with_node_binding(&self, key: String, id: node_store::NodeId, _store: &node_store::NodeStore) -> Option<Box<dyn GraphView + '_>> {
+            Some(Box::new(BoundNodeStoreGraphView {
+                store: self.store,
+                parent_root: self.parent_root,
+                bound_key: key,
+                bound_root: id,
+            }))
+        }
+        fn resolve_node(&self, path: &[&str]) -> Option<crate::graph_view::ResolvedNode<'_>> {
+            match path {
+                [] => None,
+                [first, rest @ ..] if *first == self.bound_key => {
+                    // Resolve against the bound root
+                    let mut current = self.bound_root;
+                    for (i, segment) in rest.iter().enumerate() {
+                        let is_last = i == rest.len() - 1;
+                        let parts = self.store.consists_of(current);
+                        if let Some((_, id)) = parts.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                            if is_last { return Some(crate::graph_view::ResolvedNode { id: *id, store: self.store }); }
+                            current = *id;
+                            continue;
+                        }
+                        let refs = self.store.references(current);
+                        if let Some((_, id)) = refs.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                            if is_last { return Some(crate::graph_view::ResolvedNode { id: *id, store: self.store }); }
+                            current = *id;
+                            continue;
+                        }
+                        return None;
+                    }
+                    if rest.is_empty() {
+                        Some(crate::graph_view::ResolvedNode { id: self.bound_root, store: self.store })
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    // Delegate to parent root
+                    let view = NodeStoreGraphView { store: self.store.clone(), root: self.parent_root };
+                    // Can't delegate because NodeStoreGraphView owns the store.
+                    // For tests, just return None for parent lookups.
+                    let _ = view;
+                    None
+                }
+            }
         }
     }
 
@@ -2607,6 +2697,58 @@ mod tests {
         assert!(
             html.contains("Hello body world"),
             "body content should render: got '{html}'"
+        );
+    }
+
+    #[test]
+    fn data_each_over_linked_semantic_roots_renders_fields() {
+        // Simulates: index page has data-each="input.highlight" iterating
+        // over linked feature pages. Each feature has a "title" ConsistsOf
+        // edge pointing to a heading. The template accesses item.title.
+        let mut store = node_store::NodeStore::new();
+
+        // Create two feature page semantic roots
+        let sem_name = store.intern("semantic-content");
+        let heading_name = store.intern("heading");
+        let title_name = store.intern("title");
+
+        let feature1 = store.add_node(node_store::Node::Element(sem_name));
+        let h1 = store.add_node(node_store::Node::Element(heading_name));
+        let t1 = store.add_node(node_store::Node::Text("Feature Alpha".into()));
+        store.add_edge(h1, node_store::Edge::Child(t1));
+        store.add_edge(feature1, node_store::Edge::ConsistsOf { name: title_name, part: h1 });
+
+        let feature2 = store.add_node(node_store::Node::Element(sem_name));
+        let h2 = store.add_node(node_store::Node::Element(heading_name));
+        let t2 = store.add_node(node_store::Node::Text("Feature Beta".into()));
+        store.add_edge(h2, node_store::Edge::Child(t2));
+        store.add_edge(feature2, node_store::Edge::ConsistsOf { name: title_name, part: h2 });
+
+        // Create a collection of these features
+        let collection = store.add_node(node_store::Node::Collection);
+        store.add_edge(collection, node_store::Edge::Child(feature1));
+        store.add_edge(collection, node_store::Edge::Child(feature2));
+
+        // Create the index page semantic root with highlight → collection
+        let index_root = store.add_node(node_store::Node::Element(sem_name));
+        let highlight_name = store.intern("highlight");
+        store.add_edge(index_root, node_store::Edge::ConsistsOf { name: highlight_name, part: collection });
+
+        let graph = NodeStoreGraphView { store, root: index_root };
+
+        let src = r#"<ul><template data-each="highlight"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(
+            html.contains("Feature Alpha"),
+            "first feature title should render: got '{html}'"
+        );
+        assert!(
+            html.contains("Feature Beta"),
+            "second feature title should render: got '{html}'"
         );
     }
 

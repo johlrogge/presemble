@@ -505,50 +505,51 @@ fn is_link_expression(store: &NodeStore, node: NodeId) -> bool {
 /// Resolve a link-expression node and create Reference edges on the semantic content node.
 /// PathRef → direct reference to the target document root.
 /// ThreadExpr → references to all item documents matching the stem.
-fn resolve_link_expression_to_refs(
-    store: &mut NodeStore,
-    sem: NodeId,
+/// Collect resolved link targets from a link-expression node.
+/// Returns NodeIds of the resolved targets (document roots from url_to_root).
+fn collect_link_targets(
+    store: &NodeStore,
     link_expr: NodeId,
-    slot_name: &str,
+    _slot_name: &str,
     stem_to_roots: &std::collections::HashMap<String, Vec<NodeId>>,
     url_to_root: &std::collections::HashMap<String, NodeId>,
-) {
+) -> Vec<NodeId> {
     let target_node = match find_child_by_name(store, link_expr, "link-target") {
         Some(t) => t,
-        None => return,
+        None => return Vec::new(),
     };
     let kind = match find_attr_text(store, target_node, "kind") {
         Some(k) => k,
-        None => return,
+        None => return Vec::new(),
     };
-
-    let ref_name = store.intern(slot_name);
 
     match kind.as_str() {
         "path-ref" => {
-            // Direct URL reference — find the document root for that URL
             if let Some(target_url) = find_attr_text(store, target_node, "value")
                 && let Some(&target_root) = url_to_root.get(&target_url)
             {
-                store.add_edge(sem, Edge::Reference { name: ref_name, target: target_root });
+                vec![target_root]
+            } else {
+                Vec::new()
             }
         }
         "thread-expr" => {
-            // Stem query — reference all item documents for that stem
             if let Some(stem) = find_attr_text(store, target_node, "source")
                 && let Some(roots) = stem_to_roots.get(&stem)
             {
-                for &target_root in roots {
-                    // Only reference item documents (not collections)
-                    if let Some(pk) = find_attr_text(store, target_root, "page-kind")
-                        && pk == "item"
-                    {
-                        store.add_edge(sem, Edge::Reference { name: ref_name, target: target_root });
-                    }
-                }
+                roots
+                    .iter()
+                    .filter(|&&root| {
+                        find_attr_text(store, root, "page-kind")
+                            .is_some_and(|pk| pk == "item")
+                    })
+                    .copied()
+                    .collect()
+            } else {
+                Vec::new()
             }
         }
-        _ => {}
+        _ => Vec::new(),
     }
 }
 
@@ -591,31 +592,46 @@ pub fn create_semantic_content(
                 let children = store.children(slot_id);
 
                 // Check if any child is a link-expression that needs resolving
-                let mut resolved = false;
+                let mut link_targets: Vec<NodeId> = Vec::new();
+                let mut has_link_exprs = false;
                 for &child in &children {
                     if is_link_expression(store, child) {
-                        resolve_link_expression_to_refs(
-                            store, sem, child, &slot_name,
+                        has_link_exprs = true;
+                        let targets = collect_link_targets(
+                            store, child, &slot_name,
                             stem_to_roots, url_to_root,
                         );
-                        resolved = true;
+                        link_targets.extend(targets);
                     }
                 }
 
-                if !resolved {
+                if has_link_exprs {
+                    let ref_name = store.intern(&slot_name);
                     if max == 1 {
-                        if let Some(&first) = children.first() {
-                            let ref_name = store.intern(&slot_name);
-                            store.add_edge(sem, Edge::ConsistsOf { name: ref_name, part: first });
+                        // Single-value link slot → Reference to first target
+                        if let Some(&target) = link_targets.first() {
+                            store.add_edge(sem, Edge::Reference { name: ref_name, target });
                         }
-                    } else if !children.is_empty() {
-                        let list_name = store.intern(&slot_name);
-                        let list_node = store.add_node(Node::Collection);
-                        for &child in &children {
-                            store.add_edge(list_node, Edge::Child(child));
+                    } else if !link_targets.is_empty() {
+                        // Multi-value link slot → Collection of Reference targets
+                        let collection = store.add_node(Node::Collection);
+                        for target in &link_targets {
+                            store.add_edge(collection, Edge::Child(*target));
                         }
-                        store.add_edge(sem, Edge::ConsistsOf { name: list_name, part: list_node });
+                        store.add_edge(sem, Edge::ConsistsOf { name: ref_name, part: collection });
                     }
+                } else if max == 1 {
+                    if let Some(&first) = children.first() {
+                        let ref_name = store.intern(&slot_name);
+                        store.add_edge(sem, Edge::ConsistsOf { name: ref_name, part: first });
+                    }
+                } else if !children.is_empty() {
+                    let list_name = store.intern(&slot_name);
+                    let list_node = store.add_node(Node::Collection);
+                    for &child in &children {
+                        store.add_edge(list_node, Edge::Child(child));
+                    }
+                    store.add_edge(sem, Edge::ConsistsOf { name: list_name, part: list_node });
                 }
         }
     }
@@ -679,9 +695,23 @@ pub fn rewire_doc_refs_to_semantic(
         })
         .collect();
 
-    // For each semantic root, replace Reference targets that are doc roots
+    // For each semantic root, replace Reference targets and Collection
+    // children that point to doc roots with semantic roots.
     let sem_ids: Vec<NodeId> = url_to_semantic.values().copied().collect();
     for sem_id in sem_ids {
+        // Rewire Collection children (from ConsistsOf edges)
+        for (_, part_id) in store.consists_of(sem_id) {
+            if matches!(store.get(part_id), Some(Node::Collection)) {
+                let children = store.children(part_id);
+                for old_child in children {
+                    if let Some(&new_child) = root_to_semantic.get(&old_child) {
+                        store.replace_child_target(part_id, old_child, new_child);
+                    }
+                }
+            }
+        }
+
+        // Rewire Reference edge targets
         let refs = store.references(sem_id);
         let targets_to_replace: Vec<NodeId> = refs
             .iter()
