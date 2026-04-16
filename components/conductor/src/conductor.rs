@@ -363,6 +363,25 @@ impl Conductor {
                 store.add_edge(root, node_store::Edge::Child(body));
                 url_index.insert("/".to_string(), root);
                 stem_index.entry(String::new()).or_default().push(root);
+
+                // Create semantic content for this synthetic collection page.
+                // Phase C needs all renderable pages in url_to_semantic.
+                let sem_name = store.intern("semantic-content");
+                let sem = store.add_node(node_store::Node::Element(sem_name));
+
+                let stem_attr_name = store.intern("stem");
+                let stem_attr_val = store.add_node(node_store::Node::Text(String::new()));
+                store.add_edge(sem, node_store::Edge::Attribute { name: stem_attr_name, value: stem_attr_val });
+
+                let pk_attr_name = store.intern("page-kind");
+                let pk_attr_val = store.add_node(node_store::Node::Text("collection".to_string()));
+                store.add_edge(sem, node_store::Edge::Attribute { name: pk_attr_name, value: pk_attr_val });
+
+                let url_attr_name = store.intern("url");
+                let url_attr_val = store.add_node(node_store::Node::Text("/".to_string()));
+                store.add_edge(sem, node_store::Edge::Attribute { name: url_attr_name, value: url_attr_val });
+
+                semantic_index.insert("/".to_string(), sem);
             }
         }
 
@@ -777,6 +796,7 @@ impl Conductor {
         }
 
         // Phase 2f: Apply templates and write output (one pass).
+        // Uses NodeStoreView via PrefixedGraphView — no DataGraph materialization.
         let fresh_repo = site_repository::SiteRepository::builder()
             .from_dir(&self.site_dir)
             .build();
@@ -786,24 +806,33 @@ impl Conductor {
         let mut failed_pages = Vec::new();
         let mut errors: HashMap<String, Vec<String>> = HashMap::new();
 
-        for (url, data) in &page_data {
-            // Determine stem and slug from the data
-            let stem = match data.resolve(&["_presemble_stem"]) {
-                Some(template::Value::Text(s)) => s.clone(),
-                _ => continue,
-            };
-            let slug = if url.ends_with('/') && url != "/" {
-                // Collection page URL like /post/
+        // Iterate over semantic content roots instead of DataGraphs.
+        let semantic_pairs: Vec<(String, node_store::NodeId)> = {
+            let url_to_semantic = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
+            url_to_semantic.iter().map(|(url, &sem)| (url.clone(), sem)).collect()
+        };
+
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+
+        for (url, sem_root) in &semantic_pairs {
+            // Read stem from semantic content attributes
+            let stem = node_store_bridge::content_bridge::find_attr_text(&store, *sem_root, "stem")
+                .unwrap_or_default();
+            if stem.is_empty() && url != "/" {
+                continue;
+            }
+
+            let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, *sem_root, "page-kind");
+
+            let slug = if url.ends_with('/') || url == "/" {
                 "index"
             } else {
-                url.rsplit('/').next().unwrap_or("unknown")
+                url.rsplit('/').next().unwrap_or("index")
             };
-            // For root collection /, the url is something like "/index" or just "" — normalize
-            let slug = if slug.is_empty() { "index" } else { slug };
 
             // Find template
             let stem_obj = site_index::SchemaStem::new(&stem);
-            let template_result = if slug == "index" {
+            let template_result = if slug == "index" || page_kind.as_deref() == Some("collection") {
                 fresh_repo.collection_template_source(&stem_obj)
                     .or_else(|| fresh_repo.item_template_source(&stem_obj))
                     .or_else(|| fresh_repo.partial_template_source(&stem))
@@ -815,6 +844,9 @@ impl Conductor {
             let (tmpl_src, is_hiccup) = match template_result {
                 Some(t) => t,
                 None => {
+                    if stem.is_empty() {
+                        continue;
+                    }
                     failed_pages.push(url.clone());
                     errors.entry(url.clone()).or_default().push(format!("no template for {stem}"));
                     continue;
@@ -844,11 +876,11 @@ impl Conductor {
             let (nodes, local_defs) = template::extract_definitions(raw_nodes);
             let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
-            // Wrap under "input" key (templates expect input.field paths)
-            let mut context = template::DataGraph::new();
-            context.insert("input", template::Value::Record(data.clone()));
+            // Use PrefixedGraphView — templates access data via input.field paths
+            let view = node_store_bridge::NodeStoreView::new(&store, *sem_root);
+            let prefixed = node_store_bridge::PrefixedGraphView::new("input".to_string(), view);
 
-            match template::transform(nodes, &context, &ctx) {
+            match template::transform(nodes, &prefixed, &ctx) {
                 Ok(transformed) => {
                     let html = template::serialize_nodes(&transformed);
                     let output_path =
@@ -869,6 +901,7 @@ impl Conductor {
             }
         }
 
+        drop(store);
         (rebuilt_pages, failed_pages, errors)
     }
 

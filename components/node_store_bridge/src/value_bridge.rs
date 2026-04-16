@@ -28,7 +28,28 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                     .collect();
                 template::Value::List(items)
             }
-            Node::Element(_name) => {
+            Node::Element(name) => {
+                // Content elements (heading, paragraph) → extract text content as Value::Text.
+                // Templates access preamble text fields directly (e.g., input.title → "My Title"),
+                // not as Records. This matches what build_article_graph does for the DataGraph pipeline.
+                let element_name = store.resolve_name(*name);
+                match element_name {
+                    "heading" | "paragraph" => {
+                        let text = store.children(id).into_iter().find_map(|c| {
+                            if let Some(Node::Text(s)) = store.get(c) {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(t) = text {
+                            return template::Value::Text(t);
+                        }
+                        // No text child — fall through to Record
+                    }
+                    _ => {}
+                }
+
                 // Element → Value::Record with named attributes as fields
                 let mut graph = template::DataGraph::new();
                 // Attributes: follow recursively (always leaf values)
@@ -276,6 +297,41 @@ mod tests {
         } else {
             panic!("expected List from Collection");
         }
+    }
+
+    #[test]
+    fn heading_element_with_text_child_returns_text_value() {
+        let mut store = NodeStore::new();
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(Node::Element(heading_name));
+        let text_node = store.add_node(Node::Text("My Title".to_string()));
+        store.add_edge(heading, Edge::Child(text_node));
+
+        let val = node_to_value(&store, heading);
+        assert!(matches!(val, template::Value::Text(s) if s == "My Title"));
+    }
+
+    #[test]
+    fn paragraph_element_with_text_child_returns_text_value() {
+        let mut store = NodeStore::new();
+        let para_name = store.intern("paragraph");
+        let para = store.add_node(Node::Element(para_name));
+        let text_node = store.add_node(Node::Text("Body text.".to_string()));
+        store.add_edge(para, Edge::Child(text_node));
+
+        let val = node_to_value(&store, para);
+        assert!(matches!(val, template::Value::Text(s) if s == "Body text."));
+    }
+
+    #[test]
+    fn heading_element_without_text_child_returns_record() {
+        let mut store = NodeStore::new();
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(Node::Element(heading_name));
+        // No text child — should fall through to Record
+
+        let val = node_to_value(&store, heading);
+        assert!(matches!(val, template::Value::Record(_)));
     }
 
     #[test]
