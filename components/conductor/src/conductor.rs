@@ -645,6 +645,49 @@ impl Conductor {
     ///
     /// Returns `(rebuilt_pages, failed_pages, errors)`.
     pub fn build_all_pages(&self) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
+        // === NodeStore-native pipeline (Phase B) ===
+        // Run NodeStore operations first to enrich the store.
+        // The legacy DataGraph pipeline below still runs for rendering.
+        // TODO: Phase C — use NodeStoreView for rendering, remove DataGraph pipeline.
+        {
+            let semantic_pairs: Vec<(String, node_store::NodeId)> = {
+                let url_to_semantic =
+                    self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
+                url_to_semantic.iter().map(|(url, &sem)| (url.clone(), sem)).collect()
+            };
+
+            if !semantic_pairs.is_empty() {
+                let (node_url_index, node_stem_index) = {
+                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                    node_store_bridge::store_pipeline::build_indexes_from_store(
+                        &store,
+                        &semantic_pairs,
+                    )
+                };
+
+                let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+                for (_url, sem_root) in &semantic_pairs {
+                    node_store_bridge::store_pipeline::resolve_link_expressions_in_store(
+                        &mut store,
+                        *sem_root,
+                        &node_url_index,
+                        &node_stem_index,
+                    );
+                    node_store_bridge::store_pipeline::resolve_cross_references_in_store(
+                        &mut store,
+                        *sem_root,
+                        &node_url_index,
+                    );
+                }
+                node_store_bridge::store_pipeline::inject_collections_in_store(
+                    &mut store,
+                    &semantic_pairs,
+                    &node_stem_index,
+                );
+            }
+        }
+        // === End NodeStore-native pipeline ===
+
         // Phase 2a: Materialize DataGraphs for all documents.
         // Collect url+root pairs first to avoid holding url_to_root read lock
         // while datagraph_for_document acquires other locks.
