@@ -95,6 +95,34 @@ impl NodeStore {
         self.edges_from.entry(from).or_default().push_back(edge);
     }
 
+    /// Replace all Reference edge targets matching `old_target` with `new_target`
+    /// on edges FROM the given node.
+    pub fn replace_reference_target(&mut self, from: NodeId, old_target: NodeId, new_target: NodeId) {
+        if let Some(edges) = self.edges_from.get_mut(&from) {
+            let mut new_edges = Vector::new();
+            for edge in edges.iter() {
+                match edge {
+                    Edge::Reference { name, target } if *target == old_target => {
+                        // Remove old reverse index entry
+                        if let Some(rev_edges) = self.edges_to.get_mut(&old_target) {
+                            *rev_edges = rev_edges.iter()
+                                .filter(|r| !(r.source == from && matches!(&r.edge, Edge::Reference { target: t, .. } if *t == old_target)))
+                                .cloned()
+                                .collect();
+                        }
+                        // Add new edge
+                        let new_edge = Edge::Reference { name: *name, target: new_target };
+                        let rev = ReverseEdge { source: from, edge: new_edge.clone() };
+                        self.edges_to.entry(new_target).or_default().push_back(rev);
+                        new_edges.push_back(new_edge);
+                    }
+                    other => new_edges.push_back(other.clone()),
+                }
+            }
+            *edges = new_edges;
+        }
+    }
+
     // --- Traversal helpers ---
 
     /// Ordered child nodes (Child edges only).

@@ -284,8 +284,7 @@ impl Conductor {
             }
         }
 
-        // Pass 2: Create semantic content with resolved link expressions.
-        // Now all documents are indexed, so link expressions can resolve.
+        // Pass 2: Create semantic content (structural fields only, no cross-doc links).
         for entry in &doc_entries {
             if let Some(grammar) = grammars.get(&entry.grammar_key)
                 .or_else(|| grammars.get(&entry.meta.stem))
@@ -297,6 +296,16 @@ impl Conductor {
                 semantic_index.insert(entry.url.clone(), sem);
             }
         }
+
+        // Pass 3: Rewire cross-document Reference edges to point at semantic
+        // roots instead of document roots. Templates access `item.title` etc.
+        // which only exist on semantic content (ConsistsOf edges), not on raw
+        // document roots.
+        node_store_bridge::content_bridge::rewire_doc_refs_to_semantic(
+            &mut store,
+            &semantic_index,
+            &url_index,
+        );
 
         // Parse and store all templates
         for stem in repo.schema_stems() {

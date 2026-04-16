@@ -660,6 +660,47 @@ pub fn create_semantic_content(
     sem
 }
 
+/// Rewire cross-document Reference edges from document roots to semantic roots.
+///
+/// After Pass 2, path-ref link expressions point at document roots (because
+/// semantic roots didn't exist yet when the link was resolved). This function
+/// replaces those targets with the corresponding semantic roots, so templates
+/// can access named fields (title, summary, etc.) on referenced pages.
+pub fn rewire_doc_refs_to_semantic(
+    store: &mut NodeStore,
+    url_to_semantic: &std::collections::HashMap<String, NodeId>,
+    url_to_root: &std::collections::HashMap<String, NodeId>,
+) {
+    // Build doc_root → semantic_root mapping
+    let root_to_semantic: std::collections::HashMap<NodeId, NodeId> = url_to_root
+        .iter()
+        .filter_map(|(url, &doc_root)| {
+            url_to_semantic.get(url).map(|&sem| (doc_root, sem))
+        })
+        .collect();
+
+    // For each semantic root, replace Reference targets that are doc roots
+    let sem_ids: Vec<NodeId> = url_to_semantic.values().copied().collect();
+    for sem_id in sem_ids {
+        let refs = store.references(sem_id);
+        let targets_to_replace: Vec<NodeId> = refs
+            .iter()
+            .filter_map(|(_, target)| {
+                if root_to_semantic.contains_key(target) {
+                    Some(*target)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for old_target in targets_to_replace {
+            if let Some(&new_target) = root_to_semantic.get(&old_target) {
+                store.replace_reference_target(sem_id, old_target, new_target);
+            }
+        }
+    }
+}
+
 // ── store_to_document ─────────────────────────────────────────────────────────
 
 fn zero_span() -> Span {
