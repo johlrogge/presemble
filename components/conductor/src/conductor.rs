@@ -992,11 +992,14 @@ impl Conductor {
 
         let mut edges = Vec::new();
 
-        // Source 1: Semantic content Reference edges (resolved link expressions)
+        // Source 1: Semantic content edges (Reference + ConsistsOf)
+        // Reference edges are cross-document links (resolved path-ref, thread-expr).
+        // ConsistsOf edges are structural parts (synthesized link records with href).
         let root_to_url: HashMap<node_store::NodeId, &String> = url_to_root.iter()
             .map(|(url, &root)| (root, url))
             .collect();
         for (source_url, &sem_id) in url_to_semantic.iter() {
+            // Check Reference edges (cross-document links)
             for (_, target) in store.references(sem_id) {
                 // Direct document reference (resolved thread expression)
                 if let Some(target_url) = root_to_url.get(&target) {
@@ -1007,6 +1010,17 @@ impl Conductor {
                 }
                 // Link element with href matching a known page URL
                 if let Some(href) = node_store_bridge::content_bridge::find_attr_text(&store, target, "href")
+                    && url_to_root.contains_key(&href)
+                {
+                    edges.push(site_index::Edge {
+                        source: site_index::UrlPath::new(source_url),
+                        target: site_index::UrlPath::new(&href),
+                    });
+                }
+            }
+            // Check ConsistsOf edges (structural parts with href, e.g. synthesized link)
+            for (_, part) in store.consists_of(sem_id) {
+                if let Some(href) = node_store_bridge::content_bridge::find_attr_text(&store, part, "href")
                     && url_to_root.contains_key(&href)
                 {
                     edges.push(site_index::Edge {
