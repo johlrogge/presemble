@@ -94,5 +94,52 @@ fn bench_link_expressions(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_full_build, bench_cross_links, bench_link_expressions);
+/// Benchmark repeated calls to `build_for_serve` on the same site directory.
+///
+/// Each iteration creates a fresh `Conductor` (clean build). This is distinct
+/// from a true incremental rebuild where the `Conductor` persists across file
+/// changes. The idempotency fix in `inject_collections_in_store` ensures that
+/// the second `build_all_pages` call inside `build_via_conductor` does not
+/// create orphaned Collection nodes, keeping repeated clean builds accurate.
+///
+/// A true rebuild benchmark (reusing a single `Conductor` across iterations)
+/// would require `conductor::Conductor` to be a dev-dependency of this crate.
+/// That is tracked as future work once the serve-loop rebuild path is stable.
+fn bench_rebuild(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rebuild");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+
+    for &pages in &[10, 100, 1000] {
+        let config = site_gen::BenchSiteConfig {
+            pages,
+            schemas: 3,
+            links_per_page: 3,
+            link_expressions: 0,
+            body_bytes: 2000,
+        };
+        let dir = site_gen::generate_site(&config);
+
+        group.bench_with_input(
+            BenchmarkId::new("pages", pages),
+            &dir,
+            |b, dir| {
+                // Warm up: one clean build to ensure the site is valid.
+                publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
+                    .expect("warm-up build should succeed");
+
+                // Each iteration is a fresh Conductor (clean build).
+                // This measures build_all_pages cost after inject_collections
+                // has already been applied once — idempotency keeps it stable.
+                b.iter(|| {
+                    publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
+                        .expect("rebuild should succeed")
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_full_build, bench_cross_links, bench_link_expressions, bench_rebuild);
 criterion_main!(benches);

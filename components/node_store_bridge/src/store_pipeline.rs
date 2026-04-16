@@ -127,6 +127,9 @@ fn resolve_element_cross_refs(
 /// Child edges to each item's semantic root. Each page gets a Reference
 /// edge to the collection under the stem name, unless that reference already exists.
 ///
+/// Idempotent: if all stems already have Reference edges on the first root,
+/// the function returns early without creating any new nodes or edges.
+///
 /// Performance: O(pages × stems) with O(1) per-lookup via interned Names.
 /// Previously O(pages × stems × edges_per_page) due to string allocation and
 /// linear Vec search on every iteration.
@@ -135,24 +138,51 @@ pub fn inject_collections_in_store(
     all_roots: &[(String, NodeId)],
     stem_index: &NodeStemIndex,
 ) {
-    // Build one collection node per stem.
-    let mut stem_collections: HashMap<String, NodeId> = HashMap::new();
-
-    for (stem, items) in stem_index {
-        let collection_id = store.add_node(Node::Collection);
-        for (_url, item_root) in items {
-            store.add_edge(collection_id, Edge::Child(*item_root));
-        }
-        stem_collections.insert(stem.clone(), collection_id);
-    }
-
-    // Pre-intern all stem names once — avoids repeated interning per page.
-    let interned_stems: HashMap<&str, node_store::Name> = stem_collections
+    // Pre-intern all stem names.
+    let interned_stems: HashMap<&str, node_store::Name> = stem_index
         .keys()
         .map(|s| (s.as_str(), store.intern(s)))
         .collect();
 
-    // Wire each page's semantic root to every collection.
+    // Determine which stems still need injection by checking the first root.
+    // If a Reference edge for a stem already exists on the first root, it was
+    // wired in a previous call and we skip that stem entirely — no new Collection
+    // node is created for it.
+    let needs_injection: Vec<&str> = if let Some((_, first_root)) = all_roots.first() {
+        let existing: std::collections::HashSet<node_store::Name> = store
+            .references(*first_root)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        stem_index
+            .keys()
+            .filter(|stem| {
+                let name = interned_stems[stem.as_str()];
+                !existing.contains(&name)
+            })
+            .map(|s| s.as_str())
+            .collect()
+    } else {
+        return; // no pages to inject into
+    };
+
+    if needs_injection.is_empty() {
+        return; // all stems already injected — idempotent early exit
+    }
+
+    // Build collection nodes only for stems that need injection.
+    let mut stem_collections: HashMap<&str, NodeId> = HashMap::new();
+    for stem in &needs_injection {
+        if let Some(items) = stem_index.get(*stem) {
+            let collection_id = store.add_node(Node::Collection);
+            for (_url, item_root) in items {
+                store.add_edge(collection_id, Edge::Child(*item_root));
+            }
+            stem_collections.insert(stem, collection_id);
+        }
+    }
+
+    // Wire each page's semantic root to the new collections.
     // Use a HashSet<Name> for O(1) duplicate check instead of Vec<String> with linear search.
     for (_url, sem_root) in all_roots {
         let existing: std::collections::HashSet<node_store::Name> = store
@@ -162,7 +192,7 @@ pub fn inject_collections_in_store(
             .collect();
 
         for (stem, &collection_id) in &stem_collections {
-            let name = interned_stems[stem.as_str()];
+            let name = interned_stems[stem];
             if !existing.contains(&name) {
                 store.add_edge(*sem_root, Edge::Reference { name, target: collection_id });
             }
@@ -330,6 +360,43 @@ mod tests {
             .collect();
         assert_eq!(post_refs.len(), 1, "exactly one 'post' reference should exist");
         assert_eq!(post_refs[0].1, dummy, "existing reference must not be replaced");
+    }
+
+    #[test]
+    fn inject_collections_is_idempotent() {
+        let (mut store, sem1, sem2) = build_test_store();
+        let roots = vec![
+            ("/post/one".to_string(), sem1),
+            ("/post/two".to_string(), sem2),
+        ];
+        let (_, stem_idx) = build_indexes_from_store(&store, &roots);
+
+        inject_collections_in_store(&mut store, &roots, &stem_idx);
+        let node_count_after_first = store.node_count();
+        let edge_count_after_first = store.edge_count();
+
+        // Second call must not add any new nodes or edges.
+        inject_collections_in_store(&mut store, &roots, &stem_idx);
+        assert_eq!(
+            store.node_count(),
+            node_count_after_first,
+            "second inject_collections_in_store call must not add new Collection nodes"
+        );
+        assert_eq!(
+            store.edge_count(),
+            edge_count_after_first,
+            "second inject_collections_in_store call must not add new edges"
+        );
+
+        // Both roots should still have exactly one 'post' reference.
+        for &sem_root in &[sem1, sem2] {
+            let post_ref_count = store
+                .references(sem_root)
+                .iter()
+                .filter(|(name, _)| store.resolve_name(*name) == "post")
+                .count();
+            assert_eq!(post_ref_count, 1, "each root should have exactly one 'post' reference after idempotent calls");
+        }
     }
 
     #[test]
