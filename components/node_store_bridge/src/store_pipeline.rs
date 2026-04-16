@@ -126,6 +126,10 @@ fn resolve_element_cross_refs(
 /// For each stem in the stem_index, creates a Collection node and wires
 /// Child edges to each item's semantic root. Each page gets a Reference
 /// edge to the collection under the stem name, unless that reference already exists.
+///
+/// Performance: O(pages × stems) with O(1) per-lookup via interned Names.
+/// Previously O(pages × stems × edges_per_page) due to string allocation and
+/// linear Vec search on every iteration.
 pub fn inject_collections_in_store(
     store: &mut NodeStore,
     all_roots: &[(String, NodeId)],
@@ -142,17 +146,24 @@ pub fn inject_collections_in_store(
         stem_collections.insert(stem.clone(), collection_id);
     }
 
+    // Pre-intern all stem names once — avoids repeated interning per page.
+    let interned_stems: HashMap<&str, node_store::Name> = stem_collections
+        .keys()
+        .map(|s| (s.as_str(), store.intern(s)))
+        .collect();
+
     // Wire each page's semantic root to every collection.
+    // Use a HashSet<Name> for O(1) duplicate check instead of Vec<String> with linear search.
     for (_url, sem_root) in all_roots {
-        let existing_names: Vec<String> = store
+        let existing: std::collections::HashSet<node_store::Name> = store
             .references(*sem_root)
             .iter()
-            .map(|(name, _)| store.resolve_name(*name).to_string())
+            .map(|(name, _)| *name)
             .collect();
 
         for (stem, &collection_id) in &stem_collections {
-            if !existing_names.contains(stem) {
-                let name = store.intern(stem);
+            let name = interned_stems[stem.as_str()];
+            if !existing.contains(&name) {
                 store.add_edge(*sem_root, Edge::Reference { name, target: collection_id });
             }
         }
