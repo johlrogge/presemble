@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use rayon::prelude::*;
+
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, Response};
 
 /// The result of handling a command: a response to send back, plus
@@ -84,6 +86,9 @@ fn find_document_title(store: &node_store::NodeStore, doc_root: node_store::Node
     }
     None
 }
+
+/// Result of rendering a single page: URL and outcome (success or error details).
+type PageRenderResult = (String, Result<(), (String, Vec<String>)>);
 
 /// Recursively walk a node tree collecting link expression edges.
 fn collect_edges_from_node(
@@ -676,10 +681,6 @@ impl Conductor {
             .build();
         let registry = template_registry::FileTemplateRegistry::new(fresh_repo.clone());
 
-        let mut rebuilt_pages = Vec::new();
-        let mut failed_pages = Vec::new();
-        let mut errors: HashMap<String, Vec<String>> = HashMap::new();
-
         // Iterate over semantic content roots instead of DataGraphs.
         let semantic_pairs: Vec<(String, node_store::NodeId)> = {
             let url_to_semantic = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
@@ -688,95 +689,117 @@ impl Conductor {
 
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
 
-        for (url, sem_root) in &semantic_pairs {
-            // Read stem from semantic content attributes
-            let stem = node_store_bridge::content_bridge::find_attr_text(&store, *sem_root, "stem")
-                .unwrap_or_default();
-            if stem.is_empty() && url != "/" {
-                continue;
-            }
-
-            let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, *sem_root, "page-kind");
-
-            let slug = if url.ends_with('/') || url == "/" {
-                "index"
-            } else {
-                url.rsplit('/').next().unwrap_or("index")
-            };
-
-            // Find template
-            let stem_obj = site_index::SchemaStem::new(&stem);
-            let template_result = if slug == "index" || page_kind.as_deref() == Some("collection") {
-                fresh_repo.collection_template_source(&stem_obj)
-                    .or_else(|| fresh_repo.item_template_source(&stem_obj))
-                    .or_else(|| fresh_repo.partial_template_source(&stem))
-            } else {
-                fresh_repo.item_template_source(&stem_obj)
-                    .or_else(|| fresh_repo.partial_template_source(&stem))
-            };
-
-            let (tmpl_src, is_hiccup) = match template_result {
-                Some(t) => t,
-                None => {
-                    if stem.is_empty() {
-                        continue;
-                    }
-                    failed_pages.push(url.clone());
-                    errors.entry(url.clone()).or_default().push(format!("no template for {stem}"));
-                    continue;
+        // Render all pages in parallel — each page writes to a unique file, no shared mutable state.
+        let results: Vec<PageRenderResult> = semantic_pairs
+            .par_iter()
+            .filter_map(|(url, sem_root)| {
+                // Read stem from semantic content attributes
+                let stem =
+                    node_store_bridge::content_bridge::find_attr_text(&store, *sem_root, "stem")
+                        .unwrap_or_default();
+                if stem.is_empty() && url != "/" {
+                    return None;
                 }
-            };
 
-            let raw_nodes = if is_hiccup {
-                match template::parse_template_hiccup(&tmpl_src) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        failed_pages.push(url.clone());
-                        errors.entry(url.clone()).or_default().push(format!("{e}"));
-                        continue;
+                let page_kind = node_store_bridge::content_bridge::find_attr_text(
+                    &store,
+                    *sem_root,
+                    "page-kind",
+                );
+
+                let slug = if url.ends_with('/') || url == "/" {
+                    "index"
+                } else {
+                    url.rsplit('/').next().unwrap_or("index")
+                };
+
+                // Find template
+                let stem_obj = site_index::SchemaStem::new(&stem);
+                let template_result =
+                    if slug == "index" || page_kind.as_deref() == Some("collection") {
+                        fresh_repo
+                            .collection_template_source(&stem_obj)
+                            .or_else(|| fresh_repo.item_template_source(&stem_obj))
+                            .or_else(|| fresh_repo.partial_template_source(&stem))
+                    } else {
+                        fresh_repo
+                            .item_template_source(&stem_obj)
+                            .or_else(|| fresh_repo.partial_template_source(&stem))
+                    };
+
+                let (tmpl_src, is_hiccup) = match template_result {
+                    Some(t) => t,
+                    None => {
+                        if stem.is_empty() {
+                            return None;
+                        }
+                        return Some((
+                            url.clone(),
+                            Err((url.clone(), vec![format!("no template for {stem}")])),
+                        ));
                     }
-                }
-            } else {
-                match template::parse_template_xml(&tmpl_src) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        failed_pages.push(url.clone());
-                        errors.entry(url.clone()).or_default().push(format!("{e}"));
-                        continue;
+                };
+
+                let raw_nodes = if is_hiccup {
+                    match template::parse_template_hiccup(&tmpl_src) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            return Some((url.clone(), Err((url.clone(), vec![format!("{e}")]))));
+                        }
                     }
-                }
-            };
-
-            let (nodes, local_defs) = template::extract_definitions(raw_nodes);
-
-            let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
-
-            // Use PrefixedGraphView — templates access data via input.field paths
-            let view = node_store_bridge::NodeStoreView::new(&store, *sem_root);
-            let prefixed = node_store_bridge::PrefixedGraphView::new("input".to_string(), view);
-
-            match template::transform(nodes, &prefixed, &ctx) {
-                Ok(transformed) => {
-                    let html = template::serialize_nodes(&transformed);
-                    let output_path =
-                        site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
-                    if let Some(parent) = output_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
+                } else {
+                    match template::parse_template_xml(&tmpl_src) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            return Some((url.clone(), Err((url.clone(), vec![format!("{e}")]))));
+                        }
                     }
-                    let _ = std::fs::write(&output_path, &html);
-                    rebuilt_pages.push(url.clone());
+                };
+
+                let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+                let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
+
+                // Use PrefixedGraphView — templates access data via input.field paths
+                let view = node_store_bridge::NodeStoreView::new(&store, *sem_root);
+                let prefixed =
+                    node_store_bridge::PrefixedGraphView::new("input".to_string(), view);
+
+                match template::transform(nodes, &prefixed, &ctx) {
+                    Ok(transformed) => {
+                        let html = template::serialize_nodes(&transformed);
+                        let output_path =
+                            site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
+                        if let Some(parent) = output_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&output_path, &html);
+                        Some((url.clone(), Ok(())))
+                    }
+                    Err(e) => Some((
+                        url.clone(),
+                        Err((url.clone(), vec![format!("render error: {e}")])),
+                    )),
                 }
-                Err(e) => {
-                    failed_pages.push(url.clone());
-                    errors
-                        .entry(url.clone())
-                        .or_default()
-                        .push(format!("render error: {e}"));
+            })
+            .collect();
+
+        drop(store);
+
+        // Merge parallel results into the output vecs.
+        let mut rebuilt_pages = Vec::new();
+        let mut failed_pages = Vec::new();
+        let mut errors: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (url, result) in results {
+            match result {
+                Ok(()) => rebuilt_pages.push(url),
+                Err((fail_url, errs)) => {
+                    failed_pages.push(fail_url.clone());
+                    errors.insert(fail_url, errs);
                 }
             }
         }
 
-        drop(store);
         (rebuilt_pages, failed_pages, errors)
     }
 
