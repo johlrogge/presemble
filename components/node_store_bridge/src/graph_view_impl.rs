@@ -366,6 +366,151 @@ impl GraphView for PrefixedGraphView<'_> {
         graph.insert(key, value);
         Box::new(graph)
     }
+
+    fn with_node_binding(
+        &self,
+        key: String,
+        id: NodeId,
+        _store: &NodeStore,
+    ) -> Option<Box<dyn GraphView + '_>> {
+        // Convert to MultiRootView with the prefix root + the new binding.
+        let roots = vec![(self.prefix.clone(), self.inner.root()), (key, id)];
+        Some(Box::new(MultiRootView::new(self.inner.store(), roots)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Store walking helper
+// ---------------------------------------------------------------------------
+
+/// Walk `path` segments through the store starting from `root`, returning the
+/// terminal `NodeId`. Returns `None` if any segment is not found.
+///
+/// This mirrors the walk logic in `NodeStoreView::resolve` but is a free
+/// function so it can be called without creating a `NodeStoreView` temporary
+/// (which would cause lifetime issues when the result borrows from `&self`).
+fn walk_store(store: &NodeStore, root: NodeId, path: &[&str]) -> Option<NodeId> {
+    let mut current = root;
+    for segment in path {
+        // ConsistsOf edges first
+        let parts = store.consists_of(current);
+        if let Some((_, id)) = parts.iter().find(|(n, _)| store.resolve_name(*n) == *segment) {
+            current = *id;
+            continue;
+        }
+        // Reference edges
+        let refs = store.references(current);
+        if let Some((_, id)) = refs.iter().find(|(n, _)| store.resolve_name(*n) == *segment) {
+            current = *id;
+            continue;
+        }
+        // Attribute edges
+        let attrs = store.attributes(current);
+        if let Some((_, id)) = attrs.iter().find(|(n, _)| store.resolve_name(*n) == *segment) {
+            current = *id;
+            continue;
+        }
+        return None;
+    }
+    Some(current)
+}
+
+// ---------------------------------------------------------------------------
+// MultiRootView
+// ---------------------------------------------------------------------------
+
+/// A `GraphView` backed by multiple named roots in the same `NodeStore`.
+///
+/// All lookups walk the graph directly — no materialization unless the resolved
+/// value is needed as a `DataRef`. Used by `data-each` to bind collection items
+/// without allocating a `Value` per item.
+pub struct MultiRootView<'a> {
+    store: &'a NodeStore,
+    roots: Vec<(String, NodeId)>,
+}
+
+impl<'a> MultiRootView<'a> {
+    pub fn new(store: &'a NodeStore, roots: Vec<(String, NodeId)>) -> Self {
+        Self { store, roots }
+    }
+
+    fn find_root(&self, key: &str) -> Option<NodeId> {
+        self.roots.iter().find(|(k, _)| k == key).map(|(_, id)| *id)
+    }
+}
+
+impl<'a> GraphView for MultiRootView<'a> {
+    fn resolve(&self, path: &[&str]) -> Option<DataRef<'_>> {
+        match path {
+            [] => None,
+            [key, rest @ ..] => {
+                let root = self.find_root(key)?;
+                // Walk the subpath inline — avoid temporary NodeStoreView borrow issues.
+                let resolved_id = walk_store(self.store, root, rest)?;
+                Some(DataRef::Owned(node_to_value(self.store, resolved_id)))
+            }
+        }
+    }
+
+    fn resolve_node(&self, path: &[&str]) -> Option<ResolvedNode<'_>> {
+        match path {
+            [] => None,
+            [key, rest @ ..] => {
+                let root = self.find_root(key)?;
+                if rest.is_empty() {
+                    Some(ResolvedNode { id: root, store: self.store })
+                } else {
+                    let id = walk_store(self.store, root, rest)?;
+                    Some(ResolvedNode { id, store: self.store })
+                }
+            }
+        }
+    }
+
+    fn iter_keys(&self) -> Vec<String> {
+        self.roots.iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    fn clone_scoped(&self, path: &[&str]) -> Option<Box<dyn GraphView + '_>> {
+        match path {
+            [key] => {
+                let root = self.find_root(key)?;
+                Some(Box::new(NodeStoreView::new(self.store, root)))
+            }
+            [key, rest @ ..] => {
+                let root = self.find_root(key)?;
+                let scoped_root = walk_store(self.store, root, rest)?;
+                Some(Box::new(NodeStoreView::new(self.store, scoped_root)))
+            }
+            _ => None,
+        }
+    }
+
+    fn with_binding(&self, key: String, value: Value) -> Box<dyn GraphView> {
+        // Materialize all roots into a DataGraph, then add the new binding.
+        let mut graph = DataGraph::new();
+        for (k, root_id) in &self.roots {
+            graph.insert(k.as_str(), node_to_value(self.store, *root_id));
+        }
+        graph.insert(key, value);
+        Box::new(graph)
+    }
+
+    fn with_node_binding(
+        &self,
+        key: String,
+        id: NodeId,
+        _store: &NodeStore,
+    ) -> Option<Box<dyn GraphView + '_>> {
+        let mut new_roots = self.roots.clone();
+        // Replace existing binding or append a new one.
+        if let Some(pos) = new_roots.iter().position(|(k, _)| k == &key) {
+            new_roots[pos].1 = id;
+        } else {
+            new_roots.push((key, id));
+        }
+        Some(Box::new(MultiRootView::new(self.store, new_roots)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,5 +762,107 @@ mod tests {
         g.insert("title", template::Value::Text("Hello".into()));
         let view: &dyn template::GraphView = &g;
         assert!(view.resolve_node(&["title"]).is_none());
+    }
+
+    #[test]
+    fn multi_root_view_resolves_multiple_roots() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root1 = store.add_node(Node::Element(page_name));
+        let root2 = store.add_node(Node::Element(page_name));
+        let title_name = store.intern("title");
+        let t1 = store.add_node(Node::Text("Page One".into()));
+        let t2 = store.add_node(Node::Text("Item Title".into()));
+        store.add_edge(root1, Edge::Reference { name: title_name, target: t1 });
+        store.add_edge(root2, Edge::Reference { name: title_name, target: t2 });
+
+        let view = MultiRootView::new(&store, vec![
+            ("input".to_string(), root1),
+            ("item".to_string(), root2),
+        ]);
+
+        // Resolve input.title
+        let r1 = view.resolve_node(&["input", "title"]).unwrap();
+        assert!(matches!(store.get(r1.id), Some(Node::Text(t)) if t == "Page One"));
+
+        // Resolve item.title
+        let r2 = view.resolve_node(&["item", "title"]).unwrap();
+        assert!(matches!(store.get(r2.id), Some(Node::Text(t)) if t == "Item Title"));
+    }
+
+    #[test]
+    fn multi_root_view_resolve_returns_owned_value() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+        let title_name = store.intern("title");
+        let title_val = store.add_node(Node::Text("Hello".into()));
+        store.add_edge(root, Edge::Reference { name: title_name, target: title_val });
+
+        let view = MultiRootView::new(&store, vec![("input".to_string(), root)]);
+        let result = view.resolve(&["input", "title"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Hello"));
+    }
+
+    #[test]
+    fn multi_root_view_with_node_binding_adds_root() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root1 = store.add_node(Node::Element(page_name));
+        let root2 = store.add_node(Node::Element(page_name));
+        let title_name = store.intern("title");
+        let t1 = store.add_node(Node::Text("Original".into()));
+        let t2 = store.add_node(Node::Text("Bound".into()));
+        store.add_edge(root1, Edge::Reference { name: title_name, target: t1 });
+        store.add_edge(root2, Edge::Reference { name: title_name, target: t2 });
+
+        let view = MultiRootView::new(&store, vec![("input".to_string(), root1)]);
+        let bound = view.with_node_binding("item".to_string(), root2, &store).unwrap();
+
+        // Bound key resolves to new root
+        let r1 = bound.resolve_node(&["item", "title"]).unwrap();
+        assert!(matches!(store.get(r1.id), Some(Node::Text(t)) if t == "Bound"));
+
+        // Original key still accessible
+        let r2 = bound.resolve_node(&["input", "title"]).unwrap();
+        assert!(matches!(store.get(r2.id), Some(Node::Text(t)) if t == "Original"));
+    }
+
+    #[test]
+    fn prefixed_with_node_binding_creates_multi_root() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root1 = store.add_node(Node::Element(page_name));
+        let root2 = store.add_node(Node::Element(page_name));
+        let title_name = store.intern("title");
+        let t1 = store.add_node(Node::Text("Page".into()));
+        let t2 = store.add_node(Node::Text("Item".into()));
+        store.add_edge(root1, Edge::Reference { name: title_name, target: t1 });
+        store.add_edge(root2, Edge::Reference { name: title_name, target: t2 });
+
+        let inner = NodeStoreView::new(&store, root1);
+        let prefixed = PrefixedGraphView::new("input".to_string(), inner);
+
+        let bound = prefixed.with_node_binding("item".to_string(), root2, &store).unwrap();
+
+        // Both paths resolve
+        let r1 = bound.resolve_node(&["input", "title"]).unwrap();
+        assert!(matches!(store.get(r1.id), Some(Node::Text(t)) if t == "Page"));
+        let r2 = bound.resolve_node(&["item", "title"]).unwrap();
+        assert!(matches!(store.get(r2.id), Some(Node::Text(t)) if t == "Item"));
+    }
+
+    #[test]
+    fn multi_root_view_iter_keys() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+        let view = MultiRootView::new(&store, vec![
+            ("input".to_string(), root),
+            ("item".to_string(), root),
+        ]);
+        let keys = view.iter_keys();
+        assert!(keys.contains(&"input".to_string()));
+        assert!(keys.contains(&"item".to_string()));
     }
 }

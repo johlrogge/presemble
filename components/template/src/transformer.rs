@@ -96,16 +96,42 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                     // The parent context (including "self" and all collections) is preserved.
                     let each_path = el.attr("data-each").unwrap().to_string();
                     let path_segments: Vec<&str> = each_path.split('.').collect();
-                    let value = graph.resolve(&path_segments).map(|r| r.into_owned());
                     let item_key = el.attr("item").unwrap_or("item").to_string();
-                    if let Some(Value::List(items)) = value {
-                        for item_value in items {
-                            let child_view = graph.with_binding(item_key.clone(), item_value.clone());
-                            let mut rendered = transform(el.children.clone(), &*child_view, ctx)?;
-                            output.append(&mut rendered);
+
+                    // Fast path: iterate a NodeStore Collection without materializing Values.
+                    let mut handled = false;
+                    if let Some(resolved) = graph.resolve_node(&path_segments)
+                        && matches!(resolved.store.get(resolved.id), Some(node_store::Node::Collection))
+                    {
+                            let children = resolved.store.children(resolved.id);
+                            // Probe to see if native binding is supported (avoids materializing).
+                            let supports_native = children.first().is_none_or(|&first_id| {
+                                graph.with_node_binding(item_key.clone(), first_id, resolved.store).is_some()
+                            });
+                            if supports_native {
+                                handled = true;
+                                for child_id in children {
+                                    // unwrap: we probed successfully above
+                                    let bound = graph
+                                        .with_node_binding(item_key.clone(), child_id, resolved.store)
+                                        .unwrap();
+                                    let mut rendered = transform(el.children.clone(), &*bound, ctx)?;
+                                    output.append(&mut rendered);
+                                }
+                            }
+                    }
+                    if !handled {
+                        // Legacy Value path for DataGraph or non-Collection nodes.
+                        let value = graph.resolve(&path_segments).map(|r| r.into_owned());
+                        if let Some(Value::List(items)) = value {
+                            for item_value in items {
+                                let child_view = graph.with_binding(item_key.clone(), item_value.clone());
+                                let mut rendered = transform(el.children.clone(), &*child_view, ctx)?;
+                                output.append(&mut rendered);
+                            }
                         }
                     }
-                    // Absent, non-list, or empty list — produce nothing.
+                    // Absent, non-list, or empty collection — produce nothing.
                 } else {
                     // Recursively transform children of regular elements.
                     let transformed_children = transform(el.children, graph, ctx)?;

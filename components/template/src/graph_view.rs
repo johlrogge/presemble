@@ -52,6 +52,17 @@ pub trait GraphView {
     fn resolve_node(&self, _path: &[&str]) -> Option<ResolvedNode<'_>> {
         None
     }
+
+    /// Bind a key to a NodeId without materializing to Value.
+    /// Returns None by default — only NodeStore-backed implementations support this.
+    fn with_node_binding(
+        &self,
+        _key: String,
+        _id: NodeId,
+        _store: &NodeStore,
+    ) -> Option<Box<dyn GraphView + '_>> {
+        None
+    }
 }
 
 impl GraphView for DataGraph {

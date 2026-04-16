@@ -748,6 +748,7 @@ impl Conductor {
             };
 
             let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+
             let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
             // Use PrefixedGraphView — templates access data via input.field paths

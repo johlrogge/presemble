@@ -8,4 +8,4 @@ pub mod graph_view_impl;
 
 pub use content_bridge::DocumentMeta;
 pub use value_bridge::{node_to_value, value_to_node};
-pub use graph_view_impl::{LayeredGraphView, NodeStoreView, PrefixedGraphView};
+pub use graph_view_impl::{LayeredGraphView, MultiRootView, NodeStoreView, PrefixedGraphView};
