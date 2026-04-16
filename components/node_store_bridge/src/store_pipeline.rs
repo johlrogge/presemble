@@ -20,14 +20,14 @@ pub fn build_indexes_from_store(
     let mut stem_index = NodeStemIndex::new();
 
     for (url, sem_root) in roots {
-        let page_kind = get_attribute_text(store, *sem_root, "_presemble_page_kind");
+        let page_kind = get_attribute_text(store, *sem_root, "page-kind");
         if page_kind.as_deref() != Some("item") {
             continue;
         }
 
         url_index.insert(url.clone(), *sem_root);
 
-        if let Some(stem) = get_attribute_text(store, *sem_root, "_presemble_stem") {
+        if let Some(stem) = get_attribute_text(store, *sem_root, "stem") {
             stem_index
                 .entry(stem)
                 .or_default()
@@ -178,9 +178,9 @@ mod tests {
         // Intern shared names up front.
         let page_name = store.intern("page");
         let title_name = store.intern("title");
-        let stem_name = store.intern("_presemble_stem");
+        let stem_name = store.intern("stem");
         let url_name = store.intern("url");
-        let kind_name = store.intern("_presemble_page_kind");
+        let kind_name = store.intern("page-kind");
 
         // --- Page 1 ---
         let sem1 = store.add_node(Node::Element(page_name));
@@ -223,8 +223,8 @@ mod tests {
     fn build_indexes_excludes_collection_pages() {
         let mut store = NodeStore::new();
         let page_name = store.intern("page");
-        let kind_name = store.intern("_presemble_page_kind");
-        let stem_name = store.intern("_presemble_stem");
+        let kind_name = store.intern("page-kind");
+        let stem_name = store.intern("stem");
 
         let sem = store.add_node(Node::Element(page_name));
         let kind_val = store.add_node(Node::Text("collection".into()));
@@ -332,8 +332,8 @@ mod tests {
         // Build a target page (the linked-to page).
         let page_name = store.intern("page");
         let a_name = store.intern("a");
-        let kind_name = store.intern("_presemble_page_kind");
-        let stem_name = store.intern("_presemble_stem");
+        let kind_name = store.intern("page-kind");
+        let stem_name = store.intern("stem");
 
         let target_root = store.add_node(Node::Element(page_name));
         let kind_val = store.add_node(Node::Text("item".into()));

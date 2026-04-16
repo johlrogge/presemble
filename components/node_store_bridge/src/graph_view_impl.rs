@@ -32,6 +32,14 @@ impl<'a> NodeStoreView<'a> {
     pub fn new(store: &'a NodeStore, root: NodeId) -> Self {
         Self { store, root }
     }
+
+    pub fn store(&self) -> &'a NodeStore {
+        self.store
+    }
+
+    pub fn root(&self) -> NodeId {
+        self.root
+    }
 }
 
 impl<'a> GraphView for NodeStoreView<'a> {
@@ -213,6 +221,70 @@ impl GraphView for LayeredGraphView {
 }
 
 // ---------------------------------------------------------------------------
+// PrefixedGraphView
+// ---------------------------------------------------------------------------
+
+/// A `GraphView` that makes an inner `NodeStoreView` accessible under a single prefix key.
+///
+/// `PrefixedGraphView::new("input", inner)` resolves `["input", "title"]`
+/// by delegating `["title"]` to the inner view.
+pub struct PrefixedGraphView<'a> {
+    prefix: String,
+    inner: NodeStoreView<'a>,
+}
+
+impl<'a> PrefixedGraphView<'a> {
+    pub fn new(prefix: String, inner: NodeStoreView<'a>) -> Self {
+        Self { prefix, inner }
+    }
+}
+
+impl GraphView for PrefixedGraphView<'_> {
+    fn resolve(&self, path: &[&str]) -> Option<DataRef<'_>> {
+        match path {
+            [] => None,
+            [first, rest @ ..] if *first == self.prefix => {
+                if rest.is_empty() {
+                    // Resolve the prefix itself: materialise the root as a Value
+                    Some(DataRef::Owned(node_to_value(
+                        self.inner.store(),
+                        self.inner.root(),
+                    )))
+                } else {
+                    self.inner.resolve(rest)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn iter_keys(&self) -> Vec<String> {
+        vec![self.prefix.clone()]
+    }
+
+    fn clone_scoped(&self, path: &[&str]) -> Option<Box<dyn GraphView + '_>> {
+        match path {
+            [first] if *first == self.prefix => Some(Box::new(NodeStoreView::new(
+                self.inner.store(),
+                self.inner.root(),
+            ))),
+            [first, rest @ ..] if *first == self.prefix => self.inner.clone_scoped(rest),
+            _ => None,
+        }
+    }
+
+    fn with_binding(&self, key: String, value: Value) -> Box<dyn GraphView> {
+        // Materialise inner root as a Value, wrap it under the prefix key,
+        // then add the new binding.
+        let root_value = node_to_value(self.inner.store(), self.inner.root());
+        let mut graph = DataGraph::new();
+        graph.insert(self.prefix.clone(), root_value);
+        graph.insert(key, value);
+        Box::new(graph)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -330,5 +402,59 @@ mod tests {
         let keys = bound.iter_keys();
         assert!(keys.contains(&"title".to_string()));
         assert!(keys.contains(&"extra".to_string()));
+    }
+
+    #[test]
+    fn prefixed_resolve_with_matching_prefix() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        let result = prefixed.resolve(&["input", "title"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Hello World"));
+    }
+
+    #[test]
+    fn prefixed_resolve_wrong_prefix() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        assert!(prefixed.resolve(&["other", "title"]).is_none());
+    }
+
+    #[test]
+    fn prefixed_resolve_deep_path() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        let result = prefixed.resolve(&["input", "author", "name"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Alice"));
+    }
+
+    #[test]
+    fn prefixed_iter_keys() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        assert_eq!(prefixed.iter_keys(), vec!["input"]);
+    }
+
+    #[test]
+    fn prefixed_clone_scoped_at_prefix() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        let scoped = prefixed.clone_scoped(&["input"]).unwrap();
+        let result = scoped.resolve(&["title"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Hello World"));
+    }
+
+    #[test]
+    fn prefixed_with_binding_preserves_prefix() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        let bound = prefixed.with_binding("extra".into(), Value::Text("bonus".into()));
+        assert!(bound.resolve(&["input", "title"]).is_some());
+        assert!(bound.resolve(&["extra"]).is_some());
     }
 }
