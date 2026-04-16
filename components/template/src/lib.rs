@@ -4,6 +4,7 @@ pub mod data;
 pub mod dom;
 mod error;
 pub mod expr;
+pub mod graph_view;
 pub mod hiccup;
 mod hiccup_serializer;
 pub mod registry;
@@ -11,6 +12,7 @@ pub mod transformer;
 
 pub use ast::{Expr, Transform};
 pub use data::{build_article_graph, build_article_graph_with_source, synthesize_link, Callable, DataGraph, SuggestionKind, Value};
+pub use graph_view::{DataRef, GraphView};
 pub use error::TemplateError;
 pub use expr::parse_expr;
 pub use transformer::{transform, RenderError};

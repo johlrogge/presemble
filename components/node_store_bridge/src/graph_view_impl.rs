@@ -1,0 +1,334 @@
+//! GraphView implementations backed by NodeStore.
+//!
+//! `NodeStoreView` wraps a `&NodeStore` + root `NodeId` and implements `GraphView`
+//! by walking Reference and Attribute edges.
+//!
+//! `LayeredGraphView` overlays local bindings on top of any parent `GraphView`.
+
+use std::collections::HashMap;
+
+use node_store::{NodeId, NodeStore};
+use template::data::Value;
+use template::graph_view::{DataRef, GraphView};
+use template::DataGraph;
+
+use crate::value_bridge::node_to_value;
+
+// ---------------------------------------------------------------------------
+// NodeStoreView
+// ---------------------------------------------------------------------------
+
+/// A `GraphView` backed by a `NodeStore`, rooted at a specific `NodeId`.
+///
+/// `resolve` walks Reference edges for each path segment. At the terminal node
+/// the subtree is materialised via `node_to_value`. Attribute edges are also
+/// searched when no matching Reference edge is found.
+pub struct NodeStoreView<'a> {
+    store: &'a NodeStore,
+    root: NodeId,
+}
+
+impl<'a> NodeStoreView<'a> {
+    pub fn new(store: &'a NodeStore, root: NodeId) -> Self {
+        Self { store, root }
+    }
+}
+
+impl<'a> GraphView for NodeStoreView<'a> {
+    fn resolve(&self, path: &[&str]) -> Option<DataRef<'_>> {
+        let mut current = self.root;
+        for (i, segment) in path.iter().enumerate() {
+            let is_last = i == path.len() - 1;
+
+            // 1. Try Reference edges first
+            let refs = self.store.references(current);
+            let ref_target = refs
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+                .map(|(_, id)| *id);
+
+            if let Some(id) = ref_target {
+                if is_last {
+                    return Some(DataRef::Owned(node_to_value(self.store, id)));
+                }
+                current = id;
+                continue;
+            }
+
+            // 2. Fall back to Attribute edges
+            let attrs = self.store.attributes(current);
+            let attr_target = attrs
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+                .map(|(_, id)| *id);
+
+            match attr_target {
+                Some(id) if is_last => {
+                    return Some(DataRef::Owned(node_to_value(self.store, id)));
+                }
+                Some(id) => {
+                    current = id;
+                }
+                None => return None,
+            }
+        }
+        // Empty path — nothing to resolve
+        None
+    }
+
+    fn iter_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .store
+            .references(self.root)
+            .iter()
+            .map(|(name, _)| self.store.resolve_name(*name).to_string())
+            .collect();
+        for (name, _) in self.store.attributes(self.root) {
+            keys.push(self.store.resolve_name(name).to_string());
+        }
+        keys
+    }
+
+    fn clone_scoped(&self, path: &[&str]) -> Option<Box<dyn GraphView + '_>> {
+        let mut current = self.root;
+        for segment in path {
+            let refs = self.store.references(current);
+            let target = refs
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+                .map(|(_, id)| *id);
+            match target {
+                Some(id) => current = id,
+                None => return None,
+            }
+        }
+        Some(Box::new(NodeStoreView::new(self.store, current)))
+    }
+
+    fn with_binding(&self, key: String, value: Value) -> Box<dyn GraphView> {
+        // Materialise the current node as a DataGraph, then add the binding.
+        let parent_value = node_to_value(self.store, self.root);
+        let mut combined = match parent_value {
+            Value::Record(g) => g,
+            other => {
+                let mut g = DataGraph::new();
+                g.insert("value", other);
+                g
+            }
+        };
+        combined.insert(key, value);
+        Box::new(combined)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LayeredGraphView
+// ---------------------------------------------------------------------------
+
+/// A `GraphView` that overlays local bindings on top of a parent `GraphView`.
+///
+/// Local bindings take priority; all other lookups are delegated to the parent.
+pub struct LayeredGraphView {
+    bindings: HashMap<String, Value>,
+    parent: Box<dyn GraphView>,
+}
+
+impl LayeredGraphView {
+    pub fn new(bindings: HashMap<String, Value>, parent: Box<dyn GraphView>) -> Self {
+        Self { bindings, parent }
+    }
+}
+
+impl GraphView for LayeredGraphView {
+    fn resolve(&self, path: &[&str]) -> Option<DataRef<'_>> {
+        match path {
+            [] => None,
+            [key, rest @ ..] => {
+                if let Some(value) = self.bindings.get(*key) {
+                    if rest.is_empty() {
+                        Some(DataRef::Borrowed(value))
+                    } else {
+                        // Navigate into the bound value — must return Owned because
+                        // the sub-value has no lifetime tied to &self directly.
+                        match value {
+                            Value::Record(sub) => sub
+                                .resolve(rest)
+                                .map(|v| DataRef::Owned(v.clone())),
+                            _ => None,
+                        }
+                    }
+                } else {
+                    self.parent.resolve(path)
+                }
+            }
+        }
+    }
+
+    fn iter_keys(&self) -> Vec<String> {
+        let mut keys = self.parent.iter_keys();
+        for k in self.bindings.keys() {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+        keys
+    }
+
+    fn clone_scoped(&self, path: &[&str]) -> Option<Box<dyn GraphView + '_>> {
+        match path {
+            [] => None,
+            [key, rest @ ..] => {
+                if let Some(value) = self.bindings.get(*key) {
+                    match value {
+                        Value::Record(sub) => {
+                            if rest.is_empty() {
+                                Some(Box::new(sub.clone()))
+                            } else {
+                                sub.clone_scoped(rest)
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    self.parent.clone_scoped(path)
+                }
+            }
+        }
+    }
+
+    fn with_binding(&self, key: String, value: Value) -> Box<dyn GraphView> {
+        // Materialise parent keys into a DataGraph, merge existing bindings, add new one.
+        let mut graph = DataGraph::new();
+        for k in self.parent.iter_keys() {
+            if let Some(v) = self.parent.resolve(&[k.as_str()]) {
+                graph.insert(k, v.into_owned());
+            }
+        }
+        for (k, v) in &self.bindings {
+            graph.insert(k.clone(), v.clone());
+        }
+        graph.insert(key, value);
+        Box::new(graph)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use node_store::{Edge, Node, NodeStore};
+    use template::data::Value;
+    use template::graph_view::GraphView;
+
+    fn make_test_store() -> (NodeStore, NodeId) {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+
+        let title_name = store.intern("title");
+        let title_val = store.add_node(Node::Text("Hello World".into()));
+        store.add_edge(
+            root,
+            Edge::Reference {
+                name: title_name,
+                target: title_val,
+            },
+        );
+
+        // Nested: author record with name field
+        let author_name = store.intern("author");
+        let author_elem_name = store.intern("record");
+        let author = store.add_node(Node::Element(author_elem_name));
+        let name_key = store.intern("name");
+        let name_val = store.add_node(Node::Text("Alice".into()));
+        store.add_edge(
+            author,
+            Edge::Reference {
+                name: name_key,
+                target: name_val,
+            },
+        );
+        store.add_edge(
+            root,
+            Edge::Reference {
+                name: author_name,
+                target: author,
+            },
+        );
+
+        (store, root)
+    }
+
+    #[test]
+    fn resolve_simple_text() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let result = view.resolve(&["title"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Hello World"));
+    }
+
+    #[test]
+    fn resolve_nested_path() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let result = view.resolve(&["author", "name"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Alice"));
+    }
+
+    #[test]
+    fn resolve_missing_returns_none() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        assert!(view.resolve(&["missing"]).is_none());
+    }
+
+    #[test]
+    fn iter_keys_returns_reference_names() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let keys = view.iter_keys();
+        assert!(keys.contains(&"title".to_string()));
+        assert!(keys.contains(&"author".to_string()));
+    }
+
+    #[test]
+    fn clone_scoped_narrows_root() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let scoped = view.clone_scoped(&["author"]).unwrap();
+        let result = scoped.resolve(&["name"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Alice"));
+    }
+
+    #[test]
+    fn with_binding_adds_key() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let bound = view.with_binding("extra".into(), Value::Text("bonus".into()));
+        assert!(bound.resolve(&["extra"]).is_some());
+        // Original keys still accessible
+        assert!(bound.resolve(&["title"]).is_some());
+    }
+
+    #[test]
+    fn layered_view_local_overrides_parent() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let bound = view.with_binding("title".into(), Value::Text("Overridden".into()));
+        let result = bound.resolve(&["title"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Overridden"));
+    }
+
+    #[test]
+    fn layered_view_iter_keys_includes_both() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let bound = view.with_binding("extra".into(), Value::Text("x".into()));
+        let keys = bound.iter_keys();
+        assert!(keys.contains(&"title".to_string()));
+        assert!(keys.contains(&"extra".to_string()));
+    }
+}

@@ -2,6 +2,7 @@ use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, Value};
 use crate::dom::{Element, Form, Node};
 use crate::expr::parse_expr;
+use crate::graph_view::GraphView;
 use crate::registry::RenderContext;
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ impl std::error::Error for RenderError {}
 
 /// Transform a list of template nodes using the data graph.
 /// Replaces presemble annotation nodes with generated content.
-pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
+pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
     let mut output = Vec::new();
     for node in nodes {
         match node {
@@ -76,8 +77,8 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
                     // Conditional block: render children only if the slot is present.
                     let slot_path = el.attr("data-slot").unwrap().to_string();
                     let path_segments: Vec<&str> = slot_path.split('.').collect();
-                    let value = graph.resolve(&path_segments);
-                    match value {
+                    let resolved = graph.resolve(&path_segments);
+                    match resolved.as_ref().map(|r| r.as_value()) {
                         None | Some(Value::Absent) => {
                             // Slot absent — drop the entire block.
                         }
@@ -95,13 +96,12 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
                     // The parent context (including "self" and all collections) is preserved.
                     let each_path = el.attr("data-each").unwrap().to_string();
                     let path_segments: Vec<&str> = each_path.split('.').collect();
-                    let value = graph.resolve(&path_segments).cloned();
+                    let value = graph.resolve(&path_segments).map(|r| r.into_owned());
                     let item_key = el.attr("item").unwrap_or("item").to_string();
                     if let Some(Value::List(items)) = value {
                         for item_value in items {
-                            let mut child_ctx = graph.clone();
-                            child_ctx.insert(item_key.clone(), item_value.clone());
-                            let mut rendered = transform(el.children.clone(), &child_ctx, ctx)?;
+                            let child_view = graph.with_binding(item_key.clone(), item_value.clone());
+                            let mut rendered = transform(el.children.clone(), &*child_view, ctx)?;
                             output.append(&mut rendered);
                         }
                     }
@@ -131,7 +131,7 @@ pub fn transform(nodes: Vec<Node>, graph: &DataGraph, ctx: &RenderContext) -> Re
 /// the graph and either sets or appends to the `class` attribute. Removes `presemble:class`.
 fn apply_presemble_class(
     mut attrs: Vec<(String, Form)>,
-    graph: &DataGraph,
+    graph: &dyn GraphView,
 ) -> Vec<(String, Form)> {
     // Find and remove the `presemble:class` attribute.
     let presemble_class_pos = attrs.iter().position(|(k, _)| k == crate::constants::ELEM_CLASS);
@@ -161,11 +161,12 @@ fn apply_presemble_class(
 }
 
 /// Evaluate a pipe expression against the data graph and return a string.
-pub fn eval_expr_to_string(expr: &Expr, graph: &DataGraph) -> String {
+pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
     match expr {
         Expr::Lookup(path) => {
             let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-            match graph.resolve(&segments) {
+            let resolved = graph.resolve(&segments);
+            match resolved.as_ref().map(|r| r.as_value()) {
                 Some(Value::Text(t)) => t.clone(),
                 Some(Value::Absent) | None => String::new(),
                 Some(Value::Html(h)) => h.clone(),
@@ -195,12 +196,12 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &DataGraph) -> String {
 }
 
 /// Evaluate a pipe expression against the data graph and return a Value (for chained pipes).
-fn eval_expr_to_value<'a>(expr: &Expr, graph: &'a DataGraph) -> EvalValue<'a> {
+fn eval_expr_to_value(expr: &Expr, graph: &dyn GraphView) -> EvalValue {
     match expr {
         Expr::Lookup(path) => {
             let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
             match graph.resolve(&segments) {
-                Some(v) => EvalValue::Borrowed(v),
+                Some(data_ref) => EvalValue::Owned(data_ref.into_owned()),
                 None => EvalValue::Absent,
             }
         }
@@ -213,17 +214,15 @@ fn eval_expr_to_value<'a>(expr: &Expr, graph: &'a DataGraph) -> EvalValue<'a> {
     }
 }
 
-/// Lightweight wrapper to avoid unnecessary cloning when reading from a DataGraph.
-enum EvalValue<'a> {
-    Borrowed(&'a Value),
+/// Lightweight wrapper for evaluated expressions.
+enum EvalValue {
     Owned(Value),
     Absent,
 }
 
-impl EvalValue<'_> {
+impl EvalValue {
     fn as_value(&self) -> Option<&Value> {
         match self {
-            EvalValue::Borrowed(v) => Some(v),
             EvalValue::Owned(v) => Some(v),
             EvalValue::Absent => None,
         }
@@ -231,7 +230,7 @@ impl EvalValue<'_> {
 }
 
 /// Apply a single transform to a value and return a string.
-fn apply_transform_to_string(value: &EvalValue<'_>, transform: &Transform) -> String {
+fn apply_transform_to_string(value: &EvalValue, transform: &Transform) -> String {
     match transform {
         Transform::Match(pairs) => match value.as_value() {
             Some(Value::Text(s)) => pairs
@@ -383,7 +382,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 }
 
 /// Handle a `<presemble:insert>` element.
-fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderError> {
+fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, RenderError> {
     let data_path = match el.attr("data") {
         Some(p) => p,
         None => return Ok(Vec::new()),
@@ -403,14 +402,16 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
             *last = key_file;
         }
         graph.resolve(&file_path_segments)
-            .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
+            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
             // Fallback: try direct lookup (for relative paths inside data-each)
             .or_else(|| graph.resolve(&[key_file])
-                .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None }))
+                .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None }))
             .unwrap_or_default()
     };
 
-    let value = graph.resolve(&path_segments);
+    let resolved = graph.resolve(&path_segments);
+    // Convert to owned value for use throughout the function.
+    let value: Option<Value> = resolved.map(|r| r.into_owned());
 
     // Check for :apply attribute — resolve to Form (native from hiccup, re-parsed from HTML strings)
     let apply_form = match el.attr_form("apply") {
@@ -421,7 +422,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
         None => None,
     };
     if let Some(ref form) = apply_form {
-        return match evaluate_apply(form, value)? {
+        return match evaluate_apply(form, value.as_ref())? {
             Some(text) => {
                 let tag = as_tag.unwrap_or("span").to_string();
                 let mut attrs = vec![
@@ -430,7 +431,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                     (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file)),
                 ];
                 // Preserve _source_slot from record values for browser editing
-                if let Some(Value::Record(sub_graph)) = value
+                if let Some(Value::Record(sub_graph)) = &value
                     && let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT])
                 {
                     attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
@@ -458,27 +459,27 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
                     (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                     (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
                 ],
-                children: vec![Node::Text(text.clone())],
+                children: vec![Node::Text(text)],
             };
             Ok(vec![Node::Element(element)])
         }
 
         Some(Value::Html(html)) => {
-            let nodes = crate::dom::parse_template_xml(html)
+            let nodes = crate::dom::parse_template_xml(&html)
                 .map_err(|e| RenderError::Render(e.to_string()))?;
             Ok(nodes)
         }
 
         Some(Value::Record(sub_graph)) => {
             let slot = slot_name_from_path(data_path);
-            render_record(sub_graph, as_tag, &class, &slot, &presemble_file)
+            render_record(&sub_graph, as_tag, &class, &slot, &presemble_file)
         }
 
         Some(Value::List(items)) => {
             let tag = as_tag.unwrap_or("span");
             let slot = slot_name_from_path(data_path);
             let mut result = Vec::new();
-            for item in items {
+            for item in &items {
                 let mut rendered = render_list_item(item, tag, &class, &slot, &presemble_file, graph)?;
                 result.append(&mut rendered);
             }
@@ -603,7 +604,7 @@ fn render_insert(el: &Element, graph: &DataGraph) -> Result<Vec<Node>, RenderErr
 
 /// Handle a `<presemble:apply>` element.
 /// Invokes a named callable template fragment with an explicit data context.
-fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
+fn render_apply(el: &Element, graph: &dyn GraphView, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
     let template_name = el
         .attr("template")
         .ok_or_else(|| RenderError::Render("presemble:apply requires a 'template' attribute".into()))?
@@ -626,15 +627,16 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
 
     // Resolve the data value. If absent, produce no output.
     let segments: Vec<&str> = data_path.split('.').collect();
-    let resolved_value = graph.resolve(&segments);
-    match resolved_value {
-        None | Some(Value::Absent) => return Ok(Vec::new()),
-        _ => {}
+    let resolved_value = match graph.resolve(&segments) {
+        None => return Ok(Vec::new()),
+        Some(r) => r.into_owned(),
+    };
+    if matches!(resolved_value, Value::Absent) {
+        return Ok(Vec::new());
     }
-    let resolved_value = resolved_value.unwrap();
 
     // Build the effective data graph for the callable.
-    let mut effective_graph = match resolved_value {
+    let mut effective_graph = match &resolved_value {
         Value::Record(sub) => sub.clone(),
         other => {
             let mut g = DataGraph::new();
@@ -645,7 +647,7 @@ fn render_apply(el: &Element, graph: &DataGraph, ctx: &RenderContext) -> Result<
 
     // Inject presemble.self = the resolved value
     let mut presemble_ns = DataGraph::new();
-    presemble_ns.insert("self", resolved_value.clone());
+    presemble_ns.insert("self", resolved_value);
     effective_graph.insert("presemble", Value::Record(presemble_ns));
 
     transform(callable_nodes, &effective_graph, &ctx.descend())
@@ -767,7 +769,7 @@ fn render_list_item(
     class: &str,
     slot: &str,
     file: &str,
-    _graph: &DataGraph,
+    _graph: &dyn GraphView,
 ) -> Result<Vec<Node>, RenderError> {
     match item {
         Value::Text(text) => {
