@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use template::constants::KEY_PRESEMBLE_FILE;
-
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, Response};
 
 /// The result of handling a command: a response to send back, plus
@@ -58,11 +56,9 @@ pub struct Conductor {
     url_to_root: RwLock<HashMap<String, node_store::NodeId>>,
     url_to_semantic: RwLock<HashMap<String, node_store::NodeId>>,
     stem_to_roots: RwLock<HashMap<String, Vec<node_store::NodeId>>>,
-    // Cached expression indexes from the last build_all_pages run.
-    // Used by rebuild_page for incremental single-page updates.
-    cached_url_index: RwLock<expressions::UrlIndex>,
-    cached_stem_index: RwLock<expressions::StemIndex>,
-    cached_edge_index: RwLock<expressions::EdgeIndex>,
+    // NodeStore-native cached indexes (Phase D)
+    cached_node_url_index: RwLock<node_store_bridge::store_pipeline::NodeUrlIndex>,
+    cached_node_stem_index: RwLock<node_store_bridge::store_pipeline::NodeStemIndex>,
 }
 
 /// Extract the title from a document's preamble in the NodeStore.
@@ -157,9 +153,8 @@ impl Conductor {
             url_to_root: RwLock::new(HashMap::new()),
             url_to_semantic: RwLock::new(HashMap::new()),
             stem_to_roots: RwLock::new(HashMap::new()),
-            cached_url_index: RwLock::new(HashMap::new()),
-            cached_stem_index: RwLock::new(HashMap::new()),
-            cached_edge_index: RwLock::new(HashMap::new()),
+            cached_node_url_index: RwLock::new(HashMap::new()),
+            cached_node_stem_index: RwLock::new(HashMap::new()),
         };
 
         // Load persisted pending suggestions from disk
@@ -598,62 +593,25 @@ impl Conductor {
         (url_index, stem_index, edge_index)
     }
 
-    /// Inject collection data from the NodeStore into a page's DataGraph.
-    /// NodeStore equivalent of `expressions::inject_collections`.
-    fn inject_collections_from_store(&self, page_data: &mut template::DataGraph) {
-        let stems: Vec<String> = {
-            let mut v: Vec<String> = self
-                .stem_to_roots
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .keys()
-                .cloned()
-                .collect();
-            v.sort();
-            v
-        };
-
-        for stem in stems {
-            // Skip if page already has a value for this stem
-            if page_data.resolve(&[stem.as_str()]).is_some() {
-                continue;
-            }
-
-            // Collect all item DataGraphs for this stem
-            let items: Vec<template::Value> = self
-                .query_items_from_store(&stem)
-                .into_iter()
-                .map(|(_, data)| template::Value::Record(data))
-                .collect();
-
-            if !items.is_empty() {
-                page_data.insert(stem.as_str(), template::Value::List(items));
-            }
-        }
-    }
-
-    /// Inject collection data into a page's DataGraph from the cached stem index.
-    /// Used by `rebuild_page` for incremental single-page updates.
-    fn inject_collections_from_cache(&self, page_data: &mut template::DataGraph) {
-        let cached = self.cached_stem_index.read().unwrap_or_else(|e| e.into_inner());
-        let mut stems: Vec<String> = cached.keys().map(|s| s.as_str().to_string()).collect();
-        stems.sort();
-
-        for stem in stems {
-            if page_data.resolve(&[stem.as_str()]).is_some() {
-                continue;
-            }
-            let schema_stem = site_index::SchemaStem::new(&stem);
-            if let Some(items_vec) = cached.get(&schema_stem) {
-                let values: Vec<template::Value> = items_vec
-                    .iter()
-                    .map(|(_, data)| template::Value::Record(data.clone()))
-                    .collect();
-                if !values.is_empty() {
-                    page_data.insert(stem.as_str(), template::Value::List(values));
-                }
-            }
-        }
+    /// Get cached NodeStore-native indexes for incremental page rebuilds.
+    #[allow(dead_code)]
+    fn cached_node_indexes(
+        &self,
+    ) -> (
+        node_store_bridge::store_pipeline::NodeUrlIndex,
+        node_store_bridge::store_pipeline::NodeStemIndex,
+    ) {
+        let url = self
+            .cached_node_url_index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let stem = self
+            .cached_node_stem_index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        (url, stem)
     }
 
     /// Batch-render all pages in the site.
@@ -703,97 +661,13 @@ impl Conductor {
                     &semantic_pairs,
                     &node_stem_index,
                 );
+
+                // Cache NodeStore-native indexes for rebuild_page
+                *self.cached_node_url_index.write().unwrap_or_else(|e| e.into_inner()) = node_url_index;
+                *self.cached_node_stem_index.write().unwrap_or_else(|e| e.into_inner()) = node_stem_index;
             }
         }
         // === End NodeStore-native pipeline ===
-
-        // Phase 2a: Materialize DataGraphs for all documents.
-        // Collect url+root pairs first to avoid holding url_to_root read lock
-        // while datagraph_for_document acquires other locks.
-        let url_root_pairs: Vec<(String, node_store::NodeId)> = {
-            let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
-            url_to_root.iter().map(|(url, &root)| (url.clone(), root)).collect()
-        };
-
-        let mut page_data: HashMap<String, template::DataGraph> = HashMap::new();
-        for (url, root) in &url_root_pairs {
-            if let Some(data) = self.datagraph_for_document(*root) {
-                page_data.insert(url.clone(), data);
-            }
-        }
-
-        // Phase 2b: Build indexes in one pass over all pages.
-        // Only item pages go into url_index and stem_index (for link resolution).
-        let mut url_index: expressions::UrlIndex = HashMap::new();
-        let mut stem_index: expressions::StemIndex = HashMap::new();
-        let mut all_edges = Vec::new();
-
-        {
-            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-            for (url, data) in &page_data {
-                let url_path = site_index::UrlPath::new(url);
-                // Only item pages (not collection/index pages) go into stem_index
-                let page_kind = {
-                    let root_opt = url_root_pairs.iter().find(|(u, _)| u == url).map(|(_, r)| *r);
-                    root_opt.and_then(|root| {
-                        node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")
-                    })
-                };
-                if page_kind.as_deref() == Some("item") {
-                    all_edges.extend(expressions::extract_edges(&url_path, data));
-                    url_index.insert(url_path.clone(), data.clone());
-                    if let Some(template::Value::Text(stem)) = data.resolve(&["_presemble_stem"]) {
-                        let schema_stem = site_index::SchemaStem::new(stem);
-                        stem_index.entry(schema_stem).or_default().push((url_path, data.clone()));
-                    }
-                }
-            }
-        }
-
-        let edge_index = expressions::build_edge_index(&all_edges);
-
-        // Store indexes in cache so rebuild_page can use them for incremental updates.
-        *self.cached_url_index.write().unwrap_or_else(|e| e.into_inner()) = url_index.clone();
-        *self.cached_stem_index.write().unwrap_or_else(|e| e.into_inner()) = stem_index.clone();
-        *self.cached_edge_index.write().unwrap_or_else(|e| e.into_inner()) = edge_index.clone();
-
-        // Phase 2c: Resolve all link expressions (one pass).
-        for (url, data) in page_data.iter_mut() {
-            let current_url = site_index::UrlPath::new(url);
-            expressions::resolve_link_expressions_in_graph(
-                data,
-                &url_index,
-                &stem_index,
-                &current_url,
-                &edge_index,
-            );
-        }
-
-        // Phase 2d: Resolve cross-references (one pass).
-        for (_, data) in page_data.iter_mut() {
-            expressions::resolve_cross_references(data, &url_index);
-        }
-
-        // Phase 2e: Inject collections (one pass).
-        // Build collection lists from stem_index.
-        let mut collection_lists: HashMap<String, template::Value> = HashMap::new();
-        for (stem, items) in &stem_index {
-            let values: Vec<template::Value> = items
-                .iter()
-                .map(|(_, data)| template::Value::Record(data.clone()))
-                .collect();
-            if !values.is_empty() {
-                collection_lists.insert(stem.as_str().to_string(), template::Value::List(values));
-            }
-        }
-
-        for (_, data) in page_data.iter_mut() {
-            for (stem, list) in &collection_lists {
-                if data.resolve(&[stem.as_str()]).is_none() {
-                    data.insert(stem.as_str(), list.clone());
-                }
-            }
-        }
 
         // Phase 2f: Apply templates and write output (one pass).
         // Uses NodeStoreView via PrefixedGraphView — no DataGraph materialization.
@@ -1141,7 +1015,7 @@ impl Conductor {
             _ => return Err(format!("not a content file: {}", content_path.display())),
         };
 
-        // Load grammar from cache — use collection schema for index files
+        // Load grammar
         let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let schema_key = site_index::schema_cache_key(&stem, slug);
         let schema_src = self
@@ -1150,97 +1024,56 @@ impl Conductor {
         let grammar = schema::parse_schema(&schema_src)
             .map_err(|e| format!("schema error: {e:?}"))?;
 
-        // Parse content from in-memory text
-        let doc = content::parse_and_assign(text, &grammar)
-            .map_err(|e| format!("parse error: {e}"))?;
-
-        // Build data graph (suggestion nodes fill missing slots)
-        let mut graph = template::build_article_graph_with_source(&doc, &grammar, text);
-
-        // Compute slug and URL path
+        // Compute slug and URL
         let slug = content_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
         let url_path = site_index::url_for_stem_slug(&stem, slug);
-        let presemble_file = site_index::content_file_path(&stem, slug);
 
-        // Add metadata
-        graph.insert("url", template::Value::Text(url_path.clone()));
-        graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
-        graph.insert(
-            KEY_PRESEMBLE_FILE,
-            template::Value::Text(presemble_file),
-        );
+        // Update document in NodeStore (incremental — re-parses and creates semantic content)
+        let sem_root = self.update_document_in_store(&url_path, &stem, slug, text, &grammar)?;
 
-        // Add link record
-        let title = match graph.resolve(&["title"]) {
-            Some(template::Value::Text(t)) => t.clone(),
-            _ => slug.to_string(),
-        };
-        graph.insert("link", template::Value::Record(
-            template::synthesize_link(&title, &url_path),
-        ));
-
-        // Resolve link expressions.
-        // Use cached indexes from the last build_all_pages run when available,
-        // falling back to a fresh build from the NodeStore.
+        // Run NodeStore-native pipeline on this page's semantic content
         {
-            let cached_url = self.cached_url_index.read().unwrap_or_else(|e| e.into_inner());
-            let cached_stem = self.cached_stem_index.read().unwrap_or_else(|e| e.into_inner());
-            let cached_edge = self.cached_edge_index.read().unwrap_or_else(|e| e.into_inner());
-
-            let (url_index, stem_index, edge_index);
-            let (url_ref, stem_ref, edge_ref) = if !cached_url.is_empty() {
-                (&*cached_url, &*cached_stem, &*cached_edge)
-            } else {
-                drop(cached_url);
-                drop(cached_stem);
-                drop(cached_edge);
-                let built = self.build_expression_indexes_from_store();
-                url_index = built.0;
-                stem_index = built.1;
-                edge_index = built.2;
-                (&url_index, &stem_index, &edge_index)
-            };
-
-            let current_url = site_index::UrlPath::new(&url_path);
-            expressions::resolve_link_expressions_in_graph(
-                &mut graph,
-                url_ref,
-                stem_ref,
-                &current_url,
-                edge_ref,
+            let (node_url_index, node_stem_index) = self.cached_node_indexes();
+            let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+            node_store_bridge::store_pipeline::resolve_link_expressions_in_store(
+                &mut store, sem_root, &node_url_index, &node_stem_index,
             );
-            // Phase 2: resolve cross-content references (link Records with href matching a page)
-            expressions::resolve_cross_references(&mut graph, url_ref);
+            node_store_bridge::store_pipeline::resolve_cross_references_in_store(
+                &mut store, sem_root, &node_url_index,
+            );
+            // Inject collections: build from cached stem index
+            // We need ALL semantic roots for collection injection
+            let all_roots: Vec<(String, node_store::NodeId)> = {
+                let url_to_sem = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
+                url_to_sem.iter().map(|(u, &s)| (u.clone(), s)).collect()
+            };
+            node_store_bridge::store_pipeline::inject_collections_in_store(
+                &mut store, &all_roots, &node_stem_index,
+            );
         }
 
-        // Inject collection data so templates can iterate (e.g. data-each="input.post").
-        // Use cached stem index when available, otherwise fall back to NodeStore scan.
-        let has_cache = !self.cached_stem_index.read().unwrap_or_else(|e| e.into_inner()).is_empty();
-        if has_cache {
-            self.inject_collections_from_cache(&mut graph);
-        } else {
-            self.inject_collections_from_store(&mut graph);
-        }
-
-        // Load and parse template via a fresh repo (self.repo may be stale after scaffold)
+        // Load and parse template
         let fresh_repo = site_repository::SiteRepository::builder()
             .from_dir(&self.site_dir)
             .build();
         let stem_obj = site_index::SchemaStem::new(&stem);
-        let (tmpl_src, is_hiccup) = if slug == "index" {
-            // Collection page — try collection template first
+        let page_kind = {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            node_store_bridge::content_bridge::find_attr_text(&store, sem_root, "page-kind")
+        };
+        let (tmpl_src, is_hiccup) = if slug == "index" || page_kind.as_deref() == Some("collection") {
             fresh_repo.collection_template_source(&stem_obj)
                 .or_else(|| fresh_repo.item_template_source(&stem_obj))
                 .or_else(|| fresh_repo.partial_template_source(&stem))
         } else {
-            // Item page
             fresh_repo.item_template_source(&stem_obj)
                 .or_else(|| fresh_repo.partial_template_source(&stem))
         }
         .ok_or_else(|| format!("no template for {stem}"))?;
+
         let raw_nodes = if is_hiccup {
             template::parse_template_hiccup(&tmpl_src)
                 .map_err(|e| format!("{e}"))?
@@ -1250,18 +1083,18 @@ impl Conductor {
         };
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
-        // Create render context with fresh repo
         let registry = template_registry::FileTemplateRegistry::new(fresh_repo);
         let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
 
-        // Wrap page data under "input" key (template expects input.field paths)
-        let mut context = template::DataGraph::new();
-        context.insert("input", template::Value::Record(graph));
+        // Render via PrefixedGraphView — same as build_all_pages Phase 2f
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let view = node_store_bridge::NodeStoreView::new(&store, sem_root);
+        let prefixed = node_store_bridge::PrefixedGraphView::new("input".to_string(), view);
 
-        // Transform and serialize
-        let transformed = template::transform(nodes, &context, &ctx)
+        let transformed = template::transform(nodes, &prefixed, &ctx)
             .map_err(|e| format!("render error: {e}"))?;
         let html = template::serialize_nodes(&transformed);
+        drop(store);
 
         // Write output
         let output_path = site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
@@ -1273,6 +1106,116 @@ impl Conductor {
             .map_err(|e| format!("write error: {e}"))?;
 
         Ok(vec![url_path])
+    }
+
+    /// Re-parse a single document and update its semantic content in the NodeStore.
+    /// This is the incremental counterpart to `populate_node_store`.
+    ///
+    /// Steps:
+    /// 1. Parse the document text with the grammar
+    /// 2. Store the document in the NodeStore (replacing old nodes)
+    /// 3. Create new semantic content with resolved link expressions
+    /// 4. Update url_to_root, url_to_semantic, stem_to_roots
+    ///
+    /// Returns the semantic root NodeId.
+    #[allow(dead_code)]
+    fn update_document_in_store(
+        &self,
+        url: &str,
+        stem: &str,
+        slug: &str,
+        text: &str,
+        grammar: &schema::Grammar,
+    ) -> Result<node_store::NodeId, String> {
+        let page_kind = if slug == "index" { "collection" } else { "item" };
+        let file = site_index::content_file_path(stem, slug);
+
+        let doc = content::parse_and_assign(text, grammar)
+            .map_err(|e| format!("parse error: {e}"))?;
+
+        let meta = node_store_bridge::content_bridge::DocumentMeta {
+            url: url.to_string(),
+            stem: stem.to_string(),
+            file,
+            page_kind: page_kind.to_string(),
+        };
+
+        let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+
+        // Store the document (creates new nodes; old nodes become orphaned but that's OK)
+        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+
+        // Build stem_to_roots and url_to_root snapshots for link resolution.
+        // We need ALL documents' roots so link expressions can resolve cross-document.
+        let url_to_root_snapshot: HashMap<String, node_store::NodeId> = {
+            let existing = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
+            let mut map: HashMap<String, node_store::NodeId> = existing
+                .iter()
+                .map(|(k, &v)| (k.clone(), v))
+                .collect();
+            map.insert(url.to_string(), root);
+            map
+        };
+
+        let stem_to_roots_snapshot: HashMap<String, Vec<node_store::NodeId>> = {
+            let existing = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
+            let old_root_for_url = self
+                .url_to_root
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(url)
+                .copied();
+
+            let mut map: HashMap<String, Vec<node_store::NodeId>> = existing
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+            let stem_roots = map.entry(stem.to_string()).or_default();
+            // Remove the old root for this URL if present
+            if let Some(old_root) = old_root_for_url {
+                stem_roots.retain(|r| *r != old_root);
+            }
+            stem_roots.push(root);
+            map
+        };
+
+        // Create semantic content with resolved link expressions.
+        // The write lock on node_store must be held during this call.
+        let sem = node_store_bridge::content_bridge::create_semantic_content(
+            &mut store,
+            root,
+            grammar,
+            &meta,
+            &stem_to_roots_snapshot,
+            &url_to_root_snapshot,
+        );
+
+        drop(store);
+
+        // Update indexes
+        self.url_to_root
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(url.to_string(), root);
+
+        self.url_to_semantic
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(url.to_string(), sem);
+
+        {
+            let mut stem_roots = self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner());
+            let roots = stem_roots.entry(stem.to_string()).or_default();
+            // The snapshot already has the correct list (old root removed, new root added).
+            // Replace the live entry with the snapshot value.
+            *roots = stem_to_roots_snapshot
+                .get(stem)
+                .cloned()
+                .unwrap_or_default();
+        }
+
+        Ok(sem)
     }
 
     /// Map a cursor line to the anchor of the nearest body element (or preamble slot).
@@ -3066,5 +3009,119 @@ mod node_store_index_tests {
             items.is_empty(),
             "query_items_from_store should return empty vec for unknown stem"
         );
+    }
+}
+
+#[cfg(test)]
+mod update_document_in_store_tests {
+    use super::*;
+
+    const SCHEMA_SRC: &str = "# Post title {#title}\noccurs\n: exactly once\n";
+    const TEMPLATE_SRC: &str = "[:div [:h1 title]]";
+    const CONTENT_V1: &str = "# Original Title\n\n----\n\nOriginal body\n";
+    const CONTENT_V2: &str = "# Updated Title\n\n----\n\nUpdated body\n";
+
+    fn build_single_post_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
+        std::fs::create_dir_all(root.join("templates/post")).expect("create templates/post");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
+
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("content/post/hello.md"), CONTENT_V1).expect("write content");
+
+        tmp
+    }
+
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    /// After calling update_document_in_store, the url_to_root map should
+    /// point to the new document root NodeId.
+    #[test]
+    fn update_document_sets_url_to_root() {
+        let tmp = build_single_post_site();
+        let conductor = make_conductor(&tmp);
+
+        let old_root = conductor.document_by_url("/post/hello")
+            .expect("initial populate_node_store should index /post/hello");
+
+        let grammar = schema::parse_schema(SCHEMA_SRC).expect("parse schema");
+        let new_sem = conductor
+            .update_document_in_store("/post/hello", "post", "hello", CONTENT_V2, &grammar)
+            .expect("update_document_in_store should succeed");
+
+        let new_root = conductor.document_by_url("/post/hello")
+            .expect("url_to_root should still contain /post/hello after update");
+
+        // The new root must differ from the old one (re-parse creates new nodes)
+        assert_ne!(
+            old_root, new_root,
+            "update_document_in_store should create new document nodes (old_root={old_root:?}, new_root={new_root:?})"
+        );
+
+        // The returned sem NodeId must equal what url_to_semantic holds
+        let sem_from_index = conductor.semantic_content_by_url("/post/hello")
+            .expect("url_to_semantic should contain /post/hello after update");
+        assert_eq!(
+            new_sem, sem_from_index,
+            "returned NodeId should match url_to_semantic entry"
+        );
+    }
+
+    /// After update_document_in_store, stem_to_roots should contain exactly
+    /// one entry for the updated document's stem+slug (no duplicate roots).
+    #[test]
+    fn update_document_does_not_duplicate_stem_roots() {
+        let tmp = build_single_post_site();
+        let conductor = make_conductor(&tmp);
+
+        let grammar = schema::parse_schema(SCHEMA_SRC).expect("parse schema");
+        conductor
+            .update_document_in_store("/post/hello", "post", "hello", CONTENT_V2, &grammar)
+            .expect("update_document_in_store should succeed");
+
+        let roots = conductor.documents_for_stem("post");
+        assert_eq!(
+            roots.len(),
+            1,
+            "stem_to_roots['post'] should have exactly 1 root after update (no duplicates), got {}",
+            roots.len()
+        );
+    }
+
+    /// The new document root should reflect the updated document text.
+    /// We verify this by checking that datagraph_for_document on the new root
+    /// returns the updated title.
+    #[test]
+    fn update_document_reflects_new_content() {
+        let tmp = build_single_post_site();
+        let conductor = make_conductor(&tmp);
+
+        let grammar = schema::parse_schema(SCHEMA_SRC).expect("parse schema");
+        conductor
+            .update_document_in_store("/post/hello", "post", "hello", CONTENT_V2, &grammar)
+            .expect("update_document_in_store should succeed");
+
+        let new_root = conductor.document_by_url("/post/hello")
+            .expect("should find updated document");
+
+        let data = conductor.datagraph_for_document(new_root)
+            .expect("datagraph_for_document should succeed on new root");
+
+        match data.resolve(&["title"]) {
+            Some(template::Value::Text(t)) => assert_eq!(
+                t, "Updated Title",
+                "title should reflect updated content, got {t:?}"
+            ),
+            other => panic!("expected title Text value, got {other:?}"),
+        }
     }
 }
