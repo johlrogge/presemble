@@ -1,3 +1,5 @@
+use node_store::{NodeId, NodeStore};
+
 use crate::data::{DataGraph, Value};
 
 /// A reference to data that may be borrowed or owned.
@@ -22,6 +24,13 @@ impl<'a> DataRef<'a> {
     }
 }
 
+/// A resolved node reference — provides direct access to the NodeStore
+/// without materializing to Value. Used by the render hot path.
+pub struct ResolvedNode<'a> {
+    pub id: NodeId,
+    pub store: &'a NodeStore,
+}
+
 /// Uniform data access for template rendering.
 /// Abstracts over DataGraph (legacy) and NodeStore (new).
 pub trait GraphView {
@@ -37,6 +46,12 @@ pub trait GraphView {
 
     /// Clone the entire view and insert a binding. Used by data-each iteration.
     fn with_binding(&self, key: String, value: Value) -> Box<dyn GraphView>;
+
+    /// Resolve a path to a NodeId + store reference, avoiding Value materialization.
+    /// Returns None by default — only NodeStore-backed implementations provide this.
+    fn resolve_node(&self, _path: &[&str]) -> Option<ResolvedNode<'_>> {
+        None
+    }
 }
 
 impl GraphView for DataGraph {

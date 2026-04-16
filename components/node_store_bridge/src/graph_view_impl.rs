@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use node_store::{NodeId, NodeStore};
 use template::data::Value;
-use template::graph_view::{DataRef, GraphView};
+use template::graph_view::{DataRef, GraphView, ResolvedNode};
 use template::DataGraph;
 
 use crate::value_bridge::node_to_value;
@@ -140,6 +140,46 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
         }
         Some(Box::new(NodeStoreView::new(self.store, current)))
+    }
+
+    fn resolve_node(&self, path: &[&str]) -> Option<ResolvedNode<'_>> {
+        let mut current = self.root;
+        for (i, segment) in path.iter().enumerate() {
+            let is_last = i == path.len() - 1;
+
+            // Try ConsistsOf edges first
+            let parts = self.store.consists_of(current);
+            if let Some((_, id)) = parts.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+                if is_last {
+                    return Some(ResolvedNode { id: *id, store: self.store });
+                }
+                current = *id;
+                continue;
+            }
+
+            // Try Reference edges
+            let refs = self.store.references(current);
+            if let Some((_, id)) = refs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+                if is_last {
+                    return Some(ResolvedNode { id: *id, store: self.store });
+                }
+                current = *id;
+                continue;
+            }
+
+            // Try Attribute edges
+            let attrs = self.store.attributes(current);
+            if let Some((_, id)) = attrs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+                if is_last {
+                    return Some(ResolvedNode { id: *id, store: self.store });
+                }
+                current = *id;
+                continue;
+            }
+
+            return None;
+        }
+        None
     }
 
     fn with_binding(&self, key: String, value: Value) -> Box<dyn GraphView> {
@@ -302,6 +342,21 @@ impl GraphView for PrefixedGraphView<'_> {
         }
     }
 
+    fn resolve_node(&self, path: &[&str]) -> Option<ResolvedNode<'_>> {
+        match path {
+            [] => None,
+            [first, rest @ ..] if *first == self.prefix => {
+                if rest.is_empty() {
+                    // The prefix itself — return the root node
+                    Some(ResolvedNode { id: self.inner.root(), store: self.inner.store() })
+                } else {
+                    self.inner.resolve_node(rest)
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn with_binding(&self, key: String, value: Value) -> Box<dyn GraphView> {
         // Materialise inner root as a Value, wrap it under the prefix key,
         // then add the new binding.
@@ -323,6 +378,7 @@ mod tests {
     use node_store::{Edge, Node, NodeStore};
     use template::data::Value;
     use template::graph_view::GraphView;
+    use template;
 
     fn make_test_store() -> (NodeStore, NodeId) {
         let mut store = NodeStore::new();
@@ -520,5 +576,46 @@ mod tests {
         let keys = view.iter_keys();
         assert!(keys.contains(&"title".to_string()));
         assert!(keys.contains(&"author".to_string()));
+    }
+
+    #[test]
+    fn resolve_node_returns_node_id() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let resolved = view.resolve_node(&["title"]).unwrap();
+        assert!(matches!(store.get(resolved.id), Some(Node::Text(t)) if t == "Hello World"));
+    }
+
+    #[test]
+    fn resolve_node_nested_path() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let resolved = view.resolve_node(&["author", "name"]).unwrap();
+        assert!(matches!(store.get(resolved.id), Some(Node::Text(t)) if t == "Alice"));
+    }
+
+    #[test]
+    fn resolve_node_missing_returns_none() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        assert!(view.resolve_node(&["missing"]).is_none());
+    }
+
+    #[test]
+    fn prefixed_resolve_node() {
+        let (store, root) = make_test_store();
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        let resolved = prefixed.resolve_node(&["input", "title"]).unwrap();
+        assert!(matches!(store.get(resolved.id), Some(Node::Text(t)) if t == "Hello World"));
+    }
+
+    #[test]
+    fn datagraph_resolve_node_returns_none() {
+        // DataGraph doesn't support resolve_node — returns None
+        let mut g = template::DataGraph::new();
+        g.insert("title", template::Value::Text("Hello".into()));
+        let view: &dyn template::GraphView = &g;
+        assert!(view.resolve_node(&["title"]).is_none());
     }
 }

@@ -2,7 +2,7 @@ use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, Value};
 use crate::dom::{Element, Form, Node};
 use crate::expr::parse_expr;
-use crate::graph_view::GraphView;
+use crate::graph_view::{GraphView, ResolvedNode};
 use crate::registry::RenderContext;
 
 // ---------------------------------------------------------------------------
@@ -165,6 +165,34 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
     match expr {
         Expr::Lookup(path) => {
             let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+            // Try native NodeStore path first (avoids Value materialization)
+            if let Some(resolved) = graph.resolve_node(&segments) {
+                let store = resolved.store;
+                let id = resolved.id;
+                return match store.get(id) {
+                    Some(node_store::Node::Text(t)) => t.clone(),
+                    Some(node_store::Node::Integer(n)) => n.to_string(),
+                    Some(node_store::Node::Boolean(b)) => b.to_string(),
+                    Some(node_store::Node::Keyword(name)) => format!(":{}", store.resolve_name(*name)),
+                    Some(node_store::Node::Element(name)) => {
+                        // heading/paragraph — extract text from first child
+                        let elem_name = store.resolve_name(*name);
+                        if elem_name == "heading" || elem_name == "paragraph" {
+                            store.children(id).into_iter().find_map(|c| {
+                                if let Some(node_store::Node::Text(s)) = store.get(c) {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            }).unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    _ => String::new(),
+                };
+            }
+            // Legacy Value path
             let resolved = graph.resolve(&segments);
             match resolved.as_ref().map(|r| r.as_value()) {
                 Some(Value::Text(t)) => t.clone(),
@@ -395,23 +423,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
     // Resolve the content file path for browser editing.
     // Each page's graph carries _presemble_file. For "index.tagline", look in graph["index"]["_presemble_file"].
     // For relative paths like "title" (inside data-each), look in graph["_presemble_file"].
-    let presemble_file = {
-        let key_file = crate::constants::KEY_PRESEMBLE_FILE;
-        let mut file_path_segments: Vec<&str> = path_segments.to_vec();
-        if let Some(last) = file_path_segments.last_mut() {
-            *last = key_file;
-        }
-        graph.resolve(&file_path_segments)
-            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
-            // Fallback: try direct lookup (for relative paths inside data-each)
-            .or_else(|| graph.resolve(&[key_file])
-                .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None }))
-            .unwrap_or_default()
-    };
-
-    let resolved = graph.resolve(&path_segments);
-    // Convert to owned value for use throughout the function.
-    let value: Option<Value> = resolved.map(|r| r.into_owned());
+    let presemble_file = resolve_presemble_file(&path_segments, graph);
 
     // Check for :apply attribute — resolve to Form (native from hiccup, re-parsed from HTML strings)
     let apply_form = match el.attr_form("apply") {
@@ -421,6 +433,19 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
         Some(other) => return Err(RenderError::Render(format!(":apply expects a symbol or expression, got {:?}", other))),
         None => None,
     };
+
+    // :apply needs Value — go to legacy path immediately
+    if apply_form.is_none() {
+        // Try the fast NodeId path first (avoids Value materialization)
+        if let Some(ref resolved) = graph.resolve_node(&path_segments) {
+            return render_insert_native(resolved, as_tag, &class, data_path, &presemble_file);
+        }
+    }
+
+    // Legacy Value path (DataGraph fallback or :apply)
+    let resolved = graph.resolve(&path_segments);
+    let value: Option<Value> = resolved.map(|r| r.into_owned());
+
     if let Some(ref form) = apply_form {
         return match evaluate_apply(form, value.as_ref())? {
             Some(text) => {
@@ -600,6 +625,263 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
 
         Some(Value::Opaque(_)) => Ok(Vec::new()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Native NodeStore render path (no Value materialization)
+// ---------------------------------------------------------------------------
+
+/// Render a presemble:insert element using direct NodeStore access (no Value materialization).
+/// Called when `graph.resolve_node()` returns `Some` — the fast path for NodeStore-backed graphs.
+fn render_insert_native(
+    resolved: &ResolvedNode<'_>,
+    as_tag: Option<&str>,
+    class: &str,
+    data_path: &str,
+    presemble_file: &str,
+) -> Result<Vec<Node>, RenderError> {
+    let store = resolved.store;
+    let id = resolved.id;
+
+    match store.get(id) {
+        None => Ok(Vec::new()),
+        Some(node) => match node {
+            node_store::Node::Text(text) => {
+                let tag = as_tag.unwrap_or("span").to_string();
+                let element = Element {
+                    name: tag,
+                    attrs: vec![
+                        ("class".to_string(), Form::Str(class.to_string())),
+                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                    ],
+                    children: vec![Node::Text(text.clone())],
+                };
+                Ok(vec![Node::Element(element)])
+            }
+
+            node_store::Node::Integer(n) => {
+                let tag = as_tag.unwrap_or("span").to_string();
+                let element = Element {
+                    name: tag,
+                    attrs: vec![
+                        ("class".to_string(), Form::Str(class.to_string())),
+                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                    ],
+                    children: vec![Node::Text(n.to_string())],
+                };
+                Ok(vec![Node::Element(element)])
+            }
+
+            node_store::Node::Boolean(b) => {
+                let tag = as_tag.unwrap_or("span").to_string();
+                let element = Element {
+                    name: tag,
+                    attrs: vec![
+                        ("class".to_string(), Form::Str(class.to_string())),
+                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                    ],
+                    children: vec![Node::Text(b.to_string())],
+                };
+                Ok(vec![Node::Element(element)])
+            }
+
+            node_store::Node::Keyword(name) => {
+                let text = format!(":{}", store.resolve_name(*name));
+                let tag = as_tag.unwrap_or("span").to_string();
+                let element = Element {
+                    name: tag,
+                    attrs: vec![
+                        ("class".to_string(), Form::Str(class.to_string())),
+                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                    ],
+                    children: vec![Node::Text(text)],
+                };
+                Ok(vec![Node::Element(element)])
+            }
+
+            node_store::Node::Nil | node_store::Node::Opaque(_) => Ok(Vec::new()),
+
+            node_store::Node::Collection => {
+                // List of items — render each child natively
+                let tag = as_tag.unwrap_or("span");
+                let mut result = Vec::new();
+                for child_id in store.children(id) {
+                    let child_resolved = ResolvedNode { id: child_id, store };
+                    let mut rendered = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file)?;
+                    result.append(&mut rendered);
+                }
+                Ok(result)
+            }
+
+            node_store::Node::Element(name) => {
+                let element_name = store.resolve_name(*name).to_string();
+
+                // Heading or paragraph — extract first text child
+                if element_name == "heading" || element_name == "paragraph" {
+                    let text = store.children(id).into_iter().find_map(|c| {
+                        if let Some(node_store::Node::Text(s)) = store.get(c) {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(text) = text {
+                        let tag = as_tag.unwrap_or("span").to_string();
+                        let element = Element {
+                            name: tag,
+                            attrs: vec![
+                                ("class".to_string(), Form::Str(class.to_string())),
+                                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                            ],
+                            children: vec![Node::Text(text)],
+                        };
+                        return Ok(vec![Node::Element(element)]);
+                    }
+                    return Ok(Vec::new());
+                }
+
+                // Check for href attribute → render as link
+                let attrs = store.attributes(id);
+                let href = attrs.iter().find_map(|(n, v)| {
+                    if store.resolve_name(*n) == "href" {
+                        if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                            Some(t.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                let path_val = attrs.iter().find_map(|(n, v)| {
+                    if store.resolve_name(*n) == "path" {
+                        if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                            Some(t.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(href) = href {
+                    let text = attrs.iter().find_map(|(n, v)| {
+                        if store.resolve_name(*n) == "text" {
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                Some(t.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }).unwrap_or_default();
+                    let slot = slot_name_from_path(data_path);
+                    let effective_tag = as_tag.unwrap_or("a");
+
+                    // Check for _source_slot attribute
+                    let source_slot = attrs.iter().find_map(|(n, v)| {
+                        if store.resolve_name(*n) == crate::constants::KEY_SOURCE_SLOT {
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                Some(t.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
+
+                    return match effective_tag {
+                        "a" => {
+                            let mut elem_attrs = vec![
+                                ("href".to_string(), Form::Str(href)),
+                                ("class".to_string(), Form::Str(class.to_string())),
+                                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
+                                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                            ];
+                            if let Some(source) = source_slot {
+                                elem_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
+                            }
+                            Ok(vec![Node::Element(Element {
+                                name: "a".to_string(),
+                                attrs: elem_attrs,
+                                children: vec![Node::Text(text)],
+                            })])
+                        }
+                        _ => {
+                            let inner_attrs = vec![
+                                ("class".to_string(), Form::Str(class.to_string())),
+                                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
+                                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                            ];
+                            let inner = Element {
+                                name: effective_tag.to_string(),
+                                attrs: inner_attrs,
+                                children: vec![Node::Text(text)],
+                            };
+                            Ok(vec![Node::Element(Element {
+                                name: "a".to_string(),
+                                attrs: vec![("href".to_string(), Form::Str(href))],
+                                children: vec![Node::Element(inner)],
+                            })])
+                        }
+                    };
+                }
+
+                if let Some(src) = path_val {
+                    let alt = attrs.iter().find_map(|(n, v)| {
+                        if store.resolve_name(*n) == "alt" {
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                Some(t.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }).unwrap_or_default();
+                    let tag = as_tag.unwrap_or("img").to_string();
+                    let slot = slot_name_from_path(data_path);
+                    let element = Element {
+                        name: tag,
+                        attrs: vec![
+                            ("src".to_string(), Form::Str(src)),
+                            ("alt".to_string(), Form::Str(alt)),
+                            ("class".to_string(), Form::Str(class.to_string())),
+                            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
+                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                        ],
+                        children: vec![],
+                    };
+                    return Ok(vec![Node::Element(element)]);
+                }
+
+                // Unknown element type — render nothing
+                Ok(Vec::new())
+            }
+        },
+    }
+}
+
+/// Extract the content file path from the graph for browser editing.
+fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> String {
+    let key_file = crate::constants::KEY_PRESEMBLE_FILE;
+    let mut file_path_segments: Vec<&str> = path_segments.to_vec();
+    if let Some(last) = file_path_segments.last_mut() {
+        *last = key_file;
+    }
+    graph.resolve(&file_path_segments)
+        .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
+        .or_else(|| graph.resolve(&[key_file])
+            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None }))
+        .unwrap_or_default()
 }
 
 /// Handle a `<presemble:apply>` element.
@@ -1962,6 +2244,217 @@ mod tests {
         // :apply capitalize on "hello world" -> "Hello world"
         let result = apply_string_function("capitalize", "hello world").unwrap();
         assert_eq!(result, Some("Hello world".to_string()));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Native NodeStore path tests (render_insert_native)
+    // ---------------------------------------------------------------------------
+
+    /// A minimal GraphView that always delegates to a NodeStore root.
+    /// Used to exercise the native (non-Value) render path in tests.
+    struct NodeStoreGraphView {
+        store: node_store::NodeStore,
+        root: node_store::NodeId,
+    }
+
+    impl GraphView for NodeStoreGraphView {
+        fn resolve(&self, _path: &[&str]) -> Option<crate::graph_view::DataRef<'_>> {
+            None
+        }
+        fn iter_keys(&self) -> Vec<String> {
+            vec![]
+        }
+        fn clone_scoped(&self, _path: &[&str]) -> Option<Box<dyn GraphView + '_>> {
+            None
+        }
+        fn with_binding(&self, _key: String, _value: Value) -> Box<dyn GraphView> {
+            Box::new(DataGraph::new())
+        }
+        fn resolve_node(&self, path: &[&str]) -> Option<crate::graph_view::ResolvedNode<'_>> {
+            // Walk ConsistsOf and Attribute edges for each segment
+            let mut current = self.root;
+            for (i, segment) in path.iter().enumerate() {
+                let is_last = i == path.len() - 1;
+                // ConsistsOf
+                let parts = self.store.consists_of(current);
+                if let Some((_, id)) = parts.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                    if is_last {
+                        return Some(crate::graph_view::ResolvedNode { id: *id, store: &self.store });
+                    }
+                    current = *id;
+                    continue;
+                }
+                // Attribute edges
+                let attrs = self.store.attributes(current);
+                if let Some((_, id)) = attrs.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                    if is_last {
+                        return Some(crate::graph_view::ResolvedNode { id: *id, store: &self.store });
+                    }
+                    current = *id;
+                    continue;
+                }
+                return None;
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn native_path_text_node_renders_as_span() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let title_name = store.intern("title");
+        let title_val = store.add_node(node_store::Node::Text("Native Title".into()));
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: title_val });
+
+        let graph = NodeStoreGraphView { store, root };
+        let src = r#"<presemble:insert data="title" as="h1" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert_eq!(html, r#"<h1 class="title" data-presemble-slot="title" data-presemble-file="">Native Title</h1>"#);
+    }
+
+    #[test]
+    fn native_path_integer_node_renders_as_span() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let count_name = store.intern("count");
+        let count_val = store.add_node(node_store::Node::Integer(42));
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: count_name, part: count_val });
+
+        let graph = NodeStoreGraphView { store, root };
+        let src = r#"<presemble:insert data="count" as="span" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("42"), "integer should render as text: {html}");
+        assert!(html.contains("<span"), "should use span tag: {html}");
+    }
+
+    #[test]
+    fn native_path_nil_node_renders_empty() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let field_name = store.intern("empty");
+        let nil_val = store.add_node(node_store::Node::Nil);
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: field_name, part: nil_val });
+
+        let graph = NodeStoreGraphView { store, root };
+        let src = r#"<presemble:insert data="empty" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        assert!(result.is_empty(), "Nil node should produce no output");
+    }
+
+    #[test]
+    fn native_path_link_element_renders_as_anchor() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+
+        let link_elem_name = store.intern("link");
+        let link = store.add_node(node_store::Node::Element(link_elem_name));
+
+        let href_name = store.intern("href");
+        let href_val = store.add_node(node_store::Node::Text("/about".into()));
+        store.add_edge(link, node_store::Edge::Attribute { name: href_name, value: href_val });
+
+        let text_name = store.intern("text");
+        let text_val = store.add_node(node_store::Node::Text("About Us".into()));
+        store.add_edge(link, node_store::Edge::Attribute { name: text_name, value: text_val });
+
+        let nav_link_name = store.intern("nav_link");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: nav_link_name, part: link });
+
+        let graph = NodeStoreGraphView { store, root };
+        let src = r#"<presemble:insert data="nav_link" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains(r#"href="/about""#), "link should have href: {html}");
+        assert!(html.contains("About Us"), "link should have text: {html}");
+        assert!(html.contains("<a"), "should render as anchor: {html}");
+    }
+
+    #[test]
+    fn native_path_collection_renders_each_item() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+
+        let collection = store.add_node(node_store::Node::Collection);
+        let item1 = store.add_node(node_store::Node::Text("Item 1".into()));
+        let item2 = store.add_node(node_store::Node::Text("Item 2".into()));
+        store.add_edge(collection, node_store::Edge::Child(item1));
+        store.add_edge(collection, node_store::Edge::Child(item2));
+
+        let items_name = store.intern("items");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: items_name, part: collection });
+
+        let graph = NodeStoreGraphView { store, root };
+        let src = r#"<presemble:insert data="items" as="li" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("Item 1"), "first item should appear: {html}");
+        assert!(html.contains("Item 2"), "second item should appear: {html}");
+        assert_eq!(html.matches("<li").count(), 2, "should produce 2 li elements: {html}");
+    }
+
+    #[test]
+    fn native_path_heading_element_extracts_text() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(node_store::Node::Element(heading_name));
+        let heading_text = store.add_node(node_store::Node::Text("My Heading".into()));
+        store.add_edge(heading, node_store::Edge::Child(heading_text));
+
+        let title_name = store.intern("title");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+
+        let graph = NodeStoreGraphView { store, root };
+        let src = r#"<presemble:insert data="title" as="h2" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let html = serialize_nodes(&result);
+        assert!(html.contains("My Heading"), "heading text should be extracted: {html}");
+        assert!(html.contains("<h2"), "should use h2 tag: {html}");
+    }
+
+    #[test]
+    fn eval_expr_to_string_native_path_text() {
+        use crate::ast::Expr;
+
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let title_name = store.intern("tagline");
+        let title_val = store.add_node(node_store::Node::Text("Fast path text".into()));
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: title_val });
+
+        let graph = NodeStoreGraphView { store, root };
+        let expr = Expr::Lookup(vec!["tagline".to_string()]);
+        let result = eval_expr_to_string(&expr, &graph);
+        assert_eq!(result, "Fast path text");
     }
 
     // ---------------------------------------------------------------------------
