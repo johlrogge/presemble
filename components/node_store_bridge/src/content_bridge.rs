@@ -518,6 +518,7 @@ fn collect_link_targets(
     _slot_name: &str,
     stem_to_roots: &std::collections::HashMap<String, Vec<NodeId>>,
     url_to_root: &std::collections::HashMap<String, NodeId>,
+    url_to_semantic: Option<&std::collections::HashMap<String, NodeId>>,
 ) -> Vec<NodeId> {
     let target_node = match find_child_by_name(store, link_expr, "link-target") {
         Some(t) => t,
@@ -530,10 +531,15 @@ fn collect_link_targets(
 
     match kind.as_str() {
         "path-ref" => {
-            if let Some(target_url) = find_attr_text(store, target_node, "value")
-                && let Some(&target_root) = url_to_root.get(&target_url)
-            {
-                vec![target_root]
+            if let Some(target_url) = find_attr_text(store, target_node, "value") {
+                // Prefer semantic root (has named fields for templates)
+                if let Some(&sem) = url_to_semantic.and_then(|m| m.get(&target_url)) {
+                    vec![sem]
+                } else if let Some(&root) = url_to_root.get(&target_url) {
+                    vec![root]
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             }
@@ -574,6 +580,7 @@ pub fn create_semantic_content(
     meta: &DocumentMeta,
     stem_to_roots: &std::collections::HashMap<String, Vec<NodeId>>,
     url_to_root: &std::collections::HashMap<String, NodeId>,
+    url_to_semantic: Option<&std::collections::HashMap<String, NodeId>>,
 ) -> NodeId {
     let sem_name = store.intern("semantic-content");
     let sem = store.add_node(Node::Element(sem_name));
@@ -604,18 +611,21 @@ pub fn create_semantic_content(
                         has_link_exprs = true;
                         let targets = collect_link_targets(
                             store, child, &slot_name,
-                            stem_to_roots, url_to_root,
+                            stem_to_roots, url_to_root, url_to_semantic,
                         );
                         link_targets.extend(targets);
                     } else if is_resolved_link(store, child) {
                         // Resolved link element (ContentElement::Link) — look up target by href.
-                        // Skip self-references (the page's own synthesized link record).
+                        // Prefer semantic root (has named fields). Skip self-references.
                         has_link_exprs = true;
                         if let Some(href) = find_attr_text(store, child, "href")
                             && href != meta.url
-                            && let Some(&target_root) = url_to_root.get(&href)
                         {
-                            link_targets.push(target_root);
+                            if let Some(&sem) = url_to_semantic.and_then(|m| m.get(&href)) {
+                                link_targets.push(sem);
+                            } else if let Some(&root) = url_to_root.get(&href) {
+                                link_targets.push(root);
+                            }
                         }
                     }
                 }
@@ -689,61 +699,6 @@ pub fn create_semantic_content(
     store.add_edge(sem, Edge::ConsistsOf { name: link_name, part: link_node });
 
     sem
-}
-
-/// Rewire cross-document Reference edges from document roots to semantic roots.
-///
-/// After Pass 2, path-ref link expressions point at document roots (because
-/// semantic roots didn't exist yet when the link was resolved). This function
-/// replaces those targets with the corresponding semantic roots, so templates
-/// can access named fields (title, summary, etc.) on referenced pages.
-pub fn rewire_doc_refs_to_semantic(
-    store: &mut NodeStore,
-    url_to_semantic: &std::collections::HashMap<String, NodeId>,
-    url_to_root: &std::collections::HashMap<String, NodeId>,
-) {
-    // Build doc_root → semantic_root mapping
-    let root_to_semantic: std::collections::HashMap<NodeId, NodeId> = url_to_root
-        .iter()
-        .filter_map(|(url, &doc_root)| {
-            url_to_semantic.get(url).map(|&sem| (doc_root, sem))
-        })
-        .collect();
-
-    // For each semantic root, replace Reference targets and Collection
-    // children that point to doc roots with semantic roots.
-    let sem_ids: Vec<NodeId> = url_to_semantic.values().copied().collect();
-    for sem_id in sem_ids {
-        // Rewire Collection children (from ConsistsOf edges)
-        for (_, part_id) in store.consists_of(sem_id) {
-            if matches!(store.get(part_id), Some(Node::Collection)) {
-                let children = store.children(part_id);
-                for old_child in children {
-                    if let Some(&new_child) = root_to_semantic.get(&old_child) {
-                        store.replace_child_target(part_id, old_child, new_child);
-                    }
-                }
-            }
-        }
-
-        // Rewire Reference edge targets
-        let refs = store.references(sem_id);
-        let targets_to_replace: Vec<NodeId> = refs
-            .iter()
-            .filter_map(|(_, target)| {
-                if root_to_semantic.contains_key(target) {
-                    Some(*target)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for old_target in targets_to_replace {
-            if let Some(&new_target) = root_to_semantic.get(&old_target) {
-                store.replace_reference_target(sem_id, old_target, new_target);
-            }
-        }
-    }
 }
 
 // ── store_to_document ─────────────────────────────────────────────────────────
@@ -1151,7 +1106,7 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
 
         // semantic-content element exists
         assert!(
@@ -1180,7 +1135,7 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
 
         // Find ConsistsOf("title") on semantic content
         let parts = store.consists_of(sem);
@@ -1215,7 +1170,7 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
 
         let parts = store.consists_of(sem);
         let summary_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
@@ -1247,7 +1202,7 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
 
         let parts = store.consists_of(sem);
         let body_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "body");
@@ -1274,7 +1229,7 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
 
         let parts = store.consists_of(sem);
         let link_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "link");
@@ -1302,7 +1257,7 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
 
         // Find the heading in the document tree (preamble → slot("title") → heading)
         let preamble = find_child_by_name(&store, doc_root, "preamble").unwrap();

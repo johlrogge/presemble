@@ -291,21 +291,11 @@ impl Conductor {
             {
                 let sem = node_store_bridge::content_bridge::create_semantic_content(
                     &mut store, entry.root, grammar, &entry.meta,
-                    &stem_index, &url_index,
+                    &stem_index, &url_index, Some(&semantic_index),
                 );
                 semantic_index.insert(entry.url.clone(), sem);
             }
         }
-
-        // Pass 3: Rewire cross-document Reference edges to point at semantic
-        // roots instead of document roots. Templates access `item.title` etc.
-        // which only exist on semantic content (ConsistsOf edges), not on raw
-        // document roots.
-        node_store_bridge::content_bridge::rewire_doc_refs_to_semantic(
-            &mut store,
-            &semantic_index,
-            &url_index,
-        );
 
         // Parse and store all templates
         for stem in repo.schema_stems() {
@@ -1219,6 +1209,11 @@ impl Conductor {
 
         // Create semantic content with resolved link expressions.
         // The write lock on node_store must be held during this call.
+        // Pass url_to_semantic so links resolve to semantic roots when available
+        let sem_snapshot: std::collections::HashMap<String, node_store::NodeId> = {
+            self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner())
+                .iter().map(|(k, &v)| (k.clone(), v)).collect()
+        };
         let sem = node_store_bridge::content_bridge::create_semantic_content(
             &mut store,
             root,
@@ -1226,6 +1221,7 @@ impl Conductor {
             &meta,
             &stem_to_roots_snapshot,
             &url_to_root_snapshot,
+            Some(&sem_snapshot),
         );
 
         drop(store);
@@ -3330,6 +3326,8 @@ mod feature_card_rendering_tests {
         stem_index.entry("".to_string()).or_default().push(index_root);
 
         // ── 5. Create semantic content ───────────────────────────────────────
+        let mut sem_index: HashMap<String, node_store::NodeId> = HashMap::new();
+
         let feature_sem = node_store_bridge::content_bridge::create_semantic_content(
             &mut store,
             feature_root,
@@ -3337,7 +3335,9 @@ mod feature_card_rendering_tests {
             &feature_meta,
             &stem_index,
             &url_index,
+            Some(&sem_index),
         );
+        sem_index.insert("/feature/schemas-as-contracts".to_string(), feature_sem);
 
         let index_sem = node_store_bridge::content_bridge::create_semantic_content(
             &mut store,
@@ -3346,20 +3346,10 @@ mod feature_card_rendering_tests {
             &index_meta,
             &stem_index,
             &url_index,
+            Some(&sem_index),
         );
 
-        // ── 6. Rewire cross-document references ──────────────────────────────
-        let mut sem_index: HashMap<String, node_store::NodeId> = HashMap::new();
-        sem_index.insert("/feature/schemas-as-contracts".to_string(), feature_sem);
-        sem_index.insert("/".to_string(), index_sem);
-
-        node_store_bridge::content_bridge::rewire_doc_refs_to_semantic(
-            &mut store,
-            &sem_index,
-            &url_index,
-        );
-
-        // ── 7. Render index page ─────────────────────────────────────────────
+        // ── 6. Render index page ─────────────────────────────────────────────
         let raw_nodes = template::parse_template_xml(INDEX_TEMPLATE_SRC)
             .expect("template should parse");
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
