@@ -983,8 +983,43 @@ fn render_insert_native(
                     return Ok(vec![Node::Element(element)]);
                 }
 
-                // Unknown element type — signal fallback to legacy Value path
-                Err(RenderError::Render("native_fallback".into()))
+                // Unknown element type — check for synthesized link record (ConsistsOf "link")
+                let link_part = store.consists_of(id).iter()
+                    .find(|(name, _)| store.resolve_name(*name) == "link")
+                    .map(|(_, id)| *id);
+                if let Some(link_id) = link_part {
+                    // Render as a link using the synthesized link record's href/text
+                    let link_attrs = store.attributes(link_id);
+                    let href = link_attrs.iter().find_map(|(n, v)| {
+                        if store.resolve_name(*n) == "href" {
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
+                        } else { None }
+                    });
+                    let text = link_attrs.iter().find_map(|(n, v)| {
+                        if store.resolve_name(*n) == "text" {
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
+                        } else { None }
+                    });
+                    if let Some(href) = href {
+                        let text = text.unwrap_or_default();
+                        let slot = slot_name_from_path(data_path);
+                        let effective_tag = as_tag.unwrap_or("a");
+                        let attrs = vec![
+                            ("href".to_string(), Form::Str(href)),
+                            ("class".to_string(), Form::Str(class.to_string())),
+                            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
+                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                        ];
+                        let element = Element {
+                            name: effective_tag.to_string(),
+                            attrs,
+                            children: vec![Node::Text(text)],
+                        };
+                        return Ok(vec![Node::Element(element)]);
+                    }
+                }
+                // Truly unknown — render nothing
+                Ok(Vec::new())
             }
         },
     }
