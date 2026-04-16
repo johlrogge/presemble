@@ -284,7 +284,9 @@ impl Conductor {
             }
         }
 
-        // Pass 2: Create semantic content (structural fields only, no cross-doc links).
+        // Pass 2: Create semantic content. Process items before collections
+        // so that collection pages' link slots can resolve to item semantic roots.
+        doc_entries.sort_by_key(|e| if e.meta.page_kind == "collection" { 1 } else { 0 });
         for entry in &doc_entries {
             if let Some(grammar) = grammars.get(&entry.grammar_key)
                 .or_else(|| grammars.get(&entry.meta.stem))
