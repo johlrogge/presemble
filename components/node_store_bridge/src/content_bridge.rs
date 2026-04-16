@@ -502,6 +502,11 @@ fn is_link_expression(store: &NodeStore, node: NodeId) -> bool {
     matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link-expression")
 }
 
+/// Check if a node is a resolved link element (ContentElement::Link stored as Element("link")).
+fn is_resolved_link(store: &NodeStore, node: NodeId) -> bool {
+    matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link")
+}
+
 /// Resolve a link-expression node and create Reference edges on the semantic content node.
 /// PathRef → direct reference to the target document root.
 /// ThreadExpr → references to all item documents matching the stem.
@@ -591,7 +596,7 @@ pub fn create_semantic_content(
         {
                 let children = store.children(slot_id);
 
-                // Check if any child is a link-expression that needs resolving
+                // Check if any child is a link-expression or resolved link
                 let mut link_targets: Vec<NodeId> = Vec::new();
                 let mut has_link_exprs = false;
                 for &child in &children {
@@ -602,6 +607,16 @@ pub fn create_semantic_content(
                             stem_to_roots, url_to_root,
                         );
                         link_targets.extend(targets);
+                    } else if is_resolved_link(store, child) {
+                        // Resolved link element (ContentElement::Link) — look up target by href.
+                        // Skip self-references (the page's own synthesized link record).
+                        has_link_exprs = true;
+                        if let Some(href) = find_attr_text(store, child, "href")
+                            && href != meta.url
+                            && let Some(&target_root) = url_to_root.get(&href)
+                        {
+                            link_targets.push(target_root);
+                        }
                     }
                 }
 

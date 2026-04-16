@@ -938,11 +938,14 @@ impl Conductor {
         let root_to_url: HashMap<node_store::NodeId, &String> = url_to_root.iter()
             .map(|(url, &root)| (root, url))
             .collect();
+        let sem_to_url: HashMap<node_store::NodeId, &String> = url_to_semantic.iter()
+            .map(|(url, &sem)| (sem, url))
+            .collect();
         for (source_url, &sem_id) in url_to_semantic.iter() {
             // Check Reference edges (cross-document links)
             for (_, target) in store.references(sem_id) {
-                // Direct document reference (resolved thread expression)
-                if let Some(target_url) = root_to_url.get(&target) {
+                // Direct reference (may point to doc root or semantic root after rewiring)
+                if let Some(target_url) = root_to_url.get(&target).or_else(|| sem_to_url.get(&target)) {
                     edges.push(site_index::Edge {
                         source: site_index::UrlPath::new(source_url),
                         target: site_index::UrlPath::new(target_url.as_str()),
@@ -961,6 +964,7 @@ impl Conductor {
             // Check ConsistsOf edges (structural parts with href, e.g. synthesized link)
             for (_, part) in store.consists_of(sem_id) {
                 if let Some(href) = node_store_bridge::content_bridge::find_attr_text(&store, part, "href")
+                    && href != *source_url  // skip self-references (synthesized link record)
                     && url_to_root.contains_key(&href)
                 {
                     edges.push(site_index::Edge {
@@ -3155,6 +3159,238 @@ mod update_document_in_store_tests {
                 "title should reflect updated content, got {t:?}"
             ),
             other => panic!("expected title Text value, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod feature_card_rendering_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ── schemas ──────────────────────────────────────────────────────────────
+
+    /// Schema for a feature item page.
+    const FEATURE_SCHEMA_SRC: &str =
+        "# Feature title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n";
+
+    /// Schema for the root index page with a link slot referencing feature pages.
+    const INDEX_SCHEMA_SRC: &str =
+        "[<name>](/feature/<name>) {#highlight}\ntype\n: link(feature)\noccurs\n: 1..6\n\n----\n\nBody.\n";
+
+    // ── content ──────────────────────────────────────────────────────────────
+
+    const FEATURE_CONTENT_SRC: &str = "# Schemas As Contracts\n\n----\n\nFeature body.\n";
+
+    const INDEX_CONTENT_SRC: &str =
+        "[Schemas As Contracts](/feature/schemas-as-contracts)\n\n----\n\nIndex body.\n";
+
+    // ── template ─────────────────────────────────────────────────────────────
+
+    const INDEX_TEMPLATE_SRC: &str =
+        r#"<ul><template data-each="input.highlight"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    fn node_type_name(store: &node_store::NodeStore, id: node_store::NodeId) -> String {
+        match store.get(id) {
+            Some(node_store::Node::Element(name)) => {
+                format!("Element({})", store.resolve_name(*name))
+            }
+            Some(node_store::Node::Text(s)) => format!("Text({s:?})"),
+            Some(node_store::Node::Collection) => "Collection".to_string(),
+            Some(node_store::Node::Integer(n)) => format!("Integer({n})"),
+            Some(node_store::Node::Boolean(b)) => format!("Boolean({b})"),
+            Some(node_store::Node::Nil) => "Nil".to_string(),
+            Some(node_store::Node::Keyword(name)) => {
+                format!("Keyword({})", store.resolve_name(*name))
+            }
+            Some(node_store::Node::Opaque(_)) => "Opaque".to_string(),
+            None => "Missing".to_string(),
+        }
+    }
+
+    /// Print diagnostic state of the index semantic content node.
+    fn debug_index_sem(store: &node_store::NodeStore, index_sem: node_store::NodeId) {
+        eprintln!("=== DEBUG: index semantic content ({index_sem:?}) ===");
+
+        let consists_of = store.consists_of(index_sem);
+        eprintln!("  consists_of ({} entries):", consists_of.len());
+        for (name, part) in &consists_of {
+            let name_str = store.resolve_name(*name);
+            let type_str = node_type_name(store, *part);
+            eprintln!("    {name_str} -> {part:?} ({type_str})");
+        }
+
+        let references = store.references(index_sem);
+        eprintln!("  references ({} entries):", references.len());
+        for (name, target) in &references {
+            let name_str = store.resolve_name(*name);
+            let type_str = node_type_name(store, *target);
+            eprintln!("    {name_str} -> {target:?} ({type_str})");
+        }
+
+        // Investigate the "highlight" slot specifically
+        let highlight_id = consists_of
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "highlight")
+            .map(|(_, id)| *id);
+        let highlight_ref = references
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "highlight")
+            .map(|(_, id)| *id);
+
+        let highlight = highlight_id.or(highlight_ref);
+        if let Some(h) = highlight {
+            eprintln!("  highlight target: {h:?} ({})", node_type_name(store, h));
+            let children = store.children(h);
+            eprintln!("  highlight children ({}):", children.len());
+            for child in &children {
+                let ctype = node_type_name(store, *child);
+                eprintln!("    {child:?} ({ctype})");
+                // Walk the child's ConsistsOf edges
+                let child_consists = store.consists_of(*child);
+                if !child_consists.is_empty() {
+                    for (n, p) in &child_consists {
+                        let nstr = store.resolve_name(*n);
+                        let ptype = node_type_name(store, *p);
+                        eprintln!("      ConsistsOf {nstr} -> {p:?} ({ptype})");
+                    }
+                }
+                // Also check for a "title" consists_of
+                let child_refs = store.references(*child);
+                if !child_refs.is_empty() {
+                    for (n, p) in &child_refs {
+                        let nstr = store.resolve_name(*n);
+                        let ptype = node_type_name(store, *p);
+                        eprintln!("      Reference {nstr} -> {p:?} ({ptype})");
+                    }
+                }
+            }
+        } else {
+            eprintln!("  no 'highlight' edge found on index semantic content");
+        }
+    }
+
+    // ── test ──────────────────────────────────────────────────────────────────
+
+    /// Reproduce the feature card rendering failure from `presemble serve`.
+    ///
+    /// This test exercises the EXACT same code path:
+    ///   content parsing -> document_to_store -> create_semantic_content ->
+    ///   rewire_doc_refs_to_semantic -> PrefixedGraphView -> template::transform
+    ///
+    /// Expected to FAIL: feature cards are empty because the pipeline does not
+    /// correctly wire the "highlight" link slot so that `item.title` is accessible
+    /// inside `data-each`.
+    #[test]
+    fn feature_card_rendering_via_node_store() {
+        // ── 1. Parse schemas ─────────────────────────────────────────────────
+        let feature_grammar = schema::parse_schema(FEATURE_SCHEMA_SRC)
+            .expect("feature schema should parse");
+        let index_grammar = schema::parse_schema(INDEX_SCHEMA_SRC)
+            .expect("index schema should parse");
+
+        // ── 2. Parse content ─────────────────────────────────────────────────
+        let feature_doc = content::parse_and_assign(FEATURE_CONTENT_SRC, &feature_grammar)
+            .expect("feature content should parse");
+        let index_doc = content::parse_and_assign(INDEX_CONTENT_SRC, &index_grammar)
+            .expect("index content should parse");
+
+        // ── 3. Store documents ───────────────────────────────────────────────
+        let mut store = node_store::NodeStore::new();
+
+        let feature_meta = node_store_bridge::content_bridge::DocumentMeta {
+            url: "/feature/schemas-as-contracts".to_string(),
+            stem: "feature".to_string(),
+            file: "content/feature/schemas-as-contracts.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let feature_root = node_store_bridge::content_bridge::document_to_store(
+            &feature_doc, &mut store, Some(&feature_meta),
+        );
+
+        let index_meta = node_store_bridge::content_bridge::DocumentMeta {
+            url: "/".to_string(),
+            stem: "".to_string(),
+            file: "content/index.md".to_string(),
+            page_kind: "collection".to_string(),
+        };
+        let index_root = node_store_bridge::content_bridge::document_to_store(
+            &index_doc, &mut store, Some(&index_meta),
+        );
+
+        // ── 4. Build indexes ─────────────────────────────────────────────────
+        let mut url_index: HashMap<String, node_store::NodeId> = HashMap::new();
+        url_index.insert("/feature/schemas-as-contracts".to_string(), feature_root);
+        url_index.insert("/".to_string(), index_root);
+
+        let mut stem_index: HashMap<String, Vec<node_store::NodeId>> = HashMap::new();
+        stem_index.entry("feature".to_string()).or_default().push(feature_root);
+        stem_index.entry("".to_string()).or_default().push(index_root);
+
+        // ── 5. Create semantic content ───────────────────────────────────────
+        let feature_sem = node_store_bridge::content_bridge::create_semantic_content(
+            &mut store,
+            feature_root,
+            &feature_grammar,
+            &feature_meta,
+            &stem_index,
+            &url_index,
+        );
+
+        let index_sem = node_store_bridge::content_bridge::create_semantic_content(
+            &mut store,
+            index_root,
+            &index_grammar,
+            &index_meta,
+            &stem_index,
+            &url_index,
+        );
+
+        // ── 6. Rewire cross-document references ──────────────────────────────
+        let mut sem_index: HashMap<String, node_store::NodeId> = HashMap::new();
+        sem_index.insert("/feature/schemas-as-contracts".to_string(), feature_sem);
+        sem_index.insert("/".to_string(), index_sem);
+
+        node_store_bridge::content_bridge::rewire_doc_refs_to_semantic(
+            &mut store,
+            &sem_index,
+            &url_index,
+        );
+
+        // ── 7. Render index page ─────────────────────────────────────────────
+        let raw_nodes = template::parse_template_xml(INDEX_TEMPLATE_SRC)
+            .expect("template should parse");
+        let (nodes, local_defs) = template::extract_definitions(raw_nodes);
+
+        let reg = template::NullRegistry;
+        let ctx = template::RenderContext::with_local_defs(&reg, &local_defs);
+
+        let view = node_store_bridge::NodeStoreView::new(&store, index_sem);
+        let prefixed = node_store_bridge::PrefixedGraphView::new("input".to_string(), view);
+
+        let result = template::transform(nodes, &prefixed, &ctx);
+
+        // ── 8. Assert and debug ──────────────────────────────────────────────
+        match &result {
+            Ok(transformed) => {
+                let html = template::serialize_nodes(transformed);
+                eprintln!("Rendered HTML: {html}");
+
+                if !html.contains("Schemas As Contracts") {
+                    // Print debug before failing
+                    debug_index_sem(&store, index_sem);
+                    panic!(
+                        "Expected rendered HTML to contain 'Schemas As Contracts', but got:\n{html}"
+                    );
+                }
+                // If we reach here the bug is fixed — the test passes.
+            }
+            Err(e) => {
+                debug_index_sem(&store, index_sem);
+                panic!("template::transform failed: {e:?}");
+            }
         }
     }
 }
