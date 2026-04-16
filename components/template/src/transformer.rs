@@ -462,9 +462,15 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
 
     // :apply needs Value — go to legacy path immediately
     if apply_form.is_none() {
-        // Try the fast NodeId path first (avoids Value materialization)
+        // Try the fast NodeId path first (avoids Value materialization).
+        // Falls back to legacy Value path for unhandled node types (e.g. body).
         if let Some(ref resolved) = graph.resolve_node(&path_segments) {
-            return render_insert_native(resolved, as_tag, &class, data_path, &presemble_file);
+            match render_insert_native(resolved, as_tag, &class, data_path, &presemble_file) {
+                Err(RenderError::Render(ref msg)) if msg == "native_fallback" => {
+                    // Fall through to legacy Value path below
+                }
+                other => return other,
+            }
         }
     }
 
@@ -889,8 +895,8 @@ fn render_insert_native(
                     return Ok(vec![Node::Element(element)]);
                 }
 
-                // Unknown element type — render nothing
-                Ok(Vec::new())
+                // Unknown element type — signal fallback to legacy Value path
+                Err(RenderError::Render("native_fallback".into()))
             }
         },
     }
