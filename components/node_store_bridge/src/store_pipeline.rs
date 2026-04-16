@@ -87,14 +87,21 @@ fn resolve_element_cross_refs(
                 .map(|(name, _)| store.resolve_name(*name).to_string())
                 .collect();
 
-            // Collect target page's references upfront (avoids borrow issues).
-            let target_refs: Vec<(String, NodeId)> = store
-                .references(target_root)
+            // Collect target page's fields upfront (avoids borrow issues).
+            // Fields live on both ConsistsOf (structural) and Reference (cross-doc) edges.
+            let mut target_fields: Vec<(String, NodeId)> = store
+                .consists_of(target_root)
                 .iter()
                 .map(|(name, node)| (store.resolve_name(*name).to_string(), *node))
                 .collect();
+            target_fields.extend(
+                store
+                    .references(target_root)
+                    .iter()
+                    .map(|(name, node)| (store.resolve_name(*name).to_string(), *node)),
+            );
 
-            for (name_str, target_value) in target_refs {
+            for (name_str, target_value) in target_fields {
                 if name_str != "href"
                     && name_str != "text"
                     && !existing_names.contains(&name_str)
@@ -343,7 +350,7 @@ mod tests {
 
         let headline_name = store.intern("headline");
         let headline_val = store.add_node(Node::Text("The Headline".into()));
-        store.add_edge(target_root, Edge::Reference { name: headline_name, target: headline_val });
+        store.add_edge(target_root, Edge::ConsistsOf { name: headline_name, part: headline_val });
 
         // Build a source page that has a link element pointing to the target.
         let href_name = store.intern("href");

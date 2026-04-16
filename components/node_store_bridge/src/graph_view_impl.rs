@@ -1,7 +1,7 @@
 //! GraphView implementations backed by NodeStore.
 //!
 //! `NodeStoreView` wraps a `&NodeStore` + root `NodeId` and implements `GraphView`
-//! by walking Reference and Attribute edges.
+//! by walking ConsistsOf, Reference, and Attribute edges.
 //!
 //! `LayeredGraphView` overlays local bindings on top of any parent `GraphView`.
 
@@ -20,9 +20,9 @@ use crate::value_bridge::node_to_value;
 
 /// A `GraphView` backed by a `NodeStore`, rooted at a specific `NodeId`.
 ///
-/// `resolve` walks Reference edges for each path segment. At the terminal node
-/// the subtree is materialised via `node_to_value`. Attribute edges are also
-/// searched when no matching Reference edge is found.
+/// `resolve` walks ConsistsOf edges first, then Reference edges, then Attribute
+/// edges for each path segment. At the terminal node the subtree is materialised
+/// via `node_to_value`.
 pub struct NodeStoreView<'a> {
     store: &'a NodeStore,
     root: NodeId,
@@ -48,7 +48,22 @@ impl<'a> GraphView for NodeStoreView<'a> {
         for (i, segment) in path.iter().enumerate() {
             let is_last = i == path.len() - 1;
 
-            // 1. Try Reference edges first
+            // 1. Try ConsistsOf edges (structural composition)
+            let parts = self.store.consists_of(current);
+            let part_target = parts
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+                .map(|(_, id)| *id);
+
+            if let Some(id) = part_target {
+                if is_last {
+                    return Some(DataRef::Owned(node_to_value(self.store, id)));
+                }
+                current = id;
+                continue;
+            }
+
+            // 2. Try Reference edges (cross-document links)
             let refs = self.store.references(current);
             let ref_target = refs
                 .iter()
@@ -63,7 +78,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
                 continue;
             }
 
-            // 2. Fall back to Attribute edges
+            // 3. Fall back to Attribute edges
             let attrs = self.store.attributes(current);
             let attr_target = attrs
                 .iter()
@@ -87,10 +102,13 @@ impl<'a> GraphView for NodeStoreView<'a> {
     fn iter_keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = self
             .store
-            .references(self.root)
+            .consists_of(self.root)
             .iter()
             .map(|(name, _)| self.store.resolve_name(*name).to_string())
             .collect();
+        for (name, _) in self.store.references(self.root) {
+            keys.push(self.store.resolve_name(name).to_string());
+        }
         for (name, _) in self.store.attributes(self.root) {
             keys.push(self.store.resolve_name(name).to_string());
         }
@@ -100,6 +118,17 @@ impl<'a> GraphView for NodeStoreView<'a> {
     fn clone_scoped(&self, path: &[&str]) -> Option<Box<dyn GraphView + '_>> {
         let mut current = self.root;
         for segment in path {
+            // Try ConsistsOf first
+            let parts = self.store.consists_of(current);
+            let part_target = parts
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+                .map(|(_, id)| *id);
+            if let Some(id) = part_target {
+                current = id;
+                continue;
+            }
+            // Then Reference
             let refs = self.store.references(current);
             let target = refs
                 .iter()
@@ -456,5 +485,40 @@ mod tests {
         let bound = prefixed.with_binding("extra".into(), Value::Text("bonus".into()));
         assert!(bound.resolve(&["input", "title"]).is_some());
         assert!(bound.resolve(&["extra"]).is_some());
+    }
+
+    #[test]
+    fn resolve_follows_consists_of_edges() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+
+        let title_name = store.intern("title");
+        let title_val = store.add_node(Node::Text("Via ConsistsOf".into()));
+        store.add_edge(root, Edge::ConsistsOf { name: title_name, part: title_val });
+
+        let view = NodeStoreView::new(&store, root);
+        let result = view.resolve(&["title"]).unwrap();
+        assert!(matches!(result.as_value(), Value::Text(t) if t == "Via ConsistsOf"));
+    }
+
+    #[test]
+    fn iter_keys_includes_consists_of_names() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+
+        let title_name = store.intern("title");
+        let title_val = store.add_node(Node::Text("Hello".into()));
+        store.add_edge(root, Edge::ConsistsOf { name: title_name, part: title_val });
+
+        let author_name = store.intern("author");
+        let author_val = store.add_node(Node::Text("Alice".into()));
+        store.add_edge(root, Edge::Reference { name: author_name, target: author_val });
+
+        let view = NodeStoreView::new(&store, root);
+        let keys = view.iter_keys();
+        assert!(keys.contains(&"title".to_string()));
+        assert!(keys.contains(&"author".to_string()));
     }
 }

@@ -31,15 +31,22 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
             Node::Element(_name) => {
                 // Element → Value::Record with named attributes as fields
                 let mut graph = template::DataGraph::new();
+                // Attributes: follow recursively (always leaf values)
                 for (attr_name, attr_value) in store.attributes(id) {
                     let key = store.resolve_name(attr_name).to_string();
                     let val = node_to_value(store, attr_value);
                     graph.insert(key, val);
                 }
-                // Also include child elements as named fields via Reference edges
+                // ConsistsOf: follow recursively (structural composition — safe, tree-shaped)
+                for (part_name, part_id) in store.consists_of(id) {
+                    let key = store.resolve_name(part_name).to_string();
+                    let val = node_to_value(store, part_id);
+                    graph.insert(key, val);
+                }
+                // Reference: materialize SHALLOWLY — prevents cycles from cross-document refs
                 for (ref_name, ref_target) in store.references(id) {
                     let key = store.resolve_name(ref_name).to_string();
-                    let val = node_to_value(store, ref_target);
+                    let val = materialize_reference_shallow(store, ref_target);
                     graph.insert(key, val);
                 }
                 // If the element has children, include them as a list under "_children"
@@ -56,6 +63,68 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
             Node::Opaque(any) => {
                 // Try to downcast to a Callable for Value::Fn
                 if let Some(callable) = any.downcast_ref::<std::sync::Arc<dyn template::Callable>>() {
+                    template::Value::Fn(callable.clone())
+                } else {
+                    template::Value::Opaque(any.clone())
+                }
+            }
+        },
+    }
+}
+
+/// Materialize a Reference target shallowly.
+/// Follows Attributes and ConsistsOf (structural parts) but NOT Reference edges.
+/// This prevents cycles when following cross-document references.
+fn materialize_reference_shallow(store: &NodeStore, id: NodeId) -> template::Value {
+    match store.get(id) {
+        None => template::Value::Absent,
+        Some(node) => match node {
+            Node::Text(s) => template::Value::Text(s.clone()),
+            Node::Integer(n) => template::Value::Integer(*n),
+            Node::Boolean(b) => template::Value::Bool(*b),
+            Node::Nil => template::Value::Absent,
+            Node::Keyword(name) => template::Value::Keyword {
+                namespace: None,
+                name: store.resolve_name(*name).to_string(),
+            },
+            Node::Collection => {
+                let items: Vec<template::Value> = store
+                    .children(id)
+                    .into_iter()
+                    .map(|child| materialize_reference_shallow(store, child))
+                    .collect();
+                template::Value::List(items)
+            }
+            Node::Element(_) => {
+                let mut graph = template::DataGraph::new();
+                // Attributes — safe, leaf values
+                for (attr_name, attr_value) in store.attributes(id) {
+                    let key = store.resolve_name(attr_name).to_string();
+                    let val = node_to_value(store, attr_value);
+                    graph.insert(key, val);
+                }
+                // ConsistsOf — safe, structural parts of this referenced node
+                for (part_name, part_id) in store.consists_of(id) {
+                    let key = store.resolve_name(part_name).to_string();
+                    let val = node_to_value(store, part_id);
+                    graph.insert(key, val);
+                }
+                // NO Reference edges — this is what prevents cycles
+                // Children
+                let children = store.children(id);
+                if !children.is_empty() {
+                    let child_values: Vec<template::Value> = children
+                        .into_iter()
+                        .map(|child| node_to_value(store, child))
+                        .collect();
+                    graph.insert("_children", template::Value::List(child_values));
+                }
+                template::Value::Record(graph)
+            }
+            Node::Opaque(any) => {
+                if let Some(callable) =
+                    any.downcast_ref::<std::sync::Arc<dyn template::Callable>>()
+                {
                     template::Value::Fn(callable.clone())
                 } else {
                     template::Value::Opaque(any.clone())
@@ -207,5 +276,21 @@ mod tests {
         } else {
             panic!("expected List from Collection");
         }
+    }
+
+    #[test]
+    fn node_to_value_does_not_recurse_into_reference_edges() {
+        let mut store = NodeStore::new();
+        let a_name = store.intern("page-a");
+        let b_name = store.intern("page-b");
+        let a = store.add_node(Node::Element(a_name));
+        let b = store.add_node(Node::Element(b_name));
+        // Circular Reference edges: a → b → a
+        let ref_name = store.intern("related");
+        store.add_edge(a, Edge::Reference { name: ref_name, target: b });
+        store.add_edge(b, Edge::Reference { name: ref_name, target: a });
+        // This must not stack overflow
+        let val = node_to_value(&store, a);
+        assert!(matches!(val, template::Value::Record(_)));
     }
 }

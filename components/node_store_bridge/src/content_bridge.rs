@@ -606,7 +606,7 @@ pub fn create_semantic_content(
                     if max == 1 {
                         if let Some(&first) = children.first() {
                             let ref_name = store.intern(&slot_name);
-                            store.add_edge(sem, Edge::Reference { name: ref_name, target: first });
+                            store.add_edge(sem, Edge::ConsistsOf { name: ref_name, part: first });
                         }
                     } else if !children.is_empty() {
                         let list_name = store.intern(&slot_name);
@@ -615,7 +615,7 @@ pub fn create_semantic_content(
                         for &child in &children {
                             store.add_edge(list_node, Edge::Child(child));
                         }
-                        store.add_edge(sem, Edge::Reference { name: list_name, target: list_node });
+                        store.add_edge(sem, Edge::ConsistsOf { name: list_name, part: list_node });
                     }
                 }
         }
@@ -626,14 +626,14 @@ pub fn create_semantic_content(
         && let Some(body_id) = find_child_by_name(store, doc_root, "body")
     {
         let body_name = store.intern("body");
-        store.add_edge(sem, Edge::Reference { name: body_name, target: body_id });
+        store.add_edge(sem, Edge::ConsistsOf { name: body_name, part: body_id });
     }
 
     // Synthesize a link reference (url + title text)
     // Collect title text first before any mutable borrows
     let title_text = {
-        let refs = store.references(sem);
-        let title_entry = refs.iter().find(|(n, _)| store.resolve_name(*n) == "title").copied();
+        let parts = store.consists_of(sem);
+        let title_entry = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title").copied();
         title_entry.and_then(|(_, title_node)| {
             // Walk into the content element (e.g. heading) → first child text
             store
@@ -656,7 +656,7 @@ pub fn create_semantic_content(
     add_text_attr(store, link_node, "href", &href);
     add_text_attr(store, link_node, "text", &text);
     let link_name = store.intern("link");
-    store.add_edge(sem, Edge::Reference { name: link_name, target: link_node });
+    store.add_edge(sem, Edge::ConsistsOf { name: link_name, part: link_node });
 
     sem
 }
@@ -1097,16 +1097,16 @@ mod tests {
         let empty_urls = std::collections::HashMap::new();
         let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
-        // Find Reference("title") on semantic content
-        let refs = store.references(sem);
-        let title_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "title");
-        assert!(title_ref.is_some(), "Expected a 'title' reference edge");
+        // Find ConsistsOf("title") on semantic content
+        let parts = store.consists_of(sem);
+        let title_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title");
+        assert!(title_part.is_some(), "Expected a 'title' consists-of edge");
 
-        let (_, heading_id) = title_ref.unwrap();
+        let (_, heading_id) = title_part.unwrap();
         // The referenced node should be a heading element
         assert!(
             matches!(store.get(*heading_id), Some(Node::Element(n)) if store.resolve_name(*n) == "heading"),
-            "Expected Reference('title') to point to a heading element"
+            "Expected ConsistsOf('title') to point to a heading element"
         );
 
         // The heading's child text should be "My Article"
@@ -1132,14 +1132,14 @@ mod tests {
         let empty_urls = std::collections::HashMap::new();
         let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
-        let refs = store.references(sem);
-        let summary_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
-        assert!(summary_ref.is_some(), "Expected a 'summary' reference edge");
+        let parts = store.consists_of(sem);
+        let summary_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
+        assert!(summary_part.is_some(), "Expected a 'summary' consists-of edge");
 
-        let (_, para_id) = summary_ref.unwrap();
+        let (_, para_id) = summary_part.unwrap();
         assert!(
             matches!(store.get(*para_id), Some(Node::Element(n)) if store.resolve_name(*n) == "paragraph"),
-            "Expected Reference('summary') to point to a paragraph element"
+            "Expected ConsistsOf('summary') to point to a paragraph element"
         );
 
         let text = store.children(*para_id).iter().find_map(|&c| {
@@ -1164,14 +1164,14 @@ mod tests {
         let empty_urls = std::collections::HashMap::new();
         let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
-        let refs = store.references(sem);
-        let body_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "body");
-        assert!(body_ref.is_some(), "Expected a 'body' reference edge");
+        let parts = store.consists_of(sem);
+        let body_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "body");
+        assert!(body_part.is_some(), "Expected a 'body' consists-of edge");
 
-        let (_, body_id) = body_ref.unwrap();
+        let (_, body_id) = body_part.unwrap();
         assert!(
             matches!(store.get(*body_id), Some(Node::Element(n)) if store.resolve_name(*n) == "body"),
-            "Expected Reference('body') to point to a body element"
+            "Expected ConsistsOf('body') to point to a body element"
         );
     }
 
@@ -1191,11 +1191,11 @@ mod tests {
         let empty_urls = std::collections::HashMap::new();
         let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls);
 
-        let refs = store.references(sem);
-        let link_ref = refs.iter().find(|(n, _)| store.resolve_name(*n) == "link");
-        assert!(link_ref.is_some(), "Expected a 'link' reference edge");
+        let parts = store.consists_of(sem);
+        let link_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "link");
+        assert!(link_part.is_some(), "Expected a 'link' consists-of edge");
 
-        let (_, link_id) = link_ref.unwrap();
+        let (_, link_id) = link_part.unwrap();
         assert_eq!(find_attr_text(&store, *link_id, "href"), Some("/post/my-article".to_string()));
         // title text is "My Article"
         assert_eq!(find_attr_text(&store, *link_id, "text"), Some("My Article".to_string()));
@@ -1225,9 +1225,9 @@ mod tests {
         let doc_heading = store.children(title_slot).into_iter().next().unwrap();
         let doc_text_node = store.children(doc_heading).into_iter().next().unwrap();
 
-        // Find the heading via semantic content reference
-        let refs = store.references(sem);
-        let (_, sem_heading) = refs.iter().find(|(n, _)| store.resolve_name(*n) == "title").unwrap();
+        // Find the heading via semantic content consists-of edge
+        let parts = store.consists_of(sem);
+        let (_, sem_heading) = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title").unwrap();
         let sem_text_node = store.children(*sem_heading).into_iter().next().unwrap();
 
         // They should be the SAME node (no copy, just reference)
