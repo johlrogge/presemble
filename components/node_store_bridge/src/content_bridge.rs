@@ -610,8 +610,7 @@ pub fn create_semantic_content(
                         }
                     } else if !children.is_empty() {
                         let list_name = store.intern(&slot_name);
-                        let slot_list_name = store.intern("slot-list");
-                        let list_node = store.add_node(Node::Element(slot_list_name));
+                        let list_node = store.add_node(Node::Collection);
                         for &child in &children {
                             store.add_edge(list_node, Edge::Child(child));
                         }
