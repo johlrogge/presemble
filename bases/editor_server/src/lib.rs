@@ -1,6 +1,6 @@
 use conductor::{socket_url, Command, Conductor, Response}; // Response kept for parse-error path
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 struct PresembleNreplHandler {
     conductor: Arc<Conductor>,
@@ -9,7 +9,14 @@ struct PresembleNreplHandler {
 
 impl nrepl::NreplHandler for PresembleNreplHandler {
     fn eval(&self, _session: &str, code: &str) -> Result<nrepl::EvalResult, String> {
-        let value = evaluator::eval_str(code, &self.conductor)?;
+        // Build a root with conductor builtins for each eval.
+        // In a production implementation, this root would be cached per session.
+        let root = evaluator::RootEnv::new();
+        evaluator::init_root(&root).map_err(|e| format!("init failed: {e}"))?;
+        evaluator::register_conductor_builtins(&root, &self.conductor);
+        evaluator::ned_primitives::register_ned_builtins(&root, self.conductor.node_store());
+        evaluator::load_ned_prelude(&root).map_err(|e| format!("ned prelude failed: {e}"))?;
+        let value = evaluator::eval_str_with_root(code, &root)?;
         let edn_str = edn::value_to_edn(&value);
         // Multi-line text (e.g. from doc) is sent as nREPL "out" so the
         // client prints it directly instead of showing an EDN-escaped string.
@@ -64,6 +71,9 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
         let root = evaluator::RootEnv::new();
         evaluator::primitives::register_builtins(&root);
         evaluator::register_macro_docs(&root.doc_registry);
+        // Register NED builtins for completions (uses a temporary empty store)
+        let temp_store = Arc::new(RwLock::new(node_store::NodeStore::new()));
+        evaluator::ned_primitives::register_ned_builtins(&root, temp_store);
         root.doc_registry.clone()
     };
 

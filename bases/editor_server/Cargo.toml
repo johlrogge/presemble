@@ -7,6 +7,7 @@ edition = "2024"
 conductor = { workspace = true }
 edn = { workspace = true }
 evaluator = { workspace = true }
+node_store = { workspace = true }
 nng = { workspace = true }
 nrepl = { workspace = true }
 serde_json = { workspace = true }

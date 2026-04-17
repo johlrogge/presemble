@@ -1,0 +1,11 @@
+[package]
+name = "ned"
+version = "0.35.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "ned"
+
+[dependencies]
+node_store = { workspace = true }
+im = { workspace = true }

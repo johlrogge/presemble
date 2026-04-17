@@ -767,20 +767,20 @@ mod tests {
     fn build_full_graph_populates_item_nodes() {
         let (_dir, conductor) = two_post_conductor();
 
-        let graph = conductor.site_graph();
-        // Expect exactly two Item nodes for the "post" stem
+        // Verify via NodeStore that both item pages are indexed
+        let roots = conductor.documents_for_stem("post");
         assert_eq!(
-            graph.len(),
+            roots.len(),
             2,
-            "graph should have 2 nodes after build_full_graph"
+            "NodeStore should have 2 nodes for stem 'post' after populate_node_store"
         );
         assert!(
-            graph.get(&site_index::UrlPath::new("/post/first")).is_some(),
-            "graph should have /post/first node"
+            conductor.document_by_url("/post/first").is_some(),
+            "NodeStore should have /post/first"
         );
         assert!(
-            graph.get(&site_index::UrlPath::new("/post/second")).is_some(),
-            "graph should have /post/second node"
+            conductor.document_by_url("/post/second").is_some(),
+            "NodeStore should have /post/second"
         );
     }
 
@@ -805,21 +805,10 @@ mod tests {
     }
 
     #[test]
-    fn set_site_graph_replaces_graph() {
-        let (_dir, conductor) = two_post_conductor();
-
-        // Replace with empty graph
-        conductor.set_site_graph(site_index::SiteGraph::new());
-
-        let graph = conductor.site_graph();
-        assert!(graph.is_empty(), "graph should be empty after set_site_graph with empty");
-    }
-
-    #[test]
-    fn empty_conductor_has_empty_graph() {
+    fn empty_conductor_has_empty_node_store() {
         let conductor = empty_conductor();
-        let graph = conductor.site_graph();
-        assert!(graph.is_empty(), "empty conductor should have empty site graph");
+        let roots = conductor.documents_for_stem("post");
+        assert!(roots.is_empty(), "empty conductor should have no documents in NodeStore");
     }
 
     // ── SuggestSlotEdit ──────────────────────────────────────────────────────

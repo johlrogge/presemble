@@ -9,6 +9,8 @@ interface = "conductor"
 [dependencies]
 dep_graph = { workspace = true }
 editorial_types = { workspace = true }
+node_store = { workspace = true }
+node_store_bridge = { workspace = true }
 expressions = { workspace = true }
 content_editor = { workspace = true }
 site_repository = { workspace = true }
@@ -25,6 +27,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 nng = { workspace = true }
 notify = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
+im = { workspace = true }
 tempfile = "3"

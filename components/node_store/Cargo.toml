@@ -1,0 +1,10 @@
+[package]
+name = "node_store"
+version = "0.35.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "node_store"
+
+[dependencies]
+im = { workspace = true }

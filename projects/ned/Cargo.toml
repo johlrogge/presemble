@@ -1,0 +1,11 @@
+[package]
+name = "ned_project"
+version = "0.35.0"
+edition = "2024"
+
+[[bin]]
+name = "ned"
+path = "src/main.rs"
+
+[dependencies]
+ned_cli = { workspace = true }

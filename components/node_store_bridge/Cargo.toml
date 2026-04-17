@@ -1,15 +1,14 @@
 [package]
-name = "template"
+name = "node_store_bridge"
 version = "0.35.0"
 edition = "2024"
 
 [package.metadata.polylith]
-interface = "template"
+interface = "node_store_bridge"
 
 [dependencies]
+node_store = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }
-node_store = { workspace = true }
-quick-xml = { version = "0.36", features = ["serialize"] }
+template = { workspace = true }
 im = { workspace = true }
-pulldown-cmark = { workspace = true }
