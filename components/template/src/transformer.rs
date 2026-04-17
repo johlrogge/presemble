@@ -759,7 +759,10 @@ fn render_insert_native(
                         match store.get(child_id) {
                             Some(node_store::Node::Element(child_name)) => {
                                 let child_element_name = store.resolve_name(*child_name);
-                                let slot_attr = (crate::constants::ATTR_SLOT.to_string(), Form::Str("body".to_string()));
+                                let body_attrs = vec![
+                                    (crate::constants::ATTR_SLOT.to_string(), Form::Str("body".to_string())),
+                                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                                ];
 
                                 match child_element_name {
                                     "heading" => {
@@ -768,7 +771,7 @@ fn render_insert_native(
                                         let inner = render_inline_md(&text);
                                         body_nodes.push(Node::Element(Element {
                                             name: format!("h{level}"),
-                                            attrs: vec![slot_attr],
+                                            attrs: body_attrs.clone(),
                                             children: parse_html_fragment(&inner),
                                         }));
                                     }
@@ -777,7 +780,7 @@ fn render_insert_native(
                                         let inner = render_inline_md(&text);
                                         body_nodes.push(Node::Element(Element {
                                             name: "p".to_string(),
-                                            attrs: vec![slot_attr],
+                                            attrs: body_attrs.clone(),
                                             children: parse_html_fragment(&inner),
                                         }));
                                     }
@@ -786,7 +789,7 @@ fn render_insert_native(
                                         let inner = render_inline_md(&text);
                                         body_nodes.push(Node::Element(Element {
                                             name: "blockquote".to_string(),
-                                            attrs: vec![slot_attr],
+                                            attrs: body_attrs.clone(),
                                             children: parse_html_fragment(&inner),
                                         }));
                                     }
@@ -800,7 +803,7 @@ fn render_insert_native(
                                         };
                                         body_nodes.push(Node::Element(Element {
                                             name: "pre".to_string(),
-                                            attrs: vec![slot_attr],
+                                            attrs: body_attrs.clone(),
                                             children: vec![Node::Element(Element {
                                                 name: "code".to_string(),
                                                 attrs: code_attrs,
@@ -811,13 +814,14 @@ fn render_insert_native(
                                     "image" => {
                                         let src = node_attr_str(store, child_id, "path").unwrap_or_default();
                                         let alt = node_attr_str(store, child_id, "alt").unwrap_or_default();
+                                        let mut img_attrs = vec![
+                                            ("src".to_string(), Form::Str(src)),
+                                            ("alt".to_string(), Form::Str(alt)),
+                                        ];
+                                        img_attrs.extend(body_attrs.clone());
                                         body_nodes.push(Node::Element(Element {
                                             name: "img".to_string(),
-                                            attrs: vec![
-                                                ("src".to_string(), Form::Str(src)),
-                                                ("alt".to_string(), Form::Str(alt)),
-                                                slot_attr,
-                                            ],
+                                            attrs: img_attrs,
                                             children: vec![],
                                         }));
                                     }
@@ -865,7 +869,7 @@ fn render_insert_native(
                                         }
                                         body_nodes.push(Node::Element(Element {
                                             name: "table".to_string(),
-                                            attrs: vec![slot_attr],
+                                            attrs: body_attrs.clone(),
                                             children: table_children,
                                         }));
                                     }
@@ -883,7 +887,7 @@ fn render_insert_native(
                                         let html = html.trim();
                                         body_nodes.push(Node::Element(Element {
                                             name: "div".to_string(),
-                                            attrs: vec![slot_attr],
+                                            attrs: body_attrs.clone(),
                                             children: parse_html_fragment(html),
                                         }));
                                     }
@@ -896,7 +900,11 @@ fn render_insert_native(
                                         if !href.is_empty() {
                                             body_nodes.push(Node::Element(Element {
                                                 name: "a".to_string(),
-                                                attrs: vec![("href".to_string(), Form::Str(href)), slot_attr],
+                                                attrs: {
+                                                    let mut a = vec![("href".to_string(), Form::Str(href))];
+                                                    a.extend(body_attrs.clone());
+                                                    a
+                                                },
                                                 children: vec![Node::Text(text)],
                                             }));
                                         }
