@@ -130,14 +130,17 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
             // Then Reference
             let refs = self.store.references(current);
-            let target = refs
-                .iter()
-                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
-                .map(|(_, id)| *id);
-            match target {
-                Some(id) => current = id,
-                None => return None,
+            if let Some((_, id)) = refs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+                current = *id;
+                continue;
             }
+            // Then Attribute
+            let attrs = self.store.attributes(current);
+            if let Some((_, id)) = attrs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+                current = *id;
+                continue;
+            }
+            return None;
         }
         Some(Box::new(NodeStoreView::new(self.store, current)))
     }

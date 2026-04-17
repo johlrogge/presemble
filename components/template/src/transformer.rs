@@ -464,13 +464,10 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
     if apply_form.is_none() {
         // Try the fast NodeId path first (avoids Value materialization).
         // Falls back to legacy Value path for unhandled node types (e.g. body).
-        if let Some(ref resolved) = graph.resolve_node(&path_segments) {
-            match render_insert_native(resolved, as_tag, &class, data_path, &presemble_file) {
-                Err(RenderError::Render(ref msg)) if msg == "native_fallback" => {
-                    // Fall through to legacy Value path below
-                }
-                other => return other,
-            }
+        if let Some(ref resolved) = graph.resolve_node(&path_segments)
+            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file)?
+        {
+            return Ok(nodes);
         }
     }
 
@@ -671,12 +668,12 @@ fn render_insert_native(
     class: &str,
     data_path: &str,
     presemble_file: &str,
-) -> Result<Vec<Node>, RenderError> {
+) -> Result<Option<Vec<Node>>, RenderError> {
     let store = resolved.store;
     let id = resolved.id;
 
     match store.get(id) {
-        None => Ok(Vec::new()),
+        None => Ok(Some(Vec::new())),
         Some(node) => match node {
             node_store::Node::Text(text) => {
                 let tag = as_tag.unwrap_or("span").to_string();
@@ -689,7 +686,7 @@ fn render_insert_native(
                     ],
                     children: vec![Node::Text(text.clone())],
                 };
-                Ok(vec![Node::Element(element)])
+                Ok(Some(vec![Node::Element(element)]))
             }
 
             node_store::Node::Integer(n) => {
@@ -703,7 +700,7 @@ fn render_insert_native(
                     ],
                     children: vec![Node::Text(n.to_string())],
                 };
-                Ok(vec![Node::Element(element)])
+                Ok(Some(vec![Node::Element(element)]))
             }
 
             node_store::Node::Boolean(b) => {
@@ -717,7 +714,7 @@ fn render_insert_native(
                     ],
                     children: vec![Node::Text(b.to_string())],
                 };
-                Ok(vec![Node::Element(element)])
+                Ok(Some(vec![Node::Element(element)]))
             }
 
             node_store::Node::Keyword(name) => {
@@ -732,10 +729,10 @@ fn render_insert_native(
                     ],
                     children: vec![Node::Text(text)],
                 };
-                Ok(vec![Node::Element(element)])
+                Ok(Some(vec![Node::Element(element)]))
             }
 
-            node_store::Node::Nil | node_store::Node::Opaque(_) => Ok(Vec::new()),
+            node_store::Node::Nil | node_store::Node::Opaque(_) => Ok(Some(Vec::new())),
 
             node_store::Node::Collection => {
                 // List of items — render each child natively
@@ -743,10 +740,11 @@ fn render_insert_native(
                 let mut result = Vec::new();
                 for child_id in store.children(id) {
                     let child_resolved = ResolvedNode { id: child_id, store };
-                    let mut rendered = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file)?;
-                    result.append(&mut rendered);
+                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file)? {
+                        result.append(&mut rendered);
+                    }
                 }
-                Ok(result)
+                Ok(Some(result))
             }
 
             node_store::Node::Element(name) => {
@@ -920,7 +918,7 @@ fn render_insert_native(
                             _ => {}
                         }
                     }
-                    return Ok(body_nodes);
+                    return Ok(Some(body_nodes));
                 }
 
                 // Heading or paragraph — extract first text child
@@ -943,9 +941,9 @@ fn render_insert_native(
                             ],
                             children: vec![Node::Text(text)],
                         };
-                        return Ok(vec![Node::Element(element)]);
+                        return Ok(Some(vec![Node::Element(element)]));
                     }
-                    return Ok(Vec::new());
+                    return Ok(Some(Vec::new()));
                 }
 
                 // Check for href attribute → render as link
@@ -1012,11 +1010,11 @@ fn render_insert_native(
                             if let Some(source) = source_slot {
                                 elem_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
                             }
-                            Ok(vec![Node::Element(Element {
+                            Ok(Some(vec![Node::Element(Element {
                                 name: "a".to_string(),
                                 attrs: elem_attrs,
                                 children: vec![Node::Text(text)],
-                            })])
+                            })]))
                         }
                         _ => {
                             let inner_attrs = vec![
@@ -1029,11 +1027,11 @@ fn render_insert_native(
                                 attrs: inner_attrs,
                                 children: vec![Node::Text(text)],
                             };
-                            Ok(vec![Node::Element(Element {
+                            Ok(Some(vec![Node::Element(Element {
                                 name: "a".to_string(),
                                 attrs: vec![("href".to_string(), Form::Str(href))],
                                 children: vec![Node::Element(inner)],
-                            })])
+                            })]))
                         }
                     };
                 }
@@ -1063,7 +1061,7 @@ fn render_insert_native(
                         ],
                         children: vec![],
                     };
-                    return Ok(vec![Node::Element(element)]);
+                    return Ok(Some(vec![Node::Element(element)]));
                 }
 
                 // Unknown element type — check for synthesized link record (ConsistsOf "link")
@@ -1098,11 +1096,11 @@ fn render_insert_native(
                             attrs,
                             children: vec![Node::Text(text)],
                         };
-                        return Ok(vec![Node::Element(element)]);
+                        return Ok(Some(vec![Node::Element(element)]));
                     }
                 }
-                // Truly unknown — render nothing
-                Ok(Vec::new())
+                // Truly unknown — signal fallback to legacy Value path
+                Ok(None)
             }
         },
     }
