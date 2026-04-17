@@ -759,77 +759,152 @@ fn render_insert_native(
                         match store.get(child_id) {
                             Some(node_store::Node::Element(child_name)) => {
                                 let child_element_name = store.resolve_name(*child_name);
-                                let text = store.children(child_id).into_iter().find_map(|c| {
-                                    if let Some(node_store::Node::Text(s)) = store.get(c) {
-                                        Some(s.clone())
-                                    } else {
-                                        None
-                                    }
-                                }).unwrap_or_default();
-                                // Render inline markdown (bold, italic, links, etc.)
-                                let mut html = String::new();
-                                pulldown_cmark::html::push_html(
-                                    &mut html,
-                                    pulldown_cmark::Parser::new(&text),
-                                );
-                                let html = html.trim().to_string();
-                                // Strip outer <p> wrapper if the element provides its own tag
-                                let inner = if html.starts_with("<p>") && html.ends_with("</p>") {
-                                    &html[3..html.len() - 4]
-                                } else {
-                                    &html
-                                };
-                                let tag = match child_element_name {
+                                let slot_attr = (crate::constants::ATTR_SLOT.to_string(), Form::Str("body".to_string()));
+
+                                match child_element_name {
                                     "heading" => {
-                                        let level = store.attributes(child_id).iter().find_map(|(n, v)| {
-                                            if store.resolve_name(*n) == "level" {
-                                                if let Some(node_store::Node::Integer(l)) = store.get(*v) {
-                                                    Some(*l as u8)
-                                                } else { None }
-                                            } else { None }
-                                        }).unwrap_or(2);
-                                        format!("h{level}")
+                                        let text = first_child_text(store, child_id);
+                                        let level = node_attr_int(store, child_id, "level").unwrap_or(2) as u8;
+                                        let inner = render_inline_md(&text);
+                                        body_nodes.push(Node::Element(Element {
+                                            name: format!("h{level}"),
+                                            attrs: vec![slot_attr],
+                                            children: parse_html_fragment(&inner),
+                                        }));
                                     }
-                                    "paragraph" => "p".to_string(),
-                                    "blockquote" => "blockquote".to_string(),
+                                    "paragraph" => {
+                                        let text = first_child_text(store, child_id);
+                                        let inner = render_inline_md(&text);
+                                        body_nodes.push(Node::Element(Element {
+                                            name: "p".to_string(),
+                                            attrs: vec![slot_attr],
+                                            children: parse_html_fragment(&inner),
+                                        }));
+                                    }
+                                    "blockquote" => {
+                                        let text = first_child_text(store, child_id);
+                                        let inner = render_inline_md(&text);
+                                        body_nodes.push(Node::Element(Element {
+                                            name: "blockquote".to_string(),
+                                            attrs: vec![slot_attr],
+                                            children: parse_html_fragment(&inner),
+                                        }));
+                                    }
+                                    "code-block" => {
+                                        let code = first_child_text(store, child_id);
+                                        let lang = node_attr_str(store, child_id, "language");
+                                        let code_attrs = if let Some(lang) = lang {
+                                            vec![("class".to_string(), Form::Str(format!("language-{lang}")))]
+                                        } else {
+                                            vec![]
+                                        };
+                                        body_nodes.push(Node::Element(Element {
+                                            name: "pre".to_string(),
+                                            attrs: vec![slot_attr],
+                                            children: vec![Node::Element(Element {
+                                                name: "code".to_string(),
+                                                attrs: code_attrs,
+                                                children: vec![Node::Text(crate::dom::html_escape_text(&code))],
+                                            })],
+                                        }));
+                                    }
                                     "image" => {
-                                        let src = store.attributes(child_id).iter().find_map(|(n, v)| {
-                                            if store.resolve_name(*n) == "path" {
-                                                if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
-                                            } else { None }
-                                        }).unwrap_or_default();
-                                        let alt = store.attributes(child_id).iter().find_map(|(n, v)| {
-                                            if store.resolve_name(*n) == "alt" {
-                                                if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
-                                            } else { None }
-                                        }).unwrap_or_default();
+                                        let src = node_attr_str(store, child_id, "path").unwrap_or_default();
+                                        let alt = node_attr_str(store, child_id, "alt").unwrap_or_default();
                                         body_nodes.push(Node::Element(Element {
                                             name: "img".to_string(),
                                             attrs: vec![
                                                 ("src".to_string(), Form::Str(src)),
                                                 ("alt".to_string(), Form::Str(alt)),
-                                                (crate::constants::ATTR_SLOT.to_string(), Form::Str("body".to_string())),
+                                                slot_attr,
                                             ],
                                             children: vec![],
                                         }));
-                                        continue;
                                     }
-                                    other => other.to_string(),
-                                };
-                                // Parse rendered HTML to dom nodes
-                                let children = if inner.contains('<') {
-                                    crate::dom::parse_template_xml(inner)
-                                        .unwrap_or_else(|_| vec![Node::Text(inner.to_string())])
-                                } else {
-                                    vec![Node::Text(inner.to_string())]
-                                };
-                                body_nodes.push(Node::Element(Element {
-                                    name: tag,
-                                    attrs: vec![
-                                        (crate::constants::ATTR_SLOT.to_string(), Form::Str("body".to_string())),
-                                    ],
-                                    children,
-                                }));
+                                    "table" => {
+                                        // Render table from headers + rows children
+                                        let mut table_children = Vec::new();
+                                        if let Some(headers_id) = store.children(child_id).into_iter().find(|&c| {
+                                            matches!(store.get(c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "headers")
+                                        }) {
+                                            let mut header_cells = Vec::new();
+                                            for h in store.children(headers_id) {
+                                                if let Some(node_store::Node::Text(t)) = store.get(h) {
+                                                    header_cells.push(Node::Element(Element {
+                                                        name: "th".to_string(), attrs: vec![], children: vec![Node::Text(t.clone())],
+                                                    }));
+                                                }
+                                            }
+                                            table_children.push(Node::Element(Element {
+                                                name: "thead".to_string(), attrs: vec![],
+                                                children: vec![Node::Element(Element {
+                                                    name: "tr".to_string(), attrs: vec![], children: header_cells,
+                                                })],
+                                            }));
+                                        }
+                                        let mut body_rows = Vec::new();
+                                        for row_id in store.children(child_id) {
+                                            if matches!(store.get(row_id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "row") {
+                                                let mut cells = Vec::new();
+                                                for cell in store.children(row_id) {
+                                                    if let Some(node_store::Node::Text(t)) = store.get(cell) {
+                                                        cells.push(Node::Element(Element {
+                                                            name: "td".to_string(), attrs: vec![], children: vec![Node::Text(t.clone())],
+                                                        }));
+                                                    }
+                                                }
+                                                body_rows.push(Node::Element(Element {
+                                                    name: "tr".to_string(), attrs: vec![], children: cells,
+                                                }));
+                                            }
+                                        }
+                                        if !body_rows.is_empty() {
+                                            table_children.push(Node::Element(Element {
+                                                name: "tbody".to_string(), attrs: vec![], children: body_rows,
+                                            }));
+                                        }
+                                        body_nodes.push(Node::Element(Element {
+                                            name: "table".to_string(),
+                                            attrs: vec![slot_attr],
+                                            children: table_children,
+                                        }));
+                                    }
+                                    "raw-html" => {
+                                        let html = first_child_text(store, child_id);
+                                        if let Ok(nodes) = crate::dom::parse_template_xml(&html) {
+                                            body_nodes.extend(nodes);
+                                        }
+                                    }
+                                    "list" => {
+                                        // List stored as raw markdown source
+                                        let source = first_child_text(store, child_id);
+                                        let mut html = String::new();
+                                        pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(&source));
+                                        let html = html.trim();
+                                        body_nodes.push(Node::Element(Element {
+                                            name: "div".to_string(),
+                                            attrs: vec![slot_attr],
+                                            children: parse_html_fragment(html),
+                                        }));
+                                    }
+                                    "link" | "link-expression" => {
+                                        // Links in body — render as anchor
+                                        let href = node_attr_str(store, child_id, "href").unwrap_or_default();
+                                        let text = node_attr_str(store, child_id, "text")
+                                            .or_else(|| Some(first_child_text(store, child_id)))
+                                            .unwrap_or_default();
+                                        if !href.is_empty() {
+                                            body_nodes.push(Node::Element(Element {
+                                                name: "a".to_string(),
+                                                attrs: vec![("href".to_string(), Form::Str(href)), slot_attr],
+                                                children: vec![Node::Text(text)],
+                                            }));
+                                        }
+                                    }
+                                    _ => {
+                                        // Unknown body element — skip
+                                    }
+                                }
                             }
                             Some(node_store::Node::Text(t)) => {
                                 body_nodes.push(Node::Text(t.clone()));
@@ -1025,7 +1100,57 @@ fn render_insert_native(
     }
 }
 
-/// Extract the content file path from the graph for browser editing.
+// ---------------------------------------------------------------------------
+// Body rendering helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the first Text child of a node.
+fn first_child_text(store: &node_store::NodeStore, id: node_store::NodeId) -> String {
+    store.children(id).into_iter().find_map(|c| {
+        if let Some(node_store::Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
+    }).unwrap_or_default()
+}
+
+/// Get a string attribute value from a node.
+fn node_attr_str(store: &node_store::NodeStore, id: node_store::NodeId, name: &str) -> Option<String> {
+    store.attributes(id).iter().find_map(|(n, v)| {
+        if store.resolve_name(*n) == name {
+            if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
+        } else { None }
+    })
+}
+
+/// Get an integer attribute value from a node.
+fn node_attr_int(store: &node_store::NodeStore, id: node_store::NodeId, name: &str) -> Option<i64> {
+    store.attributes(id).iter().find_map(|(n, v)| {
+        if store.resolve_name(*n) == name {
+            if let Some(node_store::Node::Integer(i)) = store.get(*v) { Some(*i) } else { None }
+        } else { None }
+    })
+}
+
+/// Render inline markdown (bold, italic, links) to HTML, stripping outer <p> wrapper.
+fn render_inline_md(text: &str) -> String {
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(text));
+    let html = html.trim();
+    if html.starts_with("<p>") && html.ends_with("</p>") {
+        html[3..html.len() - 4].to_string()
+    } else {
+        html.to_string()
+    }
+}
+
+/// Parse an HTML fragment into dom nodes, falling back to text if parsing fails.
+fn parse_html_fragment(html: &str) -> Vec<Node> {
+    if html.contains('<') {
+        crate::dom::parse_template_xml(html)
+            .unwrap_or_else(|_| vec![Node::Text(html.to_string())])
+    } else {
+        vec![Node::Text(html.to_string())]
+    }
+}
+
 fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> String {
     let key_file = crate::constants::KEY_PRESEMBLE_FILE;
     let mut file_path_segments: Vec<&str> = path_segments.to_vec();
