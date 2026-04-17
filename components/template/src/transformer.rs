@@ -935,6 +935,26 @@ fn render_insert_native(
                     return Ok(Some(body_nodes));
                 }
 
+                // Suggestion placeholder — missing content slot
+                if element_name == "suggestion" {
+                    let hint = node_attr_str(store, id, "hint").unwrap_or_default();
+                    let slot_name_val = node_attr_str(store, id, "slot-name")
+                        .unwrap_or_else(|| slot_name_from_path(data_path));
+                    let tag = as_tag.unwrap_or("div").to_string();
+                    let combined_class = format!("{class} presemble-suggestion");
+                    let element = Element {
+                        name: tag,
+                        attrs: vec![
+                            ("class".to_string(), Form::Str(combined_class)),
+                            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_val)),
+                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                            (crate::constants::ATTR_HINT.to_string(), Form::Str(hint)),
+                        ],
+                        children: vec![],
+                    };
+                    return Ok(Some(vec![Node::Element(element)]));
+                }
+
                 // Heading or paragraph — extract first text child
                 if element_name == "heading" || element_name == "paragraph" {
                     let text = store.children(id).into_iter().find_map(|c| {
@@ -1184,10 +1204,41 @@ fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> Stri
     if let Some(last) = file_path_segments.last_mut() {
         *last = key_file;
     }
-    graph.resolve(&file_path_segments)
+    // Try _presemble_file via the data path (legacy DataGraph)
+    if let Some(t) = graph.resolve(&file_path_segments)
         .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
-        .or_else(|| graph.resolve(&[key_file])
-            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None }))
+    {
+        return t;
+    }
+    // Try direct _presemble_file key (legacy DataGraph)
+    if let Some(t) = graph.resolve(&[key_file])
+        .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
+    {
+        return t;
+    }
+    // NodeStore fallback: try "file" attribute via the data path prefix
+    // e.g. for path ["input", "body"], try ["input", "file"]
+    if !path_segments.is_empty() {
+        let mut node_file_segs: Vec<&str> = path_segments.to_vec();
+        if let Some(last) = node_file_segs.last_mut() {
+            *last = "file";
+        }
+        if let Some(t) = graph.resolve(&node_file_segs)
+            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
+        {
+            return t;
+        }
+        // Try just [prefix, "file"] (two-segment path: prefix + "file")
+        let prefix = path_segments[0];
+        if let Some(t) = graph.resolve(&[prefix, "file"])
+            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
+        {
+            return t;
+        }
+    }
+    // Direct "file" attribute on the graph root (NodeStoreView without prefix)
+    graph.resolve(&["file"])
+        .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
         .unwrap_or_default()
 }
 

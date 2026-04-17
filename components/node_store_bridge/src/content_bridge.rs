@@ -642,6 +642,22 @@ pub fn create_semantic_content(
         let slot_name = slot.name.as_str().to_string();
         let max = slot.max_count();
 
+        // Check if this slot is present in the preamble
+        let slot_found = preamble
+            .and_then(|p| find_slot_by_name(store, p, &slot_name))
+            .is_some();
+
+        if !slot_found {
+            // Missing slot — create a suggestion node so the renderer can show a placeholder
+            let suggestion_elem_name = store.intern("suggestion");
+            let suggestion = store.add_node(Node::Element(suggestion_elem_name));
+            add_text_attr(store, suggestion, "hint", &format!("Add {slot_name}"));
+            add_text_attr(store, suggestion, "slot-name", &slot_name);
+            let co_name = store.intern(&slot_name);
+            store.add_edge(sem, Edge::ConsistsOf { name: co_name, part: suggestion });
+            continue;
+        }
+
         if let Some(preamble_id) = preamble
             && let Some(slot_id) = find_slot_by_name(store, preamble_id, &slot_name)
         {
@@ -1471,5 +1487,110 @@ mod tests {
         let second = serialize_from_store(&store2, root2);
 
         assert_eq!(first, second, "serialize_from_store should be fixed-point: first={first:?}, second={second:?}");
+    }
+
+    // ── multi-value slot round-trip (regression 2) ──────────────────────────
+
+    #[test]
+    fn round_trip_multi_value_slot() {
+        // A slot with 2 paragraphs should round-trip correctly.
+        // This guards against Collection nodes breaking store_to_document.
+        let doc = Document {
+            preamble: im::vector![slot(
+                "summary",
+                vec![
+                    ContentElement::Paragraph { text: "First paragraph.".to_string() },
+                    ContentElement::Paragraph { text: "Second paragraph.".to_string() },
+                ]
+            )],
+            body: im::vector![],
+            has_separator: false,
+            separator_span: None,
+        };
+
+        let recovered = round_trip(&doc);
+        compare_documents(&doc, &recovered);
+    }
+
+    // ── missing slot creates suggestion node ─────────────────────────────────
+
+    #[test]
+    fn missing_preamble_slot_creates_suggestion_node() {
+        // A document with only "title" but a grammar that also requires "summary"
+        // should produce a "suggestion" ConsistsOf edge on the semantic content.
+        use schema::{BodyRules, Constraint, CountRange, Element as SchemaElement, HeadingLevel, HeadingLevelRange, Slot, SlotName};
+        let grammar = schema::Grammar {
+            preamble: vec![
+                Slot {
+                    name: SlotName::new("title"),
+                    element: SchemaElement::Heading {
+                        level: HeadingLevelRange {
+                            min: HeadingLevel::new(1).unwrap(),
+                            max: HeadingLevel::new(2).unwrap(),
+                        },
+                    },
+                    constraints: vec![Constraint::Occurs(CountRange::Exactly(1))],
+                    hint_text: None,
+                    span: schema::Span { start: 0, end: 0 },
+                },
+                Slot {
+                    name: SlotName::new("summary"),
+                    element: SchemaElement::Paragraph,
+                    constraints: vec![Constraint::Occurs(CountRange::Exactly(1))],
+                    hint_text: None,
+                    span: schema::Span { start: 0, end: 0 },
+                },
+            ],
+            body: Some(BodyRules { heading_range: None }),
+        };
+
+        // Document has title but NO summary
+        let doc = Document {
+            preamble: im::vector![slot(
+                "title",
+                vec![ContentElement::Heading {
+                    level: HeadingLevel::new(1).unwrap(),
+                    text: "Title Only".to_string(),
+                }]
+            )],
+            body: im::vector![],
+            has_separator: false,
+            separator_span: None,
+        };
+
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/title-only".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/title-only.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(
+            &mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None,
+        );
+
+        // title should be present as a heading
+        let parts = store.consists_of(sem);
+        let title_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title");
+        assert!(title_part.is_some(), "Expected a 'title' consists-of edge");
+
+        // summary should be a suggestion node (not absent)
+        let summary_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
+        assert!(summary_part.is_some(), "Expected a 'summary' consists-of edge for the missing slot");
+
+        let (_, suggestion_id) = summary_part.unwrap();
+        assert!(
+            matches!(store.get(*suggestion_id), Some(Node::Element(n)) if store.resolve_name(*n) == "suggestion"),
+            "Expected ConsistsOf('summary') to point to a 'suggestion' element"
+        );
+
+        // Suggestion should carry the hint and slot-name attributes
+        let hint = find_attr_text(&store, *suggestion_id, "hint");
+        assert!(hint.is_some(), "Suggestion node should have a 'hint' attribute");
+        let slot_name_attr = find_attr_text(&store, *suggestion_id, "slot-name");
+        assert_eq!(slot_name_attr, Some("summary".to_string()));
     }
 }
