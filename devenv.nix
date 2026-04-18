@@ -26,15 +26,15 @@ in
 
   claude.code.mcpServers.presemble = {
     type = "stdio";
-    command = "cargo";
-    args = [ "polylith" "cargo" "--profile" "dev" "run" "--bin" "presemble" "--" "mcp" ];
+    command = "./target/release/presemble";
+    args = [ "mcp" ];
   };
 
   enterShell = ''
     if [ -z "''${CI:-}" ]; then
       cargo polylith cargo --profile live build -q --release --bin presemble 2>/dev/null \
         && export PATH="$PWD/target/release:$PATH" \
-        && echo "presemble ready (target/debug/presemble)" \
+        && echo "presemble ready (target/release/presemble)" \
         || echo "presemble not built — run: cargo polylith cargo build --bin presemble"
     fi
   '';
