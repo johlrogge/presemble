@@ -32,7 +32,7 @@ comparable to Hugo, low memory footprint so the content system runs on modest ho
 **Projects**: `publisher`, `content_management`, utility projects as they emerge.
 
 **Profiles**:
-- `development` — the default root workspace, used for `cargo check`, IDE, day-to-day work
+- `dev` — the default root workspace, used for `cargo check`, IDE, day-to-day work
 - `live` — wires real-world implementations (actual disk writes, real network, etc.)
 - `local` and `cloud` variants of live are anticipated but not yet created; do not pre-engineer for them
 

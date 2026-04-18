@@ -32,7 +32,10 @@ Read `RELEASING.md` and execute the Release Checklist section step by step.
    still marked Proposed. Mark superseded ADRs. Create new ADRs for
    significant architectural decisions made since the last release."
 
-7. **Version bump** — spawn code-minion to bump version in all Cargo.toml files.
+7. **Version bump** — spawn the polylith agent:
+   "Bump the workspace version. Use `polylith_bump` with the appropriate level
+   (major/minor/patch) based on Conventional Commits since the last tag.
+   Run with dry_run first, confirm, then apply."
 
 8. **Release-manager** — spawn the release-manager agent to start and finish
    the release branch. Provide the tag message summarizing what shipped.

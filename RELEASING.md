@@ -43,7 +43,7 @@ New features go through a design-implement-review loop before release.
 6. **commit** — commit the approved changes
    > Invoked by the orchestrator when architect approves
 
-7. **devops** — finish the feature branch
+7. **release-manager** — finish the feature branch
    > "Finish feature <name>"
 
 ## Release Checklist
