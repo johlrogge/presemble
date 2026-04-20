@@ -1597,7 +1597,7 @@ impl Conductor {
             // Escape hatch: empty, multi-element, Link, Image, List, and missing-slot
             // cases route through modify_slot_in_store (grammar-aware Rust path).
             // Text-only 1-child cases stay on NED. Phase C: widen NED coverage
-            // and reduce this list.
+            // and reduce this list. See ADR-041.
             SlotShape::Empty | SlotShape::Multi | SlotShape::NonText | SlotShape::Missing => {
                 // Load grammar so we can build the correct element type.
                 let grammar = self.load_grammar_for_file(file)?;
