@@ -8,6 +8,6 @@ pub mod store_pipeline;
 pub mod graph_view_impl;
 
 pub use body_fragment::ingest_body_fragment;
-pub use content_bridge::DocumentMeta;
+pub use content_bridge::{DocumentMeta, serialize_from_store};
 pub use value_bridge::{node_to_value, value_to_node};
 pub use graph_view_impl::{LayeredGraphView, MultiRootView, NodeStoreView, PrefixedGraphView};

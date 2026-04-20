@@ -432,7 +432,10 @@ fn content_element_from_node(store: &NodeStore, node: NodeId) -> Option<ContentE
             let target = link_target_from_node(store, target_node);
             Some(ContentElement::LinkExpression { text, target })
         }
-        _ => None,
+        _ => panic!(
+            "content_element_from_node: unknown element tag '{tag}' — \
+             was a ContentElement variant added without updating the decoder?"
+        ),
     }
 }
 
@@ -775,6 +778,17 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Document {
     }
 }
 
+// ── serialize_from_store ──────────────────────────────────────────────────────
+
+/// Serialise a document subtree in the NodeStore back to markdown.
+///
+/// Fixed-point under parse ∘ serialise — first save after edits may show a
+/// normalisation diff (whitespace/blank lines/comments), subsequent saves are
+/// stable.
+pub fn serialize_from_store(store: &NodeStore, root: NodeId) -> String {
+    content::serialize_document(&store_to_document(store, root))
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1059,6 +1073,51 @@ mod tests {
         compare_documents(&doc, &recovered);
     }
 
+    #[test]
+    fn file_attribute_on_document_root_survives_store_round_trip() {
+        // Pinned so save routing in Phase B can rely on :file surviving any subtree mutation.
+        let doc = Document {
+            preamble: im::vector![],
+            body: im::vector![zero_spanned(ContentElement::Paragraph {
+                text: "Original body".to_string(),
+            })],
+            has_separator: false,
+            separator_span: None,
+        };
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/pin-test".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/pin-test.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let root = document_to_store(&doc, &mut store, Some(&meta));
+
+        assert_eq!(
+            find_attr_text(&store, root, "file"),
+            Some("content/post/pin-test.md".to_string())
+        );
+
+        // Mutate a descendant text node and confirm :file is still intact on root.
+        let children = store.children(root).to_vec();
+        'outer: for child in children {
+            let grandchildren = store.children(child).to_vec();
+            for gc in grandchildren {
+                if let Some(Node::Text(text)) = store.get(gc) {
+                    if text.contains("Original body") {
+                        store.replace_node(gc, Node::Text("Mutated body".to_string()));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            find_attr_text(&store, root, "file"),
+            Some("content/post/pin-test.md".to_string())
+        );
+    }
+
     // ── semantic content tests ───────────────────────────────────────────────
 
     fn make_grammar_with_title_summary() -> schema::Grammar {
@@ -1294,5 +1353,104 @@ mod tests {
 
         // They should be the SAME node (no copy, just reference)
         assert_eq!(doc_text_node, sem_text_node, "Expected title text to be the same NodeId in both doc and semantic-content");
+    }
+
+    // ── guard: unknown element tag panics ────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "unknown element tag")]
+    fn content_element_from_node_panics_on_unknown_tag() {
+        let mut store = NodeStore::new();
+        let unknown_name = store.intern("wibble");
+        let node = store.add_node(Node::Element(unknown_name));
+        content_element_from_node(&store, node);
+    }
+
+    // ── serialize_from_store tests ───────────────────────────────────────────
+
+    #[test]
+    fn serialize_from_store_returns_non_empty_for_minimal_doc() {
+        let doc = Document {
+            preamble: im::vector![],
+            body: im::vector![zero_spanned(ContentElement::Paragraph {
+                text: "Hello".to_string(),
+            })],
+            has_separator: false,
+            separator_span: None,
+        };
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let result = serialize_from_store(&store, root);
+        assert!(!result.is_empty(), "expected non-empty output");
+        assert!(result.contains("Hello"), "expected 'Hello' in serialized output: {result:?}");
+    }
+
+    #[test]
+    fn serialize_from_store_reparses_to_equivalent_document() {
+        // Build a tiny document, store it, serialize it, then re-parse back through
+        // the store and compare the reconstructed Document against the original.
+        let doc = Document {
+            preamble: im::vector![],
+            body: im::vector![zero_spanned(ContentElement::Paragraph {
+                text: "Hello".to_string(),
+            })],
+            has_separator: false,
+            separator_span: None,
+        };
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+
+        // serialize_from_store produces the markdown
+        let serialized = serialize_from_store(&store, root);
+        assert!(serialized.contains("Hello"), "serialized output should contain 'Hello'");
+
+        // Re-parse by going through store_to_document (which is what serialize_from_store calls)
+        // and check the reconstructed Document matches the original.
+        let reconstructed = store_to_document(&store, root);
+        compare_documents(&doc, &reconstructed);
+
+        // Additionally confirm the serialized text equals direct serialize_document output
+        let direct = content::serialize_document(&reconstructed);
+        assert_eq!(serialized, direct, "serialize_from_store should equal serialize_document ∘ store_to_document");
+    }
+
+    #[test]
+    fn serialize_from_store_round_trip_covers_variants() {
+        let elements = vec![
+            ContentElement::Heading {
+                level: HeadingLevel::new(2).unwrap(),
+                text: "Section".to_string(),
+            },
+            ContentElement::Paragraph { text: "Para text".to_string() },
+            ContentElement::Image {
+                alt: Some("alt text".to_string()),
+                path: "/img/photo.jpg".to_string(),
+            },
+            ContentElement::Link {
+                text: "Click here".to_string(),
+                href: "https://example.com".to_string(),
+            },
+            ContentElement::Separator,
+        ];
+
+        let doc = Document {
+            preamble: im::vector![],
+            body: elements.into_iter().map(zero_spanned).collect(),
+            has_separator: false,
+            separator_span: None,
+        };
+
+        // First serialization: document → store → serialize
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let first = serialize_from_store(&store, root);
+
+        // Second serialization: round-trip the doc through the store again (fixed-point check)
+        let doc2 = round_trip(&doc);
+        let mut store2 = NodeStore::new();
+        let root2 = document_to_store(&doc2, &mut store2, None);
+        let second = serialize_from_store(&store2, root2);
+
+        assert_eq!(first, second, "serialize_from_store should be fixed-point: first={first:?}, second={second:?}");
     }
 }

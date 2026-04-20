@@ -12,3 +12,8 @@ schema = { workspace = true }
 content = { workspace = true }
 template = { workspace = true }
 im = { workspace = true }
+
+[dev-dependencies]
+node_store = { workspace = true }
+schema = { workspace = true }
+content = { workspace = true }
