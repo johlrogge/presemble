@@ -129,6 +129,11 @@ fn add_child_element(store: &mut NodeStore, parent: NodeId, element_name: &str) 
     child
 }
 
+fn make_element(store: &mut NodeStore, element_name: &str) -> NodeId {
+    let name = store.intern(element_name);
+    store.add_node(Node::Element(name))
+}
+
 fn add_child_text(store: &mut NodeStore, parent: NodeId, text: &str) -> NodeId {
     let child = store.add_node(Node::Text(text.to_string()));
     store.add_edge(parent, Edge::Child(child));
@@ -137,45 +142,55 @@ fn add_child_text(store: &mut NodeStore, parent: NodeId, text: &str) -> NodeId {
 
 // ── content element encoding ──────────────────────────────────────────────────
 
-fn content_element_to_store(
+/// Convert a single [`ContentElement`] into the node store.
+///
+/// Returns the NodeId of the created element node. The node is **not** linked
+/// to any parent — the caller is responsible for adding a `Child` edge if needed.
+/// Sub-structure helpers such as `link_text_to_store` and `link_target_to_store`
+/// still accept an explicit `parent` parameter and wire the edge themselves.
+pub(crate) fn content_element_to_store(
     element: &ContentElement,
     store: &mut NodeStore,
-    parent: NodeId,
-) {
+) -> NodeId {
     match element {
         ContentElement::Heading { level, text } => {
-            let node = add_child_element(store, parent, "heading");
+            let node = make_element(store, "heading");
             add_int_attr(store, node, "level", level.value() as i64);
             add_child_text(store, node, text);
+            node
         }
         ContentElement::Paragraph { text } => {
-            let node = add_child_element(store, parent, "paragraph");
+            let node = make_element(store, "paragraph");
             add_child_text(store, node, text);
+            node
         }
         ContentElement::Image { alt, path } => {
-            let node = add_child_element(store, parent, "image");
+            let node = make_element(store, "image");
             add_text_attr(store, node, "path", path);
             if let Some(alt_text) = alt.as_ref() {
                 add_text_attr(store, node, "alt", alt_text);
             }
+            node
         }
         ContentElement::Link { text, href } => {
-            let node = add_child_element(store, parent, "link");
+            let node = make_element(store, "link");
             add_child_text(store, node, text);
             add_text_attr(store, node, "href", href);
+            node
         }
         ContentElement::Separator => {
-            add_child_element(store, parent, "separator");
+            make_element(store, "separator")
         }
         ContentElement::CodeBlock { language, code } => {
-            let node = add_child_element(store, parent, "code-block");
+            let node = make_element(store, "code-block");
             add_child_text(store, node, code);
             if let Some(lang) = language.as_ref() {
                 add_text_attr(store, node, "language", lang);
             }
+            node
         }
         ContentElement::Table { headers, rows } => {
-            let node = add_child_element(store, parent, "table");
+            let node = make_element(store, "table");
             let headers_node = add_child_element(store, node, "headers");
             for header in headers {
                 let s: String = header.clone();
@@ -191,23 +206,28 @@ fn content_element_to_store(
                     store.add_edge(row_node, Edge::Child(text_node));
                 }
             }
+            node
         }
         ContentElement::RawHtml { html } => {
-            let node = add_child_element(store, parent, "raw-html");
+            let node = make_element(store, "raw-html");
             add_child_text(store, node, html);
+            node
         }
         ContentElement::Blockquote { text } => {
-            let node = add_child_element(store, parent, "blockquote");
+            let node = make_element(store, "blockquote");
             add_child_text(store, node, text);
+            node
         }
         ContentElement::List { source } => {
-            let node = add_child_element(store, parent, "list");
+            let node = make_element(store, "list");
             add_child_text(store, node, source);
+            node
         }
         ContentElement::LinkExpression { text, target } => {
-            let node = add_child_element(store, parent, "link-expression");
+            let node = make_element(store, "link-expression");
             link_text_to_store(text, store, node);
             link_target_to_store(target, store, node);
+            node
         }
     }
 }
@@ -298,14 +318,16 @@ pub fn document_to_store(doc: &Document, store: &mut NodeStore, meta: Option<&Do
         let slot_node = add_child_element(store, preamble_node, "slot");
         add_text_attr(store, slot_node, "name", slot.name.as_str());
         for spanned in &slot.elements {
-            content_element_to_store(&spanned.node, store, slot_node);
+            let id = content_element_to_store(&spanned.node, store);
+            store.add_edge(slot_node, Edge::Child(id));
         }
     }
 
     // body
     let body_node = add_child_element(store, root, "body");
     for spanned in &doc.body {
-        content_element_to_store(&spanned.node, store, body_node);
+        let id = content_element_to_store(&spanned.node, store);
+        store.add_edge(body_node, Edge::Child(id));
     }
 
     root

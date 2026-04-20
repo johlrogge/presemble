@@ -2,7 +2,9 @@ use std::sync::{Arc, RwLock};
 use template::Value;
 use node_store::{Node, NodeStore};
 use ned::Selection;
+use ned::NodeTree;
 use ned::selection;
+use schema::Grammar;
 use crate::closure::PrimitiveFn;
 use crate::env::RootEnv;
 use crate::doc_registry::{DocEntry, DocSource};
@@ -39,6 +41,47 @@ pub fn wrap_selection(sel: Selection) -> Value {
 
 pub fn wrap_store(store: Arc<RwLock<NodeStore>>) -> Value {
     Value::Opaque(Arc::new(store))
+}
+
+pub fn extract_node_tree(val: &Value) -> Result<NodeTree, String> {
+    match val {
+        Value::Opaque(any) => {
+            any.downcast_ref::<NodeTree>()
+                .cloned()
+                .ok_or_else(|| "expected a NodeTree".into())
+        }
+        _ => Err("expected a NodeTree".into()),
+    }
+}
+
+pub fn wrap_node_tree(tree: NodeTree) -> Value {
+    Value::Opaque(Arc::new(tree))
+}
+
+/// Extract a `Vec<NodeTree>` from a `Value::List` of Opaque-wrapped NodeTrees.
+pub fn extract_node_tree_list(val: &Value) -> Result<Vec<NodeTree>, String> {
+    match val {
+        Value::List(items) => items
+            .iter()
+            .map(extract_node_tree)
+            .collect::<Result<Vec<_>, _>>(),
+        _ => Err("expected a list of NodeTrees".into()),
+    }
+}
+
+pub fn wrap_grammar(grammar: Arc<Grammar>) -> Value {
+    Value::Opaque(Arc::new(grammar))
+}
+
+pub fn extract_grammar(val: &Value) -> Result<Arc<Grammar>, String> {
+    match val {
+        Value::Opaque(any) => {
+            any.downcast_ref::<Arc<Grammar>>()
+                .cloned()
+                .ok_or_else(|| "expected a Grammar".into())
+        }
+        _ => Err("expected a Grammar".into()),
+    }
 }
 
 fn reg(
@@ -287,6 +330,30 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
         Ok(Value::List(values))
     });
 
+    // ── Positional child access ───────────────────────────────────────────────
+
+    let s = store.clone();
+    // Intended for single-parent selections; behaviour across multi-parent selections
+    // is well-defined but flat (all children concatenated in insertion order).
+    reg(root, "ned/nth-child", "(ned/nth-child sel idx)", "Return the idx-th insertion-order child of the single node in sel.", move |args| {
+        if args.len() < 2 { return Err("ned/nth-child requires a selection and an index".into()); }
+        let sel = extract_selection(&args[0])?;
+        let idx = match &args[1] {
+            Value::Integer(n) => *n as usize,
+            _ => return Err("ned/nth-child: idx must be an integer".into()),
+        };
+        let st = s.read().map_err(|e| e.to_string())?;
+        // Collect all insertion-order children across all selected nodes.
+        // Typically called on a single-node selection (the body element).
+        let children: Vec<_> = sel.iter()
+            .flat_map(|id| st.children(id))
+            .collect();
+        match children.get(idx) {
+            Some(&child_id) => Ok(wrap_selection(Selection::single(child_id))),
+            None => Ok(wrap_selection(Selection::new())),
+        }
+    });
+
     // ── Mutations ─────────────────────────────────────────────────────────────
 
     let s = store.clone();
@@ -309,6 +376,120 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
         let mut st = s.write().map_err(|e| e.to_string())?;
         let result = ned::mutation::delete(&mut st, &sel);
         Ok(wrap_selection(result))
+    });
+
+    // ── NodeTree constructors ─────────────────────────────────────────────────
+
+    reg(root, "ned/mk-text", "(ned/mk-text s)", "Construct a text NodeTree leaf.", |args| {
+        if args.is_empty() { return Err("ned/mk-text requires a string".into()); }
+        let s = match &args[0] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/mk-text: argument must be a string".into()),
+        };
+        Ok(wrap_node_tree(NodeTree::text(s)))
+    });
+
+    reg(root, "ned/mk-element", "(ned/mk-element name)", "Construct an empty element NodeTree.", |args| {
+        if args.is_empty() { return Err("ned/mk-element requires a name".into()); }
+        let name = match &args[0] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/mk-element: argument must be a string".into()),
+        };
+        Ok(wrap_node_tree(NodeTree::element(name)))
+    });
+
+    reg(root, "ned/with-child", "(ned/with-child tree child)", "Append a child NodeTree.", |args| {
+        if args.len() < 2 { return Err("ned/with-child requires tree and child".into()); }
+        let tree = extract_node_tree(&args[0])?;
+        let child = extract_node_tree(&args[1])?;
+        Ok(wrap_node_tree(tree.with_child(child)))
+    });
+
+    reg(root, "ned/with-attr", "(ned/with-attr tree name value)", "Add an attribute to a NodeTree.", |args| {
+        if args.len() < 3 { return Err("ned/with-attr requires tree, name, and value".into()); }
+        let tree = extract_node_tree(&args[0])?;
+        let name = match &args[1] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/with-attr: name must be a string".into()),
+        };
+        let value = match &args[2] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/with-attr: value must be a string".into()),
+        };
+        Ok(wrap_node_tree(tree.with_attr(name, value)))
+    });
+
+    // ── Tree-based mutation bindings ──────────────────────────────────────────
+
+    let s = store.clone();
+    reg(root, "ned/insert-child", "(ned/insert-child sel tree)", "Insert a NodeTree as the last child under selected elements.", move |args| {
+        if args.len() < 2 { return Err("ned/insert-child requires selection and tree".into()); }
+        let sel = extract_selection(&args[0])?;
+        let tree = extract_node_tree(&args[1])?;
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        let result = ned::mutation::insert_child_tree(&mut st, &sel, tree);
+        Ok(wrap_selection(result))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/insert-before", "(ned/insert-before sel tree)", "Insert a NodeTree before each selected node.", move |args| {
+        if args.len() < 2 { return Err("ned/insert-before requires selection and tree".into()); }
+        let sel = extract_selection(&args[0])?;
+        let tree = extract_node_tree(&args[1])?;
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        let result = ned::mutation::insert_before_tree(&mut st, &sel, tree);
+        Ok(wrap_selection(result))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/insert-after", "(ned/insert-after sel tree)", "Insert a NodeTree after each selected node.", move |args| {
+        if args.len() < 2 { return Err("ned/insert-after requires selection and tree".into()); }
+        let sel = extract_selection(&args[0])?;
+        let tree = extract_node_tree(&args[1])?;
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        let result = ned::mutation::insert_after_tree(&mut st, &sel, tree);
+        Ok(wrap_selection(result))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/replace", "(ned/replace sel trees)", "Replace selected nodes with a list of NodeTrees.", move |args| {
+        if args.len() < 2 { return Err("ned/replace requires selection and list of trees".into()); }
+        let sel = extract_selection(&args[0])?;
+        let trees = extract_node_tree_list(&args[1])?;
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        let result = ned::mutation::replace(&mut st, &sel, trees);
+        Ok(wrap_selection(result))
+    });
+
+    // ── Grammar and body-fragment parsing ─────────────────────────────────────
+
+    reg(root, "ned/parse-grammar", "(ned/parse-grammar schema-src)", "Parse a schema source string into an opaque Grammar value.", |args| {
+        if args.is_empty() { return Err("ned/parse-grammar requires a schema source string".into()); }
+        let src = match &args[0] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/parse-grammar: argument must be a string".into()),
+        };
+        let grammar = schema::parse_schema(&src)
+            .map_err(|e| format!("ned/parse-grammar: schema parse error: {e}"))?;
+        Ok(wrap_grammar(Arc::new(grammar)))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/parse-body", "(ned/parse-body md-source grammar)", "Parse a markdown body fragment into a list of NodeTrees (already stored).", move |args| {
+        if args.len() < 2 { return Err("ned/parse-body requires markdown source and grammar".into()); }
+        let md_src = match &args[0] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/parse-body: first argument must be a string".into()),
+        };
+        let grammar = extract_grammar(&args[1])?;
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        let ids = node_store_bridge::ingest_body_fragment(&md_src, &grammar, &mut st)
+            .map_err(|e| format!("ned/parse-body: {e}"))?;
+        let trees: Vec<Value> = ids
+            .into_iter()
+            .map(|id| wrap_node_tree(NodeTree::Existing(id)))
+            .collect();
+        Ok(Value::List(trees))
     });
 
 }
@@ -560,5 +741,512 @@ mod tests {
             }
             _ => panic!("expected List"),
         }
+    }
+
+    // ── NodeTree constructor + mutation binding tests ─────────────────────────
+
+    #[test]
+    fn mk_text_returns_opaque_nodetree() {
+        let store = make_store_with_tree();
+        let root = setup(store);
+        let result = call(&root, "ned/mk-text", vec![Value::Text("hello".to_string())]).unwrap();
+        let tree = match &result {
+            Value::Opaque(a) => a.downcast_ref::<NodeTree>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert!(matches!(tree, NodeTree::Text(s) if s == "hello"));
+    }
+
+    #[test]
+    fn mk_element_with_child_and_attr_composes() {
+        let store = make_store_with_tree();
+        let root = setup(store);
+        // Build: (ned/mk-element "p") -> with-attr "class" "foo" -> with-child (mk-text "hi")
+        let elem = call(&root, "ned/mk-element", vec![Value::Text("p".to_string())]).unwrap();
+        let with_attr = call(
+            &root,
+            "ned/with-attr",
+            vec![elem, Value::Text("class".to_string()), Value::Text("foo".to_string())],
+        )
+        .unwrap();
+        let text_tree = call(&root, "ned/mk-text", vec![Value::Text("hi".to_string())]).unwrap();
+        let composed = call(&root, "ned/with-child", vec![with_attr, text_tree]).unwrap();
+        let tree = match &composed {
+            Value::Opaque(a) => a.downcast_ref::<NodeTree>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        match tree {
+            NodeTree::Element { name, attrs, children } => {
+                assert_eq!(name, "p");
+                assert_eq!(attrs, vec![("class".to_string(), "foo".to_string())]);
+                assert_eq!(children.len(), 1);
+                assert!(matches!(&children[0], NodeTree::Text(s) if s == "hi"));
+            }
+            _ => panic!("expected Element"),
+        }
+    }
+
+    #[test]
+    fn insert_child_wires_materialized_subtree() {
+        let store = make_store_with_tree();
+        let root_env = setup(store.clone());
+        // Select all elements of kind "heading"
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let heading_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let heading_name = Value::Text("heading".to_string());
+        let headings = call(&root_env, "ned/filter", vec![all, heading_kw, heading_name]).unwrap();
+        // Build a span tree and insert as child
+        let span_tree = call(&root_env, "ned/mk-element", vec![Value::Text("span".to_string())]).unwrap();
+        let result = call(&root_env, "ned/insert-child", vec![headings, span_tree]).unwrap();
+        let created = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque Selection"),
+        };
+        assert_eq!(created.len(), 1);
+        // Verify the span is in the store and is a child of the heading
+        let st = store.read().unwrap();
+        let span_id = created.iter().next().unwrap();
+        match st.get(span_id) {
+            Some(Node::Element(n)) => assert_eq!(st.resolve_name(*n), "span"),
+            other => panic!("expected Element(span), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_swaps_subtree_via_binding() {
+        let store = make_store_with_tree();
+        let root_env = setup(store.clone());
+        // Use ned/filter :kind heading then ned/children to isolate the heading's text child
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let heading_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let heading_name = Value::Text("heading".to_string());
+        let headings = call(&root_env, "ned/filter", vec![all, heading_kw, heading_name]).unwrap();
+        let heading_children = call(&root_env, "ned/children", vec![headings]).unwrap();
+        // Build replacement list: [(ned/mk-text "new")]
+        let new_text_tree = call(&root_env, "ned/mk-text", vec![Value::Text("new".to_string())]).unwrap();
+        let trees_list = Value::List(vec![new_text_tree]);
+        let _result = call(&root_env, "ned/replace", vec![heading_children, trees_list]).unwrap();
+        // Verify the heading now has a child with text "new"
+        let st = store.read().unwrap();
+        let all_sel = {
+            let all_v = call(&root_env, "ned/all", vec![]).unwrap();
+            match &all_v {
+                Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+                _ => panic!(),
+            }
+        };
+        // Find text nodes: look for Node::Text("new") in store
+        let has_new = all_sel.iter().any(|id| {
+            matches!(st.get(id), Some(Node::Text(s)) if s == "new")
+        });
+        assert!(has_new, "expected 'new' text node in store");
+        // The old "Hello" text should be gone
+        let has_hello = all_sel.iter().any(|id| {
+            matches!(st.get(id), Some(Node::Text(s)) if s == "Hello")
+        });
+        assert!(!has_hello, "expected 'Hello' to be removed");
+    }
+
+    // ── ned/nth-child tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn ned_nth_child_picks_by_insertion_order() {
+        let store = make_store_with_tree();
+        let root_env = setup(store.clone());
+        // The tree has doc > [h1, p1]. h1 is first child, p1 is second.
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let doc_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let doc_name = Value::Text("document".to_string());
+        let docs = call(&root_env, "ned/filter", vec![all, doc_kw, doc_name]).unwrap();
+        // Get 0th child of doc — should be h1 (a heading)
+        let first = call(&root_env, "ned/nth-child", vec![docs, Value::Integer(0)]).unwrap();
+        let sel = match &first {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert_eq!(sel.len(), 1);
+        let st = store.read().unwrap();
+        let id = sel.iter().next().unwrap();
+        assert!(matches!(st.get(id), Some(Node::Element(n)) if st.resolve_name(*n) == "heading"));
+    }
+
+    #[test]
+    fn ned_nth_child_out_of_range_returns_empty() {
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let doc_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let doc_name = Value::Text("document".to_string());
+        let docs = call(&root_env, "ned/filter", vec![all, doc_kw, doc_name]).unwrap();
+        let result = call(&root_env, "ned/nth-child", vec![docs, Value::Integer(99)]).unwrap();
+        let sel = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert!(sel.is_empty());
+    }
+
+    // ── ned prelude helpers: doc-by-path, slot, body-at ───────────────────────
+
+    fn setup_with_prelude(store: Arc<RwLock<NodeStore>>) -> RootEnv {
+        let root = RootEnv::new();
+        crate::init_root(&root).expect("core init failed");
+        register_ned_builtins(&root, store);
+        crate::load_ned_prelude(&root).expect("ned prelude load failed");
+        root
+    }
+
+    fn make_doc_store() -> Arc<RwLock<NodeStore>> {
+        use content::{ContentElement, Document, DocumentSlot};
+        use schema::{HeadingLevel, SlotName, Span, Spanned};
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+
+        let mut store = NodeStore::new();
+
+        let doc = Document {
+            preamble: im::vector![
+                DocumentSlot {
+                    name: SlotName::new("title"),
+                    elements: im::vector![Spanned {
+                        node: ContentElement::Heading {
+                            level: HeadingLevel::new(1).unwrap(),
+                            text: "My Title".to_string(),
+                        },
+                        span: Span { start: 0, end: 0 },
+                    }],
+                }
+            ],
+            body: im::vector![
+                Spanned {
+                    node: ContentElement::Paragraph { text: "First".to_string() },
+                    span: Span { start: 0, end: 0 },
+                },
+                Spanned {
+                    node: ContentElement::Paragraph { text: "Second".to_string() },
+                    span: Span { start: 0, end: 0 },
+                },
+                Spanned {
+                    node: ContentElement::Paragraph { text: "Third".to_string() },
+                    span: Span { start: 0, end: 0 },
+                },
+            ],
+            has_separator: false,
+            separator_span: None,
+        };
+
+        let meta = DocumentMeta {
+            url: "/post/foo".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/foo.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+
+        document_to_store(&doc, &mut store, Some(&meta));
+        Arc::new(RwLock::new(store))
+    }
+
+    #[test]
+    fn doc_by_path_finds_matching_document() {
+        let store = make_doc_store();
+        let root_env = setup_with_prelude(store);
+        let result = crate::eval_str_with_root(
+            r#"(ned/count (ned/doc-by-path "content/post/foo.md"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer(1)));
+    }
+
+    #[test]
+    fn doc_by_path_returns_empty_for_missing() {
+        let store = make_doc_store();
+        let root_env = setup_with_prelude(store);
+        let result = crate::eval_str_with_root(
+            r#"(ned/count (ned/doc-by-path "content/post/missing.md"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer(0)));
+    }
+
+    #[test]
+    fn slot_traverses_to_named_slot() {
+        let store = make_doc_store();
+        let root_env = setup_with_prelude(store);
+        // The slot element should have kind "slot" and attr name="title"
+        let count_result = crate::eval_str_with_root(
+            r#"(ned/count (ned/slot (ned/doc-by-path "content/post/foo.md") "title"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(count_result, Value::Integer(1)), "expected 1 slot named title");
+
+        // Verify it is kind "slot"
+        let kind_result = crate::eval_str_with_root(
+            r#"(ned/kind-of (ned/slot (ned/doc-by-path "content/post/foo.md") "title"))"#,
+            &root_env,
+        )
+        .unwrap();
+        match kind_result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(&items[0], Value::Text(s) if s == "slot"));
+            }
+            _ => panic!("expected List from ned/kind-of"),
+        }
+    }
+
+    #[test]
+    fn slot_returns_empty_for_missing_name() {
+        let store = make_doc_store();
+        let root_env = setup_with_prelude(store);
+        let result = crate::eval_str_with_root(
+            r#"(ned/count (ned/slot (ned/doc-by-path "content/post/foo.md") "nonexistent"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer(0)));
+    }
+
+    #[test]
+    fn body_at_picks_idx() {
+        let store = make_doc_store();
+        let root_env = setup_with_prelude(store);
+        // body has 3 paragraphs: First, Second, Third at indices 0, 1, 2
+        // Index 1 should give us the second paragraph ("Second")
+        let count_result = crate::eval_str_with_root(
+            r#"(ned/count (ned/body-at (ned/doc-by-path "content/post/foo.md") 1))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(count_result, Value::Integer(1)));
+
+        // Verify it is kind "paragraph"
+        let kind_result = crate::eval_str_with_root(
+            r#"(ned/kind-of (ned/body-at (ned/doc-by-path "content/post/foo.md") 1))"#,
+            &root_env,
+        )
+        .unwrap();
+        match kind_result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(&items[0], Value::Text(s) if s == "paragraph"));
+            }
+            _ => panic!("expected List from ned/kind-of"),
+        }
+    }
+
+    #[test]
+    fn body_at_out_of_range_returns_empty() {
+        let store = make_doc_store();
+        let root_env = setup_with_prelude(store);
+        let result = crate::eval_str_with_root(
+            r#"(ned/count (ned/body-at (ned/doc-by-path "content/post/foo.md") 10))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer(0)));
+    }
+
+    #[test]
+    fn body_at_zero_on_empty_body_returns_empty() {
+        use content::Document;
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+
+        let mut raw_store = NodeStore::new();
+        let doc = Document {
+            preamble: im::vector![],
+            body: im::vector![],
+            has_separator: false,
+            separator_span: None,
+        };
+        let meta = DocumentMeta {
+            url: "/post/empty".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/empty.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        document_to_store(&doc, &mut raw_store, Some(&meta));
+        let store = Arc::new(RwLock::new(raw_store));
+
+        let root_env = setup_with_prelude(store);
+        let result = crate::eval_str_with_root(
+            r#"(ned/count (ned/body-at (ned/doc-by-path "content/post/empty.md") 0))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Integer(0)));
+    }
+
+    // ── ned/parse-grammar and ned/parse-body tests ────────────────────────────
+
+    const EMPTY_SCHEMA_SRC: &str = "preamble: []\n";
+
+    fn make_grammar_value(root_env: &RootEnv) -> Value {
+        call(root_env, "ned/parse-grammar", vec![Value::Text(EMPTY_SCHEMA_SRC.to_string())]).unwrap()
+    }
+
+    #[test]
+    fn parse_grammar_returns_opaque_grammar() {
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        let result = call(&root_env, "ned/parse-grammar", vec![Value::Text(EMPTY_SCHEMA_SRC.to_string())]).unwrap();
+        match &result {
+            Value::Opaque(a) => {
+                assert!(a.downcast_ref::<Arc<Grammar>>().is_some(), "expected Arc<Grammar> opaque");
+            }
+            _ => panic!("expected Opaque"),
+        }
+    }
+
+    #[test]
+    fn parse_grammar_accepts_any_text_schema_is_permissive() {
+        // The schema parser is a custom markdown-style parser (not YAML).
+        // It is very permissive and does not fail on unrecognised input;
+        // unknown lines are silently skipped, producing an empty Grammar.
+        // This test documents that behaviour.
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        let result = call(&root_env, "ned/parse-grammar", vec![Value::Text(":::unrecognised:::".to_string())]);
+        assert!(result.is_ok(), "schema parser should accept any text and produce an empty Grammar");
+    }
+
+    #[test]
+    fn parse_body_ingests_paragraph() {
+        let store = make_store_with_tree();
+        let root_env = setup(store.clone());
+        let grammar = make_grammar_value(&root_env);
+        let result = call(
+            &root_env,
+            "ned/parse-body",
+            vec![Value::Text("Hello world\n".to_string()), grammar],
+        )
+        .unwrap();
+        let trees = match result {
+            Value::List(items) => items,
+            _ => panic!("expected List"),
+        };
+        assert_eq!(trees.len(), 1, "expected exactly one element");
+
+        let tree = extract_node_tree(&trees[0]).expect("expected NodeTree");
+        let st = store.read().unwrap();
+        match tree {
+            NodeTree::Existing(id) => {
+                match st.get(id) {
+                    Some(Node::Element(name)) => {
+                        assert_eq!(st.resolve_name(*name), "paragraph");
+                    }
+                    other => panic!("expected Element(paragraph), got {other:?}"),
+                }
+                let children = st.children(id);
+                assert!(
+                    children.iter().any(|&cid| matches!(st.get(cid), Some(Node::Text(s)) if s == "Hello world")),
+                    "expected 'Hello world' text child"
+                );
+            }
+            _ => panic!("expected NodeTree::Existing"),
+        }
+    }
+
+    #[test]
+    fn parse_body_ingests_multi_element() {
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        let grammar = make_grammar_value(&root_env);
+        let result = call(
+            &root_env,
+            "ned/parse-body",
+            vec![Value::Text("# Heading\n\nPara\n".to_string()), grammar],
+        )
+        .unwrap();
+        let trees = match result {
+            Value::List(items) => items,
+            _ => panic!("expected List"),
+        };
+        assert_eq!(trees.len(), 2, "expected heading + paragraph");
+    }
+
+    #[test]
+    fn replace_with_parse_body_swaps_body_element() {
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+        use content::{ContentElement, Document, DocumentSlot};
+        use schema::{HeadingLevel, SlotName, Span, Spanned};
+
+        let mut raw_store = NodeStore::new();
+        let doc = Document {
+            preamble: im::vector![
+                DocumentSlot {
+                    name: SlotName::new("title"),
+                    elements: im::vector![Spanned {
+                        node: ContentElement::Heading {
+                            level: HeadingLevel::new(1).unwrap(),
+                            text: "Title".to_string(),
+                        },
+                        span: Span { start: 0, end: 0 },
+                    }],
+                }
+            ],
+            body: im::vector![
+                Spanned {
+                    node: ContentElement::Paragraph { text: "Old content".to_string() },
+                    span: Span { start: 0, end: 0 },
+                },
+            ],
+            has_separator: false,
+            separator_span: None,
+        };
+        let meta = DocumentMeta {
+            url: "/post/replace-test".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/replace-test.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        document_to_store(&doc, &mut raw_store, Some(&meta));
+        let store = Arc::new(RwLock::new(raw_store));
+
+        let root_env = setup_with_prelude(store.clone());
+        let grammar = make_grammar_value(&root_env);
+
+        let doc_sel = crate::eval_str_with_root(
+            r#"(ned/doc-by-path "content/post/replace-test.md")"#,
+            &root_env,
+        ).unwrap();
+        let body_elem = call(&root_env, "ned/body-at", vec![doc_sel, Value::Integer(0)]).unwrap();
+
+        let new_trees = call(
+            &root_env,
+            "ned/parse-body",
+            vec![Value::Text("# New heading\n".to_string()), grammar],
+        ).unwrap();
+
+        let result = call(&root_env, "ned/replace", vec![body_elem, new_trees]).unwrap();
+        let inserted = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque Selection"),
+        };
+        assert_eq!(inserted.len(), 1, "expected one inserted node");
+
+        let st = store.read().unwrap();
+        let inserted_id = inserted.iter().next().unwrap();
+        match st.get(inserted_id) {
+            Some(Node::Element(name)) => {
+                assert_eq!(st.resolve_name(*name), "heading", "inserted node should be a heading");
+            }
+            other => panic!("expected Element(heading), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_body_valid_input_always_succeeds() {
+        // pulldown_cmark is very permissive; document that any valid markdown succeeds
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        let grammar = make_grammar_value(&root_env);
+        let result = call(
+            &root_env,
+            "ned/parse-body",
+            vec![Value::Text("Normal text\n".to_string()), grammar],
+        );
+        assert!(result.is_ok(), "valid input should succeed: {result:?}");
     }
 }

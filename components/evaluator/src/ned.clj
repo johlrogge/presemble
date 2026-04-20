@@ -66,3 +66,24 @@
 (def-doc! ned/stem-of "(ned/stem-of sel)" "Get stems of selected documents.")
 (defn ned/stem-of [sel]
   (ned/attr-of sel "stem"))
+
+;; ── Path-based addressing ─────────────────────────────────────────────────
+
+(def-doc! ned/doc-by-path "(ned/doc-by-path path)" "Select the document root whose :file attribute matches path. Returns empty if not found.")
+(defn ned/doc-by-path [path]
+  (ned/filter (ned/all-documents) :attr "file" path))
+
+(def-doc! ned/slot "(ned/slot doc slot-name)" "Given a document selection, return the named slot element under its preamble.")
+(defn ned/slot [doc slot-name]
+  (-> doc
+      (ned/children)
+      (ned/filter :kind "preamble")
+      (ned/children)
+      (ned/filter :attr "name" slot-name)))
+
+(def-doc! ned/body-at "(ned/body-at doc idx)" "Given a document selection, return the idx-th body child element.")
+(defn ned/body-at [doc idx]
+  (-> doc
+      (ned/children)
+      (ned/filter :kind "body")
+      (ned/nth-child idx)))

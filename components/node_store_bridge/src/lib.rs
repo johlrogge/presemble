@@ -1,11 +1,13 @@
 pub mod node_helpers;
 pub mod schema_bridge;
 pub mod content_bridge;
+pub mod body_fragment;
 pub mod template_bridge;
 pub mod value_bridge;
 pub mod store_pipeline;
 pub mod graph_view_impl;
 
+pub use body_fragment::ingest_body_fragment;
 pub use content_bridge::DocumentMeta;
 pub use value_bridge::{node_to_value, value_to_node};
 pub use graph_view_impl::{LayeredGraphView, MultiRootView, NodeStoreView, PrefixedGraphView};

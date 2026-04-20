@@ -362,9 +362,13 @@ dependencies = [
  "dep_graph",
  "editorial_types",
  "expressions",
+ "im",
  "mem_site_repository",
  "nng",
+ "node_store",
+ "node_store_bridge",
  "notify",
+ "rayon",
  "schema",
  "serde",
  "serde_json",
@@ -644,6 +648,7 @@ dependencies = [
  "edn",
  "evaluator",
  "nng",
+ "node_store",
  "nrepl",
  "serde_json",
 ]
@@ -700,7 +705,11 @@ dependencies = [
  "im",
  "macros",
  "mem_site_repository",
+ "ned",
+ "node_store",
+ "node_store_bridge",
  "reader",
+ "schema",
  "site_index",
  "tempfile",
  "template",
@@ -1463,6 +1472,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ned"
+version = "0.35.0"
+dependencies = [
+ "im",
+ "node_store",
+]
+
+[[package]]
+name = "ned_cli"
+version = "0.35.0"
+dependencies = [
+ "content",
+ "evaluator",
+ "im",
+ "mem_site_repository",
+ "ned",
+ "node_store",
+ "node_store_bridge",
+ "schema",
+ "site_index",
+ "template",
+]
+
+[[package]]
+name = "ned_project"
+version = "0.35.0"
+dependencies = [
+ "ned_cli",
+]
+
+[[package]]
 name = "nng"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1480,6 +1520,24 @@ checksum = "50d0e7f39a8fd1792a710da9351320e864dc799cf439960e332c977b2f876da6"
 dependencies = [
  "cmake",
  "version_check",
+]
+
+[[package]]
+name = "node_store"
+version = "0.35.0"
+dependencies = [
+ "im",
+]
+
+[[package]]
+name = "node_store_bridge"
+version = "0.35.0"
+dependencies = [
+ "content",
+ "im",
+ "node_store",
+ "schema",
+ "template",
 ]
 
 [[package]]
@@ -2337,6 +2395,7 @@ version = "0.35.0"
 dependencies = [
  "content",
  "im",
+ "node_store",
  "pulldown-cmark",
  "quick-xml",
  "schema",

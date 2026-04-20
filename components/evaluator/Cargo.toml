@@ -20,9 +20,9 @@ edn = { workspace = true }
 im = { workspace = true }
 ned = { workspace = true }
 node_store = { workspace = true }
+node_store_bridge = { workspace = true }
+schema = { workspace = true }
 
 [dev-dependencies]
 site_repository = { workspace = true }
-node_store_bridge = { workspace = true }
-schema = { workspace = true }
 tempfile = "3"
