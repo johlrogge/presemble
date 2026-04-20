@@ -1249,4 +1249,148 @@ mod tests {
         );
         assert!(result.is_ok(), "valid input should succeed: {result:?}");
     }
+
+    // ── ned/source-docs-of tests ─────────────────────────────────────────────
+
+    /// Build a store with two distinct documents (doc A and doc B), each with a body paragraph.
+    /// Returns the store plus the IDs of: doc_a_root, doc_a_para, doc_b_root, doc_b_para.
+    fn make_two_doc_store() -> (Arc<RwLock<NodeStore>>, node_store::NodeId, node_store::NodeId, node_store::NodeId, node_store::NodeId) {
+        use node_store::NodeStore;
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+        use content::{ContentElement, Document};
+        use schema::{Span, Spanned};
+
+        let mut store = NodeStore::new();
+
+        let make_doc = |store: &mut NodeStore, file: &str, url: &str, text: &str| {
+            let doc = Document {
+                preamble: im::vector![],
+                body: im::vector![Spanned {
+                    node: ContentElement::Paragraph { text: text.to_string() },
+                    span: Span { start: 0, end: 0 },
+                }],
+                has_separator: false,
+                separator_span: None,
+            };
+            let meta = DocumentMeta {
+                url: url.to_string(),
+                stem: "post".to_string(),
+                file: file.to_string(),
+                page_kind: "item".to_string(),
+            };
+            document_to_store(&doc, store, Some(&meta))
+        };
+
+        let doc_a_root = make_doc(&mut store, "content/a.md", "/a", "Para A");
+        let doc_b_root = make_doc(&mut store, "content/b.md", "/b", "Para B");
+
+        // Find the paragraph children of each doc via the body element
+        let find_para = |store: &NodeStore, doc_root: node_store::NodeId| -> node_store::NodeId {
+            // doc_root > body > paragraph
+            let body = store.children(doc_root)
+                .iter()
+                .copied()
+                .find(|&id| matches!(store.get(id), Some(Node::Element(n)) if store.resolve_name(*n) == "body"))
+                .expect("body child");
+            store.children(body)
+                .iter()
+                .copied()
+                .find(|&id| matches!(store.get(id), Some(Node::Element(n)) if store.resolve_name(*n) == "paragraph"))
+                .expect("paragraph child")
+        };
+
+        let doc_a_para = find_para(&store, doc_a_root);
+        let doc_b_para = find_para(&store, doc_b_root);
+
+        (Arc::new(RwLock::new(store)), doc_a_root, doc_a_para, doc_b_root, doc_b_para)
+    }
+
+    #[test]
+    fn source_docs_of_single_node_returns_containing_doc() {
+        let (store, doc_a_root, doc_a_para, _doc_b_root, _doc_b_para) = make_two_doc_store();
+        let root_env = setup_with_prelude(store);
+
+        // Select the paragraph from doc A; source-docs-of should return doc A's root.
+        let para_sel = wrap_selection(Selection::single(doc_a_para));
+        let result_val = call(&root_env, "ned/source-docs-of", vec![para_sel]).unwrap();
+        let result = match &result_val {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque Selection"),
+        };
+        assert_eq!(result.len(), 1, "expected exactly one doc root");
+        assert!(result.contains(doc_a_root), "expected doc_a_root in result");
+    }
+
+    #[test]
+    fn source_docs_of_multiple_docs_returns_multiple_roots() {
+        let (store, doc_a_root, doc_a_para, doc_b_root, doc_b_para) = make_two_doc_store();
+        let root_env = setup_with_prelude(store);
+
+        // Select one node from each document; result should contain both roots.
+        let combined = Selection::from_ids([doc_a_para, doc_b_para]);
+        let result_val = call(&root_env, "ned/source-docs-of", vec![wrap_selection(combined)]).unwrap();
+        let result = match &result_val {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque Selection"),
+        };
+        assert_eq!(result.len(), 2, "expected both doc roots");
+        assert!(result.contains(doc_a_root), "expected doc_a_root");
+        assert!(result.contains(doc_b_root), "expected doc_b_root");
+    }
+
+    #[test]
+    fn source_docs_of_doc_root_returns_itself() {
+        let (store, doc_a_root, _doc_a_para, _doc_b_root, _doc_b_para) = make_two_doc_store();
+        let root_env = setup_with_prelude(store);
+
+        // Selecting a document root directly: source-docs-of returns that same root.
+        let doc_sel = wrap_selection(Selection::single(doc_a_root));
+        let result_val = call(&root_env, "ned/source-docs-of", vec![doc_sel]).unwrap();
+        let result = match &result_val {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque Selection"),
+        };
+        assert_eq!(result.len(), 1, "expected exactly one doc root");
+        assert!(result.contains(doc_a_root), "expected doc_a_root itself");
+    }
+
+    #[test]
+    fn source_docs_of_empty_selection_returns_empty() {
+        let (store, _doc_a_root, _doc_a_para, _doc_b_root, _doc_b_para) = make_two_doc_store();
+        let root_env = setup_with_prelude(store);
+
+        let empty_sel = wrap_selection(Selection::new());
+        let result_val = call(&root_env, "ned/source-docs-of", vec![empty_sel]).unwrap();
+        let result = match &result_val {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque Selection"),
+        };
+        assert!(result.is_empty(), "expected empty result for empty input");
+    }
+
+    #[test]
+    fn source_docs_of_dedups_same_document() {
+        let (store, doc_a_root, doc_a_para, _doc_b_root, _doc_b_para) = make_two_doc_store();
+        // We also need another node from doc A — get the body element itself
+        let body_id = {
+            let st = store.read().unwrap();
+            st.children(doc_a_root)
+                .iter()
+                .copied()
+                .find(|&id| matches!(st.get(id), Some(Node::Element(n)) if st.resolve_name(*n) == "body"))
+                .expect("body")
+        };
+
+        let root_env = setup_with_prelude(store);
+
+        // Two nodes from the same document (body and one of its children) — should give one root.
+        let combined = Selection::from_ids([doc_a_para, body_id]);
+        let result_val = call(&root_env, "ned/source-docs-of", vec![wrap_selection(combined)]).unwrap();
+        let result = match &result_val {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque Selection"),
+        };
+        assert_eq!(result.len(), 1, "expected one root even for two nodes from the same doc");
+        assert!(result.contains(doc_a_root));
+    }
 }

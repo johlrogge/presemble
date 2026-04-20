@@ -87,3 +87,11 @@
       (ned/children)
       (ned/filter :kind "body")
       (ned/nth-child idx)))
+
+;; ── Source document discovery ────────────────────────────────────────────
+
+(def-doc! ned/source-docs-of "(ned/source-docs-of sel)" "Return the set of document-root nodes containing the selected nodes (ancestors filtered to Element(\"document\")).")
+(defn ned/source-docs-of [sel]
+  (ned/union
+    (ned/filter sel :kind "document")
+    (ned/filter (ned/ancestors sel) :kind "document")))

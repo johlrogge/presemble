@@ -1,9 +1,11 @@
 mod client;
 mod conductor;
+mod dirty;
 mod protocol;
 
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber};
 pub use conductor::{CommandResult, Conductor};
+pub use dirty::DirtyDocs;
 pub use protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
 pub use editorial_types;
 

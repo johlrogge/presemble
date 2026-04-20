@@ -61,6 +61,8 @@ pub struct Conductor {
     // NodeStore-native cached indexes (Phase D)
     cached_node_url_index: RwLock<node_store_bridge::store_pipeline::NodeUrlIndex>,
     cached_node_stem_index: RwLock<node_store_bridge::store_pipeline::NodeStemIndex>,
+    // NED edit path: tracks which content files have unsaved NodeStore mutations (Phase B)
+    dirty_docs: RwLock<crate::dirty::DirtyDocs>,
 }
 
 /// Extract the title from a document's preamble in the NodeStore.
@@ -160,6 +162,7 @@ impl Conductor {
             stem_to_roots: RwLock::new(HashMap::new()),
             cached_node_url_index: RwLock::new(HashMap::new()),
             cached_node_stem_index: RwLock::new(HashMap::new()),
+            dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
         };
 
         // Load persisted pending suggestions from disk
@@ -187,6 +190,11 @@ impl Conductor {
     /// Get a shared reference to the node store.
     pub fn node_store(&self) -> Arc<RwLock<node_store::NodeStore>> {
         Arc::clone(&self.node_store)
+    }
+
+    /// Access the NED dirty-docs tracker (Phase B edit path).
+    pub fn dirty_docs(&self) -> &RwLock<crate::dirty::DirtyDocs> {
+        &self.dirty_docs
     }
 
     /// Populate the node store from the site repository.
