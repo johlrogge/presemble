@@ -208,6 +208,24 @@ mod protocol_tests {
     use super::*;
 
     #[test]
+    fn schema_source_response_roundtrips_through_json() {
+        let resp = Response::SchemaSource(Some("# title {#title}\n".to_string()));
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let decoded: Response = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Response::SchemaSource(Some(src)) => {
+                assert_eq!(src, "# title {#title}\n");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let resp_none = Response::SchemaSource(None);
+        let json_none = serde_json::to_string(&resp_none).expect("serialize");
+        let decoded_none: Response = serde_json::from_str(&json_none).expect("deserialize");
+        assert!(matches!(decoded_none, Response::SchemaSource(None)));
+    }
+
+    #[test]
     fn apply_ned_program_roundtrips_through_json() {
         let cmd = Command::ApplyNedProgram {
             program: r#"(ned/set-text (ned/doc-by-path "foo.md") "Hi")"#.to_string(),

@@ -1,4 +1,43 @@
 (function(){
+// Phase B5: edit-mode handlers emit NED programs via /_presemble/apply. Suggestion paths remain on legacy endpoints pending Phase C.
+
+// Escape a JS string for embedding as a Clojure string literal.
+// Handles backslash and double-quote. Keep this in sync with the server's
+// clj_str_escape helper.
+function cljStr(s) {
+  return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+var grammarCache = {};
+
+async function fetchGrammar(stem) {
+  if (grammarCache[stem] !== undefined) return grammarCache[stem];
+  var resp = await fetch('/_presemble/grammar?stem=' + encodeURIComponent(stem));
+  if (!resp.ok) throw new Error("no grammar for stem '" + stem + "' (status " + resp.status + ')');
+  var src = await resp.text();
+  grammarCache[stem] = src;
+  return src;
+}
+
+async function applyNed(program) {
+  var resp = await fetch('/_presemble/apply', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({program: program}),
+  });
+  var data = await resp.json();
+  if (!data.ok) throw new Error(data.error || 'apply failed');
+  return data;
+}
+
+function stemFromFile(file) {
+  // content/<stem>/<slug>.md -> "<stem>"
+  // content/<slug>.md -> "" (root collection)
+  var parts = file.split('/');
+  if (parts.length === 2) return ''; // content/<slug>.md
+  return parts[1]; // content/<stem>/...
+}
+
 var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');
 var _userScrolled=false;var _scrollTimer=null;var _presembleScrolling=false;
 window.addEventListener('scroll',function(){if(_presembleScrolling){return;}_userScrolled=true;clearTimeout(_scrollTimer);_scrollTimer=setTimeout(function(){_userScrolled=false;},3000);},true);
@@ -702,25 +741,17 @@ var bvalue=ta.value;
 bcleanup();
 if(bvalue===bmd){return;}
 if(!bvalue.trim()){return;}
-fetch('/_presemble/edit-body',{
-method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,body_idx:bidx,content:bvalue})
-}).then(function(r){return r.json();}).then(function(data){
-if(!data.ok){
+var bstem=stemFromFile(bfile);
+fetchGrammar(bstem).then(function(schemaSrc){
+var program='(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    (ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
+return applyNed(program);
+}).then(function(){
+if(window._fetchDirtyCount){window._fetchDirtyCount();}
+}).catch(function(err){
 var berr2=document.createElement('div');
 berr2.className='presemble-edit-error';
-berr2.textContent=data.error||'Edit failed';
+berr2.textContent=err.message||'Edit failed';
 el.after(berr2);
-el.style.display='';
-}else{
-if(window._fetchDirtyCount){window._fetchDirtyCount();}
-}
-}).catch(function(err){
-var berr3=document.createElement('div');
-berr3.className='presemble-edit-error';
-berr3.textContent='Network error: '+err.message;
-el.after(berr3);
 el.style.display='';
 });
 }
@@ -755,6 +786,7 @@ sel.appendChild(o);
 });
 el.after(sel);
 sel.focus();
+// TODO(phase-c): route through /_presemble/apply once NED has link/image mutations
 sel.onchange=function(){
 if(sel.value){
 fetch('/_presemble/edit',{
@@ -800,23 +832,13 @@ var value=el.innerText.trim();
 cleanup();
 if(value===original){return;}
 if(!value){return;}
-fetch('/_presemble/edit',{
-method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,slot:editSlot,value:value})
-}).then(function(r){return r.json();}).then(function(data){
-if(!data.ok){
-var err=document.createElement('div');
-err.className='presemble-edit-error';
-err.textContent=data.error||'Edit failed';
-el.after(err);
-el.innerText=original;
-}
+var program='(ned/set-text (-> (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') ned/descendants ned/texts) '+cljStr(value)+')';
+applyNed(program).then(function(){
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(e){
 var err=document.createElement('div');
 err.className='presemble-edit-error';
-err.textContent='Network error: '+e.message;
+err.textContent=e.message||'Edit failed';
 el.after(err);
 el.innerText=original;
 });

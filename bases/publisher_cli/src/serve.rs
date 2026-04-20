@@ -170,6 +170,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/lsp", get(lsp_ws_handler))
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
+        .route("/_presemble/apply", post(apply_handler))
+        .route("/_presemble/grammar", get(grammar_handler))
         .route("/_presemble/links", get(links_handler))
         .route("/_presemble/schemas", get(schemas_handler))
         .route("/_presemble/create-content", post(create_content_handler))
@@ -263,6 +265,54 @@ async fn edit_body_handler(
         body_idx: req.body_idx,
         content: req.content,
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct ApplyRequest {
+    program: String,
+}
+
+async fn apply_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<ApplyRequest>,
+) -> axum::Json<EditResponse> {
+    conductor_edit_response(state.conductor.send(&conductor::Command::ApplyNedProgram {
+        program: req.program,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct GrammarQuery {
+    stem: String,
+}
+
+async fn grammar_handler(
+    State(state): State<AppState>,
+    Query(query): Query<GrammarQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    match state.conductor.send(&conductor::Command::GetGrammar { stem: query.stem }) {
+        Ok(conductor::Response::SchemaSource(Some(src))) => {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/plain")],
+                src.into_bytes(),
+            ).into_response()
+        }
+        Ok(conductor::Response::SchemaSource(None)) => {
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], b"not found".to_vec()).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
+        }
+        _ => {
+            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], b"unexpected conductor response".to_vec()).into_response()
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
