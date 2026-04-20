@@ -517,8 +517,10 @@ impl Conductor {
         // Get the stem attribute to find the grammar
         let stem = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "stem")?;
         let url = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "url")?;
-        let file = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "file");
         let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "page-kind");
+        // Derive _presemble_file before releasing the store lock.
+        let presemble_file =
+            node_store_bridge::content_bridge::presemble_file_for_root(&store, doc_root);
 
         // Reconstruct the Document from the NodeStore
         let doc = node_store_bridge::content_bridge::store_to_document(&store, doc_root);
@@ -558,20 +560,9 @@ impl Conductor {
 
         // Inject metadata (same as site_builder does)
         data.insert("_presemble_stem", template::Value::Text(stem.clone()));
-        // Always insert _presemble_file. Synthesise a deterministic content path
-        // from the stem when the stored file attribute is absent or empty (mirrors
-        // the pre-Phase-B site_builder fallback and covers the legacy-fallback root
-        // node that stores file="" to satisfy the structural requirement).
-        let presemble_file = match file.as_deref() {
-            Some(f) if !f.is_empty() => f.to_string(),
-            _ => {
-                if stem.is_empty() {
-                    "content/index.md".to_string()
-                } else {
-                    format!("content/{stem}/index.md")
-                }
-            }
-        };
+        // Always insert _presemble_file. Synthesised from the document root's
+        // :file attribute (with stem fallback) by the shared helper, computed
+        // above before releasing the store lock.
         data.insert("_presemble_file", template::Value::Text(presemble_file));
         data.insert("url", template::Value::Text(url.clone()));
 

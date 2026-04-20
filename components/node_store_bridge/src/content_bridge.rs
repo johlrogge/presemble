@@ -4,6 +4,25 @@ use content::{
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
 
+/// Derive the `_presemble_file` value for a document root in the NodeStore.
+///
+/// Reads the `file` attribute if present and non-empty; otherwise synthesises
+/// `content/index.md` or `content/<stem>/index.md` from the `stem` attribute.
+/// Used by the template renderer (`NodeStoreView`) and the legacy `DataGraph` pipeline.
+pub fn presemble_file_for_root(store: &NodeStore, root: NodeId) -> String {
+    match find_attr_text(store, root, "file") {
+        Some(f) if !f.is_empty() => f,
+        _ => {
+            let stem = find_attr_text(store, root, "stem").unwrap_or_default();
+            if stem.is_empty() {
+                "content/index.md".to_string()
+            } else {
+                format!("content/{stem}/index.md")
+            }
+        }
+    }
+}
+
 /// Metadata about a document's site-level identity.
 /// Attached as Attribute edges on the document root node.
 pub struct DocumentMeta {

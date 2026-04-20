@@ -12,6 +12,7 @@ use template::data::Value;
 use template::graph_view::{DataRef, GraphView, ResolvedNode};
 use template::DataGraph;
 
+use crate::content_bridge::presemble_file_for_root;
 use crate::value_bridge::node_to_value;
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,16 @@ impl<'a> NodeStoreView<'a> {
 
 impl<'a> GraphView for NodeStoreView<'a> {
     fn resolve(&self, path: &[&str]) -> Option<DataRef<'_>> {
+        // Special-case: _presemble_file is a synthetic template field derived
+        // from the document root's :file attribute (with :stem fallback).
+        // The transformer's fallback always ends up calling resolve(&[key_file])
+        // so we only need to handle the single-segment case here.
+        if path == [template::constants::KEY_PRESEMBLE_FILE] {
+            return Some(DataRef::Owned(Value::Text(
+                presemble_file_for_root(self.store, self.root),
+            )));
+        }
+
         let mut current = self.root;
         for (i, segment) in path.iter().enumerate() {
             let is_last = i == path.len() - 1;
@@ -448,6 +459,15 @@ impl<'a> GraphView for MultiRootView<'a> {
             [] => None,
             [key, rest @ ..] => {
                 let root = self.find_root(key)?;
+                // Special-case: synthesize _presemble_file from the bound root's
+                // file/stem attributes. Mirrors NodeStoreView::resolve so that
+                // iterated items (data-each) also emit a non-empty
+                // data-presemble-file attribute.
+                if *rest == [template::constants::KEY_PRESEMBLE_FILE] {
+                    return Some(DataRef::Owned(Value::Text(
+                        presemble_file_for_root(self.store, root),
+                    )));
+                }
                 // Walk the subpath inline — avoid temporary NodeStoreView borrow issues.
                 let resolved_id = walk_store(self.store, root, rest)?;
                 Some(DataRef::Owned(node_to_value(self.store, resolved_id)))
@@ -867,5 +887,125 @@ mod tests {
         let keys = view.iter_keys();
         assert!(keys.contains(&"input".to_string()));
         assert!(keys.contains(&"item".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // _presemble_file synthesis tests
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal store with a document root that has explicit `file` and
+    /// `stem` attributes, as `document_to_store` would create.
+    fn make_store_with_file_attr(file: &str, stem: &str) -> (NodeStore, NodeId) {
+        use node_store::{Edge, Node};
+        let mut store = NodeStore::new();
+        let doc_name = store.intern("document");
+        let root = store.add_node(Node::Element(doc_name));
+        // Always write file attr (may be empty string for legacy roots)
+        let file_name = store.intern("file");
+        let file_val = store.add_node(Node::Text(file.to_string()));
+        store.add_edge(root, Edge::Attribute { name: file_name, value: file_val });
+        if !stem.is_empty() {
+            let stem_name = store.intern("stem");
+            let stem_val = store.add_node(Node::Text(stem.to_string()));
+            store.add_edge(root, Edge::Attribute { name: stem_name, value: stem_val });
+        }
+        (store, root)
+    }
+
+    #[test]
+    fn node_store_view_synthesizes_presemble_file_from_file_attr() {
+        let (store, root) = make_store_with_file_attr("content/post/hello.md", "post");
+        let view = NodeStoreView::new(&store, root);
+        let result = view.resolve(&["_presemble_file"]).expect("should resolve _presemble_file");
+        assert!(
+            matches!(result.as_value(), Value::Text(t) if t == "content/post/hello.md"),
+            "expected 'content/post/hello.md', got {:?}",
+            result.as_value()
+        );
+    }
+
+    #[test]
+    fn node_store_view_synthesizes_presemble_file_for_legacy_root_empty_file() {
+        // Legacy root has file="" and no stem → should yield "content/index.md"
+        let (store, root) = make_store_with_file_attr("", "");
+        let view = NodeStoreView::new(&store, root);
+        let result = view.resolve(&["_presemble_file"]).expect("should resolve _presemble_file");
+        assert!(
+            matches!(result.as_value(), Value::Text(t) if t == "content/index.md"),
+            "expected 'content/index.md' for empty file+stem, got {:?}",
+            result.as_value()
+        );
+    }
+
+    #[test]
+    fn node_store_view_synthesizes_presemble_file_for_stem_fallback() {
+        // No file attr but stem present → should yield "content/{stem}/index.md"
+        let (store, root) = {
+            let mut store = NodeStore::new();
+            let doc_name = store.intern("document");
+            let root = store.add_node(node_store::Node::Element(doc_name));
+            // Only add stem, no file attr
+            let stem_name = store.intern("stem");
+            let stem_val = store.add_node(node_store::Node::Text("blog".to_string()));
+            store.add_edge(root, node_store::Edge::Attribute { name: stem_name, value: stem_val });
+            (store, root)
+        };
+        let view = NodeStoreView::new(&store, root);
+        let result = view.resolve(&["_presemble_file"]).expect("should resolve _presemble_file");
+        assert!(
+            matches!(result.as_value(), Value::Text(t) if t == "content/blog/index.md"),
+            "expected 'content/blog/index.md' for stem fallback, got {:?}",
+            result.as_value()
+        );
+    }
+
+    #[test]
+    fn presemble_file_for_root_helper_matches_inline_logic() {
+        use crate::content_bridge::presemble_file_for_root;
+
+        // Case 1: explicit file attr
+        let (store1, root1) = make_store_with_file_attr("content/about.md", "");
+        assert_eq!(presemble_file_for_root(&store1, root1), "content/about.md");
+
+        // Case 2: empty file, empty stem → index fallback
+        let (store2, root2) = make_store_with_file_attr("", "");
+        assert_eq!(presemble_file_for_root(&store2, root2), "content/index.md");
+
+        // Case 3: empty file, stem present → stem-derived fallback
+        let (store3, root3) = make_store_with_file_attr("", "post");
+        assert_eq!(presemble_file_for_root(&store3, root3), "content/post/index.md");
+    }
+
+    #[test]
+    fn multi_root_view_synthesizes_presemble_file_from_bound_root() {
+        // Build a single store holding two document roots so we can share &store.
+        // post root: file="content/post/hello.md"
+        let (mut store, post_root) = make_store_with_file_attr("content/post/hello.md", "post");
+        let index_root = {
+            let doc_name = store.intern("document");
+            let root = store.add_node(node_store::Node::Element(doc_name));
+            let file_name = store.intern("file");
+            let file_val = store.add_node(node_store::Node::Text("content/index.md".to_string()));
+            store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+            root
+        };
+        let view = MultiRootView::new(&store, vec![
+            ("input".to_string(), index_root),
+            ("item".to_string(), post_root),
+        ]);
+        // input._presemble_file → content/index.md
+        let r = view.resolve(&["input", "_presemble_file"]).expect("input._presemble_file resolves");
+        assert!(
+            matches!(r.as_value(), Value::Text(t) if t == "content/index.md"),
+            "expected 'content/index.md', got {:?}",
+            r.as_value()
+        );
+        // item._presemble_file → content/post/hello.md
+        let r = view.resolve(&["item", "_presemble_file"]).expect("item._presemble_file resolves");
+        assert!(
+            matches!(r.as_value(), Value::Text(t) if t == "content/post/hello.md"),
+            "expected 'content/post/hello.md', got {:?}",
+            r.as_value()
+        );
     }
 }

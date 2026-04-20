@@ -722,6 +722,15 @@ async fn scaffold_handler(
         theme: req.theme.clone(),
     }) {
         Ok(conductor::Response::Ok) => {
+            // Scaffold wrote new source files (CSS, templates, content).
+            // Copy newly-discovered assets (primarily assets/style.css) to output/.
+            // Best-effort: log and continue on failure — the source files are safe.
+            let repo = site_repository::SiteRepository::builder()
+                .from_dir(&state.site_dir)
+                .build();
+            if let Err(e) = crate::copy_site_assets(&state.site_dir, &repo) {
+                eprintln!("warning: post-scaffold asset copy failed: {e}");
+            }
             axum::Json(EditResponse { ok: true, error: None })
         }
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),

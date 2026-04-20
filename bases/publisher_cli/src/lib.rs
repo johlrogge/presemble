@@ -192,7 +192,7 @@ fn dir_has_md_files(dir: &std::path::Path) -> bool {
 }
 
 /// Discover and copy all assets referenced by templates to the output directory.
-fn copy_site_assets(
+pub(crate) fn copy_site_assets(
     site_dir: &Path,
     repo: &site_repository::SiteRepository,
 ) -> Result<(), CliError> {
