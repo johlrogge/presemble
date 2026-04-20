@@ -8,6 +8,20 @@ function cljStr(s) {
   return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 }
 
+// Index of `el` among its siblings that share the same data-presemble-slot value.
+// Relies on the invariant that HTML is a 1:1 render of the node tree.
+function slotChildIndex(el) {
+  var slot = el.getAttribute('data-presemble-slot');
+  if (!slot) return 0;
+  var idx = 0;
+  var sib = el.previousElementSibling;
+  while (sib) {
+    if (sib.getAttribute('data-presemble-slot') === slot) idx++;
+    sib = sib.previousElementSibling;
+  }
+  return idx;
+}
+
 // Guardrails: if the server ever emits data-presemble-file="" these helpers
 // fail fast rather than issuing /_presemble/grammar?stem=undefined requests.
 
@@ -841,7 +855,7 @@ cleanup();
 if(value===original){return;}
 if(!value){return;}
 if(!pfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('save called without pfile',el);return;}
-var program='(ned/set-text (-> (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') ned/descendants ned/texts) '+cljStr(value)+')';
+var idx=slotChildIndex(el);var program='(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+') ned/descendants ned/texts) '+cljStr(value)+')';
 applyNed(program).then(function(){
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(e){
