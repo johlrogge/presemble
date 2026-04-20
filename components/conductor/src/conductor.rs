@@ -558,9 +558,21 @@ impl Conductor {
 
         // Inject metadata (same as site_builder does)
         data.insert("_presemble_stem", template::Value::Text(stem.clone()));
-        if let Some(f) = &file {
-            data.insert("_presemble_file", template::Value::Text(f.clone()));
-        }
+        // Always insert _presemble_file. Synthesise a deterministic content path
+        // from the stem when the stored file attribute is absent or empty (mirrors
+        // the pre-Phase-B site_builder fallback and covers the legacy-fallback root
+        // node that stores file="" to satisfy the structural requirement).
+        let presemble_file = match file.as_deref() {
+            Some(f) if !f.is_empty() => f.to_string(),
+            _ => {
+                if stem.is_empty() {
+                    "content/index.md".to_string()
+                } else {
+                    format!("content/{stem}/index.md")
+                }
+            }
+        };
+        data.insert("_presemble_file", template::Value::Text(presemble_file));
         data.insert("url", template::Value::Text(url.clone()));
 
         // Synthesize link record
@@ -3509,6 +3521,106 @@ mod node_store_index_tests {
             items.is_empty(),
             "query_items_from_store should return empty vec for unknown stem"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // _presemble_file injection tests (Bug 2 Layer 1)
+    // -------------------------------------------------------------------------
+
+    /// Site with content/index.md (stem = ""). Verifies that datagraph_for_document
+    /// injects _presemble_file = "content/index.md" for the root index page.
+    fn build_root_index_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas")).expect("create schemas");
+        std::fs::create_dir_all(root.join("templates")).expect("create templates");
+        std::fs::create_dir_all(root.join("content")).expect("create content");
+
+        // Root index schema (heading slot)
+        std::fs::write(
+            root.join("schemas/index.md"),
+            "# Heading {#heading}\noccurs\n: exactly once\n",
+        ).expect("write root schema");
+        std::fs::write(
+            root.join("templates/index.hiccup"),
+            "[:div [:h1 heading]]",
+        ).expect("write root template");
+        std::fs::write(
+            root.join("content/index.md"),
+            "heading: Home\n",
+        ).expect("write root content");
+
+        tmp
+    }
+
+    /// Site with a root template but NO content/index.md (legacy fallback root).
+    /// In this case the conductor synthesises a dummy node with file = "".
+    fn build_legacy_root_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
+        std::fs::create_dir_all(root.join("templates")).expect("create templates");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
+
+        // A post item so the conductor has something to index
+        std::fs::write(
+            root.join("schemas/post/item.md"),
+            "# Title {#title}\noccurs\n: exactly once\n",
+        ).expect("write item schema");
+        std::fs::write(
+            root.join("content/post/hello.md"),
+            "title: Hello\n",
+        ).expect("write item content");
+        // Root template only — no schema, no content/index.md
+        std::fs::write(
+            root.join("templates/index.hiccup"),
+            "[:div]",
+        ).expect("write root template");
+
+        tmp
+    }
+
+    #[test]
+    fn datagraph_for_document_injects_presemble_file_for_root_index() {
+        let tmp = build_root_index_site();
+        let conductor = make_conductor(&tmp);
+
+        let root = conductor.document_by_url("/")
+            .expect("should find / in NodeStore after building root index site");
+
+        let data = conductor.datagraph_for_document(root)
+            .expect("datagraph_for_document should succeed for root index");
+
+        match data.resolve(&["_presemble_file"]) {
+            Some(template::Value::Text(f)) => assert_eq!(
+                f, "content/index.md",
+                "_presemble_file should be 'content/index.md' for root index, got {f:?}"
+            ),
+            other => panic!("expected _presemble_file Text value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn datagraph_for_document_injects_presemble_file_for_legacy_fallback_root() {
+        let tmp = build_legacy_root_site();
+        let conductor = make_conductor(&tmp);
+
+        // Legacy fallback creates a synthetic node at / with file = ""
+        let root = conductor.document_by_url("/")
+            .expect("should find / in NodeStore (legacy fallback creates synthetic root)");
+
+        let data = conductor.datagraph_for_document(root)
+            .expect("datagraph_for_document should succeed for legacy fallback root");
+
+        match data.resolve(&["_presemble_file"]) {
+            Some(template::Value::Text(f)) => assert_eq!(
+                f, "content/index.md",
+                "_presemble_file should be 'content/index.md' for legacy fallback root (stem=''), got {f:?}"
+            ),
+            other => panic!("expected _presemble_file Text value for legacy fallback root, got {other:?}"),
+        }
     }
 }
 

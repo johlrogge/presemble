@@ -93,6 +93,12 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
 
     let out_dir = crate::output_dir(site_dir);
 
+    // If the source is empty, wipe any stale output from a previous run so the
+    // welcome page is served rather than misleading stale HTML.
+    if crate::is_source_empty(site_dir) && out_dir.exists() {
+        std::fs::remove_dir_all(&out_dir).ok(); // best-effort
+    }
+
     // Initial build — populate the output directory (conductor doesn't render HTML yet).
     println!("Building site...");
     match build_for_serve(site_dir, url_config) {
@@ -993,16 +999,15 @@ async fn file_handler(
         }
     }
 
-    // For root, check if the output directory has any HTML output.
-    // If not, serve the welcome page so the user can scaffold a site.
+    // For root, serve the welcome page when the source is empty OR when there
+    // is no HTML output yet.  This ensures stale `output/` files are never
+    // surfaced after the user has removed (or never created) source content.
     if path == "/" || path.is_empty() {
-        let mut has_output = false;
+        let source_empty = crate::is_source_empty(&state.site_dir);
         let mut pages = Vec::new();
         collect_html_files(&state.output_dir, &state.output_dir, &mut pages);
-        if !pages.is_empty() {
-            has_output = true;
-        }
-        if has_output {
+        let has_output = !pages.is_empty();
+        if !source_empty && has_output {
             return serve_auto_index(&state.output_dir).into_response();
         }
         return (

@@ -8,12 +8,18 @@ function cljStr(s) {
   return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 }
 
+// Guardrails: if the server ever emits data-presemble-file="" these helpers
+// fail fast rather than issuing /_presemble/grammar?stem=undefined requests.
+
 var grammarCache = {};
 
 async function fetchGrammar(stem) {
+  if (stem === undefined || stem === null) {
+    throw new Error('fetchGrammar called with undefined/null stem — check stemFromFile');
+  }
   if (grammarCache[stem] !== undefined) return grammarCache[stem];
   var resp = await fetch('/_presemble/grammar?stem=' + encodeURIComponent(stem));
-  if (!resp.ok) throw new Error("no grammar for stem '" + stem + "' (status " + resp.status + ')');
+  if (!resp.ok) throw new Error('no grammar for stem "' + stem + '" (status ' + resp.status + ')');
   var src = await resp.text();
   grammarCache[stem] = src;
   return src;
@@ -33,8 +39,9 @@ async function applyNed(program) {
 function stemFromFile(file) {
   // content/<stem>/<slug>.md -> "<stem>"
   // content/<slug>.md -> "" (root collection)
-  var parts = file.split('/');
-  if (parts.length === 2) return ''; // content/<slug>.md
+  if (!file) return ''; // empty / null / undefined → root collection
+  var parts = String(file).split('/');
+  if (parts.length <= 2) return ''; // content/<slug>.md OR single segment → root
   return parts[1]; // content/<stem>/...
 }
 
@@ -741,6 +748,7 @@ var bvalue=ta.value;
 bcleanup();
 if(bvalue===bmd){return;}
 if(!bvalue.trim()){return;}
+if(!bfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('bsave called without bfile',el);return;}
 var bstem=stemFromFile(bfile);
 fetchGrammar(bstem).then(function(schemaSrc){
 var program='(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    (ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
@@ -832,6 +840,7 @@ var value=el.innerText.trim();
 cleanup();
 if(value===original){return;}
 if(!value){return;}
+if(!pfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('save called without pfile',el);return;}
 var program='(ned/set-text (-> (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') ned/descendants ned/texts) '+cljStr(value)+')';
 applyNed(program).then(function(){
 if(window._fetchDirtyCount){window._fetchDirtyCount();}

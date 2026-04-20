@@ -155,6 +155,42 @@ fn build_via_conductor(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     })
 }
 
+/// Returns `true` if the site source directory has no schemas and no content files yet.
+/// Used to distinguish "empty new site" from "site with content" for the welcome-page
+/// floor and stale-output cleanup.  Does NOT inspect `output/`.
+pub fn is_source_empty(site_dir: &Path) -> bool {
+    let schemas_empty = has_no_source_files(&site_dir.join("schemas"));
+    let content_empty = has_no_source_files(&site_dir.join("content"));
+    schemas_empty && content_empty
+}
+
+/// Returns `true` if `dir` does not exist or contains no `.md` files (recursively).
+/// Only checks file existence — never reads file contents.
+fn has_no_source_files(dir: &Path) -> bool {
+    if !dir.exists() {
+        return true;
+    }
+    !dir_has_md_files(dir)
+}
+
+/// Walk `dir` recursively; return `true` if any `.md` file is found.
+fn dir_has_md_files(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if dir_has_md_files(&path) {
+                return true;
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Discover and copy all assets referenced by templates to the output directory.
 fn copy_site_assets(
     site_dir: &Path,
@@ -1222,6 +1258,67 @@ mod tests {
         } else {
             panic!("expected List for latest_posts");
         }
+    }
+
+    // ── is_source_empty unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn is_source_empty_true_when_site_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(is_source_empty(tmp.path()));
+    }
+
+    #[test]
+    fn is_source_empty_true_when_schemas_and_content_dirs_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // create an unrelated dir — should not affect result
+        std::fs::create_dir(tmp.path().join("templates")).unwrap();
+        assert!(is_source_empty(tmp.path()));
+    }
+
+    #[test]
+    fn is_source_empty_true_when_dirs_exist_but_have_no_md_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("schemas")).unwrap();
+        std::fs::create_dir(tmp.path().join("content")).unwrap();
+        // put a non-md file in schemas
+        std::fs::write(tmp.path().join("schemas/README.txt"), "ignore me").unwrap();
+        assert!(is_source_empty(tmp.path()));
+    }
+
+    #[test]
+    fn is_source_empty_false_when_schemas_has_md_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("schemas")).unwrap();
+        std::fs::write(tmp.path().join("schemas/post.md"), "# post").unwrap();
+        assert!(!is_source_empty(tmp.path()));
+    }
+
+    #[test]
+    fn is_source_empty_false_when_content_has_md_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("content")).unwrap();
+        std::fs::write(tmp.path().join("content/hello.md"), "# hello").unwrap();
+        assert!(!is_source_empty(tmp.path()));
+    }
+
+    #[test]
+    fn is_source_empty_false_when_both_have_md_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("schemas")).unwrap();
+        std::fs::create_dir(tmp.path().join("content")).unwrap();
+        std::fs::write(tmp.path().join("schemas/post.md"), "# post").unwrap();
+        std::fs::write(tmp.path().join("content/item.md"), "# item").unwrap();
+        assert!(!is_source_empty(tmp.path()));
+    }
+
+    #[test]
+    fn is_source_empty_detects_md_in_nested_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let subdir = tmp.path().join("schemas").join("nested");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("deep.md"), "# deep").unwrap();
+        assert!(!is_source_empty(tmp.path()));
     }
 
 }
