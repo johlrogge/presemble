@@ -22,3 +22,7 @@ crossterm = "0.28"
 [profiles]
 dev = "profiles/dev.profile"
 live = "profiles/live.profile"
+
+[versioning]
+policy = "relaxed"
+version = "0.35.1"

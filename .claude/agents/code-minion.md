@@ -1,1 +1,1 @@
-/nix/store/lpnaplxcfhwhwqakg7ibw16x240y5zsr-claude-agents-code-minion.md
+/nix/store/kn0hi326iwdmm6av16immih2qdvckjni-claude-agents-code-minion.md

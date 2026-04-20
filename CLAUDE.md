@@ -52,6 +52,25 @@ This project runs in an immutable Nix environment managed by devenv.
 If a tool or package is missing, add it to `devenv.nix` and re-enter the shell.
 All tools, packages, hooks, and services are declared in `devenv.nix`.
 
+## Tool Usage Policy
+
+**Always prefer MCP tools over Bash.** This project inherits MCP servers
+from metadev (`git-read`, `git-write`, `gh-issues`, `gh-ci`, `gh-repo`,
+`rust-codebase`, `just`, `devenv`, `cargo-polylith`, `adr`, `ssh`,
+`mcp-test`) plus the project-specific `presemble` MCP server declared in
+`devenv.nix`. Use them first.
+
+When no MCP covers the operation:
+1. State in one sentence why you're using Bash (e.g. "no MCP tool for
+   `git ls-remote`").
+2. Consider whether the gap is worth a feature request against metadev
+   (`gh_issue_create` with `repo: "johlrogge/metadev"`,
+   `label: "enhancement"`) or the project's own MCP server.
+
+When an MCP tool exists but misbehaves:
+- **Do not fall back to Bash as a workaround.** File a bug and/or fix
+  the root cause. A silent fallback hides the defect.
+
 ## Conventions
 
 **Build and test:**

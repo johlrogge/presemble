@@ -1,1 +1,1 @@
-/nix/store/kg4w3aqxr4hbpfvfk5433ymywg429b9j-claude-agents-release-manager.md
+/nix/store/20b1yd14iisnvff898yfzllmadh9s8la-claude-agents-release-manager.md
