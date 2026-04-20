@@ -94,6 +94,11 @@ pub enum Command {
         body_idx: usize,
         content: String,
     },
+    /// Apply a NED program string (Clojure source) to the conductor's NodeStore.
+    /// The program is evaluated in a NED-enabled root environment and may
+    /// mutate the store. Return: `Response::Ok` on success, `Response::Error(msg)`
+    /// on eval or apply failure.
+    ApplyNedProgram { program: String },
     /// Create a new empty content file.
     CreateContent {
         stem: String,
@@ -196,4 +201,24 @@ pub enum ConductorEvent {
         id: editorial_types::SuggestionId,
         file: editorial_types::ContentPath,
     },
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn apply_ned_program_roundtrips_through_json() {
+        let cmd = Command::ApplyNedProgram {
+            program: r#"(ned/set-text (ned/doc-by-path "foo.md") "Hi")"#.to_string(),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let decoded: Command = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Command::ApplyNedProgram { program } => {
+                assert_eq!(program, r#"(ned/set-text (ned/doc-by-path "foo.md") "Hi")"#);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
 }

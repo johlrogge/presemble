@@ -806,13 +806,6 @@ pub fn register_higher_order_builtins(root: &RootEnv) {
     }
 }
 
-fn edge_to_value(edge: &site_index::Edge) -> template::Value {
-    let mut record = template::DataGraph::new();
-    record.insert("source", template::Value::Text(edge.source.as_str().to_string()));
-    record.insert("target", template::Value::Text(edge.target.as_str().to_string()));
-    template::Value::Record(record)
-}
-
 // ── Documentation ───────────────────────────────────────────────────────────
 
 fn first_line(s: &str) -> &str {
@@ -860,301 +853,9 @@ pub fn register_macro_docs(registry: &crate::doc_registry::DocRegistry) {
     }
 }
 
-// ── Conductor-specific builtins ──────────────────────────────────────────────
-
-/// Register conductor-specific functions into the root environment.
-///
-/// These functions require access to the conductor's live site state (content,
-/// schemas, suggestions, etc.). Call this after `init_root` to add conductor
-/// functions to an existing root environment.
-///
-/// The conductor is wrapped in `Arc` so the closures can capture it cheaply.
-pub fn register_conductor_builtins(root: &RootEnv, conductor: &std::sync::Arc<conductor::Conductor>) {
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "query", "(query :stem)", "Query all content items for the given schema stem.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("query requires 1 argument: a keyword or string".into());
-            }
-            let stem = match &args[0] {
-                template::Value::Keyword { name, .. } => name.clone(),
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("query expects a keyword or string".into()),
-            };
-            let items = cond.query_items_for_stem(&stem);
-            let values: Vec<template::Value> = items
-                .into_iter()
-                .map(|(url, mut graph)| {
-                    graph.insert("url", template::Value::Text(url));
-                    template::Value::Record(graph)
-                })
-                .collect();
-            Ok(template::Value::List(values))
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "get-content", "(get-content path)", "Get the raw text of a content file by path.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("get-content requires 1 argument".into());
-            }
-            let path_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("get-content path must be a string".into()),
-            };
-            let abs_path = cond.site_dir().join(&path_str);
-            match cond.document_text(&abs_path) {
-                Some(text) => Ok(template::Value::Text(text)),
-                None => Err(format!("file not found: {path_str}")),
-            }
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "get-schema", "(get-schema :stem)", "Get the raw schema source for a stem.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("get-schema requires 1 argument".into());
-            }
-            let stem = match &args[0] {
-                template::Value::Keyword { name, .. } => name.clone(),
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("get-schema argument must be a keyword".into()),
-            };
-            match cond.schema_source(&stem) {
-                Some(src) => Ok(template::Value::Text(src)),
-                None => Err(format!("no schema for: {stem}")),
-            }
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "list-content", "(list-content)", "List all content item URL paths.", move |_args| {
-            let urls: Vec<template::Value> = cond.list_content_urls()
-                .into_iter()
-                .map(template::Value::Text)
-                .collect();
-            Ok(template::Value::List(urls))
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "list-schemas", "(list-schemas)", "List all unique schema stems in the site.", move |_args| {
-            let mut stems: Vec<String> = cond.list_schemas();
-            stems.sort();
-            Ok(template::Value::List(stems.into_iter().map(template::Value::Text).collect()))
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "refs-to", "(refs-to url)", "Returns all edges pointing TO the given URL.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("refs-to requires 1 argument: a URL path string".into());
-            }
-            let url_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("refs-to: argument must be a string URL path".into()),
-            };
-            let edges = cond.query_edges_to(&url_str);
-            Ok(template::Value::List(edges.iter().map(edge_to_value).collect()))
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "refs-from", "(refs-from url)", "Returns all edges originating FROM the given URL.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("refs-from requires 1 argument: a URL path string".into());
-            }
-            let url_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("refs-from: argument must be a string URL path".into()),
-            };
-            let edges = cond.query_edges_from(&url_str);
-            Ok(template::Value::List(edges.iter().map(edge_to_value).collect()))
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "suggest", "(suggest file slot value reason)", "Submit a slot value suggestion.", move |args: Vec<template::Value>| {
-            if args.len() < 4 {
-                return Err("suggest requires 4 arguments: file, slot, value, reason".into());
-            }
-            let file_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: file must be a string".into()),
-            };
-            let slot_str = match &args[1] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: slot must be a string".into()),
-            };
-            let value_str = match &args[2] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: value must be a string".into()),
-            };
-            let reason_str = match &args[3] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: reason must be a string".into()),
-            };
-            match cond.handle_command(conductor::Command::SuggestSlotValue {
-                file: editorial_types::ContentPath::new(file_str),
-                slot: editorial_types::SlotName::new(slot_str),
-                value: value_str,
-                reason: reason_str,
-                author: editorial_types::Author::Tool("repl".to_string()),
-            }).response {
-                conductor::Response::SuggestionCreated(id) => Ok(template::Value::Text(id.to_string())),
-                conductor::Response::Error(e) => Err(e),
-                _ => Err("unexpected response from suggest".into()),
-            }
-        });
-    }
-
-    {
-        let cond = std::sync::Arc::clone(conductor);
-        prim_reg(root, "get-suggestions", "(get-suggestions file)", "Get pending suggestions for a file.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("get-suggestions requires 1 argument: file".into());
-            }
-            let file_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("get-suggestions: file must be a string".into()),
-            };
-            match cond.handle_command(conductor::Command::GetSuggestions {
-                file: editorial_types::ContentPath::new(file_str),
-            }).response {
-                conductor::Response::Suggestions(suggestions) => {
-                    let values: Vec<template::Value> = suggestions.iter().map(|s| {
-                        let mut record = template::DataGraph::new();
-                        record.insert("id", template::Value::Text(s.id.to_string()));
-                        record.insert("author", template::Value::Text(s.author.to_string()));
-                        record.insert("reason", template::Value::Text(s.reason.clone()));
-                        template::Value::Record(record)
-                    }).collect();
-                    Ok(template::Value::List(values))
-                }
-                _ => Err("unexpected response from get-suggestions".into()),
-            }
-        });
-    }
-}
-
-// ── Legacy string-based REPL evaluator ───────────────────────────────────────
-
-/// Evaluate an expression in the REPL context against the conductor's live state.
-/// Supports a limited set of string-based commands (legacy interface).
-/// New code should prefer `eval_str` instead.
-pub fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<template::Value, String> {
-    let code = code.trim();
-
-    if code.is_empty() {
-        return Ok(template::Value::Absent);
-    }
-
-    // Bare keyword: :stem → all items for that stem
-    if code.starts_with(':') && !code.contains(' ') {
-        let stem = &code[1..]; // strip leading ':'
-        let items = conductor.query_items_for_stem(stem);
-        let values: Vec<template::Value> = items
-            .into_iter()
-            .map(|(url, mut graph)| {
-                graph.insert("url", template::Value::Text(url));
-                template::Value::Record(graph)
-            })
-            .collect();
-        return Ok(template::Value::List(values));
-    }
-
-    // Thread expression: (->> :stem ...) or (-> :stem ...)
-    if code.starts_with("(->>") || code.starts_with("(->") {
-        let target = content::parse_link_target(code)
-            .map_err(|e| format!("parse error: {e}"))?;
-        let text = content::LinkText::Empty;
-        let (url_index, stem_index) = repl_build_indexes(conductor);
-        let edge_index = expressions::EdgeIndex::new();
-        let current_url = site_index::UrlPath::new("/");
-        return Ok(expressions::evaluate_link_expression(
-            &text,
-            &target,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        ));
-    }
-
-    // (get-content "path")
-    if code.starts_with("(get-content") {
-        let path = repl_extract_string_arg(code)?;
-        let abs_path = conductor.site_dir().join(&path);
-        match conductor.document_text(&abs_path) {
-            Some(text) => return Ok(template::Value::Text(text)),
-            None => return Err(format!("file not found: {path}")),
-        }
-    }
-
-    // (get-schema :stem)
-    if code.starts_with("(get-schema") {
-        let stem = repl_extract_keyword_arg(code)?;
-        match conductor.schema_source(&stem) {
-            Some(src) => return Ok(template::Value::Text(src)),
-            None => return Err(format!("no schema for: {stem}")),
-        }
-    }
-
-    // (list-content)
-    if code.starts_with("(list-content") {
-        let urls: Vec<template::Value> = conductor.list_content_urls()
-            .into_iter()
-            .map(template::Value::Text)
-            .collect();
-        return Ok(template::Value::List(urls));
-    }
-
-    // (list-schemas)
-    if code.starts_with("(list-schemas") {
-        let mut stems = conductor.list_schemas();
-        stems.sort();
-        let values: Vec<template::Value> = stems
-            .into_iter()
-            .map(template::Value::Text)
-            .collect();
-        return Ok(template::Value::List(values));
-    }
-
-    Err(format!("unknown expression: {code}"))
-}
-
-/// Build url_index and stem_index from conductor's NodeStore (for eval_repl).
-fn repl_build_indexes(
-    conductor: &conductor::Conductor,
-) -> (expressions::UrlIndex, expressions::StemIndex) {
-    let (url_index, stem_index, _) = conductor.build_expression_indexes_from_store_pub();
-    (url_index, stem_index)
-}
-
-/// Extract a string argument from a form like `(get-content "path")` (for eval_repl).
-fn repl_extract_string_arg(code: &str) -> Result<String, String> {
-    let start = code.find('"').ok_or("expected string argument")?;
-    let end = code[start + 1..].find('"').ok_or("unterminated string")?;
-    Ok(code[start + 1..start + 1 + end].to_string())
-}
-
-/// Extract a keyword argument from a form like `(get-schema :post)` (for eval_repl).
-fn repl_extract_keyword_arg(code: &str) -> Result<String, String> {
-    let start = code.find(':').ok_or("expected keyword argument")?;
-    let rest = &code[start + 1..];
-    let end = rest
-        .find(|c: char| c == ')' || c.is_whitespace())
-        .unwrap_or(rest.len());
-    Ok(rest[..end].to_string())
-}
+// Note: `register_conductor_builtins` and `eval_repl` have been moved to
+// `editor_server` to break the evaluator ↔ conductor circular dependency.
+// See `editor_server::register_conductor_builtins`.
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -1173,6 +874,172 @@ mod tests {
             .schema("post", POST_SCHEMA_SRC)
             .build();
         Arc::new(conductor::Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap())
+    }
+
+    /// Test-local helper: register conductor-specific builtins.
+    /// Mirrors `editor_server::register_conductor_builtins` — kept here to avoid
+    /// a compile-time dependency on `editor_server` (a base crate).
+    fn register_conductor_builtins(root: &RootEnv, conductor: &Arc<conductor::Conductor>) {
+        fn prim_reg(
+            root: &RootEnv,
+            name: &'static str,
+            f: impl Fn(Vec<template::Value>) -> Result<template::Value, String> + Send + Sync + 'static,
+        ) {
+            let prim = PrimitiveFn::new(name, f);
+            root.def(name.to_string(), prim.into_value());
+        }
+
+        {
+            let cond = Arc::clone(conductor);
+            prim_reg(root, "query", move |args| {
+                if args.is_empty() { return Err("query requires 1 argument".into()); }
+                let stem = match &args[0] {
+                    template::Value::Keyword { name, .. } => name.clone(),
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("query expects a keyword or string".into()),
+                };
+                let items = cond.query_items_for_stem(&stem);
+                Ok(template::Value::List(items.into_iter().map(|(url, mut g)| {
+                    g.insert("url", template::Value::Text(url));
+                    template::Value::Record(g)
+                }).collect()))
+            });
+        }
+        {
+            let cond = Arc::clone(conductor);
+            prim_reg(root, "get-content", move |args| {
+                if args.is_empty() { return Err("get-content requires 1 argument".into()); }
+                let path_str = match &args[0] {
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("get-content path must be a string".into()),
+                };
+                let abs_path = cond.site_dir().join(&path_str);
+                match cond.document_text(&abs_path) {
+                    Some(text) => Ok(template::Value::Text(text)),
+                    None => Err(format!("file not found: {path_str}")),
+                }
+            });
+        }
+        {
+            let cond = Arc::clone(conductor);
+            prim_reg(root, "get-schema", move |args| {
+                if args.is_empty() { return Err("get-schema requires 1 argument".into()); }
+                let stem = match &args[0] {
+                    template::Value::Keyword { name, .. } => name.clone(),
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("get-schema argument must be a keyword".into()),
+                };
+                match cond.schema_source(&stem) {
+                    Some(src) => Ok(template::Value::Text(src)),
+                    None => Err(format!("no schema for: {stem}")),
+                }
+            });
+        }
+        {
+            let cond = Arc::clone(conductor);
+            prim_reg(root, "list-content", move |_args| {
+                Ok(template::Value::List(cond.list_content_urls().into_iter().map(template::Value::Text).collect()))
+            });
+        }
+        {
+            let cond = Arc::clone(conductor);
+            prim_reg(root, "list-schemas", move |_args| {
+                let mut stems = cond.list_schemas();
+                stems.sort();
+                Ok(template::Value::List(stems.into_iter().map(template::Value::Text).collect()))
+            });
+        }
+        {
+            let cond = Arc::clone(conductor);
+            prim_reg(root, "refs-to", move |args| {
+                if args.is_empty() { return Err("refs-to requires 1 argument: a URL path string".into()); }
+                let url_str = match &args[0] {
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("refs-to: argument must be a string URL path".into()),
+                };
+                let edges = cond.query_edges_to(&url_str);
+                Ok(template::Value::List(edges.iter().map(|e| {
+                    let mut r = template::DataGraph::new();
+                    r.insert("source", template::Value::Text(e.source.as_str().to_string()));
+                    r.insert("target", template::Value::Text(e.target.as_str().to_string()));
+                    template::Value::Record(r)
+                }).collect()))
+            });
+        }
+        {
+            let cond = Arc::clone(conductor);
+            prim_reg(root, "refs-from", move |args| {
+                if args.is_empty() { return Err("refs-from requires 1 argument: a URL path string".into()); }
+                let url_str = match &args[0] {
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("refs-from: argument must be a string URL path".into()),
+                };
+                let edges = cond.query_edges_from(&url_str);
+                Ok(template::Value::List(edges.iter().map(|e| {
+                    let mut r = template::DataGraph::new();
+                    r.insert("source", template::Value::Text(e.source.as_str().to_string()));
+                    r.insert("target", template::Value::Text(e.target.as_str().to_string()));
+                    template::Value::Record(r)
+                }).collect()))
+            });
+        }
+    }
+
+    /// Test-local re-implementation of the legacy string REPL evaluator.
+    /// Mirrors the old `eval_repl` that was moved to `editor_server`.
+    fn eval_repl(code: &str, conductor: &conductor::Conductor) -> Result<template::Value, String> {
+        let code = code.trim();
+        if code.is_empty() {
+            return Ok(template::Value::Absent);
+        }
+        if code.starts_with(':') && !code.contains(' ') {
+            let stem = &code[1..];
+            let items = conductor.query_items_for_stem(stem);
+            return Ok(template::Value::List(items.into_iter().map(|(url, mut g)| {
+                g.insert("url", template::Value::Text(url));
+                template::Value::Record(g)
+            }).collect()));
+        }
+        if code.starts_with("(->>") || code.starts_with("(->") {
+            let target = content::parse_link_target(code)
+                .map_err(|e| format!("parse error: {e}"))?;
+            let text = content::LinkText::Empty;
+            let (url_index, stem_index, _) = conductor.build_expression_indexes_from_store_pub();
+            let edge_index = expressions::EdgeIndex::new();
+            let current_url = site_index::UrlPath::new("/");
+            return Ok(expressions::evaluate_link_expression(
+                &text, &target, &url_index, &stem_index, &current_url, &edge_index,
+            ));
+        }
+        if code.starts_with("(get-content") {
+            let start = code.find('"').ok_or("expected string argument")?;
+            let end = code[start + 1..].find('"').ok_or("unterminated string")?;
+            let path = &code[start + 1..start + 1 + end];
+            let abs_path = conductor.site_dir().join(path);
+            return match conductor.document_text(&abs_path) {
+                Some(text) => Ok(template::Value::Text(text)),
+                None => Err(format!("file not found: {path}")),
+            };
+        }
+        if code.starts_with("(get-schema") {
+            let start = code.find(':').ok_or("expected keyword argument")?;
+            let rest = &code[start + 1..];
+            let end = rest.find(|c: char| c == ')' || c.is_whitespace()).unwrap_or(rest.len());
+            let stem = &rest[..end];
+            return match conductor.schema_source(stem) {
+                Some(src) => Ok(template::Value::Text(src)),
+                None => Err(format!("no schema for: {stem}")),
+            };
+        }
+        if code.starts_with("(list-content") {
+            return Ok(template::Value::List(conductor.list_content_urls().into_iter().map(template::Value::Text).collect()));
+        }
+        if code.starts_with("(list-schemas") {
+            let mut stems = conductor.list_schemas();
+            stems.sort();
+            return Ok(template::Value::List(stems.into_iter().map(template::Value::Text).collect()));
+        }
+        Err(format!("unknown expression: {code}"))
     }
 
     /// Evaluate a string expression with a conductor's builtins registered.

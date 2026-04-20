@@ -6,6 +6,31 @@ use rayon::prelude::*;
 
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, Response};
 
+// ---------------------------------------------------------------------------
+// Clojure string literal escaping
+// ---------------------------------------------------------------------------
+
+/// Escape a Rust string for use as a Clojure string literal body.
+/// Handles `\\` and `\"`. Strips `\r` (CR) and null bytes rather than panicking.
+/// Returns the escaped content without surrounding quotes.
+fn clj_str_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '\0' | '\r' => {} // strip CR and null
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Wrap a Rust string as a Clojure string literal (with surrounding quotes).
+pub(crate) fn clj_str(s: &str) -> String {
+    format!("\"{}\"", clj_str_escape(s))
+}
+
 /// The result of handling a command: a response to send back, plus
 /// zero or more events to broadcast to all subscribers.
 pub struct CommandResult {
@@ -63,6 +88,9 @@ pub struct Conductor {
     cached_node_stem_index: RwLock<node_store_bridge::store_pipeline::NodeStemIndex>,
     // NED edit path: tracks which content files have unsaved NodeStore mutations (Phase B)
     dirty_docs: RwLock<crate::dirty::DirtyDocs>,
+    // Map from content file path (relative to site_dir, matching `file` attribute on doc root)
+    // to the NodeId of the document root. Populated alongside url_to_root.
+    path_to_doc_root: RwLock<HashMap<PathBuf, node_store::NodeId>>,
 }
 
 /// Extract the title from a document's preamble in the NodeStore.
@@ -163,6 +191,7 @@ impl Conductor {
             cached_node_url_index: RwLock::new(HashMap::new()),
             cached_node_stem_index: RwLock::new(HashMap::new()),
             dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
+            path_to_doc_root: RwLock::new(HashMap::new()),
         };
 
         // Load persisted pending suggestions from disk
@@ -394,11 +423,18 @@ impl Conductor {
             }
         }
 
+        // Build path_to_doc_root from doc_entries (file attr → root NodeId)
+        let path_index: HashMap<PathBuf, node_store::NodeId> = doc_entries
+            .iter()
+            .map(|e| (PathBuf::from(&e.meta.file), e.root))
+            .collect();
+
         // Commit indexes (drop store lock first to avoid write-write deadlock)
         drop(store);
         *self.url_to_root.write().unwrap_or_else(|e| e.into_inner()) = url_index;
         *self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner()) = semantic_index;
         *self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner()) = stem_index;
+        *self.path_to_doc_root.write().unwrap_or_else(|e| e.into_inner()) = path_index;
     }
 
     fn walk_and_store_templates(dir: &std::path::Path, store: &mut node_store::NodeStore) {
@@ -432,6 +468,15 @@ impl Conductor {
     /// Look up a document root NodeId by URL path.
     pub fn document_by_url(&self, url: &str) -> Option<node_store::NodeId> {
         self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
+    }
+
+    /// Look up a document root NodeId by content file path.
+    ///
+    /// The path is relative to the site root (e.g. `content/post/first.md`),
+    /// matching the `file` attribute stored on document root nodes.
+    #[allow(dead_code)] // consumed by B3
+    pub(crate) fn doc_root_for_path(&self, content_path: &Path) -> Option<node_store::NodeId> {
+        self.path_to_doc_root.read().ok()?.get(content_path).copied()
     }
 
     /// Look up a semantic content NodeId by URL path.
@@ -844,12 +889,18 @@ impl Conductor {
     /// site-repository pipeline.
     pub fn insert_url_root(&self, url: &str, root: node_store::NodeId) {
         self.url_to_root.write().unwrap_or_else(|e| e.into_inner()).insert(url.to_string(), root);
-        // Also update stem index if the node has a stem attribute
+        // Also update stem index and path index if the node has the required attributes
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(stem) = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem") {
-            drop(store);
+        let stem = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem");
+        let file = node_store_bridge::content_bridge::find_attr_text(&store, root, "file");
+        drop(store);
+        if let Some(stem) = stem {
             self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner())
                 .entry(stem).or_default().push(root);
+        }
+        if let Some(file) = file {
+            self.path_to_doc_root.write().unwrap_or_else(|e| e.into_inner())
+                .insert(PathBuf::from(file), root);
         }
     }
 
@@ -1041,35 +1092,39 @@ impl Conductor {
         stems
     }
 
-    /// Rebuild a single content page from in-memory text.
+    /// Rebuild a single content page reading from the already-mutated NodeStore.
+    ///
+    /// `doc_root` is the document root NodeId (from `url_to_root` / `doc_root_for_path`).
+    /// The store must already contain up-to-date content for this document; this
+    /// function does NOT re-ingest source text.
     ///
     /// Returns the list of URL paths that were rebuilt, or an error string.
-    /// Errors here are non-fatal: the caller logs and continues.
-    fn rebuild_page(&self, content_path: &Path, text: &str) -> Result<Vec<String>, String> {
-        // Classify file to get schema stem
-        let stem = match self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(content_path) {
-            site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
-            _ => return Err(format!("not a content file: {}", content_path.display())),
-        };
+    pub(crate) fn rebuild_page_from_store(&self, doc_root: node_store::NodeId) -> Result<Vec<String>, String> {
+        // Read stem, url, and file from the document root's attributes
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let stem = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "stem")
+            .ok_or_else(|| format!("doc root {doc_root:?} has no stem attribute"))?;
+        let url_path = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "url")
+            .ok_or_else(|| format!("doc root {doc_root:?} has no url attribute"))?;
+        let file_attr = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "file")
+            .ok_or_else(|| format!("doc root {doc_root:?} has no file attribute"))?;
+        drop(store);
 
-        // Load grammar
-        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = site_index::schema_cache_key(&stem, slug);
-        let schema_src = self
-            .schema_source(&schema_key)
-            .ok_or_else(|| format!("no schema for {schema_key}"))?;
-        let grammar = schema::parse_schema(&schema_src)
-            .map_err(|e| format!("schema error: {e:?}"))?;
-
-        // Compute slug and URL
-        let slug = content_path
+        // Derive slug from the file attribute (e.g. "content/post/first.md" → "first")
+        let slug = Path::new(&file_attr)
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        let url_path = site_index::url_for_stem_slug(&stem, slug);
+            .ok_or_else(|| format!("cannot derive slug from file attribute: {file_attr}"))?
+            .to_string();
 
-        // Update document in NodeStore (incremental — re-parses and creates semantic content)
-        let sem_root = self.update_document_in_store(&url_path, &stem, slug, text, &grammar)?;
+        // Look up the semantic root (needed for rendering)
+        let sem_root = self
+            .url_to_semantic
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&url_path)
+            .copied()
+            .ok_or_else(|| format!("no semantic root for url {url_path}"))?;
 
         // Run NodeStore-native pipeline on this page's semantic content
         {
@@ -1134,7 +1189,7 @@ impl Conductor {
         drop(store);
 
         // Write output
-        let output_path = site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
+        let output_path = site_index::output_path_for_stem_slug(&self.output_dir, &stem, &slug);
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("mkdir error: {e}"))?;
@@ -1145,6 +1200,87 @@ impl Conductor {
         Ok(vec![url_path])
     }
 
+    /// Rebuild pages for a batch of content file paths (relative to site root).
+    ///
+    /// For each path, looks up the document root via `path_to_doc_root` and calls
+    /// `rebuild_page_from_store`. Unknown paths are silently skipped.
+    ///
+    /// Returns `(rebuilt_urls, failed_urls)`.
+    pub(crate) fn rebuild_pages_for_modified_nodes(
+        &self,
+        paths: &[PathBuf],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut rebuilt = Vec::new();
+        let mut failed = Vec::new();
+
+        for path in paths {
+            let root = match self.doc_root_for_path(path) {
+                Some(r) => r,
+                None => continue, // not in store — skip silently
+            };
+            match self.rebuild_page_from_store(root) {
+                Ok(urls) => rebuilt.extend(urls),
+                Err(e) => {
+                    eprintln!("conductor: rebuild failed for {}: {e}", path.display());
+                    // Use the path stem as a best-effort URL for reporting
+                    let url = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    failed.push(url);
+                }
+            }
+        }
+
+        (rebuilt, failed)
+    }
+
+    /// Rebuild a single content page from in-memory text.
+    ///
+    /// This is a thin wrapper around `rebuild_page_from_store` that first
+    /// re-ingests `text` into the NodeStore via `update_document_in_store`.
+    ///
+    /// Returns the list of URL paths that were rebuilt, or an error string.
+    /// Errors here are non-fatal: the caller logs and continues.
+    fn rebuild_page(&self, content_path: &Path, text: &str) -> Result<Vec<String>, String> {
+        // Classify file to get schema stem
+        let stem = match self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(content_path) {
+            site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
+            _ => return Err(format!("not a content file: {}", content_path.display())),
+        };
+
+        // Load grammar
+        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = site_index::schema_cache_key(&stem, slug);
+        let schema_src = self
+            .schema_source(&schema_key)
+            .ok_or_else(|| format!("no schema for {schema_key}"))?;
+        let grammar = schema::parse_schema(&schema_src)
+            .map_err(|e| format!("schema error: {e:?}"))?;
+
+        // Compute slug and URL
+        let slug = content_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        let url_path = site_index::url_for_stem_slug(&stem, slug);
+
+        // Update document in NodeStore (incremental — re-parses and creates semantic content)
+        self.update_document_in_store(&url_path, &stem, slug, text, &grammar)?;
+
+        // Look up the doc root (update_document_in_store just wrote it)
+        let doc_root = self
+            .url_to_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&url_path)
+            .copied()
+            .ok_or_else(|| format!("no doc root for {url_path} after update"))?;
+
+        self.rebuild_page_from_store(doc_root)
+    }
+
     /// Re-parse a single document and update its semantic content in the NodeStore.
     /// This is the incremental counterpart to `populate_node_store`.
     ///
@@ -1152,7 +1288,7 @@ impl Conductor {
     /// 1. Parse the document text with the grammar
     /// 2. Store the document in the NodeStore (replacing old nodes)
     /// 3. Create new semantic content with resolved link expressions
-    /// 4. Update url_to_root, url_to_semantic, stem_to_roots
+    /// 4. Update url_to_root, url_to_semantic, stem_to_roots, path_to_doc_root
     ///
     /// Returns the semantic root NodeId.
     #[allow(dead_code)]
@@ -1258,6 +1394,12 @@ impl Conductor {
                 .unwrap_or_default();
         }
 
+        // Update path_to_doc_root
+        self.path_to_doc_root
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(PathBuf::from(&meta.file), root);
+
         Ok(sem)
     }
 
@@ -1354,70 +1496,106 @@ impl Conductor {
         map
     }
 
-    /// Apply a slot edit: read the file, modify the slot, write to disk.
-    /// Returns the list of affected URL paths, or an error string.
+    /// Text-only slot edits. Multi-element, link, image, and missing-slot cases are
+    /// rejected with an error; richer lowerings land in Phase C.
+    ///
+    /// Lowers to:
+    ///   `(ned/set-text (ned/slot (ned/doc-by-path "<FILE>") "<SLOT>") "<VALUE>")`
+    ///
+    /// The edit is applied directly to the NodeStore — `doc_sources` is no longer
+    /// updated. Disk writes happen on explicit save.
     fn apply_slot_edit(&self, file: &str, slot: &str, value: &str) -> Result<Vec<String>, String> {
-        let abs_path = self.site_dir.join(file);
-
-        // Derive schema stem from path: content/{stem}/file.md or content/file.md (root)
+        // ── Precondition checks ──────────────────────────────────────────────
         let path = std::path::Path::new(file);
-        let components: Vec<_> = path.components().collect();
-        let stem = if components.len() == 2 {
-            // content/file.md → root collection, stem ""
-            String::new()
-        } else {
-            // content/{stem}/file.md → stem is the directory name
-            components.get(1)
-                .and_then(|c| c.as_os_str().to_str())
-                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
-                .to_string()
+        let doc_root = self.doc_root_for_path(path)
+            .ok_or_else(|| format!("no document in store for {file}"))?;
+
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+
+        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
+            .ok_or_else(|| format!("slot '{slot}' not present in document '{file}'"))?;
+
+        // Find the slot node by name
+        let slot_id = {
+            let mut found = None;
+            for child_id in store.children(preamble) {
+                if let Some(node_store::Node::Element(name)) = store.get(child_id)
+                    && store.resolve_name(*name) == "slot"
+                    && node_store_bridge::content_bridge::find_attr_text(&store, child_id, "name")
+                        .as_deref() == Some(slot)
+                {
+                    found = Some(child_id);
+                    break;
+                }
+            }
+            found.ok_or_else(|| format!("slot '{slot}' not present in document '{file}'"))?
         };
 
-        // Load grammar from cache — use collection schema for index.md, item schema otherwise
-        let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = site_index::schema_cache_key(&stem, slug);
-        let grammar = match self.schema_source(&schema_key) {
-            Some(src) => match schema::parse_schema(&src) {
-                Ok(g) => g,
-                Err(e) => return Err(format!("schema parse error: {e:?}")),
-            },
-            None => return Err(format!("no schema for: {schema_key}")),
-        };
+        let children = store.children(slot_id);
+        match children.len() {
+            0 => return Err(format!("empty slot '{slot}' not supported — Phase C")),
+            1 => {
+                // Inspect the single child's element tag
+                let child = children[0];
+                let tag = if let Some(node_store::Node::Element(name)) = store.get(child) {
+                    store.resolve_name(*name).to_string()
+                } else {
+                    return Err(format!("slot '{slot}' has non-element child — Phase C"));
+                };
+                match tag.as_str() {
+                    "heading" | "paragraph" => {} // text-shaped — proceed
+                    other => return Err(format!(
+                        "slot '{slot}' has non-text element '{other}' — link/image edits not yet supported, pending Phase C"
+                    )),
+                }
+            }
+            _ => return Err(format!(
+                "multi-element slot '{slot}' not supported for text edits — Phase C"
+            )),
+        }
 
-        // Read from in-memory buffer or fall back to disk
-        let content_src = match self.document_text(&abs_path) {
-            Some(s) => s,
-            None => return Err(format!("cannot read {file}")),
-        };
+        drop(store);
 
-        // Parse, modify, serialize, and write
-        let doc = content::parse_and_assign(&content_src, &grammar)
-            .map_err(|e| format!("parse error: {e}"))?;
-
-        let grammar_arc = Arc::new(grammar);
-        let transform = content::InsertSlot::new(Arc::clone(&grammar_arc), slot, value.to_string())
-            .map_err(|e| e.to_string())?;
-        use content::Transform as _;
-        let doc = transform.apply(doc).map_err(|e| e.to_string())?;
-
-        let new_src = content::serialize_document(&doc);
-        // Store in memory only — disk write happens on explicit save
-        self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(abs_path.clone(), new_src.clone());
-
-        // Rebuild the output HTML from in-memory state so the preview is up to date
-        self.rebuild_page(&abs_path, &new_src)
+        // ── NED program ──────────────────────────────────────────────────────
+        // ned/slot returns the slot Element node; we must descend to the Text leaf to use set-text.
+        let program = format!(
+            "(ned/set-text (-> (ned/slot (ned/doc-by-path {}) {}) ned/descendants ned/texts) {})",
+            clj_str(file),
+            clj_str(slot),
+            clj_str(value),
+        );
+        let result = self.apply_ned_program(&program);
+        match result.response {
+            Response::Ok => {
+                // Extract rebuilt URLs from PagesRebuilt events
+                let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
+                    ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
+                    _ => vec![],
+                }).collect();
+                Ok(urls)
+            }
+            Response::Error(e) => Err(e),
+            _ => Ok(vec![]),
+        }
     }
 
-    /// Apply a browser body element edit: replace the markdown source for a body element at
-    /// the given index and write to disk.
+    /// Apply a browser body element edit via NED program.
+    ///
+    /// Lowers to:
+    ///
+    /// ```text
+    /// (let [g (ned/parse-grammar "<SCHEMA_SRC>")]
+    ///   (ned/replace (ned/body-at (ned/doc-by-path "<FILE>") <IDX>)
+    ///                (ned/parse-body "<CONTENT>" g)))
+    /// ```
+    ///
+    /// Pre-flight validation (out-of-range, empty body) is performed against the
+    /// NodeStore before building the program.
     fn apply_body_element_edit(&self, file: &str, body_idx: usize, new_content: &str) -> Result<Vec<String>, String> {
-        let abs_path = self.site_dir.join(file);
-
         // Derive schema stem from path: content/{stem}/file.md or content/file.md (root)
         let bpath = std::path::Path::new(file);
         let bcomponents: Vec<_> = bpath.components().collect();
         let stem = if bcomponents.len() == 2 {
-            // content/file.md → root collection, stem ""
             String::new()
         } else {
             bcomponents.get(1)
@@ -1426,49 +1604,55 @@ impl Conductor {
                 .to_string()
         };
 
-        // Load grammar from cache — use collection schema for index files
+        // Load grammar source from cache
         let bslug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let schema_key = site_index::schema_cache_key(&stem, bslug);
-        let grammar = match self.schema_source(&schema_key) {
-            Some(src) => schema::parse_schema(&src).map_err(|e| format!("schema parse error: {e:?}"))?,
-            None => return Err(format!("no schema for: {schema_key}")),
+        let schema_src = self.schema_source(&schema_key)
+            .ok_or_else(|| format!("no schema for: {schema_key}"))?;
+
+        // Pre-flight: look up the document in the NodeStore and validate the body index.
+        let doc_root = self.doc_root_for_path(bpath)
+            .ok_or_else(|| format!("document not found in store: {file}"))?;
+
+        let body_child_count = {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            let body_node = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body");
+            body_node.map(|b| store.children(b).len()).unwrap_or(0)
         };
 
-        // Read source from in-memory buffer or disk
-        let source = self.document_text(&abs_path)
-            .ok_or_else(|| format!("cannot read {file}"))?;
-
-        // Parse to get body element spans
-        let doc = content::parse_and_assign(&source, &grammar)
-            .map_err(|e| format!("parse error: {e}"))?;
-
-        // Replace the body element span, or append if body is empty
-        let new_source = if let Some(element) = doc.body.get(body_idx) {
-            let mut s = String::with_capacity(source.len() + new_content.len());
-            s.push_str(&source[..element.span.start]);
-            s.push_str(new_content);
-            s.push_str(&source[element.span.end..]);
-            s
-        } else if doc.body.is_empty() {
-            // No body elements — append content after separator (add separator if missing)
-            let mut s = source.to_string();
-            if !s.contains("----") {
-                if !s.ends_with('\n') { s.push('\n'); }
-                s.push_str("\n----\n\n");
-            }
-            if !s.ends_with('\n') { s.push('\n'); }
-            s.push_str(new_content);
-            s.push('\n');
-            s
+        let program = if body_child_count == 0 {
+            // Empty body: insert the new content as the first body child.
+            // Program: `(let [g ...] (ned/insert-child (-> (ned/doc-by-path f) (ned/children) (ned/filter :kind "body")) (first (ned/parse-body c g))))`
+            format!(
+                "(let [g (ned/parse-grammar {schema_src_lit})]\n  (ned/insert-child\n    (-> (ned/doc-by-path {file_lit}) (ned/children) (ned/filter :kind \"body\"))\n    (first (ned/parse-body {content_lit} g))))",
+                schema_src_lit = clj_str(&schema_src),
+                file_lit = clj_str(file),
+                content_lit = clj_str(new_content),
+            )
+        } else if body_idx >= body_child_count {
+            return Err(format!("body index {body_idx} out of range (have {body_child_count} elements)"));
         } else {
-            return Err(format!("body index {body_idx} out of range (have {} elements)", doc.body.len()));
+            format!(
+                "(let [g (ned/parse-grammar {schema_src_lit})]\n  (ned/replace\n    (ned/body-at (ned/doc-by-path {file_lit}) {idx})\n    (ned/parse-body {content_lit} g)))",
+                schema_src_lit = clj_str(&schema_src),
+                file_lit = clj_str(file),
+                idx = body_idx,
+                content_lit = clj_str(new_content),
+            )
         };
 
-        // Store in memory only — disk write happens on explicit save
-        self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(abs_path.clone(), new_source.clone());
-
-        // Rebuild
-        self.rebuild_page(&abs_path, &new_source)
+        let result = self.apply_ned_program(&program);
+        match result.response {
+            Response::Ok => {
+                let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
+                    ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
+                    _ => vec![],
+                }).collect();
+                Ok(urls)
+            }
+            Response::Error(e) => Err(e),
+            _ => Ok(vec![]),
+        }
     }
 
     /// Update build errors and create events from render results.
@@ -1511,6 +1695,138 @@ impl Conductor {
         };
         let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
         Some(site_index::url_for_stem_slug(&stem, slug))
+    }
+
+    // ── NED evaluation helpers ─────────────────────────────────────────────────
+
+    /// Build an evaluator root with NED builtins + prelude loaded.
+    /// Conductor-specific builtins (query, get-content, etc.) are registered
+    /// separately in `editor_server`, a base; components cannot depend on bases,
+    /// so those are not available here. Phase C may lift them into a shared
+    /// component (`evaluator_bridge`) if MCP needs them.
+    pub(crate) fn make_ned_root(&self) -> Result<evaluator::RootEnv, String> {
+        let root = evaluator::RootEnv::new();
+        evaluator::init_root(&root).map_err(|e| format!("evaluator init failed: {e}"))?;
+        evaluator::ned_primitives::register_ned_builtins(&root, self.node_store());
+        evaluator::load_ned_prelude(&root).map_err(|e| format!("ned prelude failed: {e}"))?;
+        Ok(root)
+    }
+
+    /// Walk the NodeStore upward from each node in `sel`, collecting every
+    /// ancestor (and the nodes themselves) that is an `Element("document")`.
+    ///
+    /// This is the Rust mirror of the `ned/source-docs-of` prelude function.
+    /// We do it in Rust to avoid needing to pass the evaluation result back
+    /// through the evaluator.
+    pub(crate) fn source_docs_of(&self, sel: &ned::Selection) -> Vec<node_store::NodeId> {
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let mut doc_roots: Vec<node_store::NodeId> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for start_id in sel.iter() {
+            // BFS upward: walk parent chain until we hit a document root.
+            let mut frontier = vec![start_id];
+            while let Some(id) = frontier.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                if let Some(node_store::Node::Element(name)) = store.get(id)
+                    && store.resolve_name(*name) == "document"
+                {
+                    doc_roots.push(id);
+                    // Don't walk further up from a document root.
+                    continue;
+                }
+                for parent in store.parents(id) {
+                    frontier.push(parent);
+                }
+            }
+        }
+
+        doc_roots.sort();
+        doc_roots.dedup();
+        doc_roots
+    }
+
+    /// Evaluate a NED program string against the current NodeStore.
+    ///
+    /// # Locking invariant
+    /// The evaluator's NED primitives acquire their own read/write locks on the
+    /// shared `Arc<RwLock<NodeStore>>`.  This method MUST NOT hold any outer
+    /// lock on the store when calling `eval_str_with_root`; doing so would
+    /// deadlock. All store reads/writes here are performed before or after the
+    /// eval call, never while the eval is in progress.
+    ///
+    /// Returns `(response, events)`.
+    fn apply_ned_program(&self, program: &str) -> CommandResult {
+        // Build the evaluator root — does not hold any store lock.
+        let root = match self.make_ned_root() {
+            Ok(r) => r,
+            Err(e) => return CommandResult::error(format!("evaluator init: {e}")),
+        };
+
+        // Evaluate — the primitives acquire their own locks internally.
+        let value = match evaluator::eval_str_with_root(program, &root) {
+            Ok(v) => v,
+            Err(e) => return CommandResult::error(format!("eval error: {e}")),
+        };
+
+        // Extract a Selection from the result (if any).
+        // If the program returned something other than a Selection, treat as
+        // a successful query with no dirty docs (no mutation occurred).
+        let sel = match evaluator::ned_primitives::extract_selection(&value) {
+            Ok(s) => s,
+            Err(_) => {
+                // Non-Selection result: program ran successfully, nothing is dirty.
+                return CommandResult::ok();
+            }
+        };
+
+        // Determine dirty document roots from the returned selection.
+        let dirty_roots = self.source_docs_of(&sel);
+
+        if dirty_roots.is_empty() {
+            // Selection exists but contains no document-rooted nodes — nothing dirty.
+            return CommandResult::ok();
+        }
+
+        // Collect file paths from document root attributes and mark as dirty.
+        let mut dirty_paths: Vec<PathBuf> = Vec::new();
+        {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            for root_id in &dirty_roots {
+                match node_store_bridge::content_bridge::find_attr_text(&store, *root_id, "file") {
+                    Some(file_attr) if !file_attr.is_empty() => {
+                        let path = PathBuf::from(&file_attr);
+                        dirty_paths.push(path.clone());
+                        self.dirty_docs
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .mark(path);
+                    }
+                    Some(_) | None => {
+                        // Root has no file attr — skip (synthetic root, e.g. root index)
+                    }
+                }
+            }
+        }
+
+        if dirty_paths.is_empty() {
+            return CommandResult::ok();
+        }
+
+        // Rebuild pages for modified nodes.
+        let (rebuilt_urls, failed_urls) = self.rebuild_pages_for_modified_nodes(&dirty_paths);
+
+        let mut events = Vec::new();
+        if !rebuilt_urls.is_empty() {
+            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_urls, anchor: None });
+        }
+        if !failed_urls.is_empty() {
+            events.push(ConductorEvent::BuildFailed { error_pages: failed_urls });
+        }
+
+        CommandResult::ok_with_events(events)
     }
 
     /// Handle a command and return a response plus any events to broadcast.
@@ -1914,15 +2230,27 @@ impl Conductor {
                 ])
             }
             Command::EditBodyElement { file, body_idx, content } => {
+                // Apply the body edit via NED, then post-process to attach the anchor.
+                // `apply_body_element_edit` returns rebuilt URLs; we wrap them in
+                // PagesRebuilt with the body anchor here, in the caller.
                 match self.apply_body_element_edit(&file, body_idx, &content) {
-                    Ok(pages) => CommandResult::ok_with_events(vec![
-                        ConductorEvent::PagesRebuilt {
-                            pages,
-                            anchor: Some(format!("presemble-body-{body_idx}")),
-                        },
-                    ]),
+                    Ok(pages) => {
+                        if pages.is_empty() {
+                            CommandResult::ok()
+                        } else {
+                            CommandResult::ok_with_events(vec![
+                                ConductorEvent::PagesRebuilt {
+                                    pages,
+                                    anchor: Some(format!("presemble-body-{body_idx}")),
+                                },
+                            ])
+                        }
+                    }
                     Err(e) => CommandResult::error(e),
                 }
+            }
+            Command::ApplyNedProgram { program } => {
+                self.apply_ned_program(&program)
             }
             Command::CreateContent { stem, slug } => {
                 // Use a fresh repo to find current schemas (self.repo may be stale after scaffold)
@@ -1982,15 +2310,50 @@ impl Conductor {
                 }
             }
             Command::GetDirtyBuffers => {
+                // Union of NED dirty_docs (NodeStore edits) and LSP doc_sources (editor buffer edits).
+                // - dirty_docs uses site-relative paths (e.g. "content/post/first.md")
+                // - doc_sources uses absolute paths; strip site_dir prefix to normalise
+                let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+                // NED dirty_docs (site-relative)
+                let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
+                for p in dirty.iter() {
+                    paths.insert(p.to_string_lossy().to_string());
+                }
+                drop(dirty);
+
+                // LSP doc_sources (absolute → strip site_dir prefix)
                 let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
-                let paths: Vec<String> = sources.keys()
-                    .filter_map(|p| p.strip_prefix(&self.site_dir).ok())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .collect();
-                CommandResult::with_response(Response::DirtyBuffers(paths))
+                for abs_path in sources.keys() {
+                    if let Ok(rel) = abs_path.strip_prefix(&self.site_dir) {
+                        paths.insert(rel.to_string_lossy().to_string());
+                    }
+                }
+                drop(sources);
+
+                CommandResult::with_response(Response::DirtyBuffers(paths.into_iter().collect()))
             }
             Command::SaveBuffer { path } => {
-                let abs_path = self.site_dir.join(&path);
+                let rel_path = PathBuf::from(&path);
+                let abs_path = self.site_dir.join(&rel_path);
+
+                // Try NED path first: serialize from NodeStore and write.
+                if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel_path) {
+                    let text = match self.doc_root_for_path(&rel_path) {
+                        Some(root) => {
+                            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                            node_store_bridge::serialize_from_store(&store, root)
+                        }
+                        None => return CommandResult::error(format!("document not in store: {path}")),
+                    };
+                    if let Err(e) = std::fs::write(&abs_path, &text) {
+                        return CommandResult::error(format!("write error: {e}"));
+                    }
+                    self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(&rel_path);
+                    return CommandResult::ok();
+                }
+
+                // Backward compatibility: LSP-owned buffer (abs path in doc_sources)
                 let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(text) = sources.get(&abs_path) {
                     let text = text.clone();
@@ -2005,6 +2368,26 @@ impl Conductor {
                 }
             }
             Command::SaveAllBuffers => {
+                // Save NED-dirty documents (NodeStore → disk)
+                let ned_paths = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).take();
+                for rel_path in &ned_paths {
+                    let abs_path = self.site_dir.join(rel_path);
+                    let text = match self.doc_root_for_path(rel_path) {
+                        Some(root) => {
+                            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                            node_store_bridge::serialize_from_store(&store, root)
+                        }
+                        None => {
+                            eprintln!("conductor: SaveAllBuffers: no store root for {}", rel_path.display());
+                            continue;
+                        }
+                    };
+                    if let Err(e) = std::fs::write(&abs_path, &text) {
+                        return CommandResult::error(format!("write error for {}: {e}", abs_path.display()));
+                    }
+                }
+
+                // Save LSP-owned buffers (doc_sources → disk)
                 let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
                 let buffers: Vec<(PathBuf, String)> = sources.iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
@@ -2019,6 +2402,7 @@ impl Conductor {
                 for (path, _) in buffers {
                     sources.remove(&path);
                 }
+
                 CommandResult::ok()
             }
             Command::GetSuggestionFiles => {
@@ -2341,6 +2725,10 @@ mod query_edges_tests {
         drop(store);
 
         conductor.url_to_root.write().unwrap().insert(source_url.to_string(), root);
+        conductor.path_to_doc_root.write().unwrap().insert(
+            PathBuf::from(format!("content/post/{}.md", source_url.rsplit('/').next().unwrap_or("x"))),
+            root,
+        );
 
         conductor
     }

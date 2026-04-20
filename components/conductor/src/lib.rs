@@ -15,6 +15,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use site_index;
     use template;
+    use node_store_bridge;
+    use node_store;
 
     const POST_SCHEMA_SRC: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
@@ -239,9 +241,8 @@ mod tests {
             value: "New Title".to_string(),
         });
 
-        // EditSlot may return error if no template exists (rebuild_page fails),
-        // but the in-memory buffer should still be updated.
-        // For this test, we just verify the buffer was updated.
+        // EditSlot may return Ok or Error depending on whether a template exists.
+        // The test only verifies the NodeStore mutation and dirty-docs tracking.
 
         // Verify file on disk was NOT modified (dirty buffer model)
         let disk_content = std::fs::read_to_string(&content_file).unwrap();
@@ -250,12 +251,41 @@ mod tests {
             "disk file should still have old title (dirty buffer): {disk_content}"
         );
 
-        // Verify in-memory buffer has the new content
-        let mem_content = conductor.document_text(&content_file);
-        assert!(mem_content.is_some(), "should have in-memory buffer");
+        // Verify the NodeStore slot was updated
+        let rel_path = std::path::Path::new("content/article/test.md");
+        let doc_root = conductor.doc_root_for_path(rel_path)
+            .expect("document should exist in NodeStore after EditSlot");
+        let node_store_arc = conductor.node_store();
+        let store = node_store_arc.read().unwrap();
+        // Walk preamble → slot("title") → heading → text child
+        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
+            .expect("document should have a preamble");
+        let title_text = store.children(preamble).iter().find_map(|&slot_id| {
+            let name_attr = node_store_bridge::content_bridge::find_attr_text(&store, slot_id, "name")?;
+            if name_attr != "title" { return None; }
+            store.children(slot_id).iter().find_map(|&elem_id| {
+                store.children(elem_id).iter().find_map(|&text_id| {
+                    if let Some(node_store::Node::Text(s)) = store.get(text_id) {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
+        drop(store);
+        assert_eq!(
+            title_text.as_deref(),
+            Some("New Title"),
+            "NodeStore slot 'title' should be updated to 'New Title'"
+        );
+
+        // Verify dirty_docs tracks the modified path
+        let _ = result; // response may be Ok or Error depending on template presence
+        let dirty = conductor.dirty_docs().read().unwrap();
         assert!(
-            mem_content.unwrap().contains("New Title"),
-            "in-memory buffer should contain new title"
+            dirty.contains(rel_path),
+            "dirty_docs should contain the modified path after EditSlot"
         );
     }
 
@@ -351,8 +381,14 @@ mod tests {
     const ARTICLE_SCHEMA_SRC: &str = "# Your blog post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\nYour article summary. {#summary}\noccurs\n: 1..3\n";
 
     /// Build a conductor with a temp dir, article schema, and one content file.
+    /// The schema is written to disk so `populate_node_store` loads the content into the NodeStore.
     fn article_conductor_with_file() -> (tempfile::TempDir, Conductor) {
         let dir = tempfile::tempdir().unwrap();
+
+        // Write schema to disk so populate_node_store can discover content files
+        let schemas_dir = dir.path().join("schemas");
+        std::fs::create_dir_all(&schemas_dir).unwrap();
+        std::fs::write(schemas_dir.join("article.md"), ARTICLE_SCHEMA_SRC).unwrap();
 
         // Write content file to disk
         let content_dir = dir.path().join("content/article");
@@ -620,17 +656,38 @@ mod tests {
             "disk file should still have old content (dirty buffer): {disk_content}"
         );
 
-        // Verify in-memory buffer has the new content
-        let mem_content = conductor.document_text(&content_file);
-        assert!(mem_content.is_some(), "should have in-memory buffer");
-        let mem_text = mem_content.unwrap();
+        // Verify the NodeStore body was updated
+        let rel_path = std::path::Path::new("content/article/edit-test.md");
+        let doc_root = conductor.doc_root_for_path(rel_path)
+            .expect("document should exist in NodeStore after EditBodyElement");
+        let node_store_arc = conductor.node_store();
+        let store = node_store_arc.read().unwrap();
+        // The body's first child (body element 0) should now contain "New body paragraph."
+        let body_node = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body")
+            .expect("document should have a 'body' child");
+        let body_children = store.children(body_node);
+        assert!(!body_children.is_empty(), "body should have at least one element");
+        // Check that some text node under body contains "New body paragraph."
+        let found_new = body_children.iter().any(|&child_id| {
+            store.children(child_id).iter().any(|&text_id| {
+                matches!(store.get(text_id), Some(node_store::Node::Text(s)) if s.contains("New body paragraph."))
+            })
+        });
+        assert!(found_new, "NodeStore body should contain 'New body paragraph.' after EditBodyElement");
+        // "Second paragraph." should still be present
+        let found_second = body_children.iter().any(|&child_id| {
+            store.children(child_id).iter().any(|&text_id| {
+                matches!(store.get(text_id), Some(node_store::Node::Text(s)) if s.contains("Second paragraph."))
+            })
+        });
+        assert!(found_second, "NodeStore body should still contain 'Second paragraph.'");
+        drop(store);
+
+        // Verify dirty_docs tracks the modified path
+        let dirty = conductor.dirty_docs().read().unwrap();
         assert!(
-            mem_text.contains("New body paragraph."),
-            "in-memory buffer should contain new paragraph, got: {mem_text}"
-        );
-        assert!(
-            mem_text.contains("Second paragraph."),
-            "second paragraph should be unchanged in memory, got: {mem_text}"
+            dirty.contains(rel_path),
+            "dirty_docs should contain the modified path after EditBodyElement"
         );
     }
 
@@ -858,8 +915,16 @@ mod tests {
     }
 
     /// Build a conductor with a multi-paragraph summary slot (Value::List case).
+    ///
+    /// The schema is written to disk so `populate_node_store` can discover it via
+    /// the fresh filesystem repo, placing the document in the NodeStore.
     fn multi_paragraph_conductor() -> (tempfile::TempDir, Conductor) {
         let dir = tempfile::tempdir().unwrap();
+
+        // Write schema to disk so populate_node_store can discover it
+        let schemas_dir = dir.path().join("schemas");
+        std::fs::create_dir_all(&schemas_dir).unwrap();
+        std::fs::write(schemas_dir.join("article.md"), ARTICLE_SCHEMA_SRC).unwrap();
 
         // Content file with two summary paragraphs (occurs: 1..3 produces Value::List)
         let content_dir = dir.path().join("content/article");
@@ -1000,13 +1065,34 @@ mod tests {
             "disk file should still have old title after accept: {disk_content}"
         );
 
-        // In-memory buffer should have the replaced value
-        let mem_content = conductor.document_text(&content_file);
-        assert!(mem_content.is_some(), "should have in-memory buffer after accept");
-        let mem_text = mem_content.unwrap();
-        assert!(
-            mem_text.contains("New Title"),
-            "in-memory buffer should have 'New Title' after accept: {mem_text}"
+        // NodeStore slot should have the replaced value
+        let rel_path = std::path::Path::new("content/article/test.md");
+        let doc_root = conductor.doc_root_for_path(rel_path)
+            .expect("document should exist in NodeStore after AcceptSuggestion");
+        let node_store_arc = conductor.node_store();
+        let store = node_store_arc.read().unwrap();
+        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
+            .expect("document should have a preamble");
+        // Walk preamble slots to find "title"
+        let title_text = store.children(preamble).iter().find_map(|&slot_id| {
+            let name_attr = node_store_bridge::content_bridge::find_attr_text(&store, slot_id, "name")?;
+            if name_attr != "title" { return None; }
+            // Get text from the first child element (heading) → child text
+            store.children(slot_id).iter().find_map(|&elem_id| {
+                store.children(elem_id).iter().find_map(|&text_id| {
+                    if let Some(node_store::Node::Text(s)) = store.get(text_id) {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
+        drop(store);
+        assert_eq!(
+            title_text.as_deref(),
+            Some("New Title"),
+            "NodeStore slot 'title' should be 'New Title' after AcceptSuggestion"
         );
 
         // SuggestionAccepted event should be emitted
@@ -1234,6 +1320,167 @@ mod tests {
                 assert!(paths.is_empty(), "expected empty content list for empty conductor");
             }
             other => panic!("expected ContentList, got {other:?}"),
+        }
+    }
+
+    // ── Phase B4: path_to_doc_root index ─────────────────────────────────────
+
+    #[test]
+    fn doc_root_for_path_returns_some_for_known_file() {
+        let (_dir, conductor) = two_post_conductor();
+        let id = conductor.doc_root_for_path(Path::new("content/post/first.md"));
+        assert!(id.is_some(), "expected Some NodeId for content/post/first.md, got None");
+    }
+
+    #[test]
+    fn doc_root_for_path_returns_none_for_unknown_file() {
+        let (_dir, conductor) = two_post_conductor();
+        let id = conductor.doc_root_for_path(Path::new("content/post/nonexistent.md"));
+        assert!(id.is_none(), "expected None for nonexistent path, got {id:?}");
+    }
+
+    #[test]
+    fn doc_root_for_path_agrees_with_document_by_url() {
+        let (_dir, conductor) = two_post_conductor();
+        let by_path = conductor
+            .doc_root_for_path(Path::new("content/post/first.md"))
+            .expect("doc_root_for_path should return Some for first.md");
+        let by_url = conductor
+            .document_by_url("/post/first")
+            .expect("document_by_url should return Some for /post/first");
+        assert_eq!(
+            by_path, by_url,
+            "path_to_doc_root and url_to_root should point to the same NodeId"
+        );
+    }
+
+    // ── Phase B4: rebuild_page_from_store ─────────────────────────────────────
+
+    /// Build a two-post conductor that uses a simple HTML template (no evaluator forms),
+    /// so that `rebuild_page_from_store` can actually render without a parse error.
+    fn two_post_conductor_html_template() -> (tempfile::TempDir, Conductor) {
+        let dir = tempfile::tempdir().unwrap();
+
+        let schema_dir = dir.path().join("schemas/post");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(
+            schema_dir.join("item.md"),
+            "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n",
+        )
+        .unwrap();
+
+        let tpl_dir = dir.path().join("templates/post");
+        std::fs::create_dir_all(&tpl_dir).unwrap();
+        std::fs::write(
+            tpl_dir.join("item.html"),
+            r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#,
+        )
+        .unwrap();
+
+        let content_dir = dir.path().join("content/post");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::write(content_dir.join("first.md"), "# First Post\n\n----\n\nBody of first.\n")
+            .unwrap();
+        std::fs::write(content_dir.join("second.md"), "# Second Post\n\n----\n\nBody of second.\n")
+            .unwrap();
+
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(dir.path())
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+        (dir, conductor)
+    }
+
+    #[test]
+    fn rebuild_page_from_store_returns_url_for_known_document() {
+        let (_dir, conductor) = two_post_conductor_html_template();
+        let doc_root = conductor
+            .document_by_url("/post/first")
+            .expect("document_by_url should return Some for /post/first");
+        let result = conductor.rebuild_page_from_store(doc_root);
+        match result {
+            Ok(urls) => {
+                assert!(
+                    urls.contains(&"/post/first".to_string()),
+                    "rebuilt URLs should contain /post/first, got: {urls:?}"
+                );
+            }
+            Err(e) => panic!("rebuild_page_from_store returned error: {e}"),
+        }
+    }
+
+    // ── Phase B4: rebuild_pages_for_modified_nodes ───────────────────────────
+
+    #[test]
+    fn rebuild_pages_for_modified_nodes_rebuilds_both_posts() {
+        let (_dir, conductor) = two_post_conductor_html_template();
+        let paths = vec![
+            PathBuf::from("content/post/first.md"),
+            PathBuf::from("content/post/second.md"),
+        ];
+        let (rebuilt, failed) = conductor.rebuild_pages_for_modified_nodes(&paths);
+        assert!(
+            rebuilt.contains(&"/post/first".to_string()),
+            "rebuilt should contain /post/first, got: {rebuilt:?}"
+        );
+        assert!(
+            rebuilt.contains(&"/post/second".to_string()),
+            "rebuilt should contain /post/second, got: {rebuilt:?}"
+        );
+        assert!(failed.is_empty(), "expected no failures, got: {failed:?}");
+    }
+
+    #[test]
+    fn rebuild_pages_for_modified_nodes_skips_unknown_path() {
+        let (_dir, conductor) = two_post_conductor_html_template();
+        let paths = vec![PathBuf::from("content/post/nonexistent.md")];
+        let (rebuilt, failed) = conductor.rebuild_pages_for_modified_nodes(&paths);
+        assert!(rebuilt.is_empty(), "unknown path should be silently skipped, rebuilt: {rebuilt:?}");
+        assert!(failed.is_empty(), "unknown path should not appear in failed, failed: {failed:?}");
+    }
+
+    // ── apply_slot_edit precondition tests ────────────────────────────────────
+
+    #[test]
+    fn apply_slot_edit_multi_paragraph_slot_returns_error() {
+        // The summary slot has 2 children (occurs: 1..3, content has two paragraphs).
+        let (_dir, conductor) = multi_paragraph_conductor();
+
+        let result = conductor.handle_command(Command::EditSlot {
+            file: "content/article/multi.md".to_string(),
+            slot: "summary".to_string(),
+            value: "X".to_string(),
+        });
+
+        match &result.response {
+            Response::Error(msg) => {
+                assert!(
+                    msg.contains("multi-element"),
+                    "expected 'multi-element' in error message, got: {msg}"
+                );
+            }
+            other => panic!("expected Response::Error for multi-element slot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_slot_edit_missing_slot_returns_error() {
+        let (_dir, conductor) = article_conductor_with_file();
+
+        let result = conductor.handle_command(Command::EditSlot {
+            file: "content/article/test.md".to_string(),
+            slot: "nonexistent_slot_xyz".to_string(),
+            value: "anything".to_string(),
+        });
+
+        match &result.response {
+            Response::Error(msg) => {
+                assert!(
+                    msg.contains("not present"),
+                    "expected 'not present' in error message, got: {msg}"
+                );
+            }
+            other => panic!("expected Response::Error for missing slot, got {other:?}"),
         }
     }
 }

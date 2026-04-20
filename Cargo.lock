@@ -361,9 +361,11 @@ dependencies = [
  "content_editor",
  "dep_graph",
  "editorial_types",
+ "evaluator",
  "expressions",
  "im",
  "mem_site_repository",
+ "ned",
  "nng",
  "node_store",
  "node_store_bridge",
@@ -645,12 +647,22 @@ name = "editor_server"
 version = "0.35.0"
 dependencies = [
  "conductor",
+ "content",
+ "editorial_types",
  "edn",
  "evaluator",
+ "expressions",
+ "im",
+ "mem_site_repository",
  "nng",
  "node_store",
+ "node_store_bridge",
  "nrepl",
+ "schema",
  "serde_json",
+ "site_index",
+ "tempfile",
+ "template",
 ]
 
 [[package]]

@@ -11,3 +11,15 @@ node_store = { workspace = true }
 nng = { workspace = true }
 nrepl = { workspace = true }
 serde_json = { workspace = true }
+template = { workspace = true }
+expressions = { workspace = true }
+site_index = { workspace = true }
+editorial_types = { workspace = true }
+content = { workspace = true }
+
+[dev-dependencies]
+site_repository = { workspace = true }
+tempfile = "3"
+im = { workspace = true }
+node_store_bridge = { workspace = true }
+schema = { workspace = true }

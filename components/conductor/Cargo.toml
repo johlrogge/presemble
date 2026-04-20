@@ -28,6 +28,8 @@ tokio = { workspace = true }
 nng = { workspace = true }
 notify = { workspace = true }
 rayon = { workspace = true }
+evaluator = { workspace = true }
+ned = { workspace = true }
 
 [dev-dependencies]
 im = { workspace = true }

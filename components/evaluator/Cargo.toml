@@ -11,7 +11,6 @@ forms = { workspace = true }
 macros = { workspace = true }
 template = { workspace = true }
 content = { workspace = true }
-conductor = { workspace = true }
 expressions = { workspace = true }
 site_index = { workspace = true }
 editorial_types = { workspace = true }
@@ -24,5 +23,6 @@ node_store_bridge = { workspace = true }
 schema = { workspace = true }
 
 [dev-dependencies]
+conductor = { workspace = true }
 site_repository = { workspace = true }
 tempfile = "3"
