@@ -120,6 +120,20 @@ fn find_document_title(store: &node_store::NodeStore, doc_root: node_store::Node
 /// Result of rendering a single page: URL and outcome (success or error details).
 type PageRenderResult = (String, Result<(), (String, Vec<String>)>);
 
+/// Describes the current shape of a preamble slot for routing slot edits.
+enum SlotShape {
+    /// Slot node present with a single heading or paragraph child — NED fast path.
+    SingleText,
+    /// Slot node present but has no children.
+    Empty,
+    /// Slot node present but has more than one child element.
+    Multi,
+    /// Slot node present but the single child is not heading/paragraph.
+    NonText,
+    /// Slot node not present in the preamble at all.
+    Missing,
+}
+
 /// Recursively walk a node tree collecting link expression edges.
 fn collect_edges_from_node(
     store: &node_store::NodeStore,
@@ -1496,87 +1510,142 @@ impl Conductor {
         map
     }
 
-    /// Text-only slot edits. Multi-element, link, image, and missing-slot cases are
-    /// rejected with an error; richer lowerings land in Phase C.
-    ///
-    /// Lowers to:
-    ///   `(ned/set-text (ned/slot (ned/doc-by-path "<FILE>") "<SLOT>") "<VALUE>")`
+    /// Slot edits. Text-only 1-child cases are lowered to NED; all other shapes
+    /// (empty, multi-element, link/image/list, missing) are handled by the
+    /// grammar-aware slot_editor escape hatch in `node_store_bridge`.
     ///
     /// The edit is applied directly to the NodeStore — `doc_sources` is no longer
     /// updated. Disk writes happen on explicit save.
     fn apply_slot_edit(&self, file: &str, slot: &str, value: &str) -> Result<Vec<String>, String> {
-        // ── Precondition checks ──────────────────────────────────────────────
+        // ── Locate document in store ─────────────────────────────────────────
         let path = std::path::Path::new(file);
         let doc_root = self.doc_root_for_path(path)
             .ok_or_else(|| format!("no document in store for {file}"))?;
 
-        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        // ── Inspect current slot shape to decide NED vs escape-hatch path ────
+        let shape = {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
 
-        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
-            .ok_or_else(|| format!("slot '{slot}' not present in document '{file}'"))?;
+            let preamble = node_store_bridge::content_bridge::find_child_by_name(
+                &store, doc_root, "preamble",
+            );
 
-        // Find the slot node by name
-        let slot_id = {
-            let mut found = None;
-            for child_id in store.children(preamble) {
-                if let Some(node_store::Node::Element(name)) = store.get(child_id)
-                    && store.resolve_name(*name) == "slot"
-                    && node_store_bridge::content_bridge::find_attr_text(&store, child_id, "name")
-                        .as_deref() == Some(slot)
-                {
-                    found = Some(child_id);
-                    break;
+            // Determine shape: (slot_exists, child_count, tag_if_single_text_element)
+            if let Some(preamble_id) = preamble {
+                let mut slot_id_opt = None;
+                for child_id in store.children(preamble_id) {
+                    if let Some(node_store::Node::Element(name)) = store.get(child_id)
+                        && store.resolve_name(*name) == "slot"
+                        && node_store_bridge::content_bridge::find_attr_text(&store, child_id, "name")
+                            .as_deref() == Some(slot)
+                    {
+                        slot_id_opt = Some(child_id);
+                        break;
+                    }
                 }
+                match slot_id_opt {
+                    None => SlotShape::Missing,
+                    Some(slot_id) => {
+                        let children = store.children(slot_id);
+                        match children.len() {
+                            0 => SlotShape::Empty,
+                            1 => {
+                                let child = children[0];
+                                if let Some(node_store::Node::Element(name)) = store.get(child) {
+                                    let tag = store.resolve_name(*name).to_string();
+                                    if tag == "heading" || tag == "paragraph" {
+                                        SlotShape::SingleText
+                                    } else {
+                                        SlotShape::NonText
+                                    }
+                                } else {
+                                    SlotShape::NonText
+                                }
+                            }
+                            _ => SlotShape::Multi,
+                        }
+                    }
+                }
+            } else {
+                SlotShape::Missing
             }
-            found.ok_or_else(|| format!("slot '{slot}' not present in document '{file}'"))?
         };
 
-        let children = store.children(slot_id);
-        match children.len() {
-            0 => return Err(format!("empty slot '{slot}' not supported — Phase C")),
-            1 => {
-                // Inspect the single child's element tag
-                let child = children[0];
-                let tag = if let Some(node_store::Node::Element(name)) = store.get(child) {
-                    store.resolve_name(*name).to_string()
-                } else {
-                    return Err(format!("slot '{slot}' has non-element child — Phase C"));
-                };
-                match tag.as_str() {
-                    "heading" | "paragraph" => {} // text-shaped — proceed
-                    other => return Err(format!(
-                        "slot '{slot}' has non-text element '{other}' — link/image edits not yet supported, pending Phase C"
-                    )),
+        match shape {
+            SlotShape::SingleText => {
+                // ── NED fast path (text-only 1-child) ────────────────────────
+                // ned/slot returns the slot Element node; we must descend to the Text leaf.
+                let program = format!(
+                    "(ned/set-text (-> (ned/slot (ned/doc-by-path {}) {}) ned/descendants ned/texts) {})",
+                    clj_str(file),
+                    clj_str(slot),
+                    clj_str(value),
+                );
+                let result = self.apply_ned_program(&program);
+                match result.response {
+                    Response::Ok => {
+                        let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
+                            ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
+                            _ => vec![],
+                        }).collect();
+                        Ok(urls)
+                    }
+                    Response::Error(e) => Err(e),
+                    _ => Ok(vec![]),
                 }
             }
-            _ => return Err(format!(
-                "multi-element slot '{slot}' not supported for text edits — Phase C"
-            )),
-        }
+            // Escape hatch: empty, multi-element, Link, Image, List, and missing-slot
+            // cases route through modify_slot_in_store (grammar-aware Rust path).
+            // Text-only 1-child cases stay on NED. Phase C: widen NED coverage
+            // and reduce this list.
+            SlotShape::Empty | SlotShape::Multi | SlotShape::NonText | SlotShape::Missing => {
+                // Load grammar so we can build the correct element type.
+                let grammar = self.load_grammar_for_file(file)?;
 
-        drop(store);
+                let content_path = std::path::PathBuf::from(file);
+                {
+                    let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+                    node_store_bridge::modify_slot_in_store(
+                        &mut store,
+                        doc_root,
+                        &grammar,
+                        slot,
+                        value,
+                    )?;
+                }
 
-        // ── NED program ──────────────────────────────────────────────────────
-        // ned/slot returns the slot Element node; we must descend to the Text leaf to use set-text.
-        let program = format!(
-            "(ned/set-text (-> (ned/slot (ned/doc-by-path {}) {}) ned/descendants ned/texts) {})",
-            clj_str(file),
-            clj_str(slot),
-            clj_str(value),
-        );
-        let result = self.apply_ned_program(&program);
-        match result.response {
-            Response::Ok => {
-                // Extract rebuilt URLs from PagesRebuilt events
-                let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
-                    ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
-                    _ => vec![],
-                }).collect();
-                Ok(urls)
+                // Mark dirty and rebuild.
+                self.dirty_docs
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .mark(content_path.clone());
+
+                let (rebuilt_urls, _failed_urls) =
+                    self.rebuild_pages_for_modified_nodes(&[content_path]);
+                Ok(rebuilt_urls)
             }
-            Response::Error(e) => Err(e),
-            _ => Ok(vec![]),
         }
+    }
+
+    /// Derive the grammar for a content file given its site-relative path.
+    fn load_grammar_for_file(&self, file: &str) -> Result<schema::Grammar, String> {
+        let bpath = std::path::Path::new(file);
+        let bcomponents: Vec<_> = bpath.components().collect();
+        let stem = if bcomponents.len() == 2 {
+            String::new()
+        } else {
+            bcomponents
+                .get(1)
+                .and_then(|c| c.as_os_str().to_str())
+                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
+                .to_string()
+        };
+        let slug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = site_index::schema_cache_key(&stem, slug);
+        let schema_src = self
+            .schema_source(&schema_key)
+            .ok_or_else(|| format!("slot not in grammar: no schema found for {schema_key}"))?;
+        schema::parse_schema(&schema_src).map_err(|e| format!("schema parse error: {e:?}"))
     }
 
     /// Apply a browser body element edit via NED program.

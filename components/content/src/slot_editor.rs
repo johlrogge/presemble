@@ -118,7 +118,7 @@ pub(crate) fn capitalize_slot(
 // Build element from new_value
 // ---------------------------------------------------------------------------
 
-fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentElement, String> {
+pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentElement, String> {
     match slot_element {
         Element::Heading { level } => {
             let heading_level = HeadingLevel::new(level.min.value())

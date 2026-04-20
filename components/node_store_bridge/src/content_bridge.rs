@@ -88,7 +88,7 @@ fn require_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -> String
 
 // ── helpers for adding attributes ────────────────────────────────────────────
 
-fn add_text_attr(store: &mut NodeStore, node: NodeId, attr_name: &str, value: &str) {
+pub(crate) fn add_text_attr(store: &mut NodeStore, node: NodeId, attr_name: &str, value: &str) {
     let name = store.intern(attr_name);
     let value_node = store.add_node(Node::Text(value.to_string()));
     store.add_edge(node, Edge::Attribute { name, value: value_node });

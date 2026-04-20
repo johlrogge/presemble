@@ -5,7 +5,7 @@ mod error;
 mod parser;
 mod serializer;
 mod slot_assignment;
-mod slot_editor;
+pub mod slot_editor;
 mod transform;
 mod validator;
 
