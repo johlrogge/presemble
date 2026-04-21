@@ -230,6 +230,26 @@ impl Conductor {
         &self.site_dir
     }
 
+    /// Git HEAD commit hash for the site directory.
+    ///
+    /// Returns `"untracked"` if the site isn't a git repo or any git error
+    /// occurs (including `git` not being installed). No result is cached —
+    /// git is fast and suggestions are created one at a time.
+    pub fn workspace_hash(&self) -> String {
+        use std::process::Command;
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.site_dir)
+            .args(["rev-parse", "HEAD"])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
+            _ => "untracked".to_string(),
+        }
+    }
+
     /// Get a shared reference to the node store.
     pub fn node_store(&self) -> Arc<RwLock<node_store::NodeStore>> {
         Arc::clone(&self.node_store)
@@ -3985,5 +4005,85 @@ mod feature_card_rendering_tests {
                 panic!("template::transform failed: {e:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod workspace_hash_tests {
+    use super::*;
+
+    /// Create a minimal Conductor backed by a temporary directory that is NOT
+    /// a git repo. Reuses the same `build_minimal_site` / `make_conductor`
+    /// helpers from `smoke_tests`.
+    fn build_minimal_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        const SCHEMA_SRC: &str = "# Title {#title}\noccurs\n: exactly once\n";
+        const TEMPLATE_SRC: &str = "[:div [:h1 title]]";
+        const CONTENT_SRC: &str = "title: Hello\n---\nBody\n";
+        std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas");
+        std::fs::create_dir_all(root.join("templates/post")).expect("create templates");
+        std::fs::create_dir_all(root.join("content/post")).expect("create content");
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("content/post/hello.md"), CONTENT_SRC).expect("write content");
+        tmp
+    }
+
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    #[test]
+    fn workspace_hash_returns_untracked_for_non_git_dir() {
+        let tmp = build_minimal_site();
+        let conductor = make_conductor(&tmp);
+        // The tempdir has no `.git` directory — expect "untracked".
+        assert_eq!(conductor.workspace_hash(), "untracked");
+    }
+
+    #[test]
+    fn workspace_hash_returns_hex_for_git_repo() {
+        use std::process::Command;
+
+        // Skip the test if git is not available.
+        let git_available = Command::new("git").arg("--version").output().is_ok();
+        if !git_available {
+            println!("skipping workspace_hash_returns_hex_for_git_repo: git not found");
+            return;
+        }
+
+        let tmp = build_minimal_site();
+        let root = tmp.path();
+
+        // Initialise a git repo and create an empty commit.
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .expect("git command failed");
+            assert!(status.success(), "git {args:?} exited with {status}");
+        };
+
+        git(&["init"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+
+        let conductor = make_conductor(&tmp);
+        let hash = conductor.workspace_hash();
+
+        // A real git hash is exactly 40 hex characters.
+        assert_eq!(hash.len(), 40, "expected 40-char hash, got: {hash:?}");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash contains non-hex chars: {hash:?}"
+        );
     }
 }

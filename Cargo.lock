@@ -669,6 +669,7 @@ dependencies = [
 name = "editorial_types"
 version = "0.35.0"
 dependencies = [
+ "ned",
  "schema",
  "serde",
  "serde_json",
@@ -1489,6 +1490,7 @@ version = "0.35.0"
 dependencies = [
  "im",
  "node_store",
+ "serde",
 ]
 
 [[package]]
@@ -1539,6 +1541,7 @@ name = "node_store"
 version = "0.35.0"
 dependencies = [
  "im",
+ "serde",
 ]
 
 [[package]]

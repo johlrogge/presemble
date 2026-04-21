@@ -1,4 +1,5 @@
 use node_store::{Edge, Node, NodeId, NodeStore};
+use serde::{Deserialize, Serialize};
 
 /// A not-yet-materialized subtree descriptor.
 /// Use [`NodeTree::materialize`] to add the subtree to a [`NodeStore`].
@@ -12,7 +13,7 @@ use node_store::{Edge, Node, NodeId, NodeStore};
 ///   wired to all of them (valid in a DAG, but unintended for fresh parse-body
 ///   content). Use `Existing` only when you know the insertion target is
 ///   single-parented.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeTree {
     Element {
         name: String,

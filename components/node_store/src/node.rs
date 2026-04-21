@@ -1,6 +1,12 @@
-/// Opaque internal identifier. Never serialized, never in NED programs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NodeId(pub(crate) u64);
+/// Opaque internal identifier for use within a single NodeStore session.
+///
+/// Serialized as a plain `u64` to allow `NodeTree::Existing` to participate
+/// in serde derives; deserialized `Existing` ids are only meaningful if the
+/// receiving store still holds the original node. Use `NodeTree::Element` /
+/// `NodeTree::Text` for cross-session payloads (e.g. NedMutation in suggestions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(pub u64);
 
 /// Interned name identifier for fast comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

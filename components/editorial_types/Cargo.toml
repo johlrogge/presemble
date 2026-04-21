@@ -9,6 +9,7 @@ interface = "editorial_types"
 [dependencies]
 schema = { workspace = true }
 serde = { workspace = true }
+ned = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

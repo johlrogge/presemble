@@ -1,3 +1,4 @@
+use ned::NodeTree;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -96,6 +97,76 @@ pub enum SuggestionStatus {
     /// Author rejected — no edit applied
     Rejected,
 }
+
+// ── NED-based suggestion types (Phase C) ─────────────────────────────────────
+
+/// Structured mutation for a NED suggestion.
+///
+/// `NodeTree` payloads in the `Replace`, `InsertChild`, `InsertBefore`, and
+/// `InsertAfter` variants are materialised into the NodeStore at accept time.
+/// `NodeTree::Existing` should not appear in persisted mutations — use
+/// `NodeTree::Element` / `NodeTree::Text` for cross-session payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NedMutation {
+    /// Set the text content of the selected node.
+    SetText(String),
+    /// Replace all occurrences of `search` in the selection's Text descendants.
+    /// Text-level surgery, not structural.
+    SearchReplace { search: String, replace: String },
+    /// Replace the selected node(s) with the given subtrees.
+    Replace(Vec<NodeTree>),
+    /// Insert the given subtrees as children of the selected node.
+    InsertChild(Vec<NodeTree>),
+    /// Insert the given subtrees immediately before the selected node.
+    InsertBefore(Vec<NodeTree>),
+    /// Insert the given subtrees immediately after the selected node.
+    InsertAfter(Vec<NodeTree>),
+    /// Delete the selected node(s).
+    Delete,
+}
+
+/// Lifecycle state for a NED suggestion.
+///
+/// Extends the original `SuggestionStatus` with a `Stale` variant that carries
+/// a failure reason, keeping the suggestion visible for manual review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NedSuggestionStatus {
+    /// Awaiting author review.
+    Pending,
+    /// Author accepted — edit was applied.
+    Accepted,
+    /// Author rejected — no edit applied.
+    Rejected,
+    /// Accept-time re-evaluation failed. Suggestion stays visible with its
+    /// failure reason until the author manually rejects or deletes it.
+    Stale { reason: String },
+}
+
+/// A NED-based editorial suggestion (Phase C).
+///
+/// Ships alongside the existing `Suggestion` type. Existing typed variants
+/// (`SuggestionTarget`) remain untouched until Phase C6.
+///
+/// Persisted at `.presemble/suggestions/ned/*.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NedSuggestion {
+    pub id: SuggestionId,
+    pub author: Author,
+    pub file: ContentPath,
+    /// Clojure source for the selection — rerun against HEAD on accept.
+    pub selection: String,
+    /// Structured mutation; NodeTree payloads materialise via ned at accept time.
+    pub mutation: NedMutation,
+    /// Git commit hash of the workspace when the suggestion was created.
+    /// Falls back to `"untracked"` if the site isn't a git repo.
+    pub workspace_hash: String,
+    pub reason: String,
+    pub status: NedSuggestionStatus,
+    /// ISO 8601 timestamp of creation.
+    pub created_at: String,
+}
+
+// ── Legacy suggestion types ───────────────────────────────────────────────────
 
 /// Where a suggestion targets within a content file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,5 +347,111 @@ mod tests {
         assert_eq!(back.id, suggestion.id);
         assert!(matches!(&back.target, SuggestionTarget::BodyText { search, .. } if search == "old text"));
         assert_eq!(back.status, SuggestionStatus::Pending);
+    }
+
+    // ── NED suggestion tests ──────────────────────────────────────────────────
+
+    fn base_ned_suggestion(mutation: NedMutation) -> NedSuggestion {
+        NedSuggestion {
+            id: SuggestionId(String::from("sug-000000000000ff01")),
+            author: Author::Claude,
+            file: ContentPath::new("content/post/hello.md"),
+            selection: String::from("(slot (doc-by-path \"content/post/hello.md\") \"title\")"),
+            mutation,
+            workspace_hash: String::from("abc123def456abc123def456abc123def456abc1"),
+            reason: String::from("Test reason"),
+            status: NedSuggestionStatus::Pending,
+            created_at: String::from("2026-04-21T00:00:00Z"),
+        }
+    }
+
+    #[test]
+    fn suggestion_serde_roundtrip_set_text() {
+        let sug = base_ned_suggestion(NedMutation::SetText("Hi".to_string()));
+        let json = serde_json::to_string(&sug).expect("serialize");
+        let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, sug.id);
+        assert_eq!(back.author, sug.author);
+        assert_eq!(back.file, sug.file);
+        assert_eq!(back.selection, sug.selection);
+        assert_eq!(back.workspace_hash, sug.workspace_hash);
+        assert_eq!(back.reason, sug.reason);
+        assert_eq!(back.created_at, sug.created_at);
+        assert!(matches!(back.mutation, NedMutation::SetText(ref s) if s == "Hi"));
+        assert_eq!(back.status, NedSuggestionStatus::Pending);
+    }
+
+    #[test]
+    fn suggestion_serde_roundtrip_search_replace() {
+        let sug = base_ned_suggestion(NedMutation::SearchReplace {
+            search: "old".to_string(),
+            replace: "new".to_string(),
+        });
+        let json = serde_json::to_string(&sug).expect("serialize");
+        let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, sug.id);
+        assert!(matches!(
+            back.mutation,
+            NedMutation::SearchReplace { ref search, ref replace }
+                if search == "old" && replace == "new"
+        ));
+    }
+
+    #[test]
+    fn suggestion_serde_roundtrip_replace_with_node_trees() {
+        let tree = NodeTree::element("paragraph").with_child(NodeTree::text("body"));
+        let sug = base_ned_suggestion(NedMutation::Replace(vec![tree]));
+        let json = serde_json::to_string(&sug).expect("serialize");
+        let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, sug.id);
+        match &back.mutation {
+            NedMutation::Replace(trees) => {
+                assert_eq!(trees.len(), 1);
+                match &trees[0] {
+                    NodeTree::Element { name, children, .. } => {
+                        assert_eq!(name, "paragraph");
+                        assert_eq!(children.len(), 1);
+                        assert!(matches!(&children[0], NodeTree::Text(t) if t == "body"));
+                    }
+                    other => panic!("expected Element, got {other:?}"),
+                }
+            }
+            other => panic!("expected Replace mutation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggestion_serde_roundtrip_delete() {
+        let sug = base_ned_suggestion(NedMutation::Delete);
+        let json = serde_json::to_string(&sug).expect("serialize");
+        let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, sug.id);
+        assert!(matches!(back.mutation, NedMutation::Delete));
+    }
+
+    #[test]
+    fn suggestion_status_stale_carries_reason() {
+        let mut sug = base_ned_suggestion(NedMutation::Delete);
+        sug.status = NedSuggestionStatus::Stale {
+            reason: "selection doesn't resolve".to_string(),
+        };
+        let json = serde_json::to_string(&sug).expect("serialize");
+        let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
+        match back.status {
+            NedSuggestionStatus::Stale { reason } => {
+                assert_eq!(reason, "selection doesn't resolve");
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_hash_field_roundtrips() {
+        let hash = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let mut sug = base_ned_suggestion(NedMutation::SetText("test".to_string()));
+        sug.workspace_hash = hash.to_string();
+        let json = serde_json::to_string(&sug).expect("serialize");
+        let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.workspace_hash, hash);
     }
 }

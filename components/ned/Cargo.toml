@@ -9,3 +9,4 @@ interface = "ned"
 [dependencies]
 node_store = { workspace = true }
 im = { workspace = true }
+serde = { workspace = true }

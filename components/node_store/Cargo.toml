@@ -8,3 +8,4 @@ interface = "node_store"
 
 [dependencies]
 im = { workspace = true }
+serde = { workspace = true }
