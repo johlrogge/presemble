@@ -137,6 +137,10 @@ pub enum Command {
     ListDependents { stem: String },
     /// List all content file paths.
     ListContent,
+    /// Resolve the target collection stem for a link slot on a source schema.
+    /// Returns the stem of the collection that the slot links to, or None if
+    /// the slot isn't a link or the target can't be determined.
+    ResolveLinkTargetStem { source_stem: String, slot: String },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -170,6 +174,9 @@ pub enum Response {
     Dependents(Vec<DependentFile>),
     /// List of all content file paths (site-relative).
     ContentList(Vec<String>),
+    /// The resolved link target stem for a slot on a source schema.
+    /// `None` means the slot isn't a link slot or the target couldn't be determined.
+    LinkTargetStem(Option<String>),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.
@@ -238,5 +245,38 @@ mod protocol_tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_link_target_stem_command_roundtrips_through_json() {
+        let cmd = Command::ResolveLinkTargetStem {
+            source_stem: "post".to_string(),
+            slot: "author".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let decoded: Command = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Command::ResolveLinkTargetStem { source_stem, slot } => {
+                assert_eq!(source_stem, "post");
+                assert_eq!(slot, "author");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn link_target_stem_response_roundtrips_through_json() {
+        let resp_some = Response::LinkTargetStem(Some("author".to_string()));
+        let json = serde_json::to_string(&resp_some).expect("serialize");
+        let decoded: Response = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Response::LinkTargetStem(Some(stem)) => assert_eq!(stem, "author"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let resp_none = Response::LinkTargetStem(None);
+        let json_none = serde_json::to_string(&resp_none).expect("serialize");
+        let decoded_none: Response = serde_json::from_str(&json_none).expect("deserialize");
+        assert!(matches!(decoded_none, Response::LinkTargetStem(None)));
     }
 }

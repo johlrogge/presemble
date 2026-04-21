@@ -1215,6 +1215,128 @@ mod tests {
         }
     }
 
+    // ── resolve_link_target_stem ──────────────────────────────────────────────
+
+    /// A schema for "post" that has an author slot linking to /author/<name>.
+    const POST_WITH_AUTHOR_SCHEMA_SRC: &str =
+        "# Post title {#title}\n\n[Author name](/author/<name>) {#author}\n\n----\nBody.\n";
+
+    /// A simple author schema.
+    const AUTHOR_SCHEMA_SRC: &str = "# Author name {#name}\n\n----\nBio.\n";
+
+    /// Build a conductor with post (with author link) + author schemas and one author item.
+    fn post_author_conductor() -> (tempfile::TempDir, Conductor) {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Post schema
+        let post_schema_dir = dir.path().join("schemas/post");
+        std::fs::create_dir_all(&post_schema_dir).unwrap();
+        std::fs::write(post_schema_dir.join("item.md"), POST_WITH_AUTHOR_SCHEMA_SRC).unwrap();
+
+        // Author schema
+        let author_schema_dir = dir.path().join("schemas/author");
+        std::fs::create_dir_all(&author_schema_dir).unwrap();
+        std::fs::write(author_schema_dir.join("item.md"), AUTHOR_SCHEMA_SRC).unwrap();
+
+        // Templates
+        let post_tpl_dir = dir.path().join("templates/post");
+        std::fs::create_dir_all(&post_tpl_dir).unwrap();
+        std::fs::write(post_tpl_dir.join("item.hiccup"), "[:html [:body (get input :title)]]").unwrap();
+
+        let author_tpl_dir = dir.path().join("templates/author");
+        std::fs::create_dir_all(&author_tpl_dir).unwrap();
+        std::fs::write(author_tpl_dir.join("item.hiccup"), "[:html [:body (get input :name)]]").unwrap();
+
+        // Post content
+        let post_content_dir = dir.path().join("content/post");
+        std::fs::create_dir_all(&post_content_dir).unwrap();
+        std::fs::write(
+            post_content_dir.join("hello-world.md"),
+            "# Hello World\n\n[Default Author](/author/default-author)\n\n----\n\nBody.\n",
+        ).unwrap();
+
+        // Author content
+        let author_content_dir = dir.path().join("content/author");
+        std::fs::create_dir_all(&author_content_dir).unwrap();
+        std::fs::write(
+            author_content_dir.join("default-author.md"),
+            "# Default Author\n\n----\n\nBio.\n",
+        ).unwrap();
+
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(dir.path())
+            .build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+        (dir, conductor)
+    }
+
+    #[test]
+    fn resolve_link_target_stem_for_post_author_returns_author() {
+        let (_dir, conductor) = post_author_conductor();
+        let result = conductor.resolve_link_target_stem("post", "author");
+        assert_eq!(result, Some("author".to_string()),
+            "author slot on post schema should resolve to 'author' stem");
+    }
+
+    #[test]
+    fn resolve_link_target_stem_for_non_link_slot_returns_none() {
+        let (_dir, conductor) = post_author_conductor();
+        // 'title' is a heading slot, not a link
+        let result = conductor.resolve_link_target_stem("post", "title");
+        assert_eq!(result, None,
+            "title slot is a heading, not a link — should return None");
+    }
+
+    #[test]
+    fn resolve_link_target_stem_for_unknown_slot_returns_none() {
+        let (_dir, conductor) = post_author_conductor();
+        let result = conductor.resolve_link_target_stem("post", "nonexistent_slot");
+        assert_eq!(result, None,
+            "slot that doesn't exist should return None");
+    }
+
+    #[test]
+    fn list_link_options_for_post_author_returns_authors_not_posts() {
+        let (_dir, conductor) = post_author_conductor();
+
+        // Simulate the HTTP flow: resolve target stem, then list options for that stem
+        let target_stem = conductor
+            .resolve_link_target_stem("post", "author")
+            .expect("should resolve author slot to 'author' stem");
+        assert_eq!(target_stem, "author");
+
+        let result = conductor.handle_command(Command::ListLinkOptions {
+            stem: target_stem,
+        });
+        match result.response {
+            Response::LinkOptions(opts) => {
+                assert_eq!(opts.len(), 1, "expected 1 author option, got: {opts:?}");
+                assert_eq!(opts[0].stem, "author");
+                assert!(
+                    opts[0].url.contains("default-author"),
+                    "expected URL to contain 'default-author', got: {}",
+                    opts[0].url
+                );
+            }
+            other => panic!("expected LinkOptions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_target_stem_command_returns_link_target_stem() {
+        let (_dir, conductor) = post_author_conductor();
+        let result = conductor.handle_command(Command::ResolveLinkTargetStem {
+            source_stem: "post".to_string(),
+            slot: "author".to_string(),
+        });
+        match result.response {
+            Response::LinkTargetStem(Some(stem)) => {
+                assert_eq!(stem, "author");
+            }
+            other => panic!("expected LinkTargetStem(Some(\"author\")), got {other:?}"),
+        }
+    }
+
     #[test]
     fn resolve_link_returns_false_for_nonexistent_path() {
         let conductor = empty_conductor();

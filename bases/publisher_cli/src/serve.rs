@@ -756,8 +756,7 @@ fn apply_edit(
 #[derive(serde::Deserialize)]
 struct LinksQuery {
     schema: String,
-    #[allow(dead_code)]
-    slot: String,
+    slot: Option<String>,
 }
 
 async fn links_handler(
@@ -766,8 +765,24 @@ async fn links_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
+    // If a slot is provided, try to resolve the target collection stem.
+    // This allows the picker to show options from the correct collection
+    // (e.g., author options when editing a post's author slot).
+    let effective_stem = if let Some(slot) = &query.slot {
+        match state.conductor.send(&conductor::Command::ResolveLinkTargetStem {
+            source_stem: query.schema.clone(),
+            slot: slot.clone(),
+        }) {
+            Ok(conductor::Response::LinkTargetStem(Some(target_stem))) => target_stem,
+            // If resolution fails or returns None, fall back to the source schema
+            _ => query.schema.clone(),
+        }
+    } else {
+        query.schema.clone()
+    };
+
     match state.conductor.send(&conductor::Command::ListLinkOptions {
-        stem: query.schema.clone(),
+        stem: effective_stem,
     }) {
         Ok(conductor::Response::LinkOptions(options)) => {
             #[derive(serde::Serialize)]

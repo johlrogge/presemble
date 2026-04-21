@@ -1098,6 +1098,35 @@ impl Conductor {
         options
     }
 
+    /// For a slot on a source schema, derive the target collection stem
+    /// by inspecting the slot's link-target href pattern. Returns None if
+    /// the slot isn't a link slot or the target can't be resolved.
+    pub fn resolve_link_target_stem(&self, source_stem: &str, slot: &str) -> Option<String> {
+        // 1. Look up the source schema source from cache
+        let src = self.schema_source(source_stem)?;
+        // 2. Parse the schema
+        let grammar = schema::parse_schema(&src).ok()?;
+        // 3. Find the slot by name in preamble
+        let found_slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot)?;
+        // 4. Check if it's a Link element with a pattern
+        let pattern = match &found_slot.element {
+            schema::Element::Link { pattern } => pattern,
+            schema::Element::Image { pattern } => pattern,
+            _ => return None,
+        };
+        // 5. Extract stem from pattern like "/stem/<placeholder>"
+        // Skip external URLs
+        if pattern.starts_with("http://") || pattern.starts_with("https://") {
+            return None;
+        }
+        // Remove fragment and query parts
+        let path = pattern.split('#').next().unwrap_or(pattern);
+        let path = path.split('?').next().unwrap_or(path);
+        // Split on '/' and find the first non-empty, non-placeholder segment
+        let stem = path.split('/').find(|seg| !seg.is_empty() && !seg.contains('<') && !seg.contains('>'))?;
+        Some(stem.to_string())
+    }
+
     /// List all schema stems known to the conductor (excludes collection schemas).
     pub fn list_schemas(&self) -> Vec<String> {
         let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
@@ -2562,6 +2591,10 @@ impl Conductor {
             Command::ListLinkOptions { stem } => {
                 let options = self.list_link_options(&stem);
                 CommandResult::with_response(Response::LinkOptions(options))
+            }
+            Command::ResolveLinkTargetStem { source_stem, slot } => {
+                let target = self.resolve_link_target_stem(&source_stem, &slot);
+                CommandResult::with_response(Response::LinkTargetStem(target))
             }
             Command::ResolveLink { path } => {
                 let abs_path = if std::path::Path::new(&path).is_absolute() {
