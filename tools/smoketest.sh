@@ -62,6 +62,30 @@ assert_curl() {
     fi
 }
 
+# Assert a curl response does NOT contain a string
+assert_curl_not_contains() {
+    local desc="$1" url="$2" unexpected="$3"
+    local response
+    response=$(curl -s "http://127.0.0.1:$PORT$url" 2>&1)
+    if echo "$response" | grep -qF "$unexpected"; then
+        fail "$desc (unexpected '$unexpected' found in: $response)"
+    else
+        pass "$desc"
+    fi
+}
+
+# Assert HTTP status code
+assert_status() {
+    local desc="$1" url="$2" expected="$3"
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT$url" 2>&1)
+    if [ "$status" = "$expected" ]; then
+        pass "$desc"
+    else
+        fail "$desc (expected HTTP $expected, got $status)"
+    fi
+}
+
 # Assert rep expression contains expected text
 assert_rep() {
     local desc="$1" expr="$2" expected="$3"
@@ -117,16 +141,35 @@ log "Scaffolding blog site..."
 assert_curl "scaffold blog" "/_presemble/scaffold" POST '{"template":"blog","format":"hiccup"}' '"ok":true'
 sleep 2
 
+# ── Test: Stylesheet served after scaffold ─────────────────────────────────
+
+log "Testing stylesheet..."
+assert_status "stylesheet served after scaffold" "/assets/style.css" "200"
+
 # ── Test: Schemas endpoint ─────────────────────────────────────────────────
 
 log "Testing schemas..."
 assert_curl "schemas list includes post" "/_presemble/schemas" GET "" "post"
 assert_curl "schemas list includes author" "/_presemble/schemas" GET "" "author"
 
+# ── Test: Link picker returns schema-correct options ──────────────────────
+
+log "Testing link picker..."
+assert_curl "link picker for author slot returns author options" \
+    "/_presemble/links?schema=post&slot=author" GET "" \
+    '"href":"/author/default"'
+assert_curl_not_contains "link picker for author slot excludes posts" \
+    "/_presemble/links?schema=post&slot=author" \
+    "/post/"
+
 # ── Test: Index page built ─────────────────────────────────────────────────
 
 log "Testing index page..."
 assert_curl "index page exists" "/" GET "" "html"
+assert_curl "index page has data-presemble-file attr" "/" GET "" 'data-presemble-file="content/index.md"'
+assert_curl "collection page has index data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/index.md"'
+assert_curl "collection page has item data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/hello-world.md"'
+assert_curl "leaf page has data-presemble-file attr" "/post/hello-world" GET "" 'data-presemble-file="content/post/hello-world.md"'
 
 # ── Test: Edit index tagline ───────────────────────────────────────────────
 
@@ -155,6 +198,16 @@ assert_curl "create post" "/_presemble/create-content" POST '{"stem":"post","slu
 log "Editing content..."
 assert_curl "edit author name" "/_presemble/edit" POST '{"file":"content/author/alice.md","slot":"name","value":"Alice Smith"}' '"ok":true'
 assert_curl "edit post title" "/_presemble/edit" POST '{"file":"content/post/first-post.md","slot":"title","value":"My First Post"}' '"ok":true'
+
+# ── Test: nth-child scopes edit to one paragraph, leaves others intact ────
+
+log "Testing nth-child slot edit scoping..."
+NED_PROGRAM='(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path "content/post/hello-world.md") "summary") 1) ned/descendants ned/texts) "NTHCHILD ONLY SECOND")'
+# Build JSON by escaping the double quotes inside the program string
+APPLY_BODY='{"program":"'"$(echo "$NED_PROGRAM" | sed 's/"/\\"/g')"'"}'
+assert_curl "apply nth-child edit to 2nd paragraph" "/_presemble/apply" POST "$APPLY_BODY" '"ok":true'
+assert_curl "nth-child edit: 2nd paragraph updated" "/post/hello-world" GET "" "NTHCHILD ONLY SECOND"
+assert_curl "nth-child edit: 1st paragraph unchanged" "/post/hello-world" GET "" "Welcome to your new blog"
 
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
