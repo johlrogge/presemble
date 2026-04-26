@@ -231,7 +231,7 @@ pub enum ConductorEvent {
     /// A NED-based suggestion went stale (accept-time re-evaluation failed).
     NedSuggestionStaled {
         id: editorial_types::SuggestionId,
-        file: std::path::PathBuf,
+        file: editorial_types::ContentPath,
         reason: String,
     },
 }

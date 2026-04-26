@@ -1605,46 +1605,12 @@ impl Conductor {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /// Build an ISO-8601 UTC timestamp string (`YYYY-MM-DDTHH:MM:SSZ`)
-    /// using only `std::time`.
+    /// Build an ISO-8601 UTC timestamp string (`YYYY-MM-DDTHH:MM:SSZ`).
     fn iso8601_now() -> String {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // Simple calendar calculation (no leap-second handling)
-        let s = secs % 60;
-        let m = (secs / 60) % 60;
-        let h = (secs / 3600) % 24;
-        let days = secs / 86400;
-        // Days since 1970-01-01
-        let mut year = 1970u64;
-        let mut remaining = days;
-        loop {
-            let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
-            let days_in_year: u64 = if leap { 366 } else { 365 };
-            if remaining < days_in_year {
-                break;
-            }
-            remaining -= days_in_year;
-            year += 1;
-        }
-        let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
-        let month_days: [u64; 12] = if leap {
-            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        } else {
-            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        };
-        let mut month = 1u64;
-        for &md in &month_days {
-            if remaining < md {
-                break;
-            }
-            remaining -= md;
-            month += 1;
-        }
-        let day = remaining + 1;
-        format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+        use time::format_description::well_known::Iso8601;
+        time::OffsetDateTime::now_utc()
+            .format(&Iso8601::DEFAULT)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
     }
 
     /// Classify the shape of a slot node that is already known to exist.
@@ -1689,6 +1655,11 @@ impl Conductor {
     ///   (Link, Image, List, etc.).
     ///
     /// Body-level nodes (no slot ancestor) and text slots are allowed.
+    ///
+    /// Note: multi-node selections that span different slots are validated on
+    /// the first slot ancestor encountered. This is sufficient for current use
+    /// cases (selections produced by `(slot doc name)` resolve to a single slot)
+    /// but may need revisiting if multi-slot selections become common.
     ///
     fn classify_selection_for_creation(&self, selection_src: &str) -> Result<(), String> {
         // Build the NED evaluator root without holding any store lock.
@@ -2912,10 +2883,9 @@ impl Conductor {
                     if let Err(e) = conductor.persist_ned_suggestion(&s) {
                         eprintln!("conductor: failed to persist stale ned suggestion: {e}");
                     }
-                    let file = s.file.resolve(&conductor.site_dir);
                     conductor.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(s.id.clone(), s.clone());
                     CommandResult::ok_with_events(vec![
-                        ConductorEvent::NedSuggestionStaled { id: s.id, file, reason },
+                        ConductorEvent::NedSuggestionStaled { id: s.id, file: s.file.clone(), reason },
                     ])
                 };
 
@@ -2941,7 +2911,10 @@ impl Conductor {
                 }
 
                 // 5. Single-target mutations: reject multi-node selections
-                let is_single_target = matches!(sug.mutation, editorial_types::NedMutation::SetText(_) | editorial_types::NedMutation::Delete);
+                let is_single_target = matches!(sug.mutation,
+                    editorial_types::NedMutation::SetText(_)
+                    | editorial_types::NedMutation::Delete
+                    | editorial_types::NedMutation::SearchReplace { .. });
                 if is_single_target {
                     let n = sel.iter().count();
                     if n > 1 {
@@ -4588,7 +4561,7 @@ mod classify_selection_tests {
     /// - a "title" slot containing a heading (SingleText)
     /// - a "link-slot" slot containing a link element (NonText)
     /// - a body paragraph
-    fn make_conductor_with_doc() -> Conductor {
+    fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
 
@@ -4653,9 +4626,7 @@ mod classify_selection_tests {
             document_to_store(&doc, &mut store, Some(&meta));
         }
 
-        // Keep the tempdir alive by leaking it (test lifetime is short)
-        std::mem::forget(tmp);
-        conductor
+        (conductor, tmp)
     }
 
     // -------------------------------------------------------------------------
@@ -4664,7 +4635,7 @@ mod classify_selection_tests {
 
     #[test]
     fn text_slot_selection_is_ok() {
-        let conductor = make_conductor_with_doc();
+        let (conductor, _tmp) = make_conductor_with_doc();
         // Select the title slot of the test document — it has a heading child (SingleText).
         let src = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
         let result = conductor.classify_selection_for_creation(src);
@@ -4676,7 +4647,7 @@ mod classify_selection_tests {
 
     #[test]
     fn link_slot_selection_is_rejected() {
-        let conductor = make_conductor_with_doc();
+        let (conductor, _tmp) = make_conductor_with_doc();
         // Select the link-slot — it has a link child (NonText).
         let src = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "link-slot")"#;
         let result = conductor.classify_selection_for_creation(src);
@@ -4693,7 +4664,7 @@ mod classify_selection_tests {
 
     #[test]
     fn empty_selection_is_rejected() {
-        let conductor = make_conductor_with_doc();
+        let (conductor, _tmp) = make_conductor_with_doc();
         // Select a non-existent document — returns empty selection.
         let src = r#"(ned/doc-by-path "content/test/does-not-exist.md")"#;
         let result = conductor.classify_selection_for_creation(src);
@@ -4710,7 +4681,7 @@ mod classify_selection_tests {
 
     #[test]
     fn body_element_selection_is_ok() {
-        let conductor = make_conductor_with_doc();
+        let (conductor, _tmp) = make_conductor_with_doc();
         // Select the first body element — it has no slot ancestor.
         let src = r#"(ned/body-at (ned/doc-by-path "content/test/doc.md") 0)"#;
         let result = conductor.classify_selection_for_creation(src);
@@ -4722,7 +4693,7 @@ mod classify_selection_tests {
 
     #[test]
     fn malformed_clojure_is_rejected() {
-        let conductor = make_conductor_with_doc();
+        let (conductor, _tmp) = make_conductor_with_doc();
         // Malformed Clojure that fails to parse/evaluate.
         let src = "(this is (not valid clojure";
         let result = conductor.classify_selection_for_creation(src);

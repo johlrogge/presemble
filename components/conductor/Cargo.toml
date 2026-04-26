@@ -30,6 +30,7 @@ notify = { workspace = true }
 rayon = { workspace = true }
 evaluator = { workspace = true }
 ned = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 im = { workspace = true }
