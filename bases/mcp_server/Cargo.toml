@@ -9,8 +9,10 @@ interface = "mcp_server"
 [dependencies]
 conductor = { workspace = true }
 editorial_types = { workspace = true }
+ned = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+node_store = { workspace = true }
 tempfile = { workspace = true }
