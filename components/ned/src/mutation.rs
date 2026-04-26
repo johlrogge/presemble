@@ -153,6 +153,28 @@ pub fn insert_after_tree(store: &mut NodeStore, sel: &Selection, tree: NodeTree)
     Selection::from_ids(created)
 }
 
+/// Replace all occurrences of `search` with `replace` in every Text node in `sel`.
+/// Non-Text nodes are skipped silently.
+/// If `search` is empty, returns the original selection unchanged.
+/// Returns the same selection (mutation in place; node identifiers do not change).
+pub fn search_replace_text(
+    store: &mut NodeStore,
+    sel: &Selection,
+    search: &str,
+    replace: &str,
+) -> Selection {
+    if search.is_empty() {
+        return sel.clone();
+    }
+    for id in sel.iter() {
+        if let Some(Node::Text(s)) = store.get(id) {
+            let new_text = s.replace(search, replace);
+            store.replace_node(id, Node::Text(new_text));
+        }
+    }
+    sel.clone()
+}
+
 /// Replace each selected node with a materialized copy of `replacement` subtrees.
 ///
 /// For each selected node the replacement trees are materialized and inserted
@@ -282,6 +304,72 @@ mod tests {
         assert!(modified.contains(text2));
         assert_eq!(store.get(text1), Some(&Node::Text("Same".to_string())));
         assert_eq!(store.get(text2), Some(&Node::Text("Same".to_string())));
+    }
+
+    // --- search_replace_text tests ---
+
+    #[test]
+    fn search_replace_single_occurrence() {
+        let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
+        let sel = Selection::single(text1);
+        let result = search_replace_text(&mut store, &sel, "Hello", "Goodbye");
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(text1));
+        assert_eq!(store.get(text1), Some(&Node::Text("Goodbye".to_string())));
+    }
+
+    #[test]
+    fn search_replace_multiple_occurrences() {
+        let mut store = NodeStore::new();
+        let n = store.intern("doc");
+        let root = store.add_node(Node::Element(n));
+        let text = store.add_node(Node::Text("foo bar foo".to_string()));
+        store.add_edge(root, Edge::Child(text));
+
+        let sel = Selection::single(text);
+        let result = search_replace_text(&mut store, &sel, "foo", "X");
+        assert_eq!(result.len(), 1);
+        assert_eq!(store.get(text), Some(&Node::Text("X bar X".to_string())));
+    }
+
+    #[test]
+    fn search_replace_multi_node_selection() {
+        let (mut store, _root, _h1, _p1, text1, text2) = sample_store();
+        // text1 = "Hello", text2 = "World"
+        let sel = Selection::from_ids([text1, text2]);
+        let result = search_replace_text(&mut store, &sel, "o", "0");
+        assert_eq!(result.len(), 2);
+        assert_eq!(store.get(text1), Some(&Node::Text("Hell0".to_string())));
+        assert_eq!(store.get(text2), Some(&Node::Text("W0rld".to_string())));
+    }
+
+    #[test]
+    fn search_replace_no_match_is_noop() {
+        let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
+        let sel = Selection::single(text1);
+        let result = search_replace_text(&mut store, &sel, "zzz", "X");
+        assert_eq!(result.len(), 1);
+        assert_eq!(store.get(text1), Some(&Node::Text("Hello".to_string())));
+    }
+
+    #[test]
+    fn search_replace_empty_search_is_noop() {
+        let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
+        let sel = Selection::single(text1);
+        let result = search_replace_text(&mut store, &sel, "", "X");
+        // selection returned unchanged, no mutation
+        assert_eq!(result.len(), 1);
+        assert_eq!(store.get(text1), Some(&Node::Text("Hello".to_string())));
+    }
+
+    #[test]
+    fn search_replace_skips_non_text_nodes() {
+        let (mut store, _root, h1, _p1, _text1, _text2) = sample_store();
+        let sel = Selection::single(h1);
+        // h1 is an Element; should be skipped silently
+        let result = search_replace_text(&mut store, &sel, "heading", "X");
+        assert_eq!(result.len(), 1);
+        assert!(matches!(store.get(h1), Some(Node::Element(_))));
     }
 
     #[test]

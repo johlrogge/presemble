@@ -1,4 +1,7 @@
 use ned::NodeTree;
+
+mod ned_program;
+pub use ned_program::compose_ned_program;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

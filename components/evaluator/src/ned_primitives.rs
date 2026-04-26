@@ -370,6 +370,23 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
     });
 
     let s = store.clone();
+    reg(root, "ned/search-replace", "(ned/search-replace sel search replace)", "Replace all occurrences of search with replace in every Text descendant of sel.", move |args| {
+        if args.len() < 3 { return Err("ned/search-replace requires selection, search, and replace".into()); }
+        let sel = extract_selection(&args[0])?;
+        let search = match &args[1] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/search-replace: search must be a string".into()),
+        };
+        let replace = match &args[2] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/search-replace: replace must be a string".into()),
+        };
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        let result = ned::mutation::search_replace_text(&mut st, &sel, &search, &replace);
+        Ok(wrap_selection(result))
+    });
+
+    let s = store.clone();
     reg(root, "ned/delete", "(ned/delete sel)", "Delete selected nodes and their descendants.", move |args| {
         if args.is_empty() { return Err("ned/delete requires a selection".into()); }
         let sel = extract_selection(&args[0])?;
@@ -664,6 +681,69 @@ mod tests {
             _ => panic!("expected Opaque"),
         };
         assert_eq!(modified.len(), 2); // both text nodes modified
+    }
+
+    #[test]
+    fn ned_search_replace_mutates_text_nodes() {
+        let store = make_store_with_tree();
+        let root = setup(store.clone());
+        // Select all text nodes (Hello, World) and replace "o" with "0"
+        let all = call(&root, "ned/all", vec![]).unwrap();
+        let text_kw = Value::Keyword { namespace: None, name: "text".to_string() };
+        let texts_sel = call(&root, "ned/filter", vec![all, text_kw]).unwrap();
+        let search = Value::Text("o".to_string());
+        let replace = Value::Text("0".to_string());
+        let result = call(&root, "ned/search-replace", vec![texts_sel, search, replace]).unwrap();
+        // result is the same selection (both nodes)
+        let modified = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert_eq!(modified.len(), 2);
+        // Verify text content in store
+        let st = store.read().unwrap();
+        let all_texts: Vec<_> = modified.iter()
+            .filter_map(|id| if let Some(Node::Text(s)) = st.get(id) { Some(s.clone()) } else { None })
+            .collect();
+        assert!(all_texts.contains(&"Hell0".to_string()), "expected Hell0");
+        assert!(all_texts.contains(&"W0rld".to_string()), "expected W0rld");
+    }
+
+    #[test]
+    fn ned_search_replace_empty_search_is_noop() {
+        let store = make_store_with_tree();
+        let root = setup(store.clone());
+        let all = call(&root, "ned/all", vec![]).unwrap();
+        let text_kw = Value::Keyword { namespace: None, name: "text".to_string() };
+        let texts_sel = call(&root, "ned/filter", vec![all, text_kw]).unwrap();
+        let search = Value::Text("".to_string());
+        let replace = Value::Text("X".to_string());
+        let result = call(&root, "ned/search-replace", vec![texts_sel, search, replace]).unwrap();
+        let sel = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        // Selection returned unchanged
+        assert_eq!(sel.len(), 2);
+        // Text content is unchanged
+        let st = store.read().unwrap();
+        let texts: Vec<_> = sel.iter()
+            .filter_map(|id| if let Some(Node::Text(s)) = st.get(id) { Some(s.clone()) } else { None })
+            .collect();
+        assert!(texts.contains(&"Hello".to_string()), "Hello should be unchanged");
+        assert!(texts.contains(&"World".to_string()), "World should be unchanged");
+    }
+
+    #[test]
+    fn ned_search_replace_requires_three_args() {
+        let store = make_store_with_tree();
+        let root = setup(store);
+        let all = call(&root, "ned/all", vec![]).unwrap();
+        let text_kw = Value::Keyword { namespace: None, name: "text".to_string() };
+        let texts_sel = call(&root, "ned/filter", vec![all, text_kw]).unwrap();
+        // Only 2 args — should error
+        let err = call(&root, "ned/search-replace", vec![texts_sel, Value::Text("x".to_string())]);
+        assert!(err.is_err(), "expected error with too few args");
     }
 
     #[test]

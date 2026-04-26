@@ -670,6 +670,7 @@ name = "editorial_types"
 version = "0.35.0"
 dependencies = [
  "ned",
+ "node_store",
  "schema",
  "serde",
  "serde_json",

@@ -1562,6 +1562,117 @@ impl Conductor {
         map
     }
 
+    /// Classify the shape of a slot node that is already known to exist.
+    ///
+    /// Returns `Empty`, `SingleText`, `NonText`, or `Multi` depending on the
+    /// children of `slot_id`.  The `Missing` variant is **not** returned here —
+    /// callers that cannot locate the slot node should return `SlotShape::Missing`
+    /// themselves.
+    fn slot_shape_for_node(&self, slot_id: node_store::NodeId) -> SlotShape {
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let children = store.children(slot_id);
+        match children.len() {
+            0 => SlotShape::Empty,
+            1 => {
+                let child = children[0];
+                if let Some(node_store::Node::Element(name)) = store.get(child) {
+                    let tag = store.resolve_name(*name).to_string();
+                    if tag == "heading" || tag == "paragraph" {
+                        SlotShape::SingleText
+                    } else {
+                        SlotShape::NonText
+                    }
+                } else {
+                    SlotShape::NonText
+                }
+            }
+            _ => SlotShape::Multi,
+        }
+    }
+
+    /// Synchronously validate that a selection source string targets only
+    /// text-compatible slots before persisting a NED suggestion.
+    ///
+    /// Returns `Ok(())` when the selection is acceptable, or `Err(reason)`
+    /// when it should be rejected at creation time.
+    ///
+    /// Rejection conditions:
+    /// - The source string fails to evaluate.
+    /// - The evaluated value is not a Selection.
+    /// - The selection resolves to zero nodes (guaranteed-stale suggestion).
+    /// - Any node in the selection has a Slot ancestor whose shape is `NonText`
+    ///   (Link, Image, List, etc.).
+    ///
+    /// Body-level nodes (no slot ancestor) and text slots are allowed.
+    ///
+    /// Not yet wired to a protocol command — T-5 introduces `Command::CreateNedSuggestion`.
+    #[allow(dead_code)]
+    fn classify_selection_for_creation(&self, selection_src: &str) -> Result<(), String> {
+        // Build the NED evaluator root without holding any store lock.
+        let root = self.make_ned_root()
+            .map_err(|e| format!("selection failed to evaluate: {e}"))?;
+
+        // Evaluate the selection source string.
+        let value = evaluator::eval_str_with_root(selection_src, &root)
+            .map_err(|e| format!("selection failed to evaluate: {e}"))?;
+
+        // Extract a Selection from the result.
+        let sel = evaluator::ned_primitives::extract_selection(&value)
+            .map_err(|_| "selection did not produce a node selection".to_string())?;
+
+        // Reject empty selections — no point persisting a guaranteed-stale suggestion.
+        if sel.is_empty() {
+            return Err("selection resolves to no nodes".to_string());
+        }
+
+        // For each node in the selection, walk the ancestor chain to find any
+        // Slot ancestor and check its shape.
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+
+        for node_id in sel.iter() {
+            // Walk parents upward looking for the nearest slot ancestor.
+            let mut frontier = vec![node_id];
+            let mut visited = std::collections::HashSet::new();
+
+            while let Some(current) = frontier.pop() {
+                if !visited.insert(current) {
+                    continue;
+                }
+                if let Some(node_store::Node::Element(name)) = store.get(current)
+                    && store.resolve_name(*name) == "slot"
+                {
+                    // Found a slot ancestor — classify it.
+                    let slot_name = node_store_bridge::content_bridge::find_attr_text(
+                        &store, current, "name",
+                    )
+                    .unwrap_or_default();
+
+                    // Drop the read lock before calling slot_shape_for_node,
+                    // which also acquires it.
+                    drop(store);
+
+                    match self.slot_shape_for_node(current) {
+                        SlotShape::NonText => {
+                            return Err(format!(
+                                "non-text slot '{slot_name}': structured mutation unsupported"
+                            ));
+                        }
+                        SlotShape::Empty | SlotShape::SingleText | SlotShape::Multi | SlotShape::Missing => {
+                            return Ok(());
+                        }
+                    }
+                }
+
+                for parent in store.parents(current) {
+                    frontier.push(parent);
+                }
+            }
+            // No slot ancestor found for this node — body-level, always allowed.
+        }
+
+        Ok(())
+    }
+
     /// Slot edits. Text-only 1-child cases are lowered to NED; all other shapes
     /// (empty, multi-element, link/image/list, missing) are handled by the
     /// grammar-aware slot_editor escape hatch in `node_store_bridge`.
@@ -1582,7 +1693,9 @@ impl Conductor {
                 &store, doc_root, "preamble",
             );
 
-            // Determine shape: (slot_exists, child_count, tag_if_single_text_element)
+            // Determine shape: locate the named slot node, then classify via
+            // slot_shape_for_node.  Missing preamble or missing slot both yield
+            // SlotShape::Missing.
             if let Some(preamble_id) = preamble {
                 let mut slot_id_opt = None;
                 for child_id in store.children(preamble_id) {
@@ -1595,28 +1708,12 @@ impl Conductor {
                         break;
                     }
                 }
+                // Drop the read lock before calling slot_shape_for_node, which
+                // also acquires it.
+                drop(store);
                 match slot_id_opt {
                     None => SlotShape::Missing,
-                    Some(slot_id) => {
-                        let children = store.children(slot_id);
-                        match children.len() {
-                            0 => SlotShape::Empty,
-                            1 => {
-                                let child = children[0];
-                                if let Some(node_store::Node::Element(name)) = store.get(child) {
-                                    let tag = store.resolve_name(*name).to_string();
-                                    if tag == "heading" || tag == "paragraph" {
-                                        SlotShape::SingleText
-                                    } else {
-                                        SlotShape::NonText
-                                    }
-                                } else {
-                                    SlotShape::NonText
-                                }
-                            }
-                            _ => SlotShape::Multi,
-                        }
-                    }
+                    Some(slot_id) => self.slot_shape_for_node(slot_id),
                 }
             } else {
                 SlotShape::Missing
@@ -4084,6 +4181,332 @@ mod workspace_hash_tests {
         assert!(
             hash.chars().all(|c| c.is_ascii_hexdigit()),
             "hash contains non-hex chars: {hash:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod slot_shape_tests {
+    use super::*;
+
+    /// Build a conductor with an empty NodeStore (no site on disk).
+    ///
+    /// `slot_shape_for_node` only reads from the NodeStore so we don't need a
+    /// full site — we construct the slot nodes manually.
+    fn make_bare_conductor() -> Conductor {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        // Minimal scaffolding so `with_repo` doesn't error out.
+        std::fs::create_dir_all(root.join("schemas/post")).expect("schemas");
+        std::fs::create_dir_all(root.join("templates/post")).expect("templates");
+        std::fs::create_dir_all(root.join("content/post")).expect("content");
+        std::fs::write(root.join("schemas/post/item.md"), "# Title {#title}\noccurs\n: exactly once\n")
+            .expect("schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), "[:div]").expect("template");
+
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
+        Conductor::with_repo(root.to_path_buf(), repo).expect("conductor")
+    }
+
+    /// Add an Element node named `tag` to the store and return its NodeId.
+    fn add_element(store: &mut node_store::NodeStore, tag: &str) -> node_store::NodeId {
+        let name = store.intern(tag);
+        store.add_node(node_store::Node::Element(name))
+    }
+
+    /// Add a Text node to the store and return its NodeId.
+    fn add_text(store: &mut node_store::NodeStore, text: &str) -> node_store::NodeId {
+        store.add_node(node_store::Node::Text(text.into()))
+    }
+
+    /// Add a Child edge from `parent` to `child`.
+    fn append_child(store: &mut node_store::NodeStore, parent: node_store::NodeId, child: node_store::NodeId) {
+        store.add_edge(parent, node_store::Edge::Child(child));
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn empty_slot_returns_empty() {
+        let conductor = make_bare_conductor();
+        let slot_id = {
+            let mut store = conductor.node_store.write().unwrap();
+            add_element(&mut store, "slot")
+            // no children added
+        };
+        assert!(
+            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::Empty),
+            "expected Empty for a slot with no children"
+        );
+    }
+
+    #[test]
+    fn slot_with_heading_child_returns_single_text() {
+        let conductor = make_bare_conductor();
+        let slot_id = {
+            let mut store = conductor.node_store.write().unwrap();
+            let slot = add_element(&mut store, "slot");
+            let heading = add_element(&mut store, "heading");
+            let text = add_text(&mut store, "My Heading");
+            append_child(&mut store, heading, text);
+            append_child(&mut store, slot, heading);
+            slot
+        };
+        assert!(
+            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::SingleText),
+            "expected SingleText for a slot with one heading child"
+        );
+    }
+
+    #[test]
+    fn slot_with_paragraph_child_returns_single_text() {
+        let conductor = make_bare_conductor();
+        let slot_id = {
+            let mut store = conductor.node_store.write().unwrap();
+            let slot = add_element(&mut store, "slot");
+            let para = add_element(&mut store, "paragraph");
+            let text = add_text(&mut store, "Some text");
+            append_child(&mut store, para, text);
+            append_child(&mut store, slot, para);
+            slot
+        };
+        assert!(
+            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::SingleText),
+            "expected SingleText for a slot with one paragraph child"
+        );
+    }
+
+    #[test]
+    fn slot_with_multiple_children_returns_multi() {
+        let conductor = make_bare_conductor();
+        let slot_id = {
+            let mut store = conductor.node_store.write().unwrap();
+            let slot = add_element(&mut store, "slot");
+            let heading = add_element(&mut store, "heading");
+            let para = add_element(&mut store, "paragraph");
+            append_child(&mut store, slot, heading);
+            append_child(&mut store, slot, para);
+            slot
+        };
+        assert!(
+            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::Multi),
+            "expected Multi for a slot with two children"
+        );
+    }
+
+    #[test]
+    fn slot_with_link_child_returns_non_text() {
+        let conductor = make_bare_conductor();
+        let slot_id = {
+            let mut store = conductor.node_store.write().unwrap();
+            let slot = add_element(&mut store, "slot");
+            let link = add_element(&mut store, "link");
+            append_child(&mut store, slot, link);
+            slot
+        };
+        assert!(
+            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
+            "expected NonText for a slot with a link child"
+        );
+    }
+
+    #[test]
+    fn slot_with_list_child_returns_non_text() {
+        let conductor = make_bare_conductor();
+        let slot_id = {
+            let mut store = conductor.node_store.write().unwrap();
+            let slot = add_element(&mut store, "slot");
+            let list = add_element(&mut store, "list");
+            append_child(&mut store, slot, list);
+            slot
+        };
+        assert!(
+            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
+            "expected NonText for a slot with a list child"
+        );
+    }
+
+    #[test]
+    fn slot_with_image_child_returns_non_text() {
+        let conductor = make_bare_conductor();
+        let slot_id = {
+            let mut store = conductor.node_store.write().unwrap();
+            let slot = add_element(&mut store, "slot");
+            let image = add_element(&mut store, "image");
+            append_child(&mut store, slot, image);
+            slot
+        };
+        assert!(
+            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
+            "expected NonText for a slot with an image child"
+        );
+    }
+}
+
+#[cfg(test)]
+mod classify_selection_tests {
+    use super::*;
+    use content::{ContentElement, Document, DocumentSlot};
+    use schema::{HeadingLevel, SlotName, Span, Spanned};
+    use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+
+    /// Build a minimal conductor with a document loaded into the NodeStore.
+    ///
+    /// The document at `content/test/doc.md` has:
+    /// - a "title" slot containing a heading (SingleText)
+    /// - a "link-slot" slot containing a link element (NonText)
+    /// - a body paragraph
+    fn make_conductor_with_doc() -> Conductor {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
+        std::fs::create_dir_all(root.join("templates/test")).expect("templates");
+        std::fs::create_dir_all(root.join("content/test")).expect("content");
+        std::fs::write(root.join("schemas/test/item.md"), "# Title {#title}\noccurs\n: exactly once\n")
+            .expect("schema");
+        std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").expect("template");
+
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
+        let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
+
+        // Populate the NodeStore with a document that has:
+        // - "title" slot with a heading (SingleText → text-ok)
+        // - "link-slot" slot with a link (NonText → reject)
+        // - body with a paragraph
+        let doc = Document {
+            preamble: im::vector![
+                DocumentSlot {
+                    name: SlotName::new("title"),
+                    elements: im::vector![Spanned {
+                        node: ContentElement::Heading {
+                            level: HeadingLevel::new(1).unwrap(),
+                            text: "Test Title".to_string(),
+                        },
+                        span: Span { start: 0, end: 0 },
+                    }],
+                },
+                DocumentSlot {
+                    name: SlotName::new("link-slot"),
+                    elements: im::vector![Spanned {
+                        node: ContentElement::Link {
+                            text: "Click me".to_string(),
+                            href: "https://example.com".to_string(),
+                        },
+                        span: Span { start: 0, end: 0 },
+                    }],
+                },
+            ],
+            body: im::vector![
+                Spanned {
+                    node: ContentElement::Paragraph { text: "Body text".to_string() },
+                    span: Span { start: 0, end: 0 },
+                },
+            ],
+            has_separator: false,
+            separator_span: None,
+        };
+
+        let meta = DocumentMeta {
+            url: "/test/doc".to_string(),
+            stem: "test".to_string(),
+            file: "content/test/doc.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+
+        {
+            let mut store = conductor.node_store.write().unwrap();
+            document_to_store(&doc, &mut store, Some(&meta));
+        }
+
+        // Keep the tempdir alive by leaking it (test lifetime is short)
+        std::mem::forget(tmp);
+        conductor
+    }
+
+    // -------------------------------------------------------------------------
+    // Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn text_slot_selection_is_ok() {
+        let conductor = make_conductor_with_doc();
+        // Select the title slot of the test document — it has a heading child (SingleText).
+        let src = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let result = conductor.classify_selection_for_creation(src);
+        assert!(
+            result.is_ok(),
+            "expected Ok for text slot selection, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn link_slot_selection_is_rejected() {
+        let conductor = make_conductor_with_doc();
+        // Select the link-slot — it has a link child (NonText).
+        let src = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "link-slot")"#;
+        let result = conductor.classify_selection_for_creation(src);
+        assert!(
+            result.is_err(),
+            "expected Err for non-text slot selection, got Ok"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("non-text slot"),
+            "error message should mention 'non-text slot', got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn empty_selection_is_rejected() {
+        let conductor = make_conductor_with_doc();
+        // Select a non-existent document — returns empty selection.
+        let src = r#"(ned/doc-by-path "content/test/does-not-exist.md")"#;
+        let result = conductor.classify_selection_for_creation(src);
+        assert!(
+            result.is_err(),
+            "expected Err for empty selection, got Ok"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("resolves to no nodes"),
+            "error should mention 'resolves to no nodes', got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn body_element_selection_is_ok() {
+        let conductor = make_conductor_with_doc();
+        // Select the first body element — it has no slot ancestor.
+        let src = r#"(ned/body-at (ned/doc-by-path "content/test/doc.md") 0)"#;
+        let result = conductor.classify_selection_for_creation(src);
+        assert!(
+            result.is_ok(),
+            "expected Ok for body element (no slot ancestor), got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_clojure_is_rejected() {
+        let conductor = make_conductor_with_doc();
+        // Malformed Clojure that fails to parse/evaluate.
+        let src = "(this is (not valid clojure";
+        let result = conductor.classify_selection_for_creation(src);
+        assert!(
+            result.is_err(),
+            "expected Err for malformed Clojure, got Ok"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("failed to evaluate"),
+            "error should mention 'failed to evaluate', got: {err:?}"
         );
     }
 }

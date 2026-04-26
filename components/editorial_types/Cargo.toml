@@ -13,3 +13,4 @@ ned = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+node_store = { workspace = true }
