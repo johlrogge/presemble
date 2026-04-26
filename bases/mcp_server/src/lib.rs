@@ -527,75 +527,123 @@ fn handle_request(
                         .get("file")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    match cond.send(&conductor::Command::GetSuggestions {
+
+                    // Query legacy suggestions first.
+                    let (legacy_lines, legacy_error) = match cond.send(&conductor::Command::GetSuggestions {
                         file: editorial_types::ContentPath::new(file),
                     }) {
                         Ok(conductor::Response::Suggestions(suggestions)) => {
-                            let text = if suggestions.is_empty() {
-                                "No pending suggestions.".to_string()
-                            } else {
-                                suggestions
-                                    .iter()
-                                    .map(|s| {
-                                        match &s.target {
-                                            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
-                                                format!(
-                                                    "[{}] slot {}: {} \u{2192} \"{}\" ({})",
-                                                    s.author,
-                                                    slot,
-                                                    s.reason,
-                                                    proposed_value,
-                                                    s.id
-                                                )
-                                            }
-                                            editorial_types::SuggestionTarget::BodyText { search, replace } => {
-                                                format!(
-                                                    "[{}] body: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
-                                                    s.author,
-                                                    s.reason,
-                                                    search,
-                                                    replace,
-                                                    s.id
-                                                )
-                                            }
-                                            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
-                                                format!(
-                                                    "[{}] slot-edit {}: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
-                                                    s.author,
-                                                    slot,
-                                                    s.reason,
-                                                    search,
-                                                    replace,
-                                                    s.id
-                                                )
-                                            }
+                            let lines: Vec<String> = suggestions
+                                .iter()
+                                .map(|s| {
+                                    match &s.target {
+                                        editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
+                                            format!(
+                                                "[{}] slot {}: {} \u{2192} \"{}\" ({})",
+                                                s.author,
+                                                slot,
+                                                s.reason,
+                                                proposed_value,
+                                                s.id
+                                            )
                                         }
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            };
-                            json_rpc_ok(
-                                req.id.clone(),
-                                serde_json::json!({
-                                    "content": [{"type": "text", "text": text}]
-                                }),
-                            )
+                                        editorial_types::SuggestionTarget::BodyText { search, replace } => {
+                                            format!(
+                                                "[{}] body: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
+                                                s.author,
+                                                s.reason,
+                                                search,
+                                                replace,
+                                                s.id
+                                            )
+                                        }
+                                        editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
+                                            format!(
+                                                "[{}] slot-edit {}: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
+                                                s.author,
+                                                slot,
+                                                s.reason,
+                                                search,
+                                                replace,
+                                                s.id
+                                            )
+                                        }
+                                    }
+                                })
+                                .collect();
+                            (lines, None)
                         }
-                        Ok(other) => json_rpc_ok(
-                            req.id.clone(),
-                            serde_json::json!({
-                                "content": [{"type": "text", "text": format!("Unexpected response: {other:?}")}],
-                                "isError": true
-                            }),
-                        ),
-                        Err(e) => json_rpc_ok(
-                            req.id.clone(),
-                            serde_json::json!({
-                                "content": [{"type": "text", "text": format!("Conductor error: {e}")}],
-                                "isError": true
-                            }),
-                        ),
-                    }
+                        Ok(conductor::Response::Error(e)) => {
+                            (vec![], Some(format!("[error fetching legacy suggestions: {e}]")))
+                        }
+                        Ok(other) => {
+                            (vec![], Some(format!("[unexpected legacy response: {other:?}]")))
+                        }
+                        Err(e) => {
+                            (vec![], Some(format!("[error fetching legacy suggestions: {e}]")))
+                        }
+                    };
+
+                    // Query NED suggestions second (sequential dispatch is fine for MCP).
+                    let (ned_lines, ned_error) = match cond.send(&conductor::Command::GetNedSuggestions {
+                        file: editorial_types::ContentPath::new(file),
+                    }) {
+                        Ok(conductor::Response::NedSuggestions(suggestions)) => {
+                            let lines: Vec<String> = suggestions
+                                .iter()
+                                .map(format_ned_suggestion)
+                                .collect();
+                            (lines, None)
+                        }
+                        Ok(conductor::Response::Error(e)) => {
+                            (vec![], Some(format!("[error fetching NED suggestions: {e}]")))
+                        }
+                        Ok(other) => {
+                            (vec![], Some(format!("[unexpected NED response: {other:?}]")))
+                        }
+                        Err(e) => {
+                            (vec![], Some(format!("[error fetching NED suggestions: {e}]")))
+                        }
+                    };
+
+                    // Merge results.
+                    let text = {
+                        let mut parts: Vec<String> = Vec::new();
+
+                        if !legacy_lines.is_empty() {
+                            parts.push(legacy_lines.join("\n"));
+                        }
+                        if let Some(err) = legacy_error {
+                            parts.push(err);
+                        }
+
+                        if !ned_lines.is_empty() {
+                            if !parts.is_empty() {
+                                parts.push("--- NED suggestions ---".to_string());
+                            }
+                            parts.push(ned_lines.join("\n"));
+                        }
+                        if let Some(err) = ned_error {
+                            parts.push(err);
+                        }
+
+                        if parts.is_empty() {
+                            if file.is_empty() {
+                                "No suggestions.".to_string()
+                            } else {
+                                format!("No suggestions for {file}.")
+                            }
+                        } else {
+                            parts.join("\n")
+                        }
+                    };
+
+                    json_rpc_ok(
+                        req.id.clone(),
+                        serde_json::json!({
+                            "content": [{"type": "text", "text": text}]
+                        }),
+                    )
                 }
 
                 "suggest_body_edit" => {
@@ -809,6 +857,102 @@ fn lower_body_edit_args(
         replace: replace.to_string(),
     };
     (selection, mutation)
+}
+
+/// Format a single [`NedSuggestion`] as a human-readable one-line string.
+///
+/// The format varies by mutation kind and status:
+/// - Status prefix: `PENDING` is omitted (default), `ACCEPTED`, `REJECTED`,
+///   or `STALE` are prepended (with `[was: <reason>]` appended for Stale).
+/// - Author prefix: `[Claude]` for `Author::Claude`, `[<name>]` for `Author::Human`.
+fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
+    let author_label = match &s.author {
+        editorial_types::Author::Claude => "[Claude]".to_string(),
+        editorial_types::Author::Human(name) => format!("[{name}]"),
+        editorial_types::Author::Tool(name) => format!("[{name}]"),
+    };
+
+    let status_prefix = match &s.status {
+        editorial_types::NedSuggestionStatus::Pending => String::new(),
+        editorial_types::NedSuggestionStatus::Accepted => "ACCEPTED ".to_string(),
+        editorial_types::NedSuggestionStatus::Rejected => "REJECTED ".to_string(),
+        editorial_types::NedSuggestionStatus::Stale { .. } => "STALE ".to_string(),
+    };
+
+    let stale_suffix = match &s.status {
+        editorial_types::NedSuggestionStatus::Stale { reason } => {
+            format!(" [was: {reason}]")
+        }
+        _ => String::new(),
+    };
+
+    let mutation_part = match &s.mutation {
+        editorial_types::NedMutation::SetText(text) => {
+            format!(
+                "{status_prefix}set-text @ {sel}: {reason} -> \"{text}\"",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+                text = text,
+            )
+        }
+        editorial_types::NedMutation::SearchReplace { search, replace } => {
+            format!(
+                "{status_prefix}search-replace @ {sel}: {reason} \"{search}\" -> \"{replace}\"",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+                search = search,
+                replace = replace,
+            )
+        }
+        editorial_types::NedMutation::Delete => {
+            format!(
+                "{status_prefix}delete @ {sel}: {reason}",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+            )
+        }
+        editorial_types::NedMutation::Replace(trees) => {
+            format!(
+                "{status_prefix}replace @ {sel}: {reason} ({n} subtree(s))",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+                n = trees.len(),
+            )
+        }
+        editorial_types::NedMutation::InsertChild(trees) => {
+            format!(
+                "{status_prefix}insert-child @ {sel}: {reason} ({n} subtree(s))",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+                n = trees.len(),
+            )
+        }
+        editorial_types::NedMutation::InsertBefore(trees) => {
+            format!(
+                "{status_prefix}insert-before @ {sel}: {reason} ({n} subtree(s))",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+                n = trees.len(),
+            )
+        }
+        editorial_types::NedMutation::InsertAfter(trees) => {
+            format!(
+                "{status_prefix}insert-after @ {sel}: {reason} ({n} subtree(s))",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+                n = trees.len(),
+            )
+        }
+    };
+
+    format!("{author_label} {mutation_part}{stale_suffix} ({id})", id = s.id)
 }
 
 #[cfg(test)]
@@ -1224,6 +1368,205 @@ mod tests {
                     if search == r"search\val" && replace == r"replace\val"
             ),
             "search/replace not passed through as-is; mutation: {mutation:?}"
+        );
+    }
+
+    // ── format_ned_suggestion tests ───────────────────────────────────────────
+
+    fn make_ned_suggestion(
+        mutation: editorial_types::NedMutation,
+        status: editorial_types::NedSuggestionStatus,
+        author: editorial_types::Author,
+    ) -> editorial_types::NedSuggestion {
+        editorial_types::NedSuggestion {
+            id: editorial_types::SuggestionId::from("sug-test-id".to_string()),
+            author,
+            file: editorial_types::ContentPath::new("content/post/hello.md"),
+            selection: "(ned/slot (ned/doc-by-path \"content/post/hello.md\") \"title\")".to_string(),
+            mutation,
+            workspace_hash: "abc123".to_string(),
+            reason: "Test reason".to_string(),
+            status,
+            created_at: "2026-04-26T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn format_ned_suggestion_set_text() {
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::SetText("Hello World".to_string()),
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert_eq!(
+            result,
+            r#"[Claude] set-text @ (ned/slot (ned/doc-by-path "content/post/hello.md") "title"): Test reason -> "Hello World" (sug-test-id)"#
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_search_replace() {
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::SearchReplace {
+                search: "old".to_string(),
+                replace: "new".to_string(),
+            },
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert_eq!(
+            result,
+            r#"[Claude] search-replace @ (ned/slot (ned/doc-by-path "content/post/hello.md") "title"): Test reason "old" -> "new" (sug-test-id)"#
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_delete() {
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::Delete,
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert_eq!(
+            result,
+            r#"[Claude] delete @ (ned/slot (ned/doc-by-path "content/post/hello.md") "title"): Test reason (sug-test-id)"#
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_replace_with_subtrees() {
+        use ned::NodeTree;
+        let trees = vec![
+            NodeTree::element("p").with_child(NodeTree::text("one")),
+            NodeTree::element("p").with_child(NodeTree::text("two")),
+        ];
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::Replace(trees),
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert_eq!(
+            result,
+            r#"[Claude] replace @ (ned/slot (ned/doc-by-path "content/post/hello.md") "title"): Test reason (2 subtree(s)) (sug-test-id)"#
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_insert_child() {
+        use ned::NodeTree;
+        let trees = vec![NodeTree::element("p").with_child(NodeTree::text("one"))];
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::InsertChild(trees),
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert!(
+            result.contains("insert-child"),
+            "should contain 'insert-child'; got: {result}"
+        );
+        assert!(
+            result.contains("(1 subtree(s))"),
+            "should contain '(1 subtree(s))'; got: {result}"
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_insert_before() {
+        use ned::NodeTree;
+        let trees = vec![NodeTree::element("p").with_child(NodeTree::text("one"))];
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::InsertBefore(trees),
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert!(
+            result.contains("insert-before"),
+            "should contain 'insert-before'; got: {result}"
+        );
+        assert!(
+            result.contains("(1 subtree(s))"),
+            "should contain '(1 subtree(s))'; got: {result}"
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_insert_after() {
+        use ned::NodeTree;
+        let trees = vec![NodeTree::element("p").with_child(NodeTree::text("one"))];
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::InsertAfter(trees),
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert!(
+            result.contains("insert-after"),
+            "should contain 'insert-after'; got: {result}"
+        );
+        assert!(
+            result.contains("(1 subtree(s))"),
+            "should contain '(1 subtree(s))'; got: {result}"
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_stale() {
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::SetText("Hi".to_string()),
+            editorial_types::NedSuggestionStatus::Stale {
+                reason: "selection no longer resolves to any node".to_string(),
+            },
+            editorial_types::Author::Claude,
+        );
+        let result = format_ned_suggestion(&s);
+        assert_eq!(
+            result,
+            r#"[Claude] STALE set-text @ (ned/slot (ned/doc-by-path "content/post/hello.md") "title"): Test reason -> "Hi" [was: selection no longer resolves to any node] (sug-test-id)"#
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_accepted_and_rejected() {
+        let accepted = make_ned_suggestion(
+            editorial_types::NedMutation::Delete,
+            editorial_types::NedSuggestionStatus::Accepted,
+            editorial_types::Author::Claude,
+        );
+        let result_accepted = format_ned_suggestion(&accepted);
+        assert!(
+            result_accepted.contains("ACCEPTED "),
+            "accepted suggestion should contain 'ACCEPTED '; got: {result_accepted}"
+        );
+
+        let rejected = make_ned_suggestion(
+            editorial_types::NedMutation::Delete,
+            editorial_types::NedSuggestionStatus::Rejected,
+            editorial_types::Author::Claude,
+        );
+        let result_rejected = format_ned_suggestion(&rejected);
+        assert!(
+            result_rejected.contains("REJECTED "),
+            "rejected suggestion should contain 'REJECTED '; got: {result_rejected}"
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_human_author() {
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::Delete,
+            editorial_types::NedSuggestionStatus::Pending,
+            editorial_types::Author::Human("Alice".to_string()),
+        );
+        let result = format_ned_suggestion(&s);
+        assert!(
+            result.starts_with("[Alice] "),
+            "human author should produce '[Alice] ' prefix; got: {result}"
         );
     }
 }
