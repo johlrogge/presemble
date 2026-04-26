@@ -141,6 +141,22 @@ pub enum Command {
     /// Returns the stem of the collection that the slot links to, or None if
     /// the slot isn't a link or the target can't be determined.
     ResolveLinkTargetStem { source_stem: String, slot: String },
+    /// Create a NED-based editorial suggestion without applying it.
+    CreateNedSuggestion {
+        file: std::path::PathBuf,
+        selection: String,
+        mutation: editorial_types::NedMutation,
+        reason: String,
+        author: editorial_types::Author,
+    },
+    /// Accept a NED-based suggestion: apply the mutation and mark as accepted.
+    AcceptNedSuggestion {
+        id: editorial_types::SuggestionId,
+    },
+    /// Reject a NED-based suggestion: dismiss without applying.
+    RejectNedSuggestion {
+        id: editorial_types::SuggestionId,
+    },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -207,6 +223,16 @@ pub enum ConductorEvent {
     SuggestionRejected {
         id: editorial_types::SuggestionId,
         file: editorial_types::ContentPath,
+    },
+    /// A NED-based editorial suggestion was created.
+    NedSuggestionCreated {
+        suggestion: editorial_types::NedSuggestion,
+    },
+    /// A NED-based suggestion went stale (accept-time re-evaluation failed).
+    NedSuggestionStaled {
+        id: editorial_types::SuggestionId,
+        file: std::path::PathBuf,
+        reason: String,
     },
 }
 

@@ -151,7 +151,9 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                             let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
                         }
                         Ok(conductor::ConductorEvent::SuggestionCreated { .. }) |
-                        Ok(conductor::ConductorEvent::SuggestionRejected { .. }) => {
+                        Ok(conductor::ConductorEvent::SuggestionRejected { .. }) |
+                        Ok(conductor::ConductorEvent::NedSuggestionCreated { .. }) |
+                        Ok(conductor::ConductorEvent::NedSuggestionStaled { .. }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::Reload { pages: vec![], anchor: None });
                         }
                         Err(e) => {
