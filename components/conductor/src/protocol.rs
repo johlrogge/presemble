@@ -157,6 +157,10 @@ pub enum Command {
     RejectNedSuggestion {
         id: editorial_types::SuggestionId,
     },
+    /// Query all NED suggestions for a file (all statuses).
+    GetNedSuggestions {
+        file: editorial_types::ContentPath,
+    },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -193,6 +197,8 @@ pub enum Response {
     /// The resolved link target stem for a slot on a source schema.
     /// `None` means the slot isn't a link slot or the target couldn't be determined.
     LinkTargetStem(Option<String>),
+    /// List of NED suggestions for a file (all statuses).
+    NedSuggestions(Vec<editorial_types::NedSuggestion>),
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.

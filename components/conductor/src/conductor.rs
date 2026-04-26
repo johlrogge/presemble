@@ -2975,6 +2975,16 @@ impl Conductor {
                     ConductorEvent::SuggestionRejected { id, file: sug.file },
                 ])
             }
+
+            Command::GetNedSuggestions { file } => {
+                let map = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
+                let result: Vec<editorial_types::NedSuggestion> = map
+                    .values()
+                    .filter(|s| s.file == file)
+                    .cloned()
+                    .collect();
+                CommandResult::with_response(Response::NedSuggestions(result))
+            }
         }
     }
 }
@@ -5079,5 +5089,202 @@ mod ned_suggestion_handler_tests {
         let deserialized: editorial_types::NedSuggestion =
             serde_json::from_str(&contents).expect("deserialize");
         assert_eq!(deserialized.status, editorial_types::NedSuggestionStatus::Rejected);
+    }
+
+    // ── GetNedSuggestions tests ────────────────────────────────────────────────
+
+    #[test]
+    fn get_ned_suggestions_empty_for_unknown_file() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        let file = editorial_types::ContentPath::new("content/test/nonexistent.md");
+        let result = conductor.handle_command(Command::GetNedSuggestions { file });
+
+        match result.response {
+            Response::NedSuggestions(v) => assert!(v.is_empty(), "expected empty vec"),
+            other => panic!("expected NedSuggestions, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_ned_suggestions_returns_pending_suggestion() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let create_cmd = Command::CreateNedSuggestion {
+            file: std::path::PathBuf::from("content/test/doc.md"),
+            selection: selection.to_string(),
+            mutation: editorial_types::NedMutation::SetText("Pending Title".to_string()),
+            reason: "pending test".to_string(),
+            author: editorial_types::Author::Claude,
+        };
+        let create_result = conductor.handle_command(create_cmd);
+        let id = match create_result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got: {other:?}"),
+        };
+
+        let file = editorial_types::ContentPath::new("content/test/doc.md");
+        let result = conductor.handle_command(Command::GetNedSuggestions { file });
+
+        match result.response {
+            Response::NedSuggestions(v) => {
+                assert_eq!(v.len(), 1, "expected one suggestion");
+                assert_eq!(v[0].id, id);
+                assert_eq!(v[0].status, editorial_types::NedSuggestionStatus::Pending);
+            }
+            other => panic!("expected NedSuggestions, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_ned_suggestions_returns_all_statuses() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        let file_path = std::path::PathBuf::from("content/test/doc.md");
+        let file = editorial_types::ContentPath::new("content/test/doc.md");
+        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+
+        // Create a Pending suggestion
+        let create_pending = Command::CreateNedSuggestion {
+            file: file_path.clone(),
+            selection: selection.to_string(),
+            mutation: editorial_types::NedMutation::SetText("Pending".to_string()),
+            reason: "pending".to_string(),
+            author: editorial_types::Author::Claude,
+        };
+        conductor.handle_command(create_pending);
+
+        // Create and accept a suggestion → Accepted
+        let create_accepted = Command::CreateNedSuggestion {
+            file: file_path.clone(),
+            selection: selection.to_string(),
+            mutation: editorial_types::NedMutation::SetText("Accepted".to_string()),
+            reason: "to accept".to_string(),
+            author: editorial_types::Author::Claude,
+        };
+        let accepted_id = match conductor.handle_command(create_accepted).response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got: {other:?}"),
+        };
+        conductor.handle_command(Command::AcceptNedSuggestion { id: accepted_id });
+
+        // Create and reject a suggestion → Rejected
+        let create_rejected = Command::CreateNedSuggestion {
+            file: file_path.clone(),
+            selection: selection.to_string(),
+            mutation: editorial_types::NedMutation::SetText("Rejected".to_string()),
+            reason: "to reject".to_string(),
+            author: editorial_types::Author::Claude,
+        };
+        let rejected_id = match conductor.handle_command(create_rejected).response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got: {other:?}"),
+        };
+        conductor.handle_command(Command::RejectNedSuggestion { id: rejected_id });
+
+        // Create a suggestion that goes Stale: clear the NodeStore so the
+        // selection fails to resolve on accept.
+        let create_stale = Command::CreateNedSuggestion {
+            file: file_path.clone(),
+            selection: selection.to_string(),
+            mutation: editorial_types::NedMutation::SetText("Stale".to_string()),
+            reason: "to go stale".to_string(),
+            author: editorial_types::Author::Claude,
+        };
+        let stale_id = match conductor.handle_command(create_stale).response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got: {other:?}"),
+        };
+        // Wipe the NodeStore so selection resolution fails → Stale
+        conductor.node_store.write().unwrap().clear();
+        conductor.handle_command(Command::AcceptNedSuggestion { id: stale_id });
+
+        // Query all suggestions for the file
+        let result = conductor.handle_command(Command::GetNedSuggestions { file });
+
+        match result.response {
+            Response::NedSuggestions(v) => {
+                assert_eq!(v.len(), 4, "expected four suggestions (Pending, Accepted, Rejected, Stale)");
+                let statuses: Vec<_> = v.iter().map(|s| &s.status).collect();
+                assert!(
+                    statuses.iter().any(|s| **s == editorial_types::NedSuggestionStatus::Pending),
+                    "missing Pending"
+                );
+                assert!(
+                    statuses.iter().any(|s| **s == editorial_types::NedSuggestionStatus::Accepted),
+                    "missing Accepted"
+                );
+                assert!(
+                    statuses.iter().any(|s| **s == editorial_types::NedSuggestionStatus::Rejected),
+                    "missing Rejected"
+                );
+                assert!(
+                    statuses.iter().any(|s| matches!(s, editorial_types::NedSuggestionStatus::Stale { .. })),
+                    "missing Stale"
+                );
+            }
+            other => panic!("expected NedSuggestions, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_ned_suggestions_filters_by_file() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        let file_a = std::path::PathBuf::from("content/test/doc.md");
+        let selection_a = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+
+        // Create suggestion on file_a
+        let create_a = Command::CreateNedSuggestion {
+            file: file_a.clone(),
+            selection: selection_a.to_string(),
+            mutation: editorial_types::NedMutation::SetText("For file A".to_string()),
+            reason: "file a".to_string(),
+            author: editorial_types::Author::Claude,
+        };
+        let id_a = match conductor.handle_command(create_a).response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got: {other:?}"),
+        };
+
+        // Insert a suggestion for file_b directly into the map (no doc in NodeStore)
+        let id_b = editorial_types::SuggestionId::new();
+        let sug_b = editorial_types::NedSuggestion {
+            id: id_b.clone(),
+            author: editorial_types::Author::Human("editor".to_string()),
+            file: editorial_types::ContentPath::new("content/test/other.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("For file B".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "file b".to_string(),
+            status: editorial_types::NedSuggestionStatus::Pending,
+            created_at: "2026-04-26T00:00:00Z".to_string(),
+        };
+        conductor.ned_suggestions.write().unwrap().insert(id_b, sug_b);
+
+        // Query file_a only
+        let file_a_query = editorial_types::ContentPath::new("content/test/doc.md");
+        let result_a = conductor.handle_command(Command::GetNedSuggestions { file: file_a_query });
+
+        match result_a.response {
+            Response::NedSuggestions(v) => {
+                assert_eq!(v.len(), 1, "expected only file_a suggestion");
+                assert_eq!(v[0].id, id_a);
+            }
+            other => panic!("expected NedSuggestions, got: {other:?}"),
+        }
+
+        // Query file_b only
+        let file_b_query = editorial_types::ContentPath::new("content/test/other.md");
+        let result_b = conductor.handle_command(Command::GetNedSuggestions { file: file_b_query });
+
+        match result_b.response {
+            Response::NedSuggestions(v) => {
+                assert_eq!(v.len(), 1, "expected only file_b suggestion");
+                assert_eq!(v[0].file, editorial_types::ContentPath::new("content/test/other.md"));
+            }
+            other => panic!("expected NedSuggestions, got: {other:?}"),
+        }
     }
 }
