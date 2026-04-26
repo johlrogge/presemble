@@ -1569,4 +1569,272 @@ mod tests {
             "human author should produce '[Alice] ' prefix; got: {result}"
         );
     }
+
+    // ── E2E tests: MCP request → conductor → response ─────────────────────────
+    //
+    // These tests spin up a real in-process conductor IPC server on a background
+    // thread, then exercise `handle_request` end-to-end: JSON-RPC request
+    // construction → conductor dispatch → response parsing.  No external
+    // processes are required.
+
+    /// Build a minimal site in `tmp` and return the conductor URL.
+    ///
+    /// Creates:
+    ///   schemas/post/item.md  — a single-slot "title" schema
+    ///   templates/post/item.hiccup
+    ///   content/post/first-post.md
+    fn build_e2e_site(tmp: &tempfile::TempDir) {
+        use std::fs;
+        let root = tmp.path();
+        fs::create_dir_all(root.join("schemas/post")).expect("schemas dir");
+        fs::create_dir_all(root.join("templates/post")).expect("templates dir");
+        fs::create_dir_all(root.join("content/post")).expect("content dir");
+        fs::write(
+            root.join("schemas/post/item.md"),
+            "# Post title {#title}\noccurs\n: exactly once\n",
+        )
+        .expect("schema file");
+        fs::write(root.join("templates/post/item.hiccup"), "[:div]").expect("template file");
+        fs::write(
+            root.join("content/post/first-post.md"),
+            "# First Post\n\nBody text here.\n",
+        )
+        .expect("content file");
+
+    }
+
+    /// Start an in-process conductor IPC server for `site_dir` on a background thread.
+    ///
+    /// Returns the socket URL.  The server runs until the test process exits
+    /// (or a `Shutdown` command is received).
+    fn start_conductor_server(site_dir: &std::path::Path) -> String {
+        let url = conductor::socket_url(site_dir);
+        let url_clone = url.clone();
+        let site_dir = site_dir.to_path_buf();
+
+        std::thread::spawn(move || {
+            let repo = site_repository::SiteRepository::builder()
+                .from_dir(&site_dir)
+                .build();
+            let cond = conductor::Conductor::with_repo(site_dir, repo)
+                .expect("conductor");
+
+            let rep_socket = nng::Socket::new(nng::Protocol::Rep0)
+                .expect("Rep0 socket");
+            rep_socket.listen(&url_clone).expect("listen");
+
+            // Pub socket (required by socket_url protocol; MCP doesn't use it).
+            let pub_url = format!("{url_clone}-pub");
+            let pub_socket = nng::Socket::new(nng::Protocol::Pub0)
+                .expect("Pub0 socket");
+            pub_socket.listen(&pub_url).expect("pub listen");
+
+            loop {
+                let msg = match rep_socket.recv() {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let cmd: conductor::Command = match serde_json::from_slice(&msg) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let resp = conductor::Response::Error(format!("invalid: {e}"));
+                        let data = serde_json::to_vec(&resp).unwrap_or_default();
+                        let _ = rep_socket.send(nng::Message::from(data.as_slice()));
+                        continue;
+                    }
+                };
+                let is_shutdown = matches!(cmd, conductor::Command::Shutdown);
+                let result = cond.handle_command(cmd);
+                let data = serde_json::to_vec(&result.response).unwrap_or_default();
+                let _ = rep_socket.send(nng::Message::from(data.as_slice()));
+                if is_shutdown {
+                    break;
+                }
+            }
+        });
+
+        // Poll until the server is ready (up to 5 s).
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Ok(client) = conductor::ConductorClient::connect(&url)
+                && client.ping().is_ok()
+            {
+                return url;
+            }
+        }
+        panic!("conductor server did not start within 5 seconds");
+    }
+
+    /// Extract the `text` field from a JSON-RPC `content[0].text` response.
+    fn extract_text(resp: &JsonRpcResponse) -> String {
+        resp.result
+            .as_ref()
+            .and_then(|r| r.get("content"))
+            .and_then(|c| c.get(0))
+            .and_then(|item| item.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn e2e_suggest_ned_creates_pending_suggestion() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        let _server_url = start_conductor_server(tmp.path());
+
+        let site_dir = tmp.path();
+        let file = "content/post/first-post.md";
+        let selection = format!(
+            r#"(ned/slot (ned/doc-by-path "{}") "title")"#,
+            file
+        );
+
+        // ── suggest_ned ──────────────────────────────────────────────────────
+        let req = make_request(
+            Value::from(1),
+            "tools/call",
+            serde_json::json!({
+                "name": "suggest_ned",
+                "arguments": {
+                    "file": file,
+                    "selection": selection,
+                    "mutation": { "SetText": "Updated Title" },
+                    "reason": "test ned mcp"
+                }
+            }),
+        );
+        let resp = handle_request(&req, site_dir);
+        let text = extract_text(&resp);
+        assert!(
+            text.contains("NED suggestion created"),
+            "suggest_ned should confirm creation; got: {text}"
+        );
+        assert!(
+            !text.contains("isError"),
+            "suggest_ned should not return an error; got: {text}"
+        );
+
+        // ── get_suggestions should return the new entry ───────────────────────
+        let req2 = make_request(
+            Value::from(2),
+            "tools/call",
+            serde_json::json!({
+                "name": "get_suggestions",
+                "arguments": { "file": file }
+            }),
+        );
+        let resp2 = handle_request(&req2, site_dir);
+        let text2 = extract_text(&resp2);
+        assert!(
+            text2.contains("set-text"),
+            "get_suggestions should list set-text entry; got: {text2}"
+        );
+        assert!(
+            text2.contains("(sug-"),
+            "get_suggestions should include suggestion id; got: {text2}"
+        );
+    }
+
+    #[test]
+    fn e2e_legacy_suggest_routes_through_ned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        let _server_url = start_conductor_server(tmp.path());
+
+        let site_dir = tmp.path();
+        let file = "content/post/first-post.md";
+
+        // ── legacy suggest ────────────────────────────────────────────────────
+        let req = make_request(
+            Value::from(1),
+            "tools/call",
+            serde_json::json!({
+                "name": "suggest",
+                "arguments": {
+                    "file": file,
+                    "slot": "title",
+                    "value": "A Better Title",
+                    "reason": "legacy suggest test"
+                }
+            }),
+        );
+        let resp = handle_request(&req, site_dir);
+        let text = extract_text(&resp);
+        assert!(
+            text.contains("Suggestion created") && text.contains("NED"),
+            "legacy suggest should confirm NED creation; got: {text}"
+        );
+
+        // ── get_suggestions should list it as set-text ────────────────────────
+        let req2 = make_request(
+            Value::from(2),
+            "tools/call",
+            serde_json::json!({
+                "name": "get_suggestions",
+                "arguments": { "file": file }
+            }),
+        );
+        let resp2 = handle_request(&req2, site_dir);
+        let text2 = extract_text(&resp2);
+        assert!(
+            text2.contains("set-text"),
+            "get_suggestions after legacy suggest should show set-text; got: {text2}"
+        );
+        assert!(
+            text2.contains("(sug-"),
+            "get_suggestions should include a suggestion id; got: {text2}"
+        );
+    }
+
+    #[test]
+    fn e2e_legacy_suggest_body_edit_routes_through_ned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        let _server_url = start_conductor_server(tmp.path());
+
+        let site_dir = tmp.path();
+        let file = "content/post/first-post.md";
+
+        // ── suggest_body_edit ────────────────────────────────────────────────
+        let req = make_request(
+            Value::from(1),
+            "tools/call",
+            serde_json::json!({
+                "name": "suggest_body_edit",
+                "arguments": {
+                    "file": file,
+                    "search": "Body text here",
+                    "replace": "Body text there",
+                    "reason": "smoother prose"
+                }
+            }),
+        );
+        let resp = handle_request(&req, site_dir);
+        let text = extract_text(&resp);
+        assert!(
+            text.contains("Body edit suggestion created") && text.contains("NED"),
+            "suggest_body_edit should confirm NED creation; got: {text}"
+        );
+
+        // ── get_suggestions should list it as search-replace ─────────────────
+        let req2 = make_request(
+            Value::from(2),
+            "tools/call",
+            serde_json::json!({
+                "name": "get_suggestions",
+                "arguments": { "file": file }
+            }),
+        );
+        let resp2 = handle_request(&req2, site_dir);
+        let text2 = extract_text(&resp2);
+        assert!(
+            text2.contains("search-replace"),
+            "get_suggestions after suggest_body_edit should show search-replace; got: {text2}"
+        );
+        assert!(
+            text2.contains("(sug-"),
+            "get_suggestions should include a suggestion id; got: {text2}"
+        );
+    }
 }

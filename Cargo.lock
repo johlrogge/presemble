@@ -1459,7 +1459,9 @@ version = "0.35.0"
 dependencies = [
  "conductor",
  "editorial_types",
+ "mem_site_repository",
  "ned",
+ "nng",
  "node_store",
  "serde",
  "serde_json",

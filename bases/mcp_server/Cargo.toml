@@ -15,4 +15,6 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 node_store = { workspace = true }
+nng = { workspace = true }
+site_repository = { workspace = true }
 tempfile = { workspace = true }
