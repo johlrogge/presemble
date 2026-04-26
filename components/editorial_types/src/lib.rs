@@ -2,6 +2,7 @@ use ned::NodeTree;
 
 mod ned_program;
 pub use ned_program::compose_ned_program;
+pub use ned_program::clj_str_literal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

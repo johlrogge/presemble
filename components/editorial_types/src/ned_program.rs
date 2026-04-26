@@ -28,6 +28,23 @@ pub(crate) fn clj_str(s: &str) -> String {
     format!("\"{}\"", clj_str_escape(s))
 }
 
+/// Public version of [`clj_str`]: wrap a Rust `&str` as a Clojure string
+/// literal including surrounding double quotes.
+///
+/// Use this when you need to embed a runtime value inside a Clojure source
+/// expression that will be sent to the NED runtime. The helper escapes `\\`
+/// and `"`, strips CR and null bytes, and leaves all other characters through.
+///
+/// Example:
+/// ```
+/// use editorial_types::clj_str_literal;
+/// assert_eq!(clj_str_literal("hello"), "\"hello\"");
+/// assert_eq!(clj_str_literal(r#"a"b"#), r#""a\"b""#);
+/// ```
+pub fn clj_str_literal(s: &str) -> String {
+    clj_str(s)
+}
+
 /// Render a [`NodeTree`] to Clojure source that reconstructs the same tree
 /// at runtime using the `ned/mk-text`, `ned/mk-element`, `ned/with-attr`, and
 /// `ned/with-child` primitives.

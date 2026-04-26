@@ -229,7 +229,7 @@ fn handle_request(
                     },
                     {
                         "name": "suggest",
-                        "description": "Suggest an editorial change to a content slot. The suggestion appears as an LSP diagnostic in the editor with accept/reject actions. The author is always in charge.",
+                        "description": "Suggest an editorial change to a content slot. The suggestion appears as an LSP diagnostic in the editor with accept/reject actions. The author is always in charge. (routed through NED internally)",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -484,17 +484,18 @@ fn handle_request(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    match cond.send(&conductor::Command::SuggestSlotValue {
-                        file: editorial_types::ContentPath::new(file),
-                        slot: editorial_types::SlotName::new(slot),
-                        value: value.to_string(),
+                    let (selection, mutation) = lower_suggest_args(file, slot, value);
+                    match cond.send(&conductor::Command::CreateNedSuggestion {
+                        file: std::path::PathBuf::from(file),
+                        selection,
+                        mutation,
                         reason: reason.to_string(),
                         author: editorial_types::Author::Claude,
                     }) {
                         Ok(conductor::Response::SuggestionCreated(id)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
-                                "content": [{"type": "text", "text": format!("Suggestion created: {id}. It will appear as a diagnostic in the editor.")}]
+                                "content": [{"type": "text", "text": format!("Suggestion created: {id} (NED). It will appear in the editor.")}]
                             }),
                         ),
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
@@ -763,6 +764,26 @@ fn validate_no_existing(m: &editorial_types::NedMutation) -> Result<(), String> 
         | NedMutation::InsertBefore(trees)
         | NedMutation::InsertAfter(trees) => check_trees(trees),
     }
+}
+
+/// Lower the legacy `suggest` tool arguments to a NED selection expression and
+/// mutation, ready to pass to [`conductor::Command::CreateNedSuggestion`].
+///
+/// Builds a selection of the form:
+/// `(ned/slot (ned/doc-by-path "<file>") "<slot>")`,
+/// with `file` and `slot` properly escaped as Clojure string literals.
+fn lower_suggest_args(
+    file: &str,
+    slot: &str,
+    value: &str,
+) -> (String, editorial_types::NedMutation) {
+    let selection = format!(
+        "(ned/slot (ned/doc-by-path {}) {})",
+        editorial_types::clj_str_literal(file),
+        editorial_types::clj_str_literal(slot),
+    );
+    let mutation = editorial_types::NedMutation::SetText(value.to_string());
+    (selection, mutation)
 }
 
 #[cfg(test)]
@@ -1074,5 +1095,49 @@ mod tests {
         assert!(validate_no_existing(&sr).is_ok(), "SearchReplace should be Ok");
 
         assert!(validate_no_existing(&editorial_types::NedMutation::Delete).is_ok(), "Delete should be Ok");
+    }
+
+    // ── lower_suggest_args tests ──────────────────────────────────────────────
+
+    #[test]
+    fn lower_suggest_args_produces_correct_selection_and_mutation() {
+        let (selection, mutation) =
+            lower_suggest_args("content/post/x.md", "title", "Hello");
+        assert_eq!(
+            selection,
+            r#"(ned/slot (ned/doc-by-path "content/post/x.md") "title")"#
+        );
+        assert!(
+            matches!(mutation, editorial_types::NedMutation::SetText(ref s) if s == "Hello"),
+            "unexpected mutation: {mutation:?}"
+        );
+    }
+
+    #[test]
+    fn lower_suggest_args_escapes_double_quotes_in_file_and_slot() {
+        // A file or slot containing a double-quote must be escaped so the
+        // resulting Clojure literal is valid.
+        let (selection, _mutation) =
+            lower_suggest_args(r#"content/post/say "hi".md"#, r#"slot "x""#, "val");
+        // Both the file and slot string should have escaped double-quotes.
+        assert!(
+            selection.contains(r#"\"hi\""#),
+            "double-quote in file not escaped; got: {selection}"
+        );
+        assert!(
+            selection.contains(r#"\"x\""#),
+            "double-quote in slot not escaped; got: {selection}"
+        );
+    }
+
+    #[test]
+    fn lower_suggest_args_escapes_backslashes_in_file_and_slot() {
+        let (selection, _mutation) =
+            lower_suggest_args(r"content\path\file.md", r"slot\name", "val");
+        // Backslashes must be doubled in Clojure string literals.
+        assert!(
+            selection.contains(r"\\"),
+            "backslash not escaped; got: {selection}"
+        );
     }
 }
