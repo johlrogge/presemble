@@ -277,7 +277,7 @@ fn handle_request(
                     },
                     {
                         "name": "suggest_body_edit",
-                        "description": "Suggest a text replacement in the body of a content file. The suggestion appears as a diagnostic in the editor.",
+                        "description": "Suggest a text replacement in the body of a content file. The suggestion appears as a diagnostic in the editor. (routed through NED — search/replace now matches across preamble + body; scope tightening tracked for follow-up)",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -604,17 +604,18 @@ fn handle_request(
                     let replace = arguments.get("replace").and_then(|v| v.as_str()).unwrap_or("");
                     let reason = arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("");
 
-                    match cond.send(&conductor::Command::SuggestBodyEdit {
-                        file: editorial_types::ContentPath::new(file),
-                        search: search.to_string(),
-                        replace: replace.to_string(),
+                    let (selection, mutation) = lower_body_edit_args(file, search, replace);
+                    match cond.send(&conductor::Command::CreateNedSuggestion {
+                        file: std::path::PathBuf::from(file),
+                        selection,
+                        mutation,
                         reason: reason.to_string(),
                         author: editorial_types::Author::Claude,
                     }) {
                         Ok(conductor::Response::SuggestionCreated(id)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
-                                "content": [{"type": "text", "text": format!("Suggestion created: {id}. It will appear as a diagnostic in the editor.")}]
+                                "content": [{"type": "text", "text": format!("Body edit suggestion created: {id} (NED). It will appear in the editor.")}]
                             }),
                         ),
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
@@ -783,6 +784,30 @@ fn lower_suggest_args(
         editorial_types::clj_str_literal(slot),
     );
     let mutation = editorial_types::NedMutation::SetText(value.to_string());
+    (selection, mutation)
+}
+
+/// Lower `suggest_body_edit` arguments to a NED selection + [`NedMutation::SearchReplace`]
+/// mutation, ready to pass to [`conductor::Command::CreateNedSuggestion`].
+///
+/// There is currently no `ned/body-of` primitive that returns all body content as
+/// a Selection, so the selection targets the whole document via `(ned/doc-by-path …)`.
+/// This widens scope versus the legacy behaviour — `SearchReplace` will match across
+/// preamble + body rather than body-only.  A body-scoping primitive is tracked as a
+/// follow-up to tighten this.
+fn lower_body_edit_args(
+    file: &str,
+    search: &str,
+    replace: &str,
+) -> (String, editorial_types::NedMutation) {
+    let selection = format!(
+        "(ned/doc-by-path {})",
+        editorial_types::clj_str_literal(file),
+    );
+    let mutation = editorial_types::NedMutation::SearchReplace {
+        search: search.to_string(),
+        replace: replace.to_string(),
+    };
     (selection, mutation)
 }
 
@@ -1138,6 +1163,67 @@ mod tests {
         assert!(
             selection.contains(r"\\"),
             "backslash not escaped; got: {selection}"
+        );
+    }
+
+    // ── lower_body_edit_args tests ────────────────────────────────────────────
+
+    #[test]
+    fn lower_body_edit_args_produces_correct_selection_and_mutation() {
+        let (selection, mutation) =
+            lower_body_edit_args("content/post/x.md", "old text", "new text");
+        assert_eq!(
+            selection,
+            r#"(ned/doc-by-path "content/post/x.md")"#
+        );
+        assert!(
+            matches!(
+                mutation,
+                editorial_types::NedMutation::SearchReplace { ref search, ref replace }
+                    if search == "old text" && replace == "new text"
+            ),
+            "unexpected mutation: {mutation:?}"
+        );
+    }
+
+    #[test]
+    fn lower_body_edit_args_escapes_double_quotes_in_file() {
+        // A file path containing a double-quote must be escaped in the selection.
+        let (selection, mutation) =
+            lower_body_edit_args(r#"content/post/say "hi".md"#, r#"search "x""#, r#"replace "y""#);
+        // File must have escaped double-quotes in the selection string.
+        assert!(
+            selection.contains(r#"\"hi\""#),
+            "double-quote in file not escaped; got: {selection}"
+        );
+        // search/replace go into the mutation struct as-is (no escaping needed).
+        assert!(
+            matches!(
+                mutation,
+                editorial_types::NedMutation::SearchReplace { ref search, ref replace }
+                    if search == r#"search "x""# && replace == r#"replace "y""#
+            ),
+            "search/replace not passed through as-is; mutation: {mutation:?}"
+        );
+    }
+
+    #[test]
+    fn lower_body_edit_args_escapes_backslashes_in_file() {
+        let (selection, mutation) =
+            lower_body_edit_args(r"content\path\file.md", r"search\val", r"replace\val");
+        // Backslashes in file must be doubled in the Clojure string literal.
+        assert!(
+            selection.contains(r"\\"),
+            "backslash not escaped in file; got: {selection}"
+        );
+        // search/replace are passed through as-is into the mutation.
+        assert!(
+            matches!(
+                mutation,
+                editorial_types::NedMutation::SearchReplace { ref search, ref replace }
+                    if search == r"search\val" && replace == r"replace\val"
+            ),
+            "search/replace not passed through as-is; mutation: {mutation:?}"
         );
     }
 }
