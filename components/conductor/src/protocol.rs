@@ -108,6 +108,8 @@ pub enum Command {
     GetDirtyBuffers,
     /// List distinct file paths that have at least one pending suggestion.
     GetSuggestionFiles,
+    /// List distinct file paths that have at least one pending NED suggestion.
+    GetNedSuggestionFiles,
     /// Write a dirty buffer to disk.
     SaveBuffer { path: String },
     /// Write all dirty buffers to disk.
@@ -182,6 +184,8 @@ pub enum Response {
     DirtyBuffers(Vec<String>),
     /// Distinct file paths that have at least one pending suggestion (sorted).
     SuggestionFiles(Vec<String>),
+    /// Distinct file paths that have at least one pending NED suggestion (sorted).
+    NedSuggestionFiles(Vec<String>),
     /// Classification of a file path.
     FileClassification(FileClassification),
     /// List of schema stems and their source text: `(stem, source)` pairs.

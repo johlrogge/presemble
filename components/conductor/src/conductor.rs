@@ -2688,6 +2688,17 @@ impl Conductor {
                     .collect();
                 CommandResult::with_response(Response::SuggestionFiles(files))
             }
+            Command::GetNedSuggestionFiles => {
+                let suggestions = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
+                let files: Vec<String> = suggestions
+                    .values()
+                    .filter(|s| matches!(s.status, editorial_types::NedSuggestionStatus::Pending))
+                    .map(|s| s.file.to_string())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                CommandResult::with_response(Response::NedSuggestionFiles(files))
+            }
             Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity, theme } => {
                 match site_templates::template_by_name(&template_name) {
                     Some(template) => {
@@ -5285,6 +5296,144 @@ mod ned_suggestion_handler_tests {
                 assert_eq!(v[0].file, editorial_types::ContentPath::new("content/test/other.md"));
             }
             other => panic!("expected NedSuggestions, got: {other:?}"),
+        }
+    }
+
+    // ── GetNedSuggestionFiles tests ───────────────────────────────────────────
+
+    #[test]
+    fn get_ned_suggestion_files_returns_only_pending_files() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        let id_a = editorial_types::SuggestionId::new();
+        let sug_a = editorial_types::NedSuggestion {
+            id: id_a.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/alpha.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("Alpha".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "file alpha".to_string(),
+            status: editorial_types::NedSuggestionStatus::Pending,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+
+        let id_b = editorial_types::SuggestionId::new();
+        let sug_b = editorial_types::NedSuggestion {
+            id: id_b.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/beta.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("Beta".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "file beta".to_string(),
+            status: editorial_types::NedSuggestionStatus::Pending,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+
+        // Insert a Rejected suggestion for a third file -- must NOT appear in results.
+        let id_c = editorial_types::SuggestionId::new();
+        let sug_c = editorial_types::NedSuggestion {
+            id: id_c.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/gamma.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("Gamma".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "file gamma rejected".to_string(),
+            status: editorial_types::NedSuggestionStatus::Rejected,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+
+        {
+            let mut map = conductor.ned_suggestions.write().unwrap();
+            map.insert(id_a, sug_a);
+            map.insert(id_b, sug_b);
+            map.insert(id_c, sug_c);
+        }
+
+        let result = conductor.handle_command(Command::GetNedSuggestionFiles);
+
+        match result.response {
+            Response::NedSuggestionFiles(files) => {
+                assert_eq!(files.len(), 2, "expected exactly two pending files");
+                assert_eq!(files[0], "content/test/alpha.md");
+                assert_eq!(files[1], "content/test/beta.md");
+            }
+            other => panic!("expected NedSuggestionFiles, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_ned_suggestion_files_empty_when_none_pending() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        let id = editorial_types::SuggestionId::new();
+        let sug = editorial_types::NedSuggestion {
+            id: id.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/doc.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("No show".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "rejected".to_string(),
+            status: editorial_types::NedSuggestionStatus::Rejected,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+        conductor.ned_suggestions.write().unwrap().insert(id, sug);
+
+        let result = conductor.handle_command(Command::GetNedSuggestionFiles);
+
+        match result.response {
+            Response::NedSuggestionFiles(files) => {
+                assert!(files.is_empty(), "expected no files when nothing is Pending");
+            }
+            other => panic!("expected NedSuggestionFiles, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_ned_suggestion_files_deduplicates_same_file() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        let id_1 = editorial_types::SuggestionId::new();
+        let sug_1 = editorial_types::NedSuggestion {
+            id: id_1.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/doc.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("First".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "first".to_string(),
+            status: editorial_types::NedSuggestionStatus::Pending,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+        let id_2 = editorial_types::SuggestionId::new();
+        let sug_2 = editorial_types::NedSuggestion {
+            id: id_2.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/doc.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("Second".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "second".to_string(),
+            status: editorial_types::NedSuggestionStatus::Pending,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+        {
+            let mut map = conductor.ned_suggestions.write().unwrap();
+            map.insert(id_1, sug_1);
+            map.insert(id_2, sug_2);
+        }
+
+        let result = conductor.handle_command(Command::GetNedSuggestionFiles);
+
+        match result.response {
+            Response::NedSuggestionFiles(files) => {
+                assert_eq!(files.len(), 1, "expected deduplicated to one file");
+                assert_eq!(files[0], "content/test/doc.md");
+            }
+            other => panic!("expected NedSuggestionFiles, got: {other:?}"),
         }
     }
 }

@@ -1274,6 +1274,228 @@ fn watch_and_rebuild(
     }
 }
 
+// ── NED suggestion browser projection ────────────────────────────────────────
+
+/// Browser-friendly anchor derived from a NED selection string.
+///
+/// The browser must not parse Clojure; this struct carries a pre-derived anchor
+/// that identifies where the suggestion applies.
+#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+#[allow(dead_code)] // wired in T4
+enum AnchorJson {
+    /// Derived from `(ned/slot (ned/doc-by-path "FILE") "SLOT")`
+    Slot { file: String, slot: String },
+    /// Derived from `(ned/body-at (ned/doc-by-path "FILE") IDX)`
+    BodyNth { file: String, index: usize },
+    /// Fallback — doc found or nothing matched
+    Doc { file: Option<String> },
+}
+
+/// Browser-friendly representation of a `NedSuggestion`.
+#[derive(serde::Serialize)]
+#[allow(dead_code)] // wired in T4
+struct NedSuggestionJson {
+    id: String,
+    author: String,
+    file: String,
+    selection: String,
+    mutation: editorial_types::NedMutation,
+    workspace_hash: String,
+    reason: String,
+    status: editorial_types::NedSuggestionStatus,
+    created_at: String,
+    anchor: AnchorJson,
+}
+
+impl From<&editorial_types::NedSuggestion> for NedSuggestionJson {
+    fn from(s: &editorial_types::NedSuggestion) -> Self {
+        NedSuggestionJson {
+            id: s.id.to_string(),
+            author: s.author.to_string(),
+            file: s.file.to_string(),
+            selection: s.selection.clone(),
+            mutation: s.mutation.clone(),
+            workspace_hash: s.workspace_hash.clone(),
+            reason: s.reason.clone(),
+            status: s.status.clone(),
+            created_at: s.created_at.clone(),
+            anchor: derive_anchor(&s.selection),
+        }
+    }
+}
+
+/// Decode standard backslash escapes (`\\`, `\"`, `\n`, `\t`) in a captured string.
+#[allow(dead_code)] // used by scan_string, transitively by derive_anchor
+fn decode_clj_string_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => {
+                    // Unknown escape — pass through as-is
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Try to extract the contents of the first `"..."` string literal found at
+/// `pos` in `src` (where `pos` should point just past the opening `"`).
+/// Returns `(decoded_value, position_after_closing_quote)` or `None`.
+#[allow(dead_code)] // used transitively by derive_anchor (wired in T4)
+fn scan_string(src: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = src.as_bytes();
+    let mut i = start;
+    let mut raw = String::new();
+    loop {
+        if i >= bytes.len() {
+            return None;
+        }
+        let c = bytes[i] as char;
+        if c == '"' {
+            return Some((decode_clj_string_escapes(&raw), i + 1));
+        }
+        if c == '\\' {
+            if i + 1 >= bytes.len() {
+                return None;
+            }
+            raw.push(c);
+            raw.push(bytes[i + 1] as char);
+            i += 2;
+        } else {
+            raw.push(c);
+            i += 1;
+        }
+    }
+}
+
+/// Skip ASCII whitespace (including newlines) and return the new index.
+#[allow(dead_code)] // used transitively by derive_anchor (wired in T4)
+fn skip_ws(src: &str, pos: usize) -> usize {
+    let bytes = src.as_bytes();
+    let mut i = pos;
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Try to match `needle` at position `pos` in `src` (case-sensitive, ASCII).
+#[allow(dead_code)] // used transitively by derive_anchor (wired in T4)
+fn match_literal(src: &str, pos: usize, needle: &str) -> Option<usize> {
+    let end = pos + needle.len();
+    if end <= src.len() && &src[pos..end] == needle {
+        Some(end)
+    } else {
+        None
+    }
+}
+
+/// Parse `(ned/doc-by-path "FILE")` starting at `pos`.
+/// Returns `(file, pos_after_closing_paren)` or `None`.
+#[allow(dead_code)] // used transitively by derive_anchor (wired in T4)
+fn parse_doc_by_path(src: &str, pos: usize) -> Option<(String, usize)> {
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "(")?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/doc-by-path")?;
+    let pos = skip_ws(src, pos);
+    // Expect opening quote
+    let pos = match_literal(src, pos, "\"")?;
+    let (file, pos) = scan_string(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, ")")?;
+    Some((file, pos))
+}
+
+/// Derive an `AnchorJson` from a NED selection string.
+///
+/// Patterns matched (tolerant of interior whitespace/newlines):
+/// - `(ned/slot (ned/doc-by-path "FILE") "SLOT")` → `AnchorJson::Slot`
+/// - `(ned/body-at (ned/doc-by-path "FILE") IDX)` → `AnchorJson::BodyNth`
+/// - `(ned/doc-by-path "FILE")` anywhere → `AnchorJson::Doc { file: Some(...) }`
+/// - anything else → `AnchorJson::Doc { file: None }`
+#[allow(dead_code)] // wired in T4
+fn derive_anchor(selection: &str) -> AnchorJson {
+    // Try ned/slot first
+    if let Some(anchor) = try_parse_ned_slot(selection) {
+        return anchor;
+    }
+    // Try ned/body-at
+    if let Some(anchor) = try_parse_ned_body_at(selection) {
+        return anchor;
+    }
+    // Fallback: look for ned/doc-by-path anywhere in the string
+    if let Some(file) = find_doc_by_path_anywhere(selection) {
+        return AnchorJson::Doc { file: Some(file) };
+    }
+    AnchorJson::Doc { file: None }
+}
+
+/// Try to parse `(ned/slot (ned/doc-by-path "FILE") "SLOT")`.
+#[allow(dead_code)] // used by derive_anchor (wired in T4)
+fn try_parse_ned_slot(src: &str) -> Option<AnchorJson> {
+    // Find `(ned/slot` — search for the literal; there may be leading whitespace
+    let start = src.find("(ned/slot")?;
+    let pos = start + 1; // skip `(`
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/slot")?;
+    let pos = skip_ws(src, pos);
+    let (file, pos) = parse_doc_by_path(src, pos)?;
+    let pos = skip_ws(src, pos);
+    // Expect opening quote for slot name
+    let pos = match_literal(src, pos, "\"")?;
+    let (slot, _pos) = scan_string(src, pos)?;
+    Some(AnchorJson::Slot { file, slot })
+}
+
+/// Try to parse `(ned/body-at (ned/doc-by-path "FILE") IDX)`.
+#[allow(dead_code)] // used by derive_anchor (wired in T4)
+fn try_parse_ned_body_at(src: &str) -> Option<AnchorJson> {
+    let start = src.find("(ned/body-at")?;
+    let pos = start + 1; // skip `(`
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/body-at")?;
+    let pos = skip_ws(src, pos);
+    let (file, pos) = parse_doc_by_path(src, pos)?;
+    let pos = skip_ws(src, pos);
+    // Parse integer index
+    let bytes = src.as_bytes();
+    let mut end = pos;
+    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+        end += 1;
+    }
+    if end == pos {
+        return None; // no digits
+    }
+    let index: usize = src[pos..end].parse().ok()?;
+    Some(AnchorJson::BodyNth { file, index })
+}
+
+/// Scan `src` for any `(ned/doc-by-path "FILE")` occurrence and return the file.
+#[allow(dead_code)] // used by derive_anchor (wired in T4)
+fn find_doc_by_path_anywhere(src: &str) -> Option<String> {
+    let marker = "(ned/doc-by-path";
+    let start = src.find(marker)?;
+    let pos = start + marker.len();
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "\"")?;
+    let (file, _) = scan_string(src, pos)?;
+    Some(file)
+}
+
 fn render_error_page(url_path: &str, messages: &[String]) -> String {
     let items = messages
         .iter()
@@ -1435,5 +1657,119 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = apply_edit(dir.path(), "content/article/nope.md", "title", "x").unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
+    }
+
+    // ── derive_anchor tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn derive_anchor_slot_basic() {
+        let sel = r#"(ned/slot (ned/doc-by-path "posts/foo.md") "title")"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Slot {
+                file: "posts/foo.md".to_string(),
+                slot: "title".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_body_nth_basic() {
+        let sel = r#"(ned/body-at (ned/doc-by-path "posts/foo.md") 2)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::BodyNth {
+                file: "posts/foo.md".to_string(),
+                index: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_doc_only() {
+        let sel = r#"(ned/doc-by-path "posts/bar.md")"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Doc {
+                file: Some("posts/bar.md".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_fallback_no_match() {
+        let sel = "(some/other-form 42)";
+        assert_eq!(derive_anchor(sel), AnchorJson::Doc { file: None });
+    }
+
+    #[test]
+    fn derive_anchor_escaped_quotes_in_file_path() {
+        // File path containing a literal double-quote (escaped in Clojure as \")
+        let sel = r#"(ned/slot (ned/doc-by-path "path/with\"quote.md") "title")"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Slot {
+                file: r#"path/with"quote.md"#.to_string(),
+                slot: "title".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_whitespace_tolerance() {
+        let sel = "(ned/slot\n  (ned/doc-by-path\n    \"posts/foo.md\"\n  )\n  \"summary\"\n)";
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Slot {
+                file: "posts/foo.md".to_string(),
+                slot: "summary".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_body_nth_index_zero() {
+        let sel = r#"(ned/body-at (ned/doc-by-path "content/page.md") 0)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::BodyNth {
+                file: "content/page.md".to_string(),
+                index: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn anchor_json_slot_serializes_correctly() {
+        let anchor = AnchorJson::Slot {
+            file: "posts/foo.md".to_string(),
+            slot: "title".to_string(),
+        };
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert_eq!(json, r#"{"kind":"slot","file":"posts/foo.md","slot":"title"}"#);
+    }
+
+    #[test]
+    fn anchor_json_body_nth_serializes_correctly() {
+        let anchor = AnchorJson::BodyNth {
+            file: "posts/foo.md".to_string(),
+            index: 2,
+        };
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert_eq!(json, r#"{"kind":"body-nth","file":"posts/foo.md","index":2}"#);
+    }
+
+    #[test]
+    fn anchor_json_doc_with_file_serializes_correctly() {
+        let anchor = AnchorJson::Doc { file: Some("posts/foo.md".to_string()) };
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert_eq!(json, r#"{"kind":"doc","file":"posts/foo.md"}"#);
+    }
+
+    #[test]
+    fn anchor_json_doc_no_file_serializes_correctly() {
+        let anchor = AnchorJson::Doc { file: None };
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert_eq!(json, r#"{"kind":"doc","file":null}"#);
     }
 }
