@@ -1840,10 +1840,12 @@ dependencies = [
  "editorial_types",
  "expressions",
  "forms",
+ "http-body-util",
  "lsp_capabilities",
  "lsp_service",
  "mcp_server",
  "mem_site_repository",
+ "nng",
  "notify",
  "rayon",
  "reader",
@@ -1860,6 +1862,7 @@ dependencies = [
  "template",
  "template_registry",
  "tokio",
+ "tower 0.5.3",
  "tower-lsp",
 ]
 

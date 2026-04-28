@@ -2692,7 +2692,7 @@ impl Conductor {
                 let suggestions = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
                 let files: Vec<String> = suggestions
                     .values()
-                    .filter(|s| matches!(s.status, editorial_types::NedSuggestionStatus::Pending))
+                    .filter(|s| matches!(s.status, editorial_types::NedSuggestionStatus::Pending | editorial_types::NedSuggestionStatus::Stale { .. }))
                     .map(|s| s.file.to_string())
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
@@ -5365,12 +5365,12 @@ mod ned_suggestion_handler_tests {
     }
 
     #[test]
-    fn get_ned_suggestion_files_empty_when_none_pending() {
+    fn get_ned_suggestion_files_empty_when_only_rejected_or_accepted() {
         let (conductor, _tmp) = make_conductor_with_doc();
 
-        let id = editorial_types::SuggestionId::new();
-        let sug = editorial_types::NedSuggestion {
-            id: id.clone(),
+        let id_rejected = editorial_types::SuggestionId::new();
+        let sug_rejected = editorial_types::NedSuggestion {
+            id: id_rejected.clone(),
             author: editorial_types::Author::Claude,
             file: editorial_types::ContentPath::new("content/test/doc.md"),
             selection: "(some-selection)".to_string(),
@@ -5380,13 +5380,63 @@ mod ned_suggestion_handler_tests {
             status: editorial_types::NedSuggestionStatus::Rejected,
             created_at: "2026-04-28T00:00:00Z".to_string(),
         };
-        conductor.ned_suggestions.write().unwrap().insert(id, sug);
+
+        let id_accepted = editorial_types::SuggestionId::new();
+        let sug_accepted = editorial_types::NedSuggestion {
+            id: id_accepted.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/other.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("Accepted".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "accepted".to_string(),
+            status: editorial_types::NedSuggestionStatus::Accepted,
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+
+        {
+            let mut map = conductor.ned_suggestions.write().unwrap();
+            map.insert(id_rejected, sug_rejected);
+            map.insert(id_accepted, sug_accepted);
+        }
 
         let result = conductor.handle_command(Command::GetNedSuggestionFiles);
 
         match result.response {
             Response::NedSuggestionFiles(files) => {
-                assert!(files.is_empty(), "expected no files when nothing is Pending");
+                assert!(files.is_empty(), "expected no files when only Rejected and Accepted");
+            }
+            other => panic!("expected NedSuggestionFiles, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_ned_suggestion_files_includes_stale_files() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        // One Stale suggestion — should appear in the sidebar so the user can dismiss it.
+        let id_stale = editorial_types::SuggestionId::new();
+        let sug_stale = editorial_types::NedSuggestion {
+            id: id_stale.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/test/stale-doc.md"),
+            selection: "(some-selection)".to_string(),
+            mutation: editorial_types::NedMutation::SetText("Stale".to_string()),
+            workspace_hash: "abc".to_string(),
+            reason: "stale reason".to_string(),
+            status: editorial_types::NedSuggestionStatus::Stale {
+                reason: "selection no longer resolves".to_string(),
+            },
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+        conductor.ned_suggestions.write().unwrap().insert(id_stale, sug_stale);
+
+        let result = conductor.handle_command(Command::GetNedSuggestionFiles);
+
+        match result.response {
+            Response::NedSuggestionFiles(files) => {
+                assert_eq!(files.len(), 1, "stale file must appear in sidebar");
+                assert_eq!(files[0], "content/test/stale-doc.md");
             }
             other => panic!("expected NedSuggestionFiles, got: {other:?}"),
         }
