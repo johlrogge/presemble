@@ -337,8 +337,8 @@ document.querySelectorAll('[data-presemble-original-html]').forEach(function(el)
 el.innerHTML=el.getAttribute('data-presemble-original-html');
 el.removeAttribute('data-presemble-original-html');
 });
-document.querySelectorAll('.presemble-suggest-indicator,.presemble-suggest-active').forEach(function(el){
-el.classList.remove('presemble-suggest-indicator','presemble-suggest-active','presemble-suggest-preview-active');
+document.querySelectorAll('.presemble-suggest-indicator,.presemble-suggest-active,.presemble-suggest-stale').forEach(function(el){
+el.classList.remove('presemble-suggest-indicator','presemble-suggest-active','presemble-suggest-preview-active','presemble-suggest-stale');
 });
 if(_suggestToolbar){_suggestToolbar.remove();_suggestToolbar=null;}
 _suggestPreviewState=null;_suggestActiveEl=null;
@@ -346,6 +346,19 @@ _suggestions=[];_suggestIdx=0;
 }
 function _stripMd(s){return s.replace(/`/g,'').replace(/\*\*/g,'').replace(/\*/g,'').replace(/_/g,'');}
 function _suggestFindTarget(sug){
+// NED suggestions: use anchor field when present (source === 'ned')
+if(sug._source==='ned'&&sug.anchor){
+var a=sug.anchor;
+if(a.kind==='slot'){
+return document.querySelector('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]')||document.querySelector('[data-presemble-slot="'+a.slot+'"]');
+}
+if(a.kind==='body-nth'){
+return document.getElementById('presemble-body-'+a.index);
+}
+// 'doc' kind — no specific element
+return null;
+}
+// Legacy suggestions
 if(sug.target_type==='slot'||sug.target_type==='slot_edit'){
 return document.querySelector('[data-presemble-slot="'+sug.slot+'"]');
 }
@@ -376,8 +389,18 @@ _suggestToolbar.querySelector('.presemble-suggest-preview').onclick=function(){_
 }
 var sug=_suggestions[_suggestIdx];
 _suggestToolbar.querySelector('.presemble-suggest-author').textContent=sug.author||'';
-_suggestToolbar.querySelector('.presemble-suggest-reason').textContent=sug.reason||'';
-var targetText=sug.target_type==='slot'?sug.slot:(sug.search?'"'+sug.search.substring(0,30)+'..."':'');
+var reasonText=sug.reason||'';
+// NED stale: show stale reason in toolbar
+var isStale=sug._source==='ned'&&sug.status&&typeof sug.status==='object'&&sug.status.Stale;
+if(isStale){reasonText='[STALE: '+(sug.status.Stale.reason||'')+']: '+reasonText;}
+_suggestToolbar.querySelector('.presemble-suggest-reason').textContent=reasonText;
+var targetText='';
+if(sug._source==='ned'&&sug.anchor){
+if(sug.anchor.kind==='slot'){targetText=sug.anchor.slot;}
+else if(sug.anchor.kind==='body-nth'){targetText='body['+sug.anchor.index+']';}
+}else{
+targetText=sug.target_type==='slot'?sug.slot:(sug.search?'"'+sug.search.substring(0,30)+'..."':'');
+}
 _suggestToolbar.querySelector('.presemble-suggest-counter').textContent='('+(_suggestIdx+1)+'/'+_suggestions.length+') '+targetText;
 }
 function _suggestHighlight(){
@@ -392,9 +415,39 @@ var el=_suggestFindTarget(sug);
 _suggestActiveEl=el;
 if(el){
 el.classList.add('presemble-suggest-active');
+// NED stale suggestions get a stale class; T6 adds CSS for it
+var isStale=sug._source==='ned'&&sug.status&&typeof sug.status==='object'&&sug.status.Stale;
+if(isStale){
+el.classList.add('presemble-suggest-stale');
+var staleReason=sug.status.Stale.reason||'';
+if(staleReason){el.title=staleReason;}
+}else{
+el.classList.remove('presemble-suggest-stale');
+}
 el.scrollIntoView({behavior:'smooth',block:'center'});
 el.setAttribute('data-presemble-original-html',el.innerHTML);
-if(sug.target_type==='slot'){
+// NED suggestions: render diff from SearchReplace mutation
+if(sug._source==='ned'&&sug.mutation&&sug.mutation.SearchReplace){
+var sr=sug.mutation.SearchReplace;
+var html=el.innerHTML;
+var searchEsc=sr.search.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
+var replaceEsc=(sr.replace||'').replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
+var idx=html.indexOf(searchEsc);
+if(idx!==-1){
+el.innerHTML=html.slice(0,idx)+'<del class="presemble-diff-del">'+searchEsc+'</del><ins class="presemble-diff-ins">'+replaceEsc+'</ins>'+html.slice(idx+searchEsc.length);
+}else{
+var txt=el.textContent;
+var tidx=txt.indexOf(sr.search);
+if(tidx!==-1){
+var before=txt.slice(0,tidx).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
+var after=txt.slice(tidx+sr.search.length).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
+var needleEsc=sr.search.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
+el.innerHTML=before+'<del class="presemble-diff-del">'+needleEsc+'</del><ins class="presemble-diff-ins">'+replaceEsc+'</ins>'+after;
+}
+}
+}else if(sug._source==='ned'&&sug.mutation&&sug.mutation.SetText){
+el.innerHTML='<del class="presemble-diff-del">'+el.textContent+'</del> <ins class="presemble-diff-ins">'+sug.mutation.SetText+'</ins>';
+}else if(sug.target_type==='slot'){
 el.innerHTML='<del class="presemble-diff-del">'+el.textContent+'</del> <ins class="presemble-diff-ins">'+(sug.proposed_value||'')+'</ins>';
 }else if(sug.target_type==='body'&&sug.search){
 var html=el.innerHTML;
@@ -488,6 +541,17 @@ function _suggestAccept(){
 if(_suggestions.length===0){return;}
 var sug=_suggestions[_suggestIdx];
 if(_suggestPreviewState){_suggestTogglePreview();}
+// NED suggestion: POST to NED accept endpoint; server applies the edit
+if(sug._source==='ned'){
+fetch('/_presemble/ned-suggestions/accept',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({id:sug.id})
+}).then(function(r){return r.json();}).then(function(data){
+if(data&&!data.ok){alert(data.error||'Accept failed');}
+if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+});
+return;
+}
+// Legacy suggestion: text-replace-then-accept
 var fileEl=document.querySelector('[data-presemble-file]');
 var bfile=fileEl?fileEl.getAttribute('data-presemble-file'):'';
 var editPromise;
@@ -520,8 +584,9 @@ if(_suggestions.length===0){return;}
 var sug=_suggestions[_suggestIdx];
 if(_suggestPreviewState){_suggestTogglePreview();}
 var el=_suggestFindTarget(sug);
-if(el){el.classList.remove('presemble-suggest-indicator','presemble-suggest-active');}
-fetch('/_presemble/reject-suggestion',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})
+if(el){el.classList.remove('presemble-suggest-indicator','presemble-suggest-active','presemble-suggest-stale');}
+var rejectUrl=sug._source==='ned'?'/_presemble/ned-suggestions/reject':'/_presemble/reject-suggestion';
+fetch(rejectUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})
 .then(function(r){return r.json();})
 .then(function(data){if(!data.ok){alert(data.error||'Reject failed');}});
 _suggestions.splice(_suggestIdx,1);
@@ -533,15 +598,23 @@ var fileEl=document.querySelector('[data-presemble-file]');
 if(!fileEl){return;}
 var file=fileEl.getAttribute('data-presemble-file');
 if(!file){return;}
-fetch('/_presemble/suggestions?file='+encodeURIComponent(file))
-.then(function(r){return r.json();})
-.then(function(data){
-if(!Array.isArray(data)){return;}
-var cnt=data.length;
+var enc=encodeURIComponent(file);
+Promise.all([
+fetch('/_presemble/suggestions?file='+enc).then(function(r){return r.json();}).catch(function(){return[];}),
+fetch('/_presemble/ned-suggestions?file='+enc).then(function(r){return r.json();}).catch(function(){return[];})
+]).then(function(results){
+var legacy=Array.isArray(results[0])?results[0]:[];
+var ned=Array.isArray(results[1])?results[1]:[];
+// Filter out Accepted/Rejected NED suggestions from the count/badge (Pending and Stale stay)
+var nedFiltered=ned.filter(function(s){return s.status==='Pending'||(s.status&&typeof s.status==='object'&&s.status.Stale);});
+var legacyTagged=legacy.map(function(s){return Object.assign({},s,{_source:'legacy'});});
+var nedTagged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});
+var merged=legacyTagged.concat(nedTagged);
+var cnt=merged.length;
 _editorialSuggestCount=cnt;
 if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}
 update();
-if(mode==='edit'){_editMarkSuggestions(data);}
+if(mode==='edit'){_editMarkSuggestions(merged);}
 });
 }
 function _fetchDirtyCount(){
@@ -564,9 +637,15 @@ _renderBufferLists();
 .catch(function(){});
 }
 function _fetchSuggestionFiles(){
-fetch('/_presemble/suggestion-files').then(function(r){return r.json();})
-.then(function(data){
-_suggestionFilePaths=data||[];
+Promise.all([
+fetch('/_presemble/suggestion-files').then(function(r){return r.json();}).catch(function(){return[];}),
+fetch('/_presemble/ned-suggestion-files').then(function(r){return r.json();}).catch(function(){return[];})
+]).then(function(results){
+var legacy=Array.isArray(results[0])?results[0]:[];
+var ned=Array.isArray(results[1])?results[1]:[];
+var merged=legacy.concat(ned.filter(function(p){return legacy.indexOf(p)===-1;}));
+merged.sort();
+_suggestionFilePaths=merged;
 _renderBufferLists();
 }).catch(function(){});
 }
@@ -607,16 +686,24 @@ var fileEl=document.querySelector('[data-presemble-file]');
 if(!fileEl){return;}
 var file=fileEl.getAttribute('data-presemble-file');
 if(!file){return;}
-fetch('/_presemble/suggestions?file='+encodeURIComponent(file))
-.then(function(r){return r.json();})
-.then(function(data){
-if(!Array.isArray(data)){return;}
-_suggestions=data;
+var enc=encodeURIComponent(file);
+Promise.all([
+fetch('/_presemble/suggestions?file='+enc).then(function(r){return r.json();}).catch(function(){return[];}),
+fetch('/_presemble/ned-suggestions?file='+enc).then(function(r){return r.json();}).catch(function(){return[];})
+]).then(function(results){
+var legacy=Array.isArray(results[0])?results[0]:[];
+var ned=Array.isArray(results[1])?results[1]:[];
+// Filter out Accepted/Rejected NED suggestions (Pending and Stale stay)
+var nedFiltered=ned.filter(function(s){return s.status==='Pending'||(s.status&&typeof s.status==='object'&&s.status.Stale);});
+var legacyTagged=legacy.map(function(s){return Object.assign({},s,{_source:'legacy'});});
+var nedTagged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});
+var merged=legacyTagged.concat(nedTagged);
+_suggestions=merged;
 _suggestIdx=0;
-var cnt=data.length;
+var cnt=merged.length;
 _editorialSuggestCount=cnt;
 if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}
-data.forEach(function(sug){
+merged.forEach(function(sug){
 var el=_suggestFindTarget(sug);
 if(el){el.classList.add('presemble-suggest-indicator');}
 });
@@ -904,8 +991,8 @@ var bvalue=ta.value;
 bcleanup();
 var diff=minimalDiff(bmd,bvalue);
 if(!diff){return;}
-fetch('/_presemble/suggest-body',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,body_idx:bidx,search:diff.search,replace:diff.replace})
+fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:bfile,selection:'(ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){var berr=document.createElement('div');berr.className='presemble-edit-error';berr.textContent=data.error||'Suggest failed';el.after(berr);}
 if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
@@ -942,8 +1029,8 @@ var origText=original.replace(/\u00a0/g,' ');
 cleanup();
 var diff=minimalDiff(origText,value);
 if(!diff){return;}
-fetch('/_presemble/suggest-slot-edit',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,slot:editSlot,search:diff.search,replace:diff.replace})
+fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:pfile,selection:'(ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){
 var err=document.createElement('div');err.className='presemble-edit-error';
