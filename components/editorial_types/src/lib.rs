@@ -182,7 +182,7 @@ pub fn validate_no_existing(m: &NedMutation) -> Result<(), String> {
     fn check_tree(tree: &NodeTree) -> Result<(), String> {
         match tree {
             NodeTree::Existing(_) => Err(
-                "NodeTree::Existing is store-local and cannot be sent over MCP".to_string(),
+                "NodeTree::Existing is store-local and cannot cross a wire boundary".to_string(),
             ),
             NodeTree::Text(_) => Ok(()),
             NodeTree::Element { children, .. } => {
@@ -406,7 +406,7 @@ mod tests {
         assert!(result.is_err(), "expected Err but got Ok");
         assert_eq!(
             result.unwrap_err(),
-            "NodeTree::Existing is store-local and cannot be sent over MCP"
+            "NodeTree::Existing is store-local and cannot cross a wire boundary"
         );
     }
 
@@ -430,7 +430,7 @@ mod tests {
         assert!(result.is_err(), "expected Err for nested Existing");
         assert_eq!(
             result.unwrap_err(),
-            "NodeTree::Existing is store-local and cannot be sent over MCP"
+            "NodeTree::Existing is store-local and cannot cross a wire boundary"
         );
     }
 

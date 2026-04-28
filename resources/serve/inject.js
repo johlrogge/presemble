@@ -356,6 +356,7 @@ if(a.kind==='body-nth'){
 return document.getElementById('presemble-body-'+a.index);
 }
 // 'doc' kind — no specific element
+console.warn('NED suggestion '+sug.id+' has doc-level anchor; no DOM target');
 return null;
 }
 // Legacy suggestions

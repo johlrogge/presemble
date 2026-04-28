@@ -2024,6 +2024,28 @@ mod tests {
         assert_eq!(json_val["anchor"]["slot"], "title");
         // status
         assert_eq!(json_val["status"], "Pending");
+
+        // Stale status roundtrip — guards against serde-attribute changes
+        // silently breaking the JS Stale-detection path.
+        let stale_sug = editorial_types::NedSuggestion {
+            id: editorial_types::SuggestionId::from("sug-00000000stale".to_string()),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/post/hello.md"),
+            selection: r#"(ned/slot (ned/doc-by-path "content/post/hello.md") "title")"#
+                .to_string(),
+            mutation: editorial_types::NedMutation::SetText("New Title".to_string()),
+            workspace_hash: "abc123".to_string(),
+            reason: "Clearer title".to_string(),
+            status: editorial_types::NedSuggestionStatus::Stale {
+                reason: "test reason".to_string(),
+            },
+            created_at: "2026-04-28T00:00:00Z".to_string(),
+        };
+        let stale_json = serde_json::to_value(NedSuggestionJson::from(&stale_sug)).unwrap();
+        assert_eq!(
+            stale_json["status"],
+            serde_json::json!({"Stale": {"reason": "test reason"}})
+        );
     }
 
     // ── HTTP-level NED suggestion endpoint tests ─────────────────────────────

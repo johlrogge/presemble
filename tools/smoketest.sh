@@ -219,6 +219,43 @@ assert_curl "no suggestions initially" "/_presemble/suggestions?file=content/pos
 log "Creating suggestion via MCP-style endpoint..."
 # (suggestions are created via the conductor, not HTTP — skip for now unless MCP is connected)
 
+# ── Test: NED suggestions via HTTP ────────────────────────────────────────
+
+log "Testing NED suggestions via HTTP..."
+
+NED_SUG_BODY='{"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"SetText":"Suggested Title"},"reason":"smoketest"}'
+NED_SUG_RESPONSE=$(curl -s -X POST "http://127.0.0.1:$PORT/_presemble/ned-suggestions" -H 'Content-Type: application/json' -d "$NED_SUG_BODY" 2>&1)
+
+if echo "$NED_SUG_RESPONSE" | grep -qF '"ok":true'; then
+    pass "ned_suggestions_create_returns_ok"
+else
+    fail "ned_suggestions_create_returns_ok (expected '\"ok\":true', got: $NED_SUG_RESPONSE)"
+fi
+
+if echo "$NED_SUG_RESPONSE" | grep -qF '"id":"sug-'; then
+    pass "ned_suggestions_create_returns_id"
+else
+    fail "ned_suggestions_create_returns_id (expected '\"id\":\"sug-', got: $NED_SUG_RESPONSE)"
+fi
+
+# Capture the suggestion id for subsequent reject
+NED_SUG_ID=$(echo "$NED_SUG_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+
+assert_curl "ned_suggestions_list_for_file_reason" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"reason":"smoketest"'
+assert_curl "ned_suggestions_list_for_file_anchor_kind" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"kind":"slot"'
+assert_curl "ned_suggestions_list_for_file_anchor_slot" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"slot":"title"'
+
+assert_curl "ned_suggestion_files_includes_file" "/_presemble/ned-suggestion-files" GET "" '"content/post/hello-world.md"'
+
+NED_REJECT_BODY='{"id":"'"$NED_SUG_ID"'"}'
+assert_curl "ned_suggestions_reject_marks_rejected" "/_presemble/ned-suggestions/reject" POST "$NED_REJECT_BODY" '"ok":true'
+
+assert_curl "ned_suggestions_list_after_reject_contains_rejected" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"Rejected"'
+
+NED_BAD_BODY='{"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"Replace":[{"Existing":0}]},"reason":"reject me"}'
+assert_curl "ned_suggestions_create_rejects_existing_node_ok_false" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" '"ok":false'
+assert_curl "ned_suggestions_create_rejects_existing_node_mentions_existing" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" 'Existing'
+
 # ── Test: Save edits to disk for nREPL tests ─────────────────────────────
 
 log "Saving edits to disk for nREPL..."
