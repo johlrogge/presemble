@@ -170,6 +170,48 @@ pub struct NedSuggestion {
     pub created_at: String,
 }
 
+/// Validate that a [`NedMutation`] contains no [`NodeTree::Existing`] nodes.
+///
+/// `NodeTree::Existing` holds a store-local `NodeId` and cannot be
+/// transmitted over the wire (HTTP or MCP). Returns `Err` with a descriptive
+/// message if any such node is found; returns `Ok(())` otherwise.
+///
+/// Call this at every external boundary (HTTP handler, MCP tool) before
+/// forwarding the mutation to the conductor.
+pub fn validate_no_existing(m: &NedMutation) -> Result<(), String> {
+    fn check_tree(tree: &NodeTree) -> Result<(), String> {
+        match tree {
+            NodeTree::Existing(_) => Err(
+                "NodeTree::Existing is store-local and cannot be sent over MCP".to_string(),
+            ),
+            NodeTree::Text(_) => Ok(()),
+            NodeTree::Element { children, .. } => {
+                for child in children {
+                    check_tree(child)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn check_trees(trees: &[NodeTree]) -> Result<(), String> {
+        for t in trees {
+            check_tree(t)?;
+        }
+        Ok(())
+    }
+
+    match m {
+        NedMutation::SetText(_)
+        | NedMutation::SearchReplace { .. }
+        | NedMutation::Delete => Ok(()),
+        NedMutation::Replace(trees)
+        | NedMutation::InsertChild(trees)
+        | NedMutation::InsertBefore(trees)
+        | NedMutation::InsertAfter(trees) => check_trees(trees),
+    }
+}
+
 // ── Legacy suggestion types ───────────────────────────────────────────────────
 
 /// Where a suggestion targets within a content file.
@@ -351,6 +393,71 @@ mod tests {
         assert_eq!(back.id, suggestion.id);
         assert!(matches!(&back.target, SuggestionTarget::BodyText { search, .. } if search == "old text"));
         assert_eq!(back.status, SuggestionStatus::Pending);
+    }
+
+    // ── validate_no_existing tests ────────────────────────────────────────────
+
+    #[test]
+    fn validate_no_existing_rejects_existing_in_replace() {
+        use ned::NodeTree;
+        use node_store::NodeId;
+        let mutation = NedMutation::Replace(vec![NodeTree::Existing(NodeId(7))]);
+        let result = validate_no_existing(&mutation);
+        assert!(result.is_err(), "expected Err but got Ok");
+        assert_eq!(
+            result.unwrap_err(),
+            "NodeTree::Existing is store-local and cannot be sent over MCP"
+        );
+    }
+
+    #[test]
+    fn validate_no_existing_rejects_existing_in_nested_element() {
+        use ned::NodeTree;
+        use node_store::NodeId;
+        // Replace(vec![Element { children: [Element { children: [Existing(_)] }] }])
+        let inner = NodeTree::Element {
+            name: "span".to_string(),
+            attrs: vec![],
+            children: vec![NodeTree::Existing(NodeId(3))],
+        };
+        let outer = NodeTree::Element {
+            name: "div".to_string(),
+            attrs: vec![],
+            children: vec![inner],
+        };
+        let mutation = NedMutation::Replace(vec![outer]);
+        let result = validate_no_existing(&mutation);
+        assert!(result.is_err(), "expected Err for nested Existing");
+        assert_eq!(
+            result.unwrap_err(),
+            "NodeTree::Existing is store-local and cannot be sent over MCP"
+        );
+    }
+
+    #[test]
+    fn validate_no_existing_accepts_pure_text_and_element_trees() {
+        use ned::NodeTree;
+        let tree = NodeTree::Element {
+            name: "p".to_string(),
+            attrs: vec![],
+            children: vec![NodeTree::Text("hello".to_string())],
+        };
+        let mutation = NedMutation::Replace(vec![tree]);
+        assert!(validate_no_existing(&mutation).is_ok());
+    }
+
+    #[test]
+    fn validate_no_existing_accepts_set_text_searchreplace_delete() {
+        let set_text = NedMutation::SetText("hi".to_string());
+        assert!(validate_no_existing(&set_text).is_ok(), "SetText should be Ok");
+
+        let sr = NedMutation::SearchReplace {
+            search: "a".to_string(),
+            replace: "b".to_string(),
+        };
+        assert!(validate_no_existing(&sr).is_ok(), "SearchReplace should be Ok");
+
+        assert!(validate_no_existing(&NedMutation::Delete).is_ok(), "Delete should be Ok");
     }
 
     // ── NED suggestion tests ──────────────────────────────────────────────────

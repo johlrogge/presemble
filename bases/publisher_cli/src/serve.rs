@@ -632,6 +632,13 @@ async fn ned_suggestions_create_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<NedSuggestionCreateRequest>,
 ) -> axum::Json<NedSuggestionCreateResponse> {
+    if let Err(e) = editorial_types::validate_no_existing(&req.mutation) {
+        return axum::Json(NedSuggestionCreateResponse {
+            ok: false,
+            id: None,
+            error: Some(e),
+        });
+    }
     match state.conductor.send(&conductor::Command::CreateNedSuggestion {
         file: std::path::PathBuf::from(&req.file),
         selection: req.selection,
@@ -2367,5 +2374,52 @@ mod tests {
             arr.iter().any(|p| p.as_str() == Some("content/test/doc.md")),
             "content/test/doc.md must appear in ned-suggestion-files; got: {val}"
         );
+    }
+
+    #[tokio::test]
+    async fn ned_suggestions_create_rejects_existing_node() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let app = test_app(client);
+
+        // A Replace mutation containing a NodeTree::Existing must be rejected at the boundary.
+        // We encode it as the JSON serde form that editorial_types would produce:
+        // {"Replace": [{"Existing": 0}]}
+        let body = serde_json::json!({
+            "file": "content/test/doc.md",
+            "selection": r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#,
+            "mutation": {"Replace": [{"Existing": 0}]},
+            "reason": "should be rejected"
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/ned-suggestions")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["ok"], false, "expected ok:false for Existing node, got: {val}");
+        let err = val["error"].as_str().expect("expected error field");
+        assert!(
+            err.contains("Existing"),
+            "error message should mention Existing; got: {err}"
+        );
+
+        // Confirm no suggestion was created — listing must return empty.
+        let list_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_presemble/ned-suggestions?file=content/test/doc.md")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let list_resp = app.oneshot(list_req).await.unwrap();
+        let list_bytes = http_body_util::BodyExt::collect(list_resp.into_body()).await.unwrap().to_bytes();
+        let list_val: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        assert_eq!(list_val, serde_json::json!([]), "no suggestion should have been created");
     }
 }
