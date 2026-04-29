@@ -59,6 +59,34 @@ function stemFromFile(file) {
   return parts[1]; // content/<stem>/...
 }
 
+// --- Phase D: URL-fragment mode helpers (ADR-042) ---
+
+// Parse a URL hash into a presemble mode name.
+// Returns 'view' | 'edit' | 'suggest' | 'schema' | 'unknown'
+function parsePresembleHash(hash) {
+  if (!hash || hash === '#') return 'view';
+  var bare = hash.replace(/^#/, '');
+  switch (bare) {
+    case '_schema':  return 'schema';
+    case '_edit':    return 'edit';
+    case '_suggest': return 'suggest';
+    case '':         return 'view';
+    default:         return 'unknown';
+  }
+}
+
+// Set the presemble mode by updating the URL hash.
+// 'view' removes the hash (no page reload); other modes set #_<mode>.
+function setPresembleMode(mode) {
+  if (mode === 'view') {
+    history.replaceState(null, '', location.pathname + location.search);
+  } else {
+    location.hash = '_' + mode;
+  }
+}
+
+// --- end Phase D helpers ---
+
 var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');
 var _userScrolled=false;var _scrollTimer=null;var _presembleScrolling=false;
 window.addEventListener('scroll',function(){if(_presembleScrolling){return;}_userScrolled=true;clearTimeout(_scrollTimer);_scrollTimer=setTimeout(function(){_userScrolled=false;},3000);},true);
@@ -100,7 +128,14 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 else{tryScroll(10);}
 })();
 (function(){
-var mode=sessionStorage.getItem('presemble-mode')||'view';
+// Hash takes precedence over sessionStorage on load (T8).
+// Unknown hashes fall through to sessionStorage (existing behaviour).
+var _hashModeOnLoad=parsePresembleHash(location.hash);
+var mode=(_hashModeOnLoad!=='unknown'&&_hashModeOnLoad!=='schema')
+  ? _hashModeOnLoad
+  : (sessionStorage.getItem('presemble-mode')||'view');
+// Flag to suppress re-writing the hash while we are reacting to a hashchange.
+var _handlingHashChange=false;
 var _editorialSuggestCount=0;
 var _dirtyCount=0;
 var _dirtyPaths=[];
@@ -720,9 +755,55 @@ menu.classList.remove('open');
 update();
 if(m==='edit'){_editEnter();}
 if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
+// Update the URL hash to reflect the new mode, unless we are already
+// responding to a hashchange (which would create an infinite loop).
+if(!_handlingHashChange){setPresembleMode(m);}
 }
+// --- Phase D T8: schema mode handlers and hash dispatcher ---
+function _enterSchemaMode(){
+// Mocked for T8 (start) — T4 will replace with real fetch.
+var mockHtml='<div class="presemble-schema-mock">'
++'<p>Structure mode \u2014 schema render endpoint not yet wired.</p>'
++'<p>Path: '+location.pathname+'</p>'
++'</div>';
+var main=document.querySelector('main')||document.body;
+main.innerHTML=mockHtml;
+document.body.classList.add('presemble-mode-schema');
+}
+function _leaveSchemaMode(){
+if(document.body.classList.contains('presemble-mode-schema')){
+location.reload();
+}
+}
+function _applyHashMode(){
+_handlingHashChange=true;
+var m=parsePresembleHash(location.hash);
+if(m==='unknown'){
+_handlingHashChange=false;
+return;
+}
+if(m==='schema'){
+if(!document.body.classList.contains('presemble-mode-schema')){
+_enterSchemaMode();
+}
+}else{
+// Leaving schema mode triggers a reload to restore original content.
+// The reload will land with the new hash, re-entering this dispatcher.
+if(document.body.classList.contains('presemble-mode-schema')){
+_handlingHashChange=false;
+_leaveSchemaMode();
+return;
+}
+setMode(m);
+}
+_handlingHashChange=false;
+}
+window.addEventListener('hashchange',_applyHashMode);
+// --- End Phase D T8 ---
 if(mode==='edit'){_editEnter();}
 if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
+// If the page was opened with #_schema, enter schema mode after normal init.
+if(_hashModeOnLoad==='schema'){_enterSchemaMode();}
 viewBtn.onclick=function(){setMode('view');};
 editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
