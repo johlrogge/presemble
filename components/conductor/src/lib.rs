@@ -2,6 +2,7 @@ mod client;
 mod conductor;
 mod dirty;
 mod protocol;
+pub(crate) mod self_write_tracker;
 
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber};
 pub use conductor::{CommandResult, Conductor};

@@ -93,6 +93,8 @@ pub struct Conductor {
     path_to_doc_root: RwLock<HashMap<PathBuf, node_store::NodeId>>,
     // NED-based suggestions (Phase C)
     ned_suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::NedSuggestion>>,
+    // Self-write tracker: suppresses watcher events for files the conductor wrote itself.
+    self_write_tracker: crate::self_write_tracker::SelfWriteTracker,
 }
 
 /// Extract the title from a document's preamble in the NodeStore.
@@ -209,6 +211,9 @@ impl Conductor {
             dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
             path_to_doc_root: RwLock::new(HashMap::new()),
             ned_suggestions: RwLock::new(HashMap::new()),
+            self_write_tracker: crate::self_write_tracker::SelfWriteTracker::new(
+                std::time::Duration::from_secs(5),
+            ),
         };
 
         // Load persisted pending suggestions from disk
@@ -1786,7 +1791,7 @@ impl Conductor {
                 );
                 let result = self.apply_ned_program(&program);
                 match result.response {
-                    Response::Ok => {
+                    Response::Ok | Response::Applied { .. } => {
                         let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
                             ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
                             _ => vec![],
@@ -1915,7 +1920,7 @@ impl Conductor {
 
         let result = self.apply_ned_program(&program);
         match result.response {
-            Response::Ok => {
+            Response::Ok | Response::Applied { .. } => {
                 let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
                     ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
                     _ => vec![],
@@ -2050,7 +2055,11 @@ impl Conductor {
             Ok(s) => s,
             Err(_) => {
                 // Non-Selection result: program ran successfully, nothing is dirty.
-                return CommandResult::ok();
+                return CommandResult::with_response(Response::Applied {
+                    rebuilt_pages: vec![],
+                    failed_pages: vec![],
+                    dirty_paths: 0,
+                });
             }
         };
 
@@ -2059,7 +2068,11 @@ impl Conductor {
 
         if dirty_roots.is_empty() {
             // Selection exists but contains no document-rooted nodes — nothing dirty.
-            return CommandResult::ok();
+            return CommandResult::with_response(Response::Applied {
+                rebuilt_pages: vec![],
+                failed_pages: vec![],
+                dirty_paths: 0,
+            });
         }
 
         // Collect file paths from document root attributes and mark as dirty.
@@ -2084,21 +2097,33 @@ impl Conductor {
         }
 
         if dirty_paths.is_empty() {
-            return CommandResult::ok();
+            return CommandResult::with_response(Response::Applied {
+                rebuilt_pages: vec![],
+                failed_pages: vec![],
+                dirty_paths: 0,
+            });
         }
 
         // Rebuild pages for modified nodes.
         let (rebuilt_urls, failed_urls) = self.rebuild_pages_for_modified_nodes(&dirty_paths);
 
+        let dirty_path_count = dirty_paths.len();
         let mut events = Vec::new();
         if !rebuilt_urls.is_empty() {
-            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_urls, anchor: None });
+            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_urls.clone(), anchor: None });
         }
         if !failed_urls.is_empty() {
-            events.push(ConductorEvent::BuildFailed { error_pages: failed_urls });
+            events.push(ConductorEvent::BuildFailed { error_pages: failed_urls.clone() });
         }
 
-        CommandResult::ok_with_events(events)
+        CommandResult {
+            response: Response::Applied {
+                rebuilt_pages: rebuilt_urls,
+                failed_pages: failed_urls,
+                dirty_paths: dirty_path_count,
+            },
+            events,
+        }
     }
 
     fn stem_from_url_path(url: &str) -> String {
@@ -2263,11 +2288,37 @@ impl Conductor {
                 CommandResult::ok()
             }
             Command::FileChanged { paths } => {
-                // 1. Clear in-memory versions
-                for p in &paths {
+                // 0. Filter out paths that the conductor wrote itself.
+                //    We resolve each path to an absolute path and check the on-disk mtime.
+                //    If the mtime matches a recorded self-write, the event is suppressed.
+                //    Deletions (no metadata) are always processed.
+                let external_paths: Vec<String> = paths.iter().filter(|p| {
+                    let raw = Path::new(p.as_str());
+                    let abs = if raw.is_absolute() {
+                        raw.to_path_buf()
+                    } else {
+                        self.site_dir.join(raw)
+                    };
+                    let mtime = std::fs::metadata(&abs).ok().and_then(|m| m.modified().ok());
+                    match mtime {
+                        Some(mtime) => !self.self_write_tracker.should_ignore(&abs, mtime),
+                        None => true, // deletion — always process
+                    }
+                }).cloned().collect();
+
+                // If every changed path was written by us, skip the rebuild entirely.
+                if external_paths.is_empty() {
+                    return CommandResult::ok();
+                }
+
+                // 1. Clear in-memory versions (only for genuinely external paths)
+                for p in &external_paths {
                     let path = PathBuf::from(p);
                     self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
                 }
+
+                // Rebind so the rest of this handler uses the filtered set.
+                let paths = external_paths;
 
                 // 2. Refresh site index for new/removed files
                 {
@@ -2713,7 +2764,11 @@ impl Conductor {
                         }
                         None => return CommandResult::error(format!("document not in store: {path}")),
                     };
-                    if let Err(e) = std::fs::write(&abs_path, &text) {
+                    if let Err(e) = crate::self_write_tracker::write_source_file(
+                        &abs_path,
+                        text.as_bytes(),
+                        &self.self_write_tracker,
+                    ) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
                     self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(&rel_path);
@@ -2725,7 +2780,11 @@ impl Conductor {
                 if let Some(text) = sources.get(&abs_path) {
                     let text = text.clone();
                     drop(sources);
-                    if let Err(e) = std::fs::write(&abs_path, &text) {
+                    if let Err(e) = crate::self_write_tracker::write_source_file(
+                        &abs_path,
+                        text.as_bytes(),
+                        &self.self_write_tracker,
+                    ) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
                     self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&abs_path);
@@ -2749,7 +2808,11 @@ impl Conductor {
                             continue;
                         }
                     };
-                    if let Err(e) = std::fs::write(&abs_path, &text) {
+                    if let Err(e) = crate::self_write_tracker::write_source_file(
+                        &abs_path,
+                        text.as_bytes(),
+                        &self.self_write_tracker,
+                    ) {
                         return CommandResult::error(format!("write error for {}: {e}", abs_path.display()));
                     }
                 }
@@ -2761,7 +2824,11 @@ impl Conductor {
                     .collect();
                 drop(sources);
                 for (path, text) in &buffers {
-                    if let Err(e) = std::fs::write(path, text) {
+                    if let Err(e) = crate::self_write_tracker::write_source_file(
+                        path,
+                        text.as_bytes(),
+                        &self.self_write_tracker,
+                    ) {
                         return CommandResult::error(format!("write error for {}: {e}", path.display()));
                     }
                 }
@@ -2810,6 +2877,15 @@ impl Conductor {
                         };
                         match template.scaffold(&self.site_dir, &format, &style) {
                             Ok(()) => {
+                                // Record all written source files so the watcher suppresses the
+                                // resulting events (they would otherwise trigger a redundant
+                                // populate_node_store / build_all_pages cycle).
+                                for subdir in &["schemas", "content", "templates"] {
+                                    crate::self_write_tracker::record_dir_recursive(
+                                        &self.site_dir.join(subdir),
+                                        &self.self_write_tracker,
+                                    );
+                                }
                                 // Refresh schema cache and site index — new schemas/dirs were written to disk
                                 self.refresh_schema_cache();
                                 self.refresh_site_index();
@@ -5587,6 +5663,110 @@ mod ned_suggestion_handler_tests {
                 assert_eq!(files[0], "content/test/doc.md");
             }
             other => panic!("expected NedSuggestionFiles, got: {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod apply_ned_program_diagnostic_tests {
+    use super::*;
+    use content::{ContentElement, Document, DocumentSlot};
+    use schema::{HeadingLevel, SlotName, Span, Spanned};
+    use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+
+    /// Build a minimal conductor with a document loaded into the NodeStore.
+    ///
+    /// Document at `content/test/doc.md` has a "title" slot with a heading.
+    fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
+        std::fs::create_dir_all(root.join("templates/test")).expect("templates");
+        std::fs::create_dir_all(root.join("content/test")).expect("content");
+        std::fs::write(
+            root.join("schemas/test/item.md"),
+            "# Title {#title}\noccurs\n: exactly once\n",
+        )
+        .expect("schema");
+        std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").expect("template");
+
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
+        let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
+
+        let doc = Document {
+            preamble: im::vector![DocumentSlot {
+                name: SlotName::new("title"),
+                elements: im::vector![Spanned {
+                    node: ContentElement::Heading {
+                        level: HeadingLevel::new(1).unwrap(),
+                        text: "Test Title".to_string(),
+                    },
+                    span: Span { start: 0, end: 0 },
+                }],
+            }],
+            body: im::vector![],
+            has_separator: false,
+            separator_span: None,
+        };
+
+        let meta = DocumentMeta {
+            url: "/test/doc".to_string(),
+            stem: "test".to_string(),
+            file: "content/test/doc.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+
+        {
+            let mut store = conductor.node_store.write().unwrap();
+            document_to_store(&doc, &mut store, Some(&meta));
+        }
+
+        (conductor, tmp)
+    }
+
+    /// A program that returns a number (not a Selection) should produce
+    /// `Response::Applied` with `dirty_paths: 0`.
+    #[test]
+    fn apply_no_selection_returns_zero_dirty_paths() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        // Evaluate a program that returns a number, not a Selection.
+        let result = conductor.apply_ned_program("42");
+
+        match result.response {
+            Response::Applied { dirty_paths, rebuilt_pages, failed_pages } => {
+                assert_eq!(dirty_paths, 0, "non-Selection program should report 0 dirty paths");
+                assert!(rebuilt_pages.is_empty(), "no pages should be rebuilt for a no-op");
+                assert!(failed_pages.is_empty(), "no pages should fail for a no-op");
+            }
+            other => panic!("expected Response::Applied, got: {other:?}"),
+        }
+    }
+
+    /// A program that mutates a document node should produce `Response::Applied`
+    /// with `dirty_paths: 1` (the document was marked dirty).
+    #[test]
+    fn apply_with_selection_returns_correct_dirty_paths_count() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+
+        // Program: set the title slot text — this returns a Selection over the mutated nodes.
+        let program =
+            r#"(ned/set-text (-> (ned/slot (ned/doc-by-path "content/test/doc.md") "title") ned/descendants ned/texts) "Changed")"#;
+
+        let result = conductor.apply_ned_program(program);
+
+        match result.response {
+            Response::Applied { dirty_paths, .. } => {
+                assert_eq!(
+                    dirty_paths, 1,
+                    "mutation affecting one document should report dirty_paths: 1"
+                );
+            }
+            Response::Error(e) => panic!("unexpected error from apply_ned_program: {e}"),
+            other => panic!("expected Response::Applied, got: {other:?}"),
         }
     }
 }

@@ -55,7 +55,10 @@ assert_curl() {
     else
         response=$(curl -s "http://127.0.0.1:$PORT$url" 2>&1)
     fi
-    if echo "$response" | grep -qF "$expected"; then
+    # Use herestring (<<<) instead of pipe to avoid SIGPIPE: with `set -o pipefail`,
+    # `echo "$response" | grep -qF` would propagate a SIGPIPE failure when grep finds
+    # an early match and closes the pipe before echo finishes writing a large response.
+    if grep -qF "$expected" <<< "$response"; then
         pass "$desc"
     else
         fail "$desc (expected '$expected', got: $response)"
@@ -67,7 +70,7 @@ assert_curl_not_contains() {
     local desc="$1" url="$2" unexpected="$3"
     local response
     response=$(curl -s "http://127.0.0.1:$PORT$url" 2>&1)
-    if echo "$response" | grep -qF "$unexpected"; then
+    if grep -qF "$unexpected" <<< "$response"; then
         fail "$desc (unexpected '$unexpected' found in: $response)"
     else
         pass "$desc"
@@ -92,7 +95,7 @@ assert_rep() {
     local response
     local port_dir="$(dirname "$SITE_DIR")"
     response=$(rep -p "@$port_dir/.nrepl-port" "$expr" 2>&1 || echo "REP_ERROR")
-    if echo "$response" | grep -qF "$expected"; then
+    if grep -qF "$expected" <<< "$response"; then
         pass "$desc"
     else
         fail "$desc (expected '$expected', got: $response)"
@@ -139,7 +142,6 @@ assert_curl "welcome page on empty site" "/" GET "" "Welcome to Presemble"
 
 log "Scaffolding blog site..."
 assert_curl "scaffold blog" "/_presemble/scaffold" POST '{"template":"blog","format":"hiccup"}' '"ok":true'
-sleep 2
 
 # ── Test: Stylesheet served after scaffold ─────────────────────────────────
 
@@ -205,7 +207,7 @@ log "Testing nth-child slot edit scoping..."
 NED_PROGRAM='(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path "content/post/hello-world.md") "summary") 1) ned/descendants ned/texts) "NTHCHILD ONLY SECOND")'
 # Build JSON by escaping the double quotes inside the program string
 APPLY_BODY='{"program":"'"$(echo "$NED_PROGRAM" | sed 's/"/\\"/g')"'"}'
-assert_curl "apply nth-child edit to 2nd paragraph" "/_presemble/apply" POST "$APPLY_BODY" '"ok":true'
+assert_curl "apply nth-child edit to 2nd paragraph" "/_presemble/apply" POST "$APPLY_BODY" '"dirtyPaths":1'
 assert_curl "nth-child edit: 2nd paragraph updated" "/post/hello-world" GET "" "NTHCHILD ONLY SECOND"
 assert_curl "nth-child edit: 1st paragraph unchanged" "/post/hello-world" GET "" "Welcome to your new blog"
 
