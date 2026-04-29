@@ -227,26 +227,56 @@ struct EditRequest {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EditResponse {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dirty_paths: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rebuilt_pages: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_pages: Option<Vec<String>>,
+}
+
+impl EditResponse {
+    fn ok_simple() -> Self {
+        Self { ok: true, error: None, dirty_paths: None, rebuilt_pages: None, failed_pages: None }
+    }
+
+    fn ok_applied(dirty_paths: usize, rebuilt_pages: Vec<String>, failed_pages: Vec<String>) -> Self {
+        Self {
+            ok: true,
+            error: None,
+            dirty_paths: Some(dirty_paths),
+            rebuilt_pages: Some(rebuilt_pages),
+            failed_pages: Some(failed_pages),
+        }
+    }
+
+    fn err(msg: String) -> Self {
+        Self { ok: false, error: Some(msg), dirty_paths: None, rebuilt_pages: None, failed_pages: None }
+    }
 }
 
 /// Convert a conductor command result into an EditResponse.
 fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum::Json<EditResponse> {
     match result {
         Ok(conductor::Response::Ok) | Ok(conductor::Response::SuggestionCreated(_)) => {
-            axum::Json(EditResponse { ok: true, error: None })
+            axum::Json(EditResponse::ok_simple())
+        }
+        Ok(conductor::Response::Applied { rebuilt_pages, failed_pages, dirty_paths }) => {
+            axum::Json(EditResponse::ok_applied(dirty_paths, rebuilt_pages, failed_pages))
         }
         Ok(conductor::Response::Error(e)) => {
-            axum::Json(EditResponse { ok: false, error: Some(e) })
+            axum::Json(EditResponse::err(e))
         }
         Err(e) => {
-            axum::Json(EditResponse { ok: false, error: Some(e) })
+            axum::Json(EditResponse::err(e))
         }
         _ => {
-            axum::Json(EditResponse { ok: false, error: Some("unexpected conductor response".to_string()) })
+            axum::Json(EditResponse::err("unexpected conductor response".to_string()))
         }
     }
 }
@@ -966,14 +996,11 @@ async fn scaffold_handler(
             if let Err(e) = crate::copy_site_assets(&state.site_dir, &repo) {
                 eprintln!("warning: post-scaffold asset copy failed: {e}");
             }
-            axum::Json(EditResponse { ok: true, error: None })
+            axum::Json(EditResponse::ok_simple())
         }
-        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        Err(e) => axum::Json(EditResponse { ok: false, error: Some(e) }),
-        _ => axum::Json(EditResponse {
-            ok: false,
-            error: Some("unexpected conductor response".to_string()),
-        }),
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse::err(e)),
+        Err(e) => axum::Json(EditResponse::err(e)),
+        _ => axum::Json(EditResponse::err("unexpected conductor response".to_string())),
     }
 }
 

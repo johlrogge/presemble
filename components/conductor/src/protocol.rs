@@ -203,6 +203,12 @@ pub enum Response {
     LinkTargetStem(Option<String>),
     /// List of NED suggestions for a file (all statuses).
     NedSuggestions(Vec<editorial_types::NedSuggestion>),
+    /// Result of applying a NED program: counts of dirty paths and rebuilt/failed pages.
+    Applied {
+        rebuilt_pages: Vec<String>,
+        failed_pages: Vec<String>,
+        dirty_paths: usize,
+    },
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.
