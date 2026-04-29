@@ -395,6 +395,23 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
         );
     }
 
+    // Store per-slot schema constraint attributes in the graph so the renderer
+    // can emit them as data-presemble-schema-constraints-* HTML attributes.
+    // Key: "_presemble_schema_constraints_<slotname>", Value: Record of (suffix → Text).
+    let prefix = crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX;
+    for slot in &grammar.preamble {
+        let constraint_pairs = crate::constraints::extract_slot_constraint_attrs(slot);
+        if constraint_pairs.is_empty() {
+            continue;
+        }
+        let mut record = DataGraph::new();
+        for (suffix, value) in constraint_pairs {
+            record.insert(suffix, Value::Text(value));
+        }
+        let key = format!("{prefix}{}", slot.name.as_str());
+        graph.insert(key, Value::Record(record));
+    }
+
     graph
 }
 
@@ -1257,5 +1274,77 @@ mod tests {
             }
             other => panic!("expected Some(Html) for body, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Schema constraint storage in DataGraph tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn build_article_graph_stores_constraint_record_for_slot_with_occurs() {
+        use schema::{BodyRules, Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+
+        let grammar = Grammar {
+            preamble: vec![Slot {
+                name: SlotName::new("title"),
+                element: Element::Heading {
+                    level: HeadingLevelRange {
+                        min: HeadingLevel::new(1).unwrap(),
+                        max: HeadingLevel::new(1).unwrap(),
+                    },
+                },
+                constraints: vec![Constraint::Occurs(CountRange::Exactly(1))],
+                hint_text: None,
+                span: Span { start: 0, end: 0 },
+            }],
+            body: None,
+        };
+
+        let doc_input = "# My Title\n";
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        let graph = build_article_graph(&doc, &grammar);
+
+        let constraint_key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, "title");
+        match graph.resolve(&[constraint_key.as_str()]) {
+            Some(Value::Record(record)) => {
+                match record.resolve(&["occurs"]) {
+                    Some(Value::Text(v)) => assert_eq!(v, "exactly-once"),
+                    other => panic!("expected occurs=exactly-once in constraint record, got {other:?}"),
+                }
+            }
+            other => panic!("expected constraint Record for title, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_article_graph_does_not_store_constraint_record_for_unconstrained_slot() {
+        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+
+        let grammar = Grammar {
+            preamble: vec![Slot {
+                name: SlotName::new("title"),
+                element: Element::Heading {
+                    level: HeadingLevelRange {
+                        min: HeadingLevel::new(1).unwrap(),
+                        max: HeadingLevel::new(1).unwrap(),
+                    },
+                },
+                constraints: vec![],
+                hint_text: None,
+                span: Span { start: 0, end: 0 },
+            }],
+            body: Some(BodyRules { heading_range: None }),
+        };
+
+        let doc_input = "# My Title\n";
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        let graph = build_article_graph(&doc, &grammar);
+
+        let constraint_key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, "title");
+        // No constraints → no entry in graph.
+        assert!(
+            graph.resolve(&[constraint_key.as_str()]).is_none(),
+            "expected no constraint record for unconstrained slot"
+        );
     }
 }

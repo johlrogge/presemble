@@ -1,5 +1,47 @@
 use template;
 
+/// End-to-end: render a schema-derived document and verify that the slot outer element
+/// carries `data-presemble-schema-constraints-occurs` when the grammar specifies it.
+#[test]
+fn render_schema_derived_slot_emits_constraint_attributes() {
+    use schema::{Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+    use content::parse_and_assign;
+
+    // A minimal grammar: title slot with Occurs(Exactly(1)).
+    let grammar = Grammar {
+        preamble: vec![Slot {
+            name: SlotName::new("title"),
+            element: Element::Heading {
+                level: HeadingLevelRange {
+                    min: HeadingLevel::new(1).unwrap(),
+                    max: HeadingLevel::new(1).unwrap(),
+                },
+            },
+            constraints: vec![Constraint::Occurs(CountRange::Exactly(1))],
+            hint_text: None,
+            span: Span { start: 0, end: 0 },
+        }],
+        body: None,
+    };
+
+    let doc_input = "# My Article Title\n";
+    let doc = parse_and_assign(doc_input, &grammar).expect("document should parse");
+    let slot_graph = template::build_article_graph(&doc, &grammar);
+
+    // Wrap in a context the same way as the real render pipeline.
+    let mut context = template::DataGraph::new();
+    context.insert("input", template::Value::Record(slot_graph));
+
+    let template_src = r#"<h1><presemble:insert data="input.title" /></h1>"#;
+    let html = template::render_template(template_src, &context)
+        .expect("render should succeed");
+
+    assert!(
+        html.contains("data-presemble-schema-constraints-occurs=\"exactly-once\""),
+        "expected data-presemble-schema-constraints-occurs attribute on title element; got: {html}"
+    );
+}
+
 #[test]
 fn render_article_with_dom_transformer() {
     let schema_src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
