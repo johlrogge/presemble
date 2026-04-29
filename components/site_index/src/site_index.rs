@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+pub use schema::SchemaKind;
+
 /// Conventional directory names within a site.
 pub const DIR_SCHEMAS: &str = "schemas";
 pub const DIR_CONTENT: &str = "content";
@@ -50,20 +52,6 @@ impl std::fmt::Display for UrlPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
-}
-
-/// Whether a URL path points to a collection index page or an individual item page.
-///
-/// Used when rendering schema lenses via the `#_schema` fragment (ADR-042).
-/// Inference is purely structural — trailing slash means `Index`, no trailing
-/// slash means `Item`. The caller is responsible for verifying that a schema
-/// actually exists at the path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaKind {
-    /// Collection index (path ends with `/` or is empty/root).
-    Index,
-    /// Individual item (leaf path with no trailing slash).
-    Item,
 }
 
 /// Infer whether a URL path refers to a collection index or an item page.
