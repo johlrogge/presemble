@@ -415,6 +415,62 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
     graph
 }
 
+// ---------------------------------------------------------------------------
+// Schema "included by" helpers
+// ---------------------------------------------------------------------------
+
+/// Build the JSON string for `data-presemble-schema-included-by`.
+///
+/// Each entry in `included` is a `(schema_stem, url)` pair. The result is a
+/// compact JSON array, e.g. `[{"schema":"post","url":"/post/#_schema"}]`.
+/// An empty slice produces `"[]"`.
+pub fn build_schema_included_by_json(included: &[(&str, &str)]) -> String {
+    if included.is_empty() {
+        return "[]".to_string();
+    }
+    let entries: Vec<String> = included
+        .iter()
+        .map(|(schema, url)| {
+            let schema_escaped = json_escape_str(schema);
+            let url_escaped = json_escape_str(url);
+            format!(r#"{{"schema":"{schema_escaped}","url":"{url_escaped}"}}"#)
+        })
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// Escape a string for use inside a JSON `"..."` value.
+///
+/// Escapes `\`, `"`, and ASCII control characters.
+fn json_escape_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Insert the `_presemble_schema_included_by` JSON key into an existing DataGraph.
+///
+/// `included` is a slice of `(schema_stem, schema_url)` pairs.  Call this
+/// after `build_article_graph` to attach the back-reference list so the
+/// template renderer can emit `data-presemble-schema-included-by` on the
+/// schema-document root element.
+pub fn inject_schema_included_by(graph: &mut DataGraph, included: &[(&str, &str)]) {
+    let json = build_schema_included_by_json(included);
+    graph.insert(crate::constants::KEY_SCHEMA_INCLUDED_BY, Value::Text(json));
+}
+
 /// Render a single paragraph's markdown text to inline HTML, stripping the outer `<p>` wrapper.
 fn render_inline_markdown(text: &str) -> String {
     let parser = pulldown_cmark::Parser::new(text);

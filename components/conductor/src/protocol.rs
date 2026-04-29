@@ -28,6 +28,15 @@ pub struct DependentFile {
     pub kind: FileClassification,
 }
 
+/// Selects which rendering mode to use for `Command::RenderPage`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RenderMode {
+    /// Normal content rendering (view mode).
+    View,
+    /// Schema/structure rendering — synthesized Document, constraint attrs visible.
+    Schema,
+}
+
 /// Commands sent from clients (LSP, serve) to the conductor via nng REQ/REP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -143,6 +152,8 @@ pub enum Command {
     /// Returns the stem of the collection that the slot links to, or None if
     /// the slot isn't a link or the target can't be determined.
     ResolveLinkTargetStem { source_stem: String, slot: String },
+    /// Render a page at the given URL path, either in normal view mode or schema/structure mode.
+    RenderPage { path: String, mode: RenderMode },
     /// Create a NED-based editorial suggestion without applying it.
     CreateNedSuggestion {
         file: std::path::PathBuf,
@@ -203,6 +214,8 @@ pub enum Response {
     LinkTargetStem(Option<String>),
     /// List of NED suggestions for a file (all statuses).
     NedSuggestions(Vec<editorial_types::NedSuggestion>),
+    /// HTML string for a rendered page (response to `Command::RenderPage`).
+    PageRendered { html: String },
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.

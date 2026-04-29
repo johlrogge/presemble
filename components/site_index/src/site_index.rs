@@ -259,6 +259,18 @@ impl SiteIndex {
         files
     }
 
+    /// Return the URL of the first (alphabetically sorted) content document for
+    /// a stem, or `None` if there are no content files for that stem.
+    ///
+    /// Intended for structure-mode badge data: callers pair this with
+    /// `content_files(stem).len()` to get the count + sample URL pair.
+    pub fn sample_url_for_stem(&self, stem: &str) -> Option<String> {
+        let files = self.content_files(stem);
+        let first = files.first()?;
+        let slug = first.file_stem()?.to_str()?;
+        Some(url_for_stem_slug(stem, slug))
+    }
+
     /// Given a schema stem, find the matching template (html first, then hiccup).
     /// Prefers the new directory-based convention (`templates/{stem}/item.html`)
     /// and falls back to the legacy flat convention (`templates/{stem}.html`).
@@ -377,6 +389,40 @@ impl SiteIndex {
         let schema_path = self.schema_path(stem);
         let src = std::fs::read_to_string(&schema_path).ok()?;
         schema::parse_schema(&src).ok()
+    }
+
+    /// Return the list of schema stems that include the given `target_stem` via
+    /// `Constraint::TypeLink(target_stem)` in any of their slots.
+    ///
+    /// The returned vec is sorted alphabetically.  Each entry is just the stem
+    /// string — the caller can derive the URL with `/<stem>/#_schema`.
+    ///
+    /// Returns an empty vec if no schemas reference the target, or if the
+    /// schemas directory cannot be read.
+    pub fn schemas_including(&self, target_stem: &str) -> Vec<String> {
+        let all_stems = self.schema_stems();
+        let mut result = Vec::new();
+
+        for stem in &all_stems {
+            // Skip the stem itself — a schema cannot be "included by" itself
+            if stem == target_stem {
+                continue;
+            }
+            // Load the grammar and look for TypeLink constraints
+            if let Some(grammar) = self.load_grammar(stem) {
+                let references_target = grammar.preamble.iter().any(|slot| {
+                    slot.constraints.iter().any(|c| {
+                        matches!(c, schema::Constraint::TypeLink(name) if name == target_stem)
+                    })
+                });
+                if references_target {
+                    result.push(stem.clone());
+                }
+            }
+        }
+
+        result.sort();
+        result
     }
 }
 
@@ -675,6 +721,27 @@ mod tests {
     }
 
     #[test]
+    fn sample_url_for_stem_returns_some_for_existing_content() {
+        let idx = index();
+        let url = idx.sample_url_for_stem("article");
+        assert!(url.is_some(), "should return a URL when content files exist");
+        let url = url.unwrap();
+        // URL should be root-relative and contain the stem
+        assert!(
+            url.starts_with("/article/"),
+            "article sample URL should start with /article/; got: {url}"
+        );
+    }
+
+    #[test]
+    fn sample_url_for_stem_returns_none_for_missing_stem() {
+        // Use a stem that has no content files in the fixture.
+        let idx = index();
+        let url = idx.sample_url_for_stem("nonexistent_stem_xyz");
+        assert!(url.is_none(), "should return None when no content files exist");
+    }
+
+    #[test]
     fn template_for_finds_html_template() {
         let idx = index();
         let tpl = idx.template_for("article");
@@ -807,5 +874,90 @@ mod tests {
         let idx = SiteIndex::new(tmp.path().to_path_buf());
         let grammar = idx.load_grammar("post");
         assert!(grammar.is_some(), "should parse dir-based grammar");
+    }
+
+    // -----------------------------------------------------------------------
+    // schemas_including tests
+    // -----------------------------------------------------------------------
+
+    /// Build a temp site with three schemas:
+    /// - "author": no TypeLink constraints
+    /// - "post":   has `type: link(author)` on the author slot
+    /// - "event":  also has `type: link(author)` on the organiser slot
+    fn make_typelink_site(tmp: &tempfile::TempDir) {
+        // schemas/author/item.md — no TypeLink
+        let author_schema_dir = tmp.path().join("schemas/author");
+        std::fs::create_dir_all(&author_schema_dir).unwrap();
+        std::fs::write(
+            author_schema_dir.join("item.md"),
+            "# Author name {#name}\noccurs\n: exactly once\n",
+        )
+        .unwrap();
+
+        // schemas/post/item.md — has TypeLink("author")
+        let post_schema_dir = tmp.path().join("schemas/post");
+        std::fs::create_dir_all(&post_schema_dir).unwrap();
+        std::fs::write(
+            post_schema_dir.join("item.md"),
+            "# Post title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#author}\ntype\n: link(author)\n",
+        )
+        .unwrap();
+
+        // schemas/event/item.md — also has TypeLink("author")
+        let event_schema_dir = tmp.path().join("schemas/event");
+        std::fs::create_dir_all(&event_schema_dir).unwrap();
+        std::fs::write(
+            event_schema_dir.join("item.md"),
+            "# Event title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#organiser}\ntype\n: link(author)\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn schemas_including_finds_schemas_with_typelink_to_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_typelink_site(&tmp);
+        let idx = SiteIndex::new(tmp.path().to_path_buf());
+
+        let including = idx.schemas_including("author");
+        assert!(
+            including.contains(&"post".to_string()),
+            "post should appear in schemas_including(author): {including:?}"
+        );
+        assert!(
+            including.contains(&"event".to_string()),
+            "event should appear in schemas_including(author): {including:?}"
+        );
+        // The target itself must not appear
+        assert!(
+            !including.contains(&"author".to_string()),
+            "author should not include itself: {including:?}"
+        );
+    }
+
+    #[test]
+    fn schemas_including_is_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_typelink_site(&tmp);
+        let idx = SiteIndex::new(tmp.path().to_path_buf());
+
+        let including = idx.schemas_including("author");
+        let mut sorted = including.clone();
+        sorted.sort();
+        assert_eq!(including, sorted, "schemas_including should return sorted results");
+    }
+
+    #[test]
+    fn schemas_including_empty_for_schema_with_no_dependents() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_typelink_site(&tmp);
+        let idx = SiteIndex::new(tmp.path().to_path_buf());
+
+        // "post" has no schemas that TypeLink to it
+        let including = idx.schemas_including("post");
+        assert!(
+            including.is_empty(),
+            "no schema has a TypeLink to 'post', expected empty: {including:?}"
+        );
     }
 }

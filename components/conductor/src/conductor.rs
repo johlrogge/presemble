@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use rayon::prelude::*;
 
-use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, Response};
+use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, RenderMode, Response};
 
 // ---------------------------------------------------------------------------
 // Clojure string literal escaping
@@ -2101,6 +2101,101 @@ impl Conductor {
         CommandResult::ok_with_events(events)
     }
 
+    fn stem_from_url_path(url: &str) -> String {
+        let trimmed = url.trim_start_matches('/');
+        if trimmed.is_empty() { return String::new(); }
+        trimmed.split('/').next().unwrap_or("").to_string()
+    }
+
+    fn render_page(&self, url_path: &str, mode: &RenderMode) -> Result<String, String> {
+        match mode {
+            RenderMode::View => {
+                let stem = Self::stem_from_url_path(url_path);
+                let slug = if url_path.ends_with('/') || url_path == "/" {
+                    "index".to_string()
+                } else {
+                    url_path.rsplit('/').next().unwrap_or("index").to_string()
+                };
+                let out = site_index::output_path_for_stem_slug(&self.output_dir, &stem, &slug);
+                std::fs::read_to_string(&out).map_err(|e| format!("no output for {url_path}: {e}"))
+            }
+            RenderMode::Schema => {
+                let url = site_index::UrlPath::new(url_path);
+                let kind = site_index::schema_kind_for_path(&url);
+                let stem = Self::stem_from_url_path(url_path);
+                let grammar_key = match kind {
+                    schema::SchemaKind::Index => site_index::schema_cache_key(&stem, "index"),
+                    schema::SchemaKind::Item => {
+                        let item_key = format!("{stem}/item");
+                        let c = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+                        if c.contains_key(&item_key) { item_key } else { stem.clone() }
+                    }
+                };
+                let grammar_src = {
+                    let c = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+                    c.get(&grammar_key).cloned()
+                }.ok_or_else(|| format!("no schema for {url_path} (key={grammar_key})"))?;
+                let grammar = schema::parse_schema(&grammar_src)
+                    .map_err(|e| format!("schema parse: {e}"))?;
+                let doc = node_store_bridge::synthesize_schema_document(&grammar, kind);
+                let article_graph = template::build_article_graph(&doc, &grammar);
+                let mut ctx_graph = template::DataGraph::new();
+                ctx_graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
+                ctx_graph.insert("_presemble_file", template::Value::Text(String::new()));
+                ctx_graph.insert("url", template::Value::Text(url_path.to_string()));
+                ctx_graph.insert("input", template::Value::Record(article_graph));
+                let fresh_repo = site_repository::SiteRepository::builder().from_dir(&self.site_dir).build();
+                let stem_obj = site_index::SchemaStem::new(&stem);
+                let tmpl = if matches!(kind, schema::SchemaKind::Index) {
+                    fresh_repo.collection_template_source(&stem_obj)
+                        .or_else(|| fresh_repo.item_template_source(&stem_obj))
+                        .or_else(|| fresh_repo.partial_template_source(&stem))
+                } else {
+                    fresh_repo.item_template_source(&stem_obj)
+                        .or_else(|| fresh_repo.partial_template_source(&stem))
+                }.ok_or_else(|| format!("no template for stem {stem}"))?;
+                let (tmpl_src, is_hiccup) = tmpl;
+                let raw = if is_hiccup {
+                    template::parse_template_hiccup(&tmpl_src).map_err(|e| format!("{e}"))?
+                } else {
+                    template::parse_template_xml(&tmpl_src).map_err(|e| format!("{e}"))?
+                };
+                let reg = template_registry::FileTemplateRegistry::new(fresh_repo);
+                let (nodes, local_defs) = template::extract_definitions(raw);
+                let render_ctx = template::RenderContext::with_local_defs(&reg, &local_defs);
+                let transformed = template::transform(nodes, &ctx_graph, &render_ctx)
+                    .map_err(|e| format!("render: {e}"))?;
+
+                // T6: attach instance-count + sample-URL attrs to the first root element.
+                let count = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                    .content_files(&stem).len();
+                let sample_url = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                    .sample_url_for_stem(&stem);
+                let transformed = template::attach_schema_instance_attrs(
+                    transformed,
+                    count,
+                    sample_url.as_deref(),
+                );
+
+                // T7: attach included-by back-reference JSON attr.
+                let including_stems = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                    .schemas_including(&stem);
+                let included_pairs_owned: Vec<(String, String)> = including_stems.iter()
+                    .map(|s| (s.clone(), format!("/{s}/#_schema")))
+                    .collect();
+                let included_pairs: Vec<(&str, &str)> = included_pairs_owned.iter()
+                    .map(|(s, u)| (s.as_str(), u.as_str()))
+                    .collect();
+                let transformed = template::attach_schema_included_by_attr(
+                    transformed,
+                    &included_pairs,
+                );
+
+                Ok(template::serialize_nodes(&transformed))
+            }
+        }
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -2995,6 +3090,14 @@ impl Conductor {
                     .cloned()
                     .collect();
                 CommandResult::with_response(Response::NedSuggestions(result))
+            }
+
+            // ── Phase D T4 stub: schema render endpoint ───────────────────────
+            Command::RenderPage { path, mode } => {
+                match self.render_page(&path, &mode) {
+                    Ok(html) => CommandResult::with_response(Response::PageRendered { html }),
+                    Err(e) => CommandResult::error(e),
+                }
             }
         }
     }

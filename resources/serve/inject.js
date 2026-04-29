@@ -760,18 +760,31 @@ if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
 if(!_handlingHashChange){setPresembleMode(m);}
 }
 // --- Phase D T8: schema mode handlers and hash dispatcher ---
+var _schemaFetchSeq=0;
 function _enterSchemaMode(){
-// Mocked for T8 (start) — T4 will replace with real fetch.
-var mockHtml='<div class="presemble-schema-mock">'
-+'<p>Structure mode \u2014 schema render endpoint not yet wired.</p>'
-+'<p>Path: '+location.pathname+'</p>'
-+'</div>';
-var main=document.querySelector('main')||document.body;
-main.innerHTML=mockHtml;
 document.body.classList.add('presemble-mode-schema');
+var mySeq=++_schemaFetchSeq;
+fetch('/_presemble/render?path='+encodeURIComponent(location.pathname)+'&mode=schema')
+.then(function(r){
+if(mySeq!==_schemaFetchSeq){return null;}
+if(!r.ok){throw new Error('Schema render failed: '+r.status);}
+return r.text();
+})
+.then(function(html){
+if(html===null){return;}
+if(mySeq!==_schemaFetchSeq){return;}
+var main=document.querySelector('main');
+if(main){main.innerHTML=html;}else{document.body.innerHTML=html;}
+})
+.catch(function(err){
+if(mySeq!==_schemaFetchSeq){return;}
+var main=document.querySelector('main')||document.body;
+main.innerHTML='<div class="presemble-schema-error"><p>Could not load schema for '+location.pathname+'</p><p><small>'+err.message+'</small></p></div>';
+});
 }
 function _leaveSchemaMode(){
 if(document.body.classList.contains('presemble-mode-schema')){
+_schemaFetchSeq++;
 location.reload();
 }
 }

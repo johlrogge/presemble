@@ -6,7 +6,7 @@ mod protocol;
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber};
 pub use conductor::{CommandResult, Conductor};
 pub use dirty::DirtyDocs;
-pub use protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
+pub use protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, RenderMode, Response};
 pub use editorial_types;
 
 #[cfg(test)]
@@ -1747,6 +1747,66 @@ mod tests {
         assert!(
             dirty.contains(rel_path),
             "dirty_docs should contain the modified path after empty-slot edit"
+        );
+    }
+
+    /// Task B regression: `render_insert_native` must propagate constraint_attrs to the rendered
+    /// HTML element when the graph is backed by a NodeStore (the production NED path).
+    ///
+    /// This test builds a NodeStore with:
+    /// - a heading node for "title"
+    /// - a constraint record node for "_presemble_schema_constraints_title"
+    /// both as references from the semantic root, then renders via PrefixedGraphView
+    /// (which implements resolve_node()) to exercise render_insert_native.
+    #[test]
+    fn render_insert_native_propagates_constraint_attrs_via_node_store() {
+        use node_store::{Edge, Node, NodeStore};
+        use node_store_bridge::{NodeStoreView, PrefixedGraphView};
+        use template::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX;
+
+        // Build a NodeStore with:
+        // root
+        //   → title (heading)
+        //       → "My NodeStore Title" (text)
+        //   → _presemble_schema_constraints_title (record-like element)
+        //       → occurs (text "exactly-once")
+        let mut store = NodeStore::new();
+        let root_name = store.intern("semantic");
+        let root = store.add_node(Node::Element(root_name));
+
+        // Title heading node
+        let title_key = store.intern("title");
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(Node::Element(heading_name));
+        let text_node = store.add_node(Node::Text("My NodeStore Title".to_string()));
+        store.add_edge(heading, Edge::Child(text_node));
+        store.add_edge(root, Edge::Reference { name: title_key, target: heading });
+
+        // Constraint record node: _presemble_schema_constraints_title → { occurs: "exactly-once" }
+        let constraint_key_name = format!("{KEY_SCHEMA_CONSTRAINTS_PREFIX}title");
+        let constraint_record_key = store.intern(&constraint_key_name);
+        let record_elem_name = store.intern("constraint-record");
+        let constraint_record = store.add_node(Node::Element(record_elem_name));
+        let occurs_key = store.intern("occurs");
+        let occurs_val = store.add_node(Node::Text("exactly-once".to_string()));
+        store.add_edge(constraint_record, Edge::Reference { name: occurs_key, target: occurs_val });
+        store.add_edge(root, Edge::Reference { name: constraint_record_key, target: constraint_record });
+
+        // PrefixedGraphView — this implements resolve_node(), so render_insert_native is used
+        let store_view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), store_view);
+
+        let template_src = r#"<h1><presemble:insert data="input.title" /></h1>"#;
+        let nodes = template::parse_template_xml(template_src).expect("template parse");
+        let reg = template::NullRegistry;
+        let ctx = template::RenderContext::new(&reg);
+        let transformed = template::transform(nodes, &prefixed, &ctx)
+            .expect("transform should succeed");
+        let html = template::serialize_nodes(&transformed);
+
+        assert!(
+            html.contains("data-presemble-schema-constraints-occurs=\"exactly-once\""),
+            "NodeStore-backed render via render_insert_native should emit constraint attrs; got: {html}"
         );
     }
 }

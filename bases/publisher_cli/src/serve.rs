@@ -179,6 +179,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/apply", post(apply_handler))
+        .route("/_presemble/render", get(render_handler))
         .route("/_presemble/grammar", get(grammar_handler))
         .route("/_presemble/links", get(links_handler))
         .route("/_presemble/schemas", get(schemas_handler))
@@ -318,6 +319,51 @@ async fn grammar_handler(
         }
         Ok(conductor::Response::Error(e)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
+        }
+        _ => {
+            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], b"unexpected conductor response".to_vec()).into_response()
+        }
+    }
+}
+
+/// Query parameters for `GET /_presemble/render`.
+#[derive(serde::Deserialize)]
+struct RenderQuery {
+    path: String,
+    mode: String,
+}
+
+async fn render_handler(
+    State(state): State<AppState>,
+    Query(query): Query<RenderQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let mode = match query.mode.as_str() {
+        "view" => conductor::RenderMode::View,
+        "schema" => conductor::RenderMode::Schema,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain")],
+                format!("invalid mode: {:?}; expected 'view' or 'schema'", query.mode).into_bytes(),
+            ).into_response();
+        }
+    };
+
+    match state.conductor.send(&conductor::Command::RenderPage { path: query.path, mode }) {
+        Ok(conductor::Response::PageRendered { html }) => {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                html.into_bytes(),
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
         }
         Err(e) => {
             (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
