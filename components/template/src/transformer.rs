@@ -451,6 +451,10 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
     // For relative paths like "title" (inside data-each), look in graph["_presemble_file"].
     let presemble_file = resolve_presemble_file(&path_segments, graph);
 
+    // Resolve per-slot schema constraint attributes for structure-mode overlays.
+    // These become data-presemble-schema-constraints-* attributes on the outer element.
+    let constraint_attrs = resolve_slot_constraint_form_attrs(data_path, graph);
+
     // Check for :apply attribute — resolve to Form (native from hiccup, re-parsed from HTML strings)
     let apply_form = match el.attr_form("apply") {
         Some(form @ (Form::Symbol(_) | Form::List(_))) => Some(form.clone()),
@@ -490,6 +494,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
                 {
                     attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
                 }
+                attrs.extend(constraint_attrs);
                 let element = Element {
                     name: tag,
                     attrs,
@@ -506,13 +511,15 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
 
         Some(Value::Text(text)) => {
             let tag = as_tag.unwrap_or("span").to_string();
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
                 name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
+                attrs,
                 children: vec![Node::Text(text)],
             };
             Ok(vec![Node::Element(element)])
@@ -580,6 +587,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
             } else if effective_tag == "a" {
                 attrs.push(("href".to_string(), Form::Str("#".to_string())));
             }
+            attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
                 name: effective_tag.to_string(),
                 attrs,
@@ -593,29 +601,25 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
 
         Some(Value::Integer(n)) => {
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(n.to_string())],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
+            let element = Element { name: tag, attrs, children: vec![Node::Text(n.to_string())] };
             Ok(vec![Node::Element(element)])
         }
 
         Some(Value::Bool(b)) => {
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(b.to_string())],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
+            let element = Element { name: tag, attrs, children: vec![Node::Text(b.to_string())] };
             Ok(vec![Node::Element(element)])
         }
 
@@ -625,30 +629,26 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
                 None => format!(":{name}"),
             };
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(text)],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
+            let element = Element { name: tag, attrs, children: vec![Node::Text(text)] };
             Ok(vec![Node::Element(element)])
         }
 
         Some(Value::Fn(c)) => {
             let text = format!("#<fn {}>", c.name().unwrap_or("anonymous"));
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(text)],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs);
+            let element = Element { name: tag, attrs, children: vec![Node::Text(text)] };
             Ok(vec![Node::Element(element)])
         }
 
@@ -1168,6 +1168,50 @@ fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> Stri
         .or_else(|| graph.resolve(&[key_file])
             .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None }))
         .unwrap_or_default()
+}
+
+/// Look up per-slot schema constraint attributes from the graph and return them as
+/// `(attribute-name, Form::Str(value))` pairs ready to append to an element's attrs list.
+///
+/// The slot name is derived as the last segment of `data_path` (e.g. "input.title" → "title").
+/// The constraint record is stored as `"_presemble_schema_constraints_<slotname>"` within
+/// the same parent record that holds the slot value.  For `data="input.title"` the lookup
+/// path is `["input", "_presemble_schema_constraints_title"]`; for `data="title"` it is
+/// `["_presemble_schema_constraints_title"]`.  Falls back to a top-level lookup if the
+/// scoped lookup returns nothing (mirrors `resolve_presemble_file`).
+fn resolve_slot_constraint_form_attrs(data_path: &str, graph: &dyn GraphView) -> Vec<(String, Form)> {
+    let slot_name = slot_name_from_path(data_path);
+    let key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, slot_name);
+
+    // Build a scoped path by replacing the last segment with the constraint key.
+    let path_segments: Vec<&str> = data_path.split('.').collect();
+    let mut scoped: Vec<&str> = path_segments.clone();
+    if let Some(last) = scoped.last_mut() {
+        *last = key.as_str();
+    }
+
+    let resolved = graph.resolve(&scoped)
+        .or_else(|| graph.resolve(&[key.as_str()]));
+
+    match resolved {
+        Some(data_ref) => {
+            if let Value::Record(record) = data_ref.into_owned() {
+                record.iter()
+                    .map(|(suffix, val)| {
+                        let attr_name = crate::constraints::constraint_attr_name(suffix);
+                        let attr_val = match val {
+                            Value::Text(t) => t.clone(),
+                            _ => String::new(),
+                        };
+                        (attr_name, Form::Str(attr_val))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    }
 }
 
 /// Handle a `<presemble:apply>` element.

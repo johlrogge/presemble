@@ -18,3 +18,8 @@ pub const ATTR_FILE: &str = "data-presemble-file";
 pub const ATTR_HINT: &str = "data-presemble-hint";
 pub const ATTR_MD: &str = "data-presemble-md";
 pub const ATTR_SOURCE_SLOT: &str = "data-presemble-source-slot";
+
+/// DataGraph key prefix for per-slot schema constraint records.
+/// The full key for slot "title" is `"_presemble_schema_constraints_title"`.
+/// The value is a `Value::Record` where each entry maps a constraint suffix to its string value.
+pub const KEY_SCHEMA_CONSTRAINTS_PREFIX: &str = "_presemble_schema_constraints_";

@@ -1,5 +1,6 @@
 mod ast;
 pub mod constants;
+pub mod constraints;
 pub mod data;
 pub mod dom;
 mod error;
@@ -11,6 +12,7 @@ pub mod registry;
 pub mod transformer;
 
 pub use ast::{Expr, Transform};
+pub use constraints::{constraint_attr_name, extract_slot_constraint_attrs, CONSTRAINT_ATTR_PREFIX};
 pub use data::{build_article_graph, build_article_graph_with_source, synthesize_link, Callable, DataGraph, SuggestionKind, Value};
 pub use graph_view::{DataRef, GraphView, ResolvedNode};
 pub use error::TemplateError;
