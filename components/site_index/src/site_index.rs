@@ -52,6 +52,36 @@ impl std::fmt::Display for UrlPath {
     }
 }
 
+/// Whether a URL path points to a collection index page or an individual item page.
+///
+/// Used when rendering schema lenses via the `#_schema` fragment (ADR-042).
+/// Inference is purely structural — trailing slash means `Index`, no trailing
+/// slash means `Item`. The caller is responsible for verifying that a schema
+/// actually exists at the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaKind {
+    /// Collection index (path ends with `/` or is empty/root).
+    Index,
+    /// Individual item (leaf path with no trailing slash).
+    Item,
+}
+
+/// Infer whether a URL path refers to a collection index or an item page.
+///
+/// Rules:
+/// - `""` (empty) → `Index`
+/// - `"/"` (root) → `Index`
+/// - Paths ending with `/` → `Index`
+/// - All other paths → `Item`
+pub fn schema_kind_for_path(path: &UrlPath) -> SchemaKind {
+    let s = path.as_str();
+    if s.is_empty() || s == "/" || s.ends_with('/') {
+        SchemaKind::Index
+    } else {
+        SchemaKind::Item
+    }
+}
+
 #[derive(Debug)]
 pub enum FileKind {
     Content { schema_stem: SchemaStem },
@@ -432,6 +462,30 @@ mod tests {
     fn index() -> SiteIndex {
         SiteIndex::new(fixture_site())
     }
+
+    // --- schema_kind_for_path tests ---
+
+    #[test]
+    fn schema_kind_for_root_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/")), SchemaKind::Index);
+    }
+
+    #[test]
+    fn schema_kind_for_collection_with_trailing_slash_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/")), SchemaKind::Index);
+    }
+
+    #[test]
+    fn schema_kind_for_item_no_trailing_slash_is_item() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo")), SchemaKind::Item);
+    }
+
+    #[test]
+    fn schema_kind_for_empty_path_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("")), SchemaKind::Index);
+    }
+
+    // ---
 
     #[test]
     fn url_for_stem_slug_root_index() {
