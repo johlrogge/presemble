@@ -258,6 +258,46 @@ NED_BAD_BODY='{"file":"content/post/hello-world.md","selection":"(ned/slot (ned/
 assert_curl "ned_suggestions_create_rejects_existing_node_ok_false" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" '"ok":false'
 assert_curl "ned_suggestions_create_rejects_existing_node_mentions_existing" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" 'Existing'
 
+# ── Test: Structure mode rendering via render endpoint ────────────────────
+
+log "Testing schema render endpoint..."
+
+# View mode: re-renders the content page (sanity check that the endpoint works)
+assert_curl "render endpoint view mode renders content" \
+    "/_presemble/render?path=/post/hello-world&mode=view" GET "" \
+    'data-presemble-slot="title"'
+
+# Schema mode: synthesizes empty document and renders schema-as-mockup
+assert_curl "render endpoint schema mode emits constraint attrs" \
+    "/_presemble/render?path=/post/hello-world&mode=schema" GET "" \
+    'data-presemble-schema-constraints-occurs'
+
+assert_curl "render endpoint schema mode emits instance count attr" \
+    "/_presemble/render?path=/post/hello-world&mode=schema" GET "" \
+    'data-presemble-schema-instance-count'
+
+assert_curl "render endpoint schema mode emits included-by attr" \
+    "/_presemble/render?path=/author/default&mode=schema" GET "" \
+    'data-presemble-schema-included-by'
+
+# Schema mode at root: synthesises root index schema
+assert_curl "render endpoint schema mode at root emits constraints" \
+    "/_presemble/render?path=/&mode=schema" GET "" \
+    'data-presemble-schema-constraints'
+
+# Subschema link: post's author slot points at /author/#_schema in schema mode
+assert_curl "render endpoint schema mode emits typelink href" \
+    "/_presemble/render?path=/post/hello-world&mode=schema" GET "" \
+    '/author/#_schema'
+
+# Bad mode: should return 400
+assert_status "render endpoint rejects bad mode" \
+    "/_presemble/render?path=/post/hello-world&mode=invalid" "400"
+
+# Missing path: Axum query-param deserialisation returns 400
+assert_status "render endpoint rejects missing path" \
+    "/_presemble/render?mode=schema" "400"
+
 # ── Test: Save edits to disk for nREPL tests ─────────────────────────────
 
 log "Saving edits to disk for nREPL..."
