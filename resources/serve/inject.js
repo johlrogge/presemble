@@ -77,9 +77,24 @@ function parsePresembleHash(hash) {
 
 // Set the presemble mode by updating the URL hash.
 // 'view' removes the hash (no page reload); other modes set #_<mode>.
+// Also canonicalizes the pathname by stripping /index.html or /index.htm
+// so mode URLs read as /post/some-post/#_schema rather than
+// /post/some-post/index.html#_schema.
 function setPresembleMode(mode) {
+  var p = location.pathname;
+  if (p.endsWith('/index.html')) {
+    p = p.slice(0, -('index.html'.length)); // keeps trailing /
+  } else if (p.endsWith('/index.htm')) {
+    p = p.slice(0, -('index.htm'.length));
+  }
+  var pathChanged = p !== location.pathname;
+
   if (mode === 'view') {
-    history.replaceState(null, '', location.pathname + location.search);
+    history.replaceState(null, '', p + location.search);
+  } else if (pathChanged) {
+    // replaceState doesn't fire hashchange, so update URL then dispatch manually.
+    history.replaceState(null, '', p + location.search + '#_' + mode);
+    _applyHashMode();
   } else {
     location.hash = '_' + mode;
   }
@@ -773,8 +788,23 @@ return r.text();
 .then(function(html){
 if(html===null){return;}
 if(mySeq!==_schemaFetchSeq){return;}
-var main=document.querySelector('main');
-if(main){main.innerHTML=html;}else{document.body.innerHTML=html;}
+var doc=new DOMParser().parseFromString(html,'text/html');
+var newMain=doc.querySelector('main');
+var existingMain=document.querySelector('main');
+if(newMain&&existingMain){
+existingMain.innerHTML=newMain.innerHTML;
+}else if(newMain){
+document.body.appendChild(newMain.cloneNode(true));
+}else{
+// Fallback: no <main> in response — last resort, dump into body
+document.body.innerHTML=html;
+}
+// Propagate schema-metadata attrs from rendered <html> to live <html>
+['data-presemble-schema-instance-count','data-presemble-schema-instance-sample-url','data-presemble-schema-included-by'].forEach(function(attr){
+if(doc.documentElement.hasAttribute(attr)){
+document.documentElement.setAttribute(attr,doc.documentElement.getAttribute(attr));
+}
+});
 })
 .catch(function(err){
 if(mySeq!==_schemaFetchSeq){return;}
@@ -785,6 +815,9 @@ main.innerHTML='<div class="presemble-schema-error"><p>Could not load schema for
 function _leaveSchemaMode(){
 if(document.body.classList.contains('presemble-mode-schema')){
 _schemaFetchSeq++;
+['data-presemble-schema-instance-count','data-presemble-schema-instance-sample-url','data-presemble-schema-included-by'].forEach(function(attr){
+document.documentElement.removeAttribute(attr);
+});
 location.reload();
 }
 }
@@ -814,6 +847,24 @@ setMode(m);
 _handlingHashChange=false;
 }
 window.addEventListener('hashchange',_applyHashMode);
+// Schema-mode link intercept: keep #_schema on navigation (ADR-042 Phase D Slice 1).
+document.addEventListener('click',function(e){
+if(mode!=='schema'){return;}
+var a=e.target.closest&&e.target.closest('a');
+if(!a){return;}
+var href=a.getAttribute('href');
+if(!href){return;}
+// Skip anchor-only fragments, javascript:, mailto:, and links that already carry a hash
+if(href.startsWith('#')||href.startsWith('javascript:')||href.startsWith('mailto:')){return;}
+if(href.includes('#')){return;}
+// Skip external URLs that are cross-origin
+if(/^https?:\/\//.test(href)){
+try{var u=new URL(href);if(u.origin!==location.origin){return;}}
+catch(_){return;}
+}
+e.preventDefault();
+location.href=href+'#_schema';
+},true);
 // --- End Phase D T8 ---
 if(mode==='edit'){_editEnter();}
 if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}

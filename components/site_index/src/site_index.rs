@@ -56,14 +56,26 @@ impl std::fmt::Display for UrlPath {
 
 /// Infer whether a URL path refers to a collection index or an item page.
 ///
-/// Rules:
-/// - `""` (empty) → `Index`
+/// Rules (by URL segment depth):
+/// - `""` (empty) → `Index` (root)
 /// - `"/"` (root) → `Index`
-/// - Paths ending with `/` → `Index`
-/// - All other paths → `Item`
+/// - `/foo/` or `/foo/index.html` (depth 1) → `Index` (collection)
+/// - `/foo/bar/`, `/foo/bar`, `/foo/bar/index.html` (depth 2+) → `Item`
+///
+/// The algorithm:
+/// 1. Strip `index.html` suffix if present (canonical form)
+/// 2. Strip trailing slash
+/// 3. Split by `/` and filter empty segments
+/// 4. Count: 0 → root Index, 1 → collection Index, 2+ → Item
 pub fn schema_kind_for_path(path: &UrlPath) -> SchemaKind {
     let s = path.as_str();
-    if s.is_empty() || s == "/" || s.ends_with('/') {
+    // Canonical form: strip index.html suffix
+    let s = s.strip_suffix("index.html").unwrap_or(s);
+    // Strip trailing slash
+    let s = s.trim_end_matches('/');
+    // Count non-empty segments
+    let depth = s.split('/').filter(|seg| !seg.is_empty()).count();
+    if depth <= 1 {
         SchemaKind::Index
     } else {
         SchemaKind::Item
@@ -517,6 +529,21 @@ mod tests {
     #[test]
     fn schema_kind_for_empty_path_is_index() {
         assert_eq!(schema_kind_for_path(&UrlPath::new("")), SchemaKind::Index);
+    }
+
+    #[test]
+    fn schema_kind_for_item_with_trailing_slash_is_item() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo/")), SchemaKind::Item);
+    }
+
+    #[test]
+    fn schema_kind_for_item_with_index_html_suffix_is_item() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo/index.html")), SchemaKind::Item);
+    }
+
+    #[test]
+    fn schema_kind_for_collection_with_index_html_suffix_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/index.html")), SchemaKind::Index);
     }
 
     // ---
