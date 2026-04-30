@@ -128,12 +128,10 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 else{tryScroll(10);}
 })();
 (function(){
-// Hash takes precedence over sessionStorage on load (T8).
-// Unknown hashes fall through to sessionStorage (existing behaviour).
-var _hashModeOnLoad=parsePresembleHash(location.hash);
-var mode=(_hashModeOnLoad!=='unknown'&&_hashModeOnLoad!=='schema')
-  ? _hashModeOnLoad
-  : (sessionStorage.getItem('presemble-mode')||'view');
+// Mode is derived exclusively from the URL hash (ADR-042, T11).
+// 'view' is the default; unknown or empty hashes also resolve to 'view'.
+var _initialHashMode=parsePresembleHash(location.hash);
+var mode=(_initialHashMode!=='unknown')?_initialHashMode:'view';
 // Flag to suppress re-writing the hash while we are reacting to a hashchange.
 var _handlingHashChange=false;
 var _editorialSuggestCount=0;
@@ -157,7 +155,8 @@ var viewBtn=document.createElement('button');viewBtn.textContent='\u{1F441} View
 var editBtn=document.createElement('button');editBtn.textContent='\u{270F}\u{FE0F} Edit';
 var suggestBtn=document.createElement('button');suggestBtn.textContent='\u{1F4AC} Suggest';suggestBtn.style.position='relative';
 var suggestBadge=document.createElement('span');suggestBadge.className='presemble-suggest-badge';suggestBadge.style.display='none';suggestBtn.appendChild(suggestBadge);
-menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);
+var structureBtn=document.createElement('button');structureBtn.textContent='\u{1F4D0} Structure';
+menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);menu.appendChild(structureBtn);
 container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);
 document.body.appendChild(container);
 function update(){
@@ -170,12 +169,14 @@ if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}
 else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';
 if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}
 }
+else if(mode==='schema'){icon.textContent='\u{1F4D0}';icon.title='Structure mode \u{2014} viewing schema';}
 else if(totalBadge===0&&_dirtyCount===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}
 else if(_dirtyCount>0&&totalBadge===0){icon.textContent='\u{1F4BE}';icon.title=_dirtyCount+' unsaved change'+(_dirtyCount===1?'':'s')+' \u{2014} click to change';}
 else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+(_dirtyCount>0?' ('+_dirtyCount+' unsaved)':'')+' \u{2014} click to edit';}
 viewBtn.className=mode==='view'?'active':'';
 editBtn.className=mode==='edit'?'active':'';
 suggestBtn.className=mode==='suggest'?'active':'';
+structureBtn.className=mode==='schema'?'active':'';
 if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}else{document.body.classList.remove('presemble-edit-mode');}
 }
 update();
@@ -750,7 +751,6 @@ function setMode(m){
 if(m!=='edit'){cleanupEditing();_editCleanup();}
 if(m!=='suggest'){_suggestCleanup();}
 mode=m;
-sessionStorage.setItem('presemble-mode',m);
 menu.classList.remove('open');
 update();
 if(m==='edit'){_editEnter();}
@@ -797,6 +797,8 @@ return;
 }
 if(m==='schema'){
 if(!document.body.classList.contains('presemble-mode-schema')){
+mode='schema';
+update();
 _enterSchemaMode();
 }
 }else{
@@ -816,10 +818,11 @@ window.addEventListener('hashchange',_applyHashMode);
 if(mode==='edit'){_editEnter();}
 if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
 // If the page was opened with #_schema, enter schema mode after normal init.
-if(_hashModeOnLoad==='schema'){_enterSchemaMode();}
+if(mode==='schema'){_enterSchemaMode();}
 viewBtn.onclick=function(){setMode('view');};
 editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
+structureBtn.onclick=function(){setMode('schema');};
 window._fetchDirtyCount=_fetchDirtyCount;
 window._fetchSuggestionCount=_fetchSuggestionCount;
 window._fetchSuggestionFiles=_fetchSuggestionFiles;
@@ -1056,7 +1059,7 @@ if(e.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('key
 });
 });
 document.addEventListener('click',function(e){
-var suggestMode=sessionStorage.getItem('presemble-mode')==='suggest';
+var suggestMode=mode==='suggest';
 if(!suggestMode){return;}
 var el=e.target.closest('[data-presemble-slot]');
 if(!el||el.classList.contains('presemble-editing')){return;}
