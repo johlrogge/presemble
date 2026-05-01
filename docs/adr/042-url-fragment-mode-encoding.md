@@ -2,7 +2,9 @@
 
 ## Status
 
-Proposed. Will become Accepted when Phase D Slice 1 lands.
+Superseded by [ADR-044](044-schema-mode-uses-canonical-urls.md). Schema mode
+now uses canonical `/_schema/` URLs rather than the `#_schema` fragment;
+edit and suggest modes retain their hash form.
 
 ## Context
 
