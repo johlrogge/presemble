@@ -203,6 +203,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/font-moods", get(font_moods_handler))
         .route("/_presemble/palette-types", get(palette_types_handler))
         .route("/_presemble/style-preview", post(style_preview_handler))
+        .route("/_presemble/schema-for", get(schema_for_handler))
+        .route("/_presemble/page-for", get(page_for_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -1140,6 +1142,62 @@ async fn schemas_handler(State(state): State<AppState>) -> axum::response::Respo
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SchemaForQuery {
+    page: String,
+}
+
+async fn schema_for_handler(
+    State(state): State<AppState>,
+    Query(q): Query<SchemaForQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    match state.conductor.send(&conductor::Command::SchemaUrlForPage { page_url: q.page.clone() }) {
+        Ok(conductor::Response::SchemaUrl(Some(url))) => {
+            let json = format!(r#"{{"url":{:?}}}"#, url);
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::SchemaUrl(None)) => {
+            let msg = format!("no schema for {}", q.page);
+            let json = format!(r#"{{"error":{:?}}}"#, msg);
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let json = format!(r#"{{"error":{:?}}}"#, e);
+            (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected response").into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PageForQuery {
+    schema: String,
+}
+
+async fn page_for_handler(
+    State(state): State<AppState>,
+    Query(q): Query<PageForQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    match state.conductor.send(&conductor::Command::PageUrlForSchema { schema_url: q.schema.clone() }) {
+        Ok(conductor::Response::PageUrl(Some(url))) => {
+            let json = format!(r#"{{"url":{:?}}}"#, url);
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::PageUrl(None)) => {
+            let msg = format!("no page for {}", q.schema);
+            let json = format!(r#"{{"error":{:?}}}"#, msg);
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let json = format!(r#"{{"error":{:?}}}"#, e);
+            (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected response").into_response(),
+    }
+}
+
 async fn create_content_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<CreateContentRequest>,
@@ -1276,6 +1334,36 @@ async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
     }
 }
 
+/// Render a canonical `/_schema/...` URL by asking the conductor and injecting
+/// the reload script (same as regular content pages).
+async fn render_schema_url_directly(state: AppState, path: &str) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    match state.conductor.send(&conductor::Command::RenderPage {
+        path: path.to_string(),
+        mode: conductor::RenderMode::Schema,
+    }) {
+        Ok(conductor::Response::PageRendered { html }) => {
+            let final_bytes = inject_reload_script(html.into_bytes());
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                final_bytes,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("schema render error: {e}").into_bytes(),
+            ).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected conductor response",
+        ).into_response(),
+    }
+}
+
 async fn file_handler(
     State(state): State<AppState>,
     uri: axum::http::Uri,
@@ -1283,6 +1371,11 @@ async fn file_handler(
     use axum::http::{StatusCode, header};
 
     let path = uri.path();
+
+    // Intercept canonical `/_schema/...` URLs and render them directly.
+    if site_index::parse_schema_url(path).is_some() {
+        return render_schema_url_directly(state, path).await;
+    }
 
     // Check for build errors before attempting to serve from disk.
     // Normalise: look up with and without trailing slash.

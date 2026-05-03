@@ -298,6 +298,40 @@ assert_status "render endpoint rejects bad mode" \
 assert_status "render endpoint rejects missing path" \
     "/_presemble/render?mode=schema" "400"
 
+# ── Test: Schema-for endpoint ────────────────────────────────────────────
+
+log "Testing schema-for endpoint..."
+assert_curl "schema-for endpoint resolves item URL" \
+    "/_presemble/schema-for?page=/post/hello-world" GET "" '"/_schema/post/item"'
+assert_curl "schema-for endpoint resolves collection URL" \
+    "/_presemble/schema-for?page=/post/" GET "" '"/_schema/post/index"'
+assert_curl "schema-for endpoint resolves root URL" \
+    "/_presemble/schema-for?page=/" GET "" '"/_schema/index"'
+assert_status "schema-for endpoint returns 404 for unknown page" \
+    "/_presemble/schema-for?page=/no/such/page" "404"
+
+# ── Test: Page-for endpoint ───────────────────────────────────────────────
+
+log "Testing page-for endpoint..."
+assert_curl "page-for endpoint resolves item schema" \
+    "/_presemble/page-for?schema=/_schema/post/item" GET "" '"/post/'
+assert_curl "page-for endpoint resolves collection schema" \
+    "/_presemble/page-for?schema=/_schema/post/index" GET "" '"/post/"'
+assert_curl "page-for endpoint resolves root schema" \
+    "/_presemble/page-for?schema=/_schema/index" GET "" '"/"'
+assert_status "page-for endpoint returns 404 for unknown schema" \
+    "/_presemble/page-for?schema=/_schema/no-such-stem/item" "404"
+
+# ── Test: Direct GET to schema URL ────────────────────────────────────────
+
+log "Testing direct schema URL rendering..."
+assert_curl "direct GET to /_schema/post/item renders schema" \
+    "/_schema/post/item" GET "" 'data-presemble-schema-constraints'
+assert_curl "direct GET to /_schema/post/index renders schema" \
+    "/_schema/post/index" GET "" 'data-presemble-schema-constraints'
+assert_curl "direct GET to /_schema/index renders root schema" \
+    "/_schema/index" GET "" 'data-presemble-schema-constraints'
+
 # ── Test: Save edits to disk for nREPL tests ─────────────────────────────
 
 log "Saving edits to disk for nREPL..."
