@@ -1504,7 +1504,8 @@ fn extract_text(graph: &DataGraph, key: &str) -> Option<String> {
 }
 
 /// Given a list of constraint `(attr-name, Form)` pairs, look for a TypeLink
-/// constraint and return the corresponding schema URL (`/<name>/#_schema`).
+/// constraint and return the corresponding canonical schema URL
+/// (`/_schema/<name>/item`).
 ///
 /// Returns `None` if no TypeLink constraint is present.
 fn typelink_schema_href(constraint_attrs: &[(String, Form)]) -> Option<String> {
@@ -1514,7 +1515,7 @@ fn typelink_schema_href(constraint_attrs: &[(String, Form)]) -> Option<String> {
             && let Form::Str(schema_name) = val
             && !schema_name.is_empty()
         {
-            Some(format!("/{}/#_schema", schema_name))
+            Some(format!("/_schema/{}/item", schema_name))
         } else {
             None
         }

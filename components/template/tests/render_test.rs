@@ -283,8 +283,8 @@ fn attach_schema_included_by_attr_targets_root_element_only() {
 }
 
 /// End-to-end: a TypeLink slot rendered from a schema-derived document should
-/// produce `<a href="/author/#_schema">` — pointing at the schema URL for that
-/// linked schema type — rather than the placeholder `href="#"`.
+/// produce `<a href="/_schema/author/item">` — pointing at the canonical schema
+/// URL for that linked schema type — rather than the placeholder `href="#"`.
 #[test]
 fn render_typelink_slot_produces_schema_href() {
     use schema::{Constraint, Element, Grammar, Slot, SlotName, Span};
@@ -315,8 +315,8 @@ fn render_typelink_slot_produces_schema_href() {
         .expect("render should succeed");
 
     assert!(
-        html.contains(r#"href="/author/#_schema""#),
-        "expected href=\"/author/#_schema\" for TypeLink slot; got: {html}"
+        html.contains(r#"href="/_schema/author/item""#),
+        "expected href=\"/_schema/author/item\" for TypeLink slot; got: {html}"
     );
 }
 

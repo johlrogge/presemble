@@ -62,12 +62,13 @@ function stemFromFile(file) {
 // --- Phase D: URL-fragment mode helpers (ADR-042) ---
 
 // Parse a URL hash into a presemble mode name.
-// Returns 'view' | 'edit' | 'suggest' | 'schema' | 'unknown'
+// Returns 'view' | 'edit' | 'suggest' | 'unknown'
+// Note: '#_schema' is no longer a valid hash-based mode; schema mode is
+// detected via location.pathname starting with '/_schema/'.
 function parsePresembleHash(hash) {
   if (!hash || hash === '#') return 'view';
   var bare = hash.replace(/^#/, '');
   switch (bare) {
-    case '_schema':  return 'schema';
     case '_edit':    return 'edit';
     case '_suggest': return 'suggest';
     case '':         return 'view';
@@ -75,12 +76,24 @@ function parsePresembleHash(hash) {
   }
 }
 
-// Set the presemble mode by updating the URL hash.
+// Set the presemble mode.
+// 'schema' triggers real navigation to the canonical /_schema/... URL via
+// _enterSchemaMode() — no hash is written.
+// When currently on a /_schema/... URL and switching to a non-schema mode,
+// _leaveSchemaMode() navigates back to the corresponding content page.
 // 'view' removes the hash (no page reload); other modes set #_<mode>.
-// Also canonicalizes the pathname by stripping /index.html or /index.htm
-// so mode URLs read as /post/some-post/#_schema rather than
-// /post/some-post/index.html#_schema.
+// Also canonicalizes the pathname by stripping /index.html or /index.htm.
 function setPresembleMode(mode) {
+  if (mode === 'schema') {
+    _enterSchemaMode();
+    return;
+  }
+  // If we are currently on a schema URL, leaving any non-schema mode requires
+  // navigating back to the content page via the page-for API.
+  if (location.pathname.indexOf('/_schema/') === 0) {
+    _leaveSchemaMode();
+    return;
+  }
   var p = location.pathname;
   if (p.endsWith('/index.html')) {
     p = p.slice(0, -('index.html'.length)); // keeps trailing /
@@ -143,10 +156,12 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 else{tryScroll(10);}
 })();
 (function(){
-// Mode is derived exclusively from the URL hash (ADR-042, T11).
+// Mode is derived from the URL path first (schema URLs), then hash (ADR-042, T11).
 // 'view' is the default; unknown or empty hashes also resolve to 'view'.
 var _initialHashMode=parsePresembleHash(location.hash);
-var mode=(_initialHashMode!=='unknown')?_initialHashMode:'view';
+var mode=(location.pathname.indexOf('/_schema/')===0)
+    ?'schema'
+    :(_initialHashMode!=='unknown'?_initialHashMode:'view');
 // Flag to suppress re-writing the hash while we are reacting to a hashchange.
 var _handlingHashChange=false;
 var _editorialSuggestCount=0;
@@ -774,102 +789,87 @@ if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
 // responding to a hashchange (which would create an infinite loop).
 if(!_handlingHashChange){setPresembleMode(m);}
 }
-// --- Phase D T8: schema mode handlers and hash dispatcher ---
-var _schemaFetchSeq=0;
+// --- Phase D Wave D: schema mode handlers (canonical URL navigation) ---
 function _enterSchemaMode(){
-document.body.classList.add('presemble-mode-schema');
-var mySeq=++_schemaFetchSeq;
-fetch('/_presemble/render?path='+encodeURIComponent(location.pathname)+'&mode=schema')
+var page=location.pathname;
+fetch('/_presemble/schema-for?page='+encodeURIComponent(page))
 .then(function(r){
-if(mySeq!==_schemaFetchSeq){return null;}
-if(!r.ok){throw new Error('Schema render failed: '+r.status);}
-return r.text();
+if(r.status===404){return null;}
+if(!r.ok){throw new Error('schema-for failed: '+r.status);}
+return r.json();
 })
-.then(function(html){
-if(html===null){return;}
-if(mySeq!==_schemaFetchSeq){return;}
-var doc=new DOMParser().parseFromString(html,'text/html');
-var newMain=doc.querySelector('main');
-var existingMain=document.querySelector('main');
-if(newMain&&existingMain){
-existingMain.innerHTML=newMain.innerHTML;
-}else if(newMain){
-document.body.appendChild(newMain.cloneNode(true));
-}else{
-// Fallback: no <main> in response — last resort, dump into body
-document.body.innerHTML=html;
+.then(function(data){
+if(!data||!data.url){
+console.warn('no schema available for',page);
+return;
 }
-// Propagate schema-metadata attrs from rendered <html> to live <html>
-['data-presemble-schema-instance-count','data-presemble-schema-instance-sample-url','data-presemble-schema-included-by'].forEach(function(attr){
-if(doc.documentElement.hasAttribute(attr)){
-document.documentElement.setAttribute(attr,doc.documentElement.getAttribute(attr));
-}
-});
+location.href=data.url;
 })
 .catch(function(err){
-if(mySeq!==_schemaFetchSeq){return;}
-var main=document.querySelector('main')||document.body;
-main.innerHTML='<div class="presemble-schema-error"><p>Could not load schema for '+location.pathname+'</p><p><small>'+err.message+'</small></p></div>';
+console.error('schema-for error:',err);
 });
 }
 function _leaveSchemaMode(){
-if(document.body.classList.contains('presemble-mode-schema')){
-_schemaFetchSeq++;
-['data-presemble-schema-instance-count','data-presemble-schema-instance-sample-url','data-presemble-schema-included-by'].forEach(function(attr){
-document.documentElement.removeAttribute(attr);
+var schemaUrl=location.pathname;
+fetch('/_presemble/page-for?schema='+encodeURIComponent(schemaUrl))
+.then(function(r){
+if(r.status===404){location.href='/';return null;}
+return r.json();
+})
+.then(function(data){
+if(data&&data.url){location.href=data.url;}
+})
+.catch(function(err){
+console.error('page-for error:',err);
+location.href='/';
 });
-location.reload();
-}
 }
 function _applyHashMode(){
 _handlingHashChange=true;
 var m=parsePresembleHash(location.hash);
+// Schema mode is a URL-path concern (/_schema/...), not a hash concern.
+// Stale #_schema hashes are treated as unknown and ignored.
 if(m==='unknown'){
 _handlingHashChange=false;
 return;
 }
-if(m==='schema'){
-if(!document.body.classList.contains('presemble-mode-schema')){
-mode='schema';
-update();
-_enterSchemaMode();
-}
-}else{
-// Leaving schema mode triggers a reload to restore original content.
-// The reload will land with the new hash, re-entering this dispatcher.
-if(document.body.classList.contains('presemble-mode-schema')){
-_handlingHashChange=false;
-_leaveSchemaMode();
-return;
-}
 setMode(m);
-}
 _handlingHashChange=false;
 }
 window.addEventListener('hashchange',_applyHashMode);
-// Schema-mode link intercept: keep #_schema on navigation (ADR-042 Phase D Slice 1).
+// Schema-mode link intercept: when in schema mode, content link clicks are
+// resolved to their canonical schema URL via the schema-for API.
 document.addEventListener('click',function(e){
 if(mode!=='schema'){return;}
 var a=e.target.closest&&e.target.closest('a');
 if(!a){return;}
 var href=a.getAttribute('href');
 if(!href){return;}
-// Skip anchor-only fragments, javascript:, mailto:, and links that already carry a hash
+// Skip already-schema URLs
+if(href.indexOf('/_schema/')===0){return;}
+// Skip fragments, javascript:, mailto:
 if(href.startsWith('#')||href.startsWith('javascript:')||href.startsWith('mailto:')){return;}
-if(href.includes('#')){return;}
-// Skip external URLs that are cross-origin
+// Skip cross-origin external URLs
 if(/^https?:\/\//.test(href)){
 try{var u=new URL(href);if(u.origin!==location.origin){return;}}
 catch(_){return;}
 }
 e.preventDefault();
-location.href=href+'#_schema';
+fetch('/_presemble/schema-for?page='+encodeURIComponent(href))
+.then(function(r){
+if(r.status===404){location.href=href;return null;}
+return r.json();
+})
+.then(function(data){
+if(data&&data.url){location.href=data.url;}else if(data!==null){location.href=href;}
+})
+.catch(function(){
+location.href=href;
+});
 },true);
-// --- End Phase D T8 ---
+// --- End Phase D Wave D ---
 if(mode==='edit'){_editEnter();}
 if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
-// If the page was opened with #_schema, enter schema mode after normal init.
-if(mode==='schema'){_enterSchemaMode();}
 viewBtn.onclick=function(){setMode('view');};
 editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
