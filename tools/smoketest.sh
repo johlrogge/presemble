@@ -269,25 +269,25 @@ assert_curl "render endpoint view mode renders content" \
 
 # Schema mode: synthesizes empty document and renders schema-as-mockup
 assert_curl "render endpoint schema mode emits constraint attrs" \
-    "/_presemble/render?path=/post/hello-world&mode=schema" GET "" \
+    "/_presemble/render?path=/_schema/post/item&mode=schema" GET "" \
     'data-presemble-schema-constraints-occurs'
 
 assert_curl "render endpoint schema mode emits instance count attr" \
-    "/_presemble/render?path=/post/hello-world&mode=schema" GET "" \
+    "/_presemble/render?path=/_schema/post/item&mode=schema" GET "" \
     'data-presemble-schema-instance-count'
 
 assert_curl "render endpoint schema mode emits included-by attr" \
-    "/_presemble/render?path=/author/default&mode=schema" GET "" \
+    "/_presemble/render?path=/_schema/author/item&mode=schema" GET "" \
     'data-presemble-schema-included-by'
 
 # Schema mode at root: synthesises root index schema
 assert_curl "render endpoint schema mode at root emits constraints" \
-    "/_presemble/render?path=/&mode=schema" GET "" \
+    "/_presemble/render?path=/_schema/index&mode=schema" GET "" \
     'data-presemble-schema-constraints'
 
 # Subschema link: post's author slot points at /author/#_schema in schema mode
 assert_curl "render endpoint schema mode emits typelink href" \
-    "/_presemble/render?path=/post/hello-world&mode=schema" GET "" \
+    "/_presemble/render?path=/_schema/post/item&mode=schema" GET "" \
     '/author/#_schema'
 
 # Bad mode: should return 400

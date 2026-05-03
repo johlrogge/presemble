@@ -575,24 +575,12 @@ impl Conductor {
     ///
     /// Returns `None` for malformed or unknown schema URLs.
     pub fn page_url_for_schema(&self, schema_url: &str) -> Option<String> {
-        // Must start with "/_schema/"
-        let rest = schema_url.strip_prefix("/_schema/")?;
-        // Split remaining path into segments
-        let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-
-        enum Kind { Index, Item }
-
-        let (stem, kind) = match segments.as_slice() {
-            ["index"] => ("".to_string(), Kind::Index),
-            [stem_seg, "index"] => (stem_seg.to_string(), Kind::Index),
-            [stem_seg, "item"] => (stem_seg.to_string(), Kind::Item),
-            _ => return None, // malformed: too few, too many, or wrong terminal
-        };
+        let (stem, kind) = site_index::parse_schema_url(schema_url)?;
 
         let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
 
         match kind {
-            Kind::Index => {
+            schema::SchemaKind::Index => {
                 if stem.is_empty() {
                     Some("/".to_string())
                 } else {
@@ -604,7 +592,7 @@ impl Conductor {
                     }
                 }
             }
-            Kind::Item => {
+            schema::SchemaKind::Item => {
                 // Try the parent collection page first
                 let collection_url = format!("/{stem}/");
                 if url_to_root.contains_key(&collection_url) {
@@ -2264,9 +2252,8 @@ impl Conductor {
                 std::fs::read_to_string(&out).map_err(|e| format!("no output for {url_path}: {e}"))
             }
             RenderMode::Schema => {
-                let url = site_index::UrlPath::new(url_path);
-                let kind = site_index::schema_kind_for_path(&url);
-                let stem = Self::stem_from_url_path(url_path);
+                let (stem, kind) = site_index::parse_schema_url(url_path)
+                    .ok_or_else(|| format!("not a schema URL: {url_path}"))?;
                 let grammar_key = match kind {
                     schema::SchemaKind::Index => site_index::schema_cache_key(&stem, "index"),
                     schema::SchemaKind::Item => {

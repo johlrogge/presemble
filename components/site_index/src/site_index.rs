@@ -54,6 +54,34 @@ impl std::fmt::Display for UrlPath {
     }
 }
 
+/// Parse a canonical schema URL of the form `/_schema/...` into a `(stem, kind)` pair.
+///
+/// Valid forms:
+/// - `/_schema/index`        → `Some(("", SchemaKind::Index))` (root collection index)
+/// - `/_schema/<stem>/index` → `Some(("<stem>", SchemaKind::Index))`
+/// - `/_schema/<stem>/item`  → `Some(("<stem>", SchemaKind::Item))`
+/// - Anything else           → `None`
+///
+/// Trailing slashes are stripped before parsing.
+pub fn parse_schema_url(url: &str) -> Option<(String, SchemaKind)> {
+    // Strip trailing slash
+    let url = url.trim_end_matches('/');
+    // Must start with /_schema/
+    let rest = url.strip_prefix("/_schema/")?;
+    if rest.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = rest.split('/').collect();
+    match segments.as_slice() {
+        // /_schema/index → root collection index (stem = "")
+        ["index"] => Some((String::new(), SchemaKind::Index)),
+        // /_schema/<stem>/index or /_schema/<stem>/item
+        [stem, "index"] => Some(((*stem).to_string(), SchemaKind::Index)),
+        [stem, "item"] => Some(((*stem).to_string(), SchemaKind::Item)),
+        _ => None,
+    }
+}
+
 /// Infer whether a URL path refers to a collection index or an item page.
 ///
 /// Rules (by URL segment depth):
@@ -67,6 +95,12 @@ impl std::fmt::Display for UrlPath {
 /// 2. Strip trailing slash
 /// 3. Split by `/` and filter empty segments
 /// 4. Count: 0 → root Index, 1 → collection Index, 2+ → Item
+///
+/// # Deprecation note
+///
+/// For canonical `/_schema/...` URLs, use [`parse_schema_url`] instead.
+/// This function is retained for callers that classify content-URL-shape paths.
+#[deprecated(note = "Use `parse_schema_url` for canonical `/_schema/...` URLs")]
 pub fn schema_kind_for_path(path: &UrlPath) -> SchemaKind {
     let s = path.as_str();
     // Canonical form: strip index.html suffix
@@ -507,6 +541,42 @@ mod tests {
 
     fn index() -> SiteIndex {
         SiteIndex::new(fixture_site())
+    }
+
+    // --- parse_schema_url tests ---
+
+    #[test]
+    fn parse_schema_url_root_index() {
+        assert_eq!(parse_schema_url("/_schema/index"), Some((String::new(), SchemaKind::Index)));
+    }
+
+    #[test]
+    fn parse_schema_url_collection_index() {
+        assert_eq!(parse_schema_url("/_schema/post/index"), Some(("post".to_string(), SchemaKind::Index)));
+    }
+
+    #[test]
+    fn parse_schema_url_item() {
+        assert_eq!(parse_schema_url("/_schema/post/item"), Some(("post".to_string(), SchemaKind::Item)));
+    }
+
+    #[test]
+    fn parse_schema_url_with_trailing_slash() {
+        assert_eq!(parse_schema_url("/_schema/post/item/"), Some(("post".to_string(), SchemaKind::Item)));
+    }
+
+    #[test]
+    fn parse_schema_url_not_schema_url_returns_none() {
+        assert_eq!(parse_schema_url("/post/foo"), None);
+        assert_eq!(parse_schema_url("/_schema/foo/bar/baz"), None);  // wrong shape
+        assert_eq!(parse_schema_url("/_schema/post/unknown"), None); // wrong kind
+    }
+
+    #[test]
+    fn parse_schema_url_empty_returns_none() {
+        assert_eq!(parse_schema_url(""), None);
+        assert_eq!(parse_schema_url("/_schema"), None);   // missing kind
+        assert_eq!(parse_schema_url("/_schema/"), None);  // empty kind segment
     }
 
     // --- schema_kind_for_path tests ---
