@@ -321,17 +321,24 @@ pub fn has_text_containing<'a>(needle: &'a str) -> impl Fn(&NodeStore, NodeId) -
     }
 }
 
-/// Match nodes whose concatenated Text descendants equal `value` exactly.
+/// Match nodes whose concatenated Text descendants equal `value` after
+/// whitespace normalization (runs of whitespace collapse to a single space,
+/// leading/trailing whitespace is stripped).
 ///
 /// A node with no Text descendants concatenates to `""`, so
 /// `has_text_equals("")` matches nodes that have no Text descendants.
 /// Case-sensitive.
 pub fn has_text_equals<'a>(value: &'a str) -> impl Fn(&NodeStore, NodeId) -> bool + 'a {
+    let normalized_target = normalize_ws(value);
     move |store, id| {
         let mut text = String::new();
         collect_text_descendants(store, id, &mut text);
-        text == value
+        normalize_ws(&text) == normalized_target
     }
+}
+
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -666,5 +673,24 @@ mod tests {
         // p1 has "World"
         assert!(has_text_containing("orl")(&store, p1));
         assert!(!has_text_containing("xyz")(&store, p1));
+    }
+
+    #[test]
+    fn has_text_equals_normalizes_whitespace() {
+        // Both sides should normalize: trailing newlines, extra spaces, tabs collapse.
+        let mut store = NodeStore::new();
+        let p_name = store.intern("paragraph");
+        let p = store.add_node(Node::Element(p_name));
+        let t = store.add_node(Node::Text("Hello   World\n".to_string()));
+        store.add_edge(p, Edge::Child(t));
+
+        let pred = has_text_equals("Hello World");
+        assert!(pred(&store, p));
+
+        let pred2 = has_text_equals("  Hello\tWorld  ");
+        assert!(pred2(&store, p));
+
+        let pred3 = has_text_equals("Hello  World");
+        assert!(pred3(&store, p));
     }
 }

@@ -8,8 +8,9 @@ function cljStr(s) {
   return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 }
 
-// Index of `el` among its siblings that share the same data-presemble-slot value.
-// Relies on the invariant that HTML is a 1:1 render of the node tree.
+// Legacy fallback used inside buildStructural* helpers when kind detection
+// fails or the element is not in the slot-sibling list. New code should
+// build selectors via buildStructuralSelection.
 function slotChildIndex(el) {
   var slot = el.getAttribute('data-presemble-slot');
   if (!slot) return 0;
@@ -48,7 +49,7 @@ function kindFromTag(el) {
   var t = el.tagName;
   if (/^H[1-6]$/.test(t)) return 'heading';
   if (t === 'P') return 'paragraph';
-  if (t === 'PRE' || el.querySelector('code')) return 'code-block';
+  if (t === 'PRE') return 'code-block';
   if (t === 'BLOCKQUOTE') return 'blockquote';
   if (t === 'IMG') return 'image';
   if (t === 'TABLE') return 'table';
@@ -139,6 +140,7 @@ function buildBodyAnchor(el, file) {
 
 // Build a NED selection for a preamble-slot element.
 function buildPreambleAnchor(el, file, slot) {
+  el = el.closest('[data-presemble-slot]') || el;
   var bySlot = Array.prototype.slice.call(
     document.querySelectorAll('[data-presemble-slot="'+slot+'"][data-presemble-file="'+file+'"]')
   );
@@ -155,6 +157,10 @@ function buildPreambleAnchor(el, file, slot) {
     if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
     return 0;
   });
+  // Single-child slot: select the slot Element directly. Safe for set-text
+  // (descendants/texts walk the only child anyway). DO NOT use this branch
+  // if a future caller passes the result to ned/replace — that would replace
+  // the slot element rather than its child.
   if (sibs.length === 1) {
     return nedSlot(file, slot);
   }
@@ -546,11 +552,18 @@ function _kindMatchesEl(kind,el){
 var t=el.tagName;
 if(kind==='paragraph')return t==='P';
 if(kind==='heading')return /^H[1-6]$/.test(t);
-if(kind==='code-block')return t==='PRE'||!!el.querySelector('code');
+if(kind==='code-block') return t === 'PRE';
 if(kind==='blockquote')return t==='BLOCKQUOTE';
 if(kind==='image')return t==='IMG';
 if(kind==='table')return t==='TABLE';
-if(kind==='list')return t==='UL'||t==='OL';
+if (kind === 'list') {
+  if (t === 'UL' || t === 'OL') return true;
+  if (t === 'DIV') {
+    var md = el.getAttribute('data-presemble-md') || '';
+    return /^\s*([-*+]|\d+\.)\s/.test(md);
+  }
+  return false;
+}
 return false;
 }
 function _suggestFindStructural(a){
@@ -564,7 +577,7 @@ if(heading){
 var anchorIdx=-1;
 for(var i=0;i<arr.length;i++){
 var el=arr[i];
-if(/^H[1-6]$/.test(el.tagName)&&el.innerText.trim()===heading){anchorIdx=i;break;}
+if(/^H[1-6]$/.test(el.tagName)&&el.innerText.trim().replace(/\s+/g, ' ')===heading){anchorIdx=i;break;}
 }
 if(anchorIdx<0)return null;
 var count=0;
@@ -1213,9 +1226,6 @@ if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(wind
 e.preventDefault();
 var bfile=el.getAttribute('data-presemble-file');
 if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-var bidxAttr=el.id;
-var bidx=0;
-if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\d+)/);if(m){bidx=parseInt(m[1],10);}}
 var bmd=el.getAttribute('data-presemble-md')||el.innerText;
 el.style.display='none';
 var ta=document.createElement('textarea');
@@ -1244,7 +1254,12 @@ if(!bvalue.trim()){return;}
 if(!bfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('bsave called without bfile',el);return;}
 var bstem=stemFromFile(bfile);
 fetchGrammar(bstem).then(function(schemaSrc){
-var program='(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    (ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  console.error('buildStructuralSelection returned null for body element', el);
+  return;
+}
+var program = '(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    '+sel+'\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
 return applyNed(program);
 }).then(function(){
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
@@ -1334,7 +1349,12 @@ cleanup();
 if(value===original){return;}
 if(!value){return;}
 if(!pfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('save called without pfile',el);return;}
-var idx=slotChildIndex(el);var program='(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+') ned/descendants ned/texts) '+cljStr(value)+')';
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  var idx = slotChildIndex(el);
+  sel = '(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')';
+}
+var program = '(ned/set-text (-> '+sel+' ned/descendants ned/texts) '+cljStr(value)+')';
 applyNed(program).then(function(){
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(e){
@@ -1363,9 +1383,6 @@ if(slot==='body'){
 e.preventDefault();
 var bfile=el.getAttribute('data-presemble-file');
 if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-var bidxAttr=el.id;
-var bidx=0;
-if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\d+)/);if(m){bidx=parseInt(m[1],10);}}
 var bmd=el.getAttribute('data-presemble-md')||el.innerText;
 el.style.display='none';
 var ta=document.createElement('textarea');
@@ -1383,8 +1400,13 @@ var bvalue=ta.value;
 bcleanup();
 var diff=minimalDiff(bmd,bvalue);
 if(!diff){return;}
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  console.error('buildStructuralSelection returned null for body element', el);
+  return;
+}
 fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,selection:'(ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
+body:JSON.stringify({file:bfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){var berr=document.createElement('div');berr.className='presemble-edit-error';berr.textContent=data.error||'Suggest failed';el.after(berr);}
 if(data.ok&&data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
@@ -1425,9 +1447,13 @@ var origText=original.replace(/\u00a0/g,' ');
 cleanup();
 var diff=minimalDiff(origText,value);
 if(!diff){return;}
-var idx=slotChildIndex(el);
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  var idx = slotChildIndex(el);
+  sel = '(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')';
+}
 fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,selection:'(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
+body:JSON.stringify({file:pfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){
 var err=document.createElement('div');err.className='presemble-edit-error';
