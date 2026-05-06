@@ -380,10 +380,50 @@ _suggestPreviewState=null;_suggestActiveEl=null;
 _suggestions=[];_suggestIdx=0;
 }
 function _stripMd(s){return s.replace(/`/g,'').replace(/\*\*/g,'').replace(/\*/g,'').replace(/_/g,'');}
+function _kindMatchesEl(kind,el){
+var t=el.tagName;
+if(kind==='paragraph')return t==='P';
+if(kind==='heading')return /^H[1-6]$/.test(t);
+if(kind==='code-block')return t==='PRE'||!!el.querySelector('code');
+if(kind==='blockquote')return t==='BLOCKQUOTE';
+if(kind==='image')return t==='IMG';
+if(kind==='table')return t==='TABLE';
+if(kind==='list')return t==='UL'||t==='OL';
+return false;
+}
+function _suggestFindStructural(a){
+var nk=a['node-kind'];
+var heading=a['heading-text'];
+var sel='[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]';
+var sibs=document.querySelectorAll(sel);
+if(sibs.length===0){sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"]');}
+var arr=Array.prototype.slice.call(sibs);
+if(heading){
+var anchorIdx=-1;
+for(var i=0;i<arr.length;i++){
+var el=arr[i];
+if(/^H[1-6]$/.test(el.tagName)&&el.innerText.trim()===heading){anchorIdx=i;break;}
+}
+if(anchorIdx<0)return null;
+var count=0;
+for(var j=anchorIdx+1;j<arr.length;j++){
+if(_kindMatchesEl(nk,arr[j])){
+if(count===a.offset)return arr[j];
+count++;
+}
+}
+return null;
+}
+var matching=arr.filter(function(el){return _kindMatchesEl(nk,el);});
+return matching[a.offset]||null;
+}
 function _suggestFindTarget(sug){
 // NED suggestions: use anchor field when present (source === 'ned')
 if(sug._source==='ned'&&sug.anchor){
 var a=sug.anchor;
+if(a.kind==='structural'){
+return _suggestFindStructural(a);
+}
 if(a.kind==='slot-nth'){
 var sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]');
 if(sibs.length===0){sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"]');}
@@ -440,6 +480,12 @@ if(sug._source==='ned'&&sug.anchor){
 if(sug.anchor.kind==='slot'){targetText=sug.anchor.slot;}
 else if(sug.anchor.kind==='slot-nth'){targetText=sug.anchor.slot+'['+sug.anchor.index+']';}
 else if(sug.anchor.kind==='body-nth'){targetText='body['+sug.anchor.index+']';}
+else if(sug.anchor.kind==='structural'){
+var nk=sug.anchor['node-kind'];
+var off=sug.anchor.offset;
+if(sug.anchor['heading-text']){targetText='"'+sug.anchor['heading-text']+'" / '+nk+'['+off+']';}
+else{targetText=sug.anchor.slot+' / '+nk+'['+off+']';}
+}
 }else{
 targetText=sug.target_type==='slot'?sug.slot:(sug.search?'"'+sug.search.substring(0,30)+'..."':'');
 }
