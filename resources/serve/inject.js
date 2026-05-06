@@ -979,7 +979,6 @@ _suggestHighlight();
 });
 }
 function setMode(m){
-console.log('[presemble:mode] setMode(', m, ') from current mode:', mode);
 if(m!=='edit'){cleanupEditing();_editCleanup();}
 if(m!=='suggest'){_suggestCleanup();}
 mode=m;
@@ -1033,7 +1032,6 @@ location.href=_appendModeHash('/',targetMode);
 });
 }
 function _applyHashMode(){
-console.log('[presemble:mode] _applyHashMode hash=', location.hash, '→ parsed:', parsePresembleHash(location.hash));
 _handlingHashChange=true;
 var m=parsePresembleHash(location.hash);
 // Schema mode is a URL-path concern (/_schema/...), not a hash concern.
@@ -1055,16 +1053,13 @@ _handlingHashChange=false;
 // NOTE: defined here (inside the mode-management IIFE) so it can close over
 // _enterSchemaMode, _leaveSchemaMode and _applyHashMode.
 function setPresembleMode(mode) {
-  console.log('[presemble:mode] setPresembleMode start:', mode, 'pathname:', location.pathname);
   if (mode === 'schema') {
-    console.log('[presemble:mode] → _enterSchemaMode');
     _enterSchemaMode();
     return;
   }
   // If we are currently on a schema URL, leaving any non-schema mode requires
   // navigating back to the content page via the page-for API.
   if (location.pathname.indexOf('/_schema/') === 0) {
-    console.log('[presemble:mode] → _leaveSchemaMode(', mode, ')');
     _leaveSchemaMode(mode);
     return;
   }
@@ -1075,21 +1070,16 @@ function setPresembleMode(mode) {
     p = p.slice(0, -('index.htm'.length));
   }
   var pathChanged = p !== location.pathname;
-  console.log('[presemble:mode] canonicalized p=', p, 'pathChanged=', pathChanged);
 
   if (mode === 'view') {
-    console.log('[presemble:mode] → replaceState (view, no hash)');
     history.replaceState(null, '', p + location.search);
   } else if (pathChanged) {
-    console.log('[presemble:mode] → replaceState + _applyHashMode (path changed)');
     // replaceState doesn't fire hashchange, so update URL then dispatch manually.
     history.replaceState(null, '', p + location.search + '#_' + mode);
     _applyHashMode();
   } else {
-    console.log('[presemble:mode] → location.hash = _' + mode + ' (no canonicalization)');
     location.hash = '_' + mode;
   }
-  console.log('[presemble:mode] setPresembleMode end. location.hash now:', location.hash);
 }
 window.addEventListener('hashchange',_applyHashMode);
 // Schema-mode link intercept: when in schema mode, content link clicks are
