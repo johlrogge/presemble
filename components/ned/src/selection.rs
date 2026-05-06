@@ -130,6 +130,64 @@ impl Selection {
         Self { nodes: result }
     }
 
+    /// Siblings strictly after each selected node in parent's child list (document order). Self excluded.
+    pub fn following_siblings(&self, store: &NodeStore) -> Selection {
+        let mut result = OrdSet::new();
+        for id in &self.nodes {
+            for parent_id in store.parents(*id) {
+                let children = store.children(parent_id);
+                let pos = children.iter().position(|&c| c == *id);
+                if let Some(p) = pos {
+                    for sibling_id in &children[p + 1..] {
+                        result.insert(*sibling_id);
+                    }
+                }
+            }
+        }
+        Self { nodes: result }
+    }
+
+    /// Siblings strictly before each selected node in parent's child list (document order). Self excluded.
+    pub fn preceding_siblings(&self, store: &NodeStore) -> Selection {
+        let mut result = OrdSet::new();
+        for id in &self.nodes {
+            for parent_id in store.parents(*id) {
+                let children = store.children(parent_id);
+                let pos = children.iter().position(|&c| c == *id);
+                if let Some(p) = pos {
+                    for sibling_id in &children[..p] {
+                        result.insert(*sibling_id);
+                    }
+                }
+            }
+        }
+        Self { nodes: result }
+    }
+
+    /// Among the current selection's members (in iteration order), filter to elements whose
+    /// name matches `name` and return the `idx`-th. Out-of-range → empty. Empty receiver → empty.
+    ///
+    /// Intended to be called on a pre-flattened selection (e.g. after `children()` or
+    /// `following_siblings()`), where the nodes to filter are already in the selection.
+    pub fn nth_of_kind(&self, store: &NodeStore, name: &str, idx: usize) -> Selection {
+        let matching: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .copied()
+            .filter(|&id| {
+                if let Some(Node::Element(n)) = store.get(id) {
+                    store.resolve_name(*n) == name
+                } else {
+                    false
+                }
+            })
+            .collect();
+        match matching.get(idx) {
+            Some(&id) => Selection::single(id),
+            None => Selection::new(),
+        }
+    }
+
     /// All descendants (transitive children). Uses BFS, cycle-safe via visited set.
     pub fn descendants(&self, store: &NodeStore) -> Selection {
         let mut result = OrdSet::new();
@@ -233,6 +291,47 @@ pub fn has_attr_int<'a>(
 /// Match Element nodes (any name).
 pub fn is_any_element() -> impl Fn(&NodeStore, NodeId) -> bool {
     |store, id| matches!(store.get(id), Some(Node::Element(_)))
+}
+
+// Private helper: collect Text descendant strings depth-first (document order).
+fn collect_text_descendants(store: &NodeStore, id: NodeId, out: &mut String) {
+    for child_id in store.children(id) {
+        match store.get(child_id) {
+            Some(Node::Text(s)) => out.push_str(s),
+            Some(Node::Element(_)) => collect_text_descendants(store, child_id, out),
+            _ => {}
+        }
+    }
+}
+
+/// Match nodes whose concatenated Text descendants contain `needle`.
+///
+/// Edge case: empty `needle` returns true iff the candidate has at least one
+/// Text descendant (does NOT delegate to `String::contains("")` which always
+/// returns true).
+pub fn has_text_containing<'a>(needle: &'a str) -> impl Fn(&NodeStore, NodeId) -> bool + 'a {
+    move |store, id| {
+        let mut text = String::new();
+        collect_text_descendants(store, id, &mut text);
+        if needle.is_empty() {
+            !text.is_empty()
+        } else {
+            text.contains(needle)
+        }
+    }
+}
+
+/// Match nodes whose concatenated Text descendants equal `value` exactly.
+///
+/// A node with no Text descendants concatenates to `""`, so
+/// `has_text_equals("")` matches nodes that have no Text descendants.
+/// Case-sensitive.
+pub fn has_text_equals<'a>(value: &'a str) -> impl Fn(&NodeStore, NodeId) -> bool + 'a {
+    move |store, id| {
+        let mut text = String::new();
+        collect_text_descendants(store, id, &mut text);
+        text == value
+    }
 }
 
 #[cfg(test)]
@@ -398,7 +497,7 @@ mod tests {
 
     #[test]
     fn union_of_two_selections() {
-        let (store, root, h1, _text1, p1, _text2, h2, _text3) = sample_store();
+        let (_store, root, h1, _text1, p1, _text2, h2, _text3) = sample_store();
         let sel1 = Selection::single(root);
         let sel2 = Selection::single(h1);
         let union = sel1.union(&sel2);
@@ -411,7 +510,7 @@ mod tests {
 
     #[test]
     fn intersection_of_two_selections() {
-        let (store, root, h1, _text1, _p1, _text2, h2, _text3) = sample_store();
+        let (_store, root, h1, _text1, _p1, _text2, h2, _text3) = sample_store();
         let sel1 = Selection::from_ids([root, h1, h2]);
         let sel2 = Selection::from_ids([h1, h2]);
         let intersection = sel1.intersection(&sel2);
@@ -423,7 +522,7 @@ mod tests {
 
     #[test]
     fn difference_of_two_selections() {
-        let (store, root, h1, _text1, _p1, _text2, h2, _text3) = sample_store();
+        let (_store, root, h1, _text1, _p1, _text2, h2, _text3) = sample_store();
         let sel1 = Selection::from_ids([root, h1, h2]);
         let sel2 = Selection::from_ids([h1]);
         let diff = sel1.difference(&sel2);
@@ -442,5 +541,130 @@ mod tests {
         assert_eq!(sel.len(), 2);
         assert!(sel.contains(h1));
         assert!(sel.contains(h2));
+    }
+
+    /// Build a doc with children [h, p, h, p, p, p] under the root.
+    /// Returns (store, root, h0, p0, h1_node, p1, p2, p3)
+    fn multi_child_store() -> (NodeStore, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId) {
+        let mut store = NodeStore::new();
+        let doc_name = store.intern("doc");
+        let heading_name = store.intern("heading");
+        let paragraph_name = store.intern("paragraph");
+
+        let root = store.add_node(Node::Element(doc_name));
+
+        let h0 = store.add_node(Node::Element(heading_name));
+        let p0 = store.add_node(Node::Element(paragraph_name));
+        let h1_node = store.add_node(Node::Element(heading_name));
+        let p1 = store.add_node(Node::Element(paragraph_name));
+        let p2 = store.add_node(Node::Element(paragraph_name));
+        let p3 = store.add_node(Node::Element(paragraph_name));
+
+        store.add_edge(root, Edge::Child(h0));
+        store.add_edge(root, Edge::Child(p0));
+        store.add_edge(root, Edge::Child(h1_node));
+        store.add_edge(root, Edge::Child(p1));
+        store.add_edge(root, Edge::Child(p2));
+        store.add_edge(root, Edge::Child(p3));
+
+        (store, root, h0, p0, h1_node, p1, p2, p3)
+    }
+
+    // ── nth_of_kind tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn nth_of_kind_picks_third_paragraph_skipping_headings() {
+        // Doc has children [h0, p0, h1, p1, p2, p3].
+        // After .children(), the selection is [h0, p0, h1, p1, p2, p3].
+        // Filter to "paragraph" members: [p0, p1, p2, p3]. idx=2 → p2 (the 3rd paragraph).
+        let (store, root, _h0, _p0, _h1_node, _p1, p2, _p3) = multi_child_store();
+        let sel = Selection::single(root)
+            .children(&store)
+            .nth_of_kind(&store, "paragraph", 2);
+        assert_eq!(sel.len(), 1);
+        assert!(sel.contains(p2));
+    }
+
+    #[test]
+    fn nth_of_kind_out_of_range_returns_empty() {
+        let (store, root, ..) = multi_child_store();
+        // Only 4 paragraphs (indices 0-3); idx=4 is out of range
+        let sel = Selection::single(root).nth_of_kind(&store, "paragraph", 4);
+        assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn nth_of_kind_on_empty_selection() {
+        let (store, ..) = multi_child_store();
+        let sel = Selection::new().nth_of_kind(&store, "paragraph", 0);
+        assert!(sel.is_empty());
+    }
+
+    // ── following_siblings / preceding_siblings tests ────────────────────────
+
+    #[test]
+    fn following_siblings_returns_only_after_self() {
+        // root has [h0, p0, h1, p1, p2, p3]. h1 is at index 2, so following are [p1, p2, p3].
+        let (store, _root, _h0, p0, h1_node, p1, p2, p3) = multi_child_store();
+        let sel = Selection::single(h1_node).following_siblings(&store);
+        assert!(!sel.contains(p0), "p0 is before h1");
+        assert!(!sel.contains(h1_node), "self excluded");
+        assert!(sel.contains(p1));
+        assert!(sel.contains(p2));
+        assert!(sel.contains(p3));
+    }
+
+    #[test]
+    fn preceding_siblings_returns_only_before_self() {
+        // h1 (index 2) is preceded by [h0, p0].
+        let (store, _root, h0, p0, h1_node, p1, ..) = multi_child_store();
+        let sel = Selection::single(h1_node).preceding_siblings(&store);
+        assert!(sel.contains(h0));
+        assert!(sel.contains(p0));
+        assert!(!sel.contains(h1_node), "self excluded");
+        assert!(!sel.contains(p1), "p1 is after h1");
+    }
+
+    #[test]
+    fn following_siblings_for_first_child_is_empty() {
+        // h0 is the first child — no following siblings from sibling direction means
+        // actually h0 has siblings AFTER it, so we test p3 (last child) has no following siblings.
+        let (store, _root, _h0, _p0, _h1_node, _p1, _p2, p3) = multi_child_store();
+        let sel = Selection::single(p3).following_siblings(&store);
+        assert!(sel.is_empty());
+    }
+
+    // ── has_text_containing / has_text_equals tests ──────────────────────────
+
+    #[test]
+    fn has_text_equals_matches_concatenated_descendants() {
+        // Use sample_store: h1 has text1="Hello", p1 has text2="World"
+        let (store, _root, h1, _text1, p1, _text2, _h2, _text3) = sample_store();
+
+        // h1's text descendants concatenate to "Hello"
+        assert!(has_text_equals("Hello")(&store, h1));
+        // p1's text descendants concatenate to "World"
+        assert!(has_text_equals("World")(&store, p1));
+        // Wrong value
+        assert!(!has_text_equals("hello")(&store, h1)); // case-sensitive
+
+        // Build a node with two text children "He" + "llo"
+        let mut store2 = NodeStore::new();
+        let heading_name = store2.intern("heading");
+        let h = store2.add_node(Node::Element(heading_name));
+        let t1 = store2.add_node(Node::Text("He".to_string()));
+        let t2 = store2.add_node(Node::Text("llo".to_string()));
+        store2.add_edge(h, Edge::Child(t1));
+        store2.add_edge(h, Edge::Child(t2));
+        // Concatenated = "Hello"
+        assert!(has_text_equals("Hello")(&store2, h));
+    }
+
+    #[test]
+    fn has_text_containing_matches_substring() {
+        let (store, _root, _h1, _text1, p1, _text2, _h2, _text3) = sample_store();
+        // p1 has "World"
+        assert!(has_text_containing("orl")(&store, p1));
+        assert!(!has_text_containing("xyz")(&store, p1));
     }
 }

@@ -95,3 +95,21 @@
   (ned/union
     (ned/filter sel :kind "document")
     (ned/filter (ned/ancestors sel) :kind "document")))
+
+;; ── Structural anchor helpers ────────────────────────────────────────────
+
+(def-doc! ned/heading-with-text "(ned/heading-with-text sel text)" "Filter sel to heading elements whose concatenated text descendants exactly equal text.")
+(defn ned/heading-with-text [sel text]
+  (-> sel (ned/filter :kind "heading") (ned/filter :text-equals text)))
+
+(def-doc! ned/nth-heading "(ned/nth-heading sel idx)" "Pick the idx-th heading from sel.")
+(defn ned/nth-heading [sel idx]
+  (ned/nth-of-kind sel "heading" idx))
+
+(def-doc! ned/first-after "(ned/first-after sel kind)" "First element of given kind among the following siblings of sel.")
+(defn ned/first-after [sel kind]
+  (-> sel ned/following-siblings (ned/nth-of-kind kind 0)))
+
+(def-doc! ned/nth-after "(ned/nth-after sel kind idx)" "idx-th element of given kind among the following siblings of sel.")
+(defn ned/nth-after [sel kind idx]
+  (-> sel ned/following-siblings (ned/nth-of-kind kind idx)))

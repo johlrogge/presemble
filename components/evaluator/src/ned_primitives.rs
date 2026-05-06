@@ -208,6 +208,20 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
                             _ => Err("ned/filter :attr value must be string or integer".into()),
                         }
                     }
+                    "text-contains" => {
+                        let needle = match args.get(2) {
+                            Some(Value::Text(s)) => s.clone(),
+                            _ => return Err("ned/filter :text-contains requires a string".into()),
+                        };
+                        Ok(wrap_selection(sel.filter(&st, selection::has_text_containing(&needle))))
+                    }
+                    "text-equals" => {
+                        let value = match args.get(2) {
+                            Some(Value::Text(s)) => s.clone(),
+                            _ => return Err("ned/filter :text-equals requires a string".into()),
+                        };
+                        Ok(wrap_selection(sel.filter(&st, selection::has_text_equals(&value))))
+                    }
                     other => Err(format!("ned/filter: unknown predicate keyword :{other}")),
                 }
             }
@@ -352,6 +366,41 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
             Some(&child_id) => Ok(wrap_selection(Selection::single(child_id))),
             None => Ok(wrap_selection(Selection::new())),
         }
+    });
+
+    // ── Directional sibling traversal ────────────────────────────────────────
+
+    let s = store.clone();
+    reg(root, "ned/following-siblings", "(ned/following-siblings sel)", "Siblings strictly after each selected node in parent's child list.", move |args| {
+        if args.is_empty() { return Err("ned/following-siblings requires a selection".into()); }
+        let sel = extract_selection(&args[0])?;
+        let st = s.read().map_err(|e| e.to_string())?;
+        Ok(wrap_selection(sel.following_siblings(&st)))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/preceding-siblings", "(ned/preceding-siblings sel)", "Siblings strictly before each selected node in parent's child list.", move |args| {
+        if args.is_empty() { return Err("ned/preceding-siblings requires a selection".into()); }
+        let sel = extract_selection(&args[0])?;
+        let st = s.read().map_err(|e| e.to_string())?;
+        Ok(wrap_selection(sel.preceding_siblings(&st)))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/nth-of-kind", "(ned/nth-of-kind sel name idx)", "idx-th element of given kind within sel (caller pre-flattens with ned/children or ned/following-siblings).", move |args| {
+        if args.len() < 3 { return Err("ned/nth-of-kind requires a selection, kind name, and index".into()); }
+        let sel = extract_selection(&args[0])?;
+        let name = match &args[1] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/nth-of-kind: kind name must be a string".into()),
+        };
+        let idx = match &args[2] {
+            Value::Integer(n) if *n < 0 => return Err("ned/nth-of-kind: idx must be non-negative".into()),
+            Value::Integer(n) => *n as usize,
+            _ => return Err("ned/nth-of-kind: idx must be an integer".into()),
+        };
+        let st = s.read().map_err(|e| e.to_string())?;
+        Ok(wrap_selection(sel.nth_of_kind(&st, &name, idx)))
     });
 
     // ── Mutations ─────────────────────────────────────────────────────────────
@@ -1472,5 +1521,185 @@ mod tests {
         };
         assert_eq!(result.len(), 1, "expected one root even for two nodes from the same doc");
         assert!(result.contains(doc_a_root));
+    }
+
+    // ── Fixtures for new Phase-1 tests ────────────────────────────────────────
+
+    /// Store with: doc > [heading("Hello"), paragraph("World")]
+    /// heading has text child "Hello"; paragraph has text child "World".
+    fn make_store_with_heading_and_para() -> Arc<RwLock<NodeStore>> {
+        let mut store = NodeStore::new();
+        let doc_name = store.intern("document");
+        let heading_name = store.intern("heading");
+        let para_name = store.intern("paragraph");
+
+        let root = store.add_node(Node::Element(doc_name));
+
+        let h = store.add_node(Node::Element(heading_name));
+        let t_h = store.add_node(Node::Text("Hello".to_string()));
+        store.add_edge(h, Edge::Child(t_h));
+
+        let p = store.add_node(Node::Element(para_name));
+        let t_p = store.add_node(Node::Text("World".to_string()));
+        store.add_edge(p, Edge::Child(t_p));
+
+        store.add_edge(root, Edge::Child(h));
+        store.add_edge(root, Edge::Child(p));
+
+        Arc::new(RwLock::new(store))
+    }
+
+    // ── ned/nth-of-kind binding tests ─────────────────────────────────────────
+
+    #[test]
+    fn ned_nth_of_kind_basic() {
+        let store = make_store_with_tree();
+        let root_env = setup(store.clone());
+        // make_store_with_tree has doc > [heading, paragraph]
+        // Get doc's children (heading + paragraph), then nth-of-kind "paragraph" 0 → the paragraph.
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let doc_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let doc_name = Value::Text("document".to_string());
+        let docs = call(&root_env, "ned/filter", vec![all, doc_kw, doc_name]).unwrap();
+        let children = call(&root_env, "ned/children", vec![docs.clone()]).unwrap();
+
+        let result = call(&root_env, "ned/nth-of-kind", vec![
+            children.clone(),
+            Value::Text("paragraph".to_string()),
+            Value::Integer(0),
+        ]).unwrap();
+        let sel = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert_eq!(sel.len(), 1);
+        let st = store.read().unwrap();
+        let id = sel.iter().next().unwrap();
+        assert!(matches!(st.get(id), Some(Node::Element(n)) if st.resolve_name(*n) == "paragraph"));
+
+        // Out of range — index 1 beyond the single paragraph
+        let empty_result = call(&root_env, "ned/nth-of-kind", vec![
+            children,
+            Value::Text("paragraph".to_string()),
+            Value::Integer(1),
+        ]).unwrap();
+        let empty_sel = match &empty_result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert!(empty_sel.is_empty());
+    }
+
+    // ── ned/following-siblings and ned/preceding-siblings binding tests ────────
+
+    #[test]
+    fn ned_following_siblings_basic() {
+        // doc > [heading, paragraph]: following-siblings of heading = [paragraph]
+        let store = make_store_with_heading_and_para();
+        let root_env = setup(store.clone());
+
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let heading_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let heading_name = Value::Text("heading".to_string());
+        let headings = call(&root_env, "ned/filter", vec![all, heading_kw, heading_name]).unwrap();
+
+        let result = call(&root_env, "ned/following-siblings", vec![headings]).unwrap();
+        let sel = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert_eq!(sel.len(), 1);
+        let st = store.read().unwrap();
+        let id = sel.iter().next().unwrap();
+        assert!(matches!(st.get(id), Some(Node::Element(n)) if st.resolve_name(*n) == "paragraph"));
+    }
+
+    #[test]
+    fn ned_preceding_siblings_basic() {
+        // doc > [heading, paragraph]: preceding-siblings of paragraph = [heading]
+        let store = make_store_with_heading_and_para();
+        let root_env = setup(store.clone());
+
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let para_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
+        let para_name = Value::Text("paragraph".to_string());
+        let paras = call(&root_env, "ned/filter", vec![all, para_kw, para_name]).unwrap();
+
+        let result = call(&root_env, "ned/preceding-siblings", vec![paras]).unwrap();
+        let sel = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert_eq!(sel.len(), 1);
+        let st = store.read().unwrap();
+        let id = sel.iter().next().unwrap();
+        assert!(matches!(st.get(id), Some(Node::Element(n)) if st.resolve_name(*n) == "heading"));
+    }
+
+    // ── ned/filter :text-contains and :text-equals binding tests ─────────────
+
+    #[test]
+    fn ned_filter_text_contains() {
+        let store = make_store_with_heading_and_para();
+        let root_env = setup(store);
+        // heading has text "Hello"; filter :text-contains "ell"
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let kw = Value::Keyword { namespace: None, name: "text-contains".to_string() };
+        let needle = Value::Text("ell".to_string());
+        let result = call(&root_env, "ned/filter", vec![all, kw, needle]).unwrap();
+        let sel = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        // At minimum the heading element should be included (its text descendant is "Hello")
+        assert!(sel.len() >= 1, "expected at least one match");
+    }
+
+    #[test]
+    fn ned_filter_text_equals() {
+        let store = make_store_with_heading_and_para();
+        let root_env = setup(store);
+        // paragraph has text "World"; filter :text-equals "World"
+        let all = call(&root_env, "ned/all", vec![]).unwrap();
+        let kw = Value::Keyword { namespace: None, name: "text-equals".to_string() };
+        let value = Value::Text("World".to_string());
+        let result = call(&root_env, "ned/filter", vec![all, kw, value]).unwrap();
+        let sel = match &result {
+            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
+            _ => panic!("expected Opaque"),
+        };
+        assert!(sel.len() >= 1, "expected at least one match");
+    }
+
+    // ── Prelude helper: ned/nth-after ─────────────────────────────────────────
+
+    #[test]
+    fn nth_after_prelude_helper() {
+        // Use make_doc_store: doc has body with [paragraph("First"), paragraph("Second"), paragraph("Third")]
+        // (ned/body-at doc 0) is First paragraph; its following siblings contain Second and Third.
+        // (ned/nth-after (ned/body-at doc 0) "paragraph" 0) should be the Second paragraph.
+        let store = make_doc_store();
+        let root_env = setup_with_prelude(store);
+
+        // Count should be 1
+        let count_result = crate::eval_str_with_root(
+            r#"(ned/count (ned/nth-after (ned/body-at (ned/doc-by-path "content/post/foo.md") 0) "paragraph" 0))"#,
+            &root_env,
+        ).unwrap();
+        assert!(matches!(count_result, Value::Integer(1)), "expected 1 element");
+
+        // Text content should be "Second" (first following-paragraph after the first body element)
+        let text_result = crate::eval_str_with_root(
+            r#"(ned/text-of (ned/filter (ned/descendants (ned/nth-after (ned/body-at (ned/doc-by-path "content/post/foo.md") 0) "paragraph" 0)) :text))"#,
+            &root_env,
+        ).unwrap();
+        match text_result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(&items[0], Value::Text(s) if s == "Second"),
+                    "expected 'Second', got {items:?}");
+            }
+            _ => panic!("expected List"),
+        }
     }
 }
