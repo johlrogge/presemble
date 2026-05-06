@@ -30,6 +30,10 @@ enum BrowserMessage {
     ScrollTo {
         anchor: String,
     },
+    /// Suggestion overlay metadata changed — no HTML was mutated, no page reload needed.
+    SuggestionListChanged {
+        file: Option<String>,
+    },
 }
 
 impl BrowserMessage {
@@ -61,6 +65,16 @@ impl BrowserMessage {
                     r#"{{"type":"scroll","anchor":"{}"}}"#,
                     anchor.replace('\\', "\\\\").replace('"', "\\\"")
                 )
+            }
+            BrowserMessage::SuggestionListChanged { file } => {
+                let file_json = match file {
+                    Some(f) => format!(
+                        r#","file":"{}""#,
+                        f.replace('\\', "\\\\").replace('"', "\\\"")
+                    ),
+                    None => String::new(),
+                };
+                format!(r#"{{"type":"suggestion-list-changed"{}}}"#, file_json)
             }
         }
     }
@@ -150,11 +164,25 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                         Ok(conductor::ConductorEvent::SuggestionAccepted { pages, .. }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
                         }
-                        Ok(conductor::ConductorEvent::SuggestionCreated { .. }) |
-                        Ok(conductor::ConductorEvent::SuggestionRejected { .. }) |
-                        Ok(conductor::ConductorEvent::NedSuggestionCreated { .. }) |
-                        Ok(conductor::ConductorEvent::NedSuggestionStaled { .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages: vec![], anchor: None });
+                        Ok(conductor::ConductorEvent::SuggestionCreated { suggestion }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(suggestion.file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::SuggestionRejected { file, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionCreated { suggestion }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(suggestion.file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionStaled { file, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(file.to_string()),
+                            });
                         }
                         Err(e) => {
                             eprintln!("Conductor subscription error: {e}");
@@ -1684,6 +1712,8 @@ fn watch_and_rebuild(
 enum AnchorJson {
     /// Derived from `(ned/slot (ned/doc-by-path "FILE") "SLOT")`
     Slot { file: String, slot: String },
+    /// Derived from `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)`
+    SlotNth { file: String, slot: String, index: usize },
     /// Derived from `(ned/body-at (ned/doc-by-path "FILE") IDX)`
     BodyNth { file: String, index: usize },
     /// Fallback — doc found or nothing matched
@@ -1820,7 +1850,12 @@ fn parse_doc_by_path(src: &str, pos: usize) -> Option<(String, usize)> {
 /// - `(ned/doc-by-path "FILE")` anywhere → `AnchorJson::Doc { file: Some(...) }`
 /// - anything else → `AnchorJson::Doc { file: None }`
 fn derive_anchor(selection: &str) -> AnchorJson {
-    // Try ned/slot first
+    // Try ned/nth-child (slot) first — must come before ned/slot because
+    // `(ned/slot ...)` is a substring of the nth-child form.
+    if let Some(anchor) = try_parse_ned_nth_child_slot(selection) {
+        return anchor;
+    }
+    // Try ned/slot
     if let Some(anchor) = try_parse_ned_slot(selection) {
         return anchor;
     }
@@ -1849,6 +1884,38 @@ fn try_parse_ned_slot(src: &str) -> Option<AnchorJson> {
     let pos = match_literal(src, pos, "\"")?;
     let (slot, _pos) = scan_string(src, pos)?;
     Some(AnchorJson::Slot { file, slot })
+}
+
+/// Try to parse `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)`.
+fn try_parse_ned_nth_child_slot(src: &str) -> Option<AnchorJson> {
+    let start = src.find("(ned/nth-child")?;
+    let pos = start + 1; // skip `(`
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/nth-child")?;
+    let pos = skip_ws(src, pos);
+    // Expect `(ned/slot ...)` sub-form
+    let pos = match_literal(src, pos, "(")?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/slot")?;
+    let pos = skip_ws(src, pos);
+    let (file, pos) = parse_doc_by_path(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "\"")?;
+    let (slot, pos) = scan_string(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, ")")?; // close (ned/slot ...)
+    let pos = skip_ws(src, pos);
+    // Parse integer index
+    let bytes = src.as_bytes();
+    let mut end = pos;
+    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+        end += 1;
+    }
+    if end == pos {
+        return None; // no digits
+    }
+    let index: usize = src[pos..end].parse().ok()?;
+    Some(AnchorJson::SlotNth { file, slot, index })
 }
 
 /// Try to parse `(ned/body-at (ned/doc-by-path "FILE") IDX)`.
@@ -2159,6 +2226,69 @@ mod tests {
         let anchor = AnchorJson::Doc { file: None };
         let json = serde_json::to_string(&anchor).unwrap();
         assert_eq!(json, r#"{"kind":"doc","file":null}"#);
+    }
+
+    #[test]
+    fn derive_anchor_slot_nth_basic() {
+        let sel = r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "pitch") 1)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::SlotNth {
+                file: "content/index.md".to_string(),
+                slot: "pitch".to_string(),
+                index: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_slot_nth_index_zero() {
+        let sel = r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "pitch") 0)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::SlotNth {
+                file: "content/index.md".to_string(),
+                slot: "pitch".to_string(),
+                index: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_slot_nth_whitespace_tolerance() {
+        let sel = "(ned/nth-child\n  (ned/slot\n    (ned/doc-by-path\n      \"content/index.md\"\n    )\n    \"pitch\"\n  )\n  2\n)";
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::SlotNth {
+                file: "content/index.md".to_string(),
+                slot: "pitch".to_string(),
+                index: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_slot_still_works() {
+        // Regression guard: bare (ned/slot ...) must still return Slot, not SlotNth
+        let sel = r#"(ned/slot (ned/doc-by-path "posts/foo.md") "title")"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Slot {
+                file: "posts/foo.md".to_string(),
+                slot: "title".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn anchor_json_slot_nth_serializes_correctly() {
+        let anchor = AnchorJson::SlotNth {
+            file: "content/index.md".to_string(),
+            slot: "pitch".to_string(),
+            index: 1,
+        };
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert_eq!(json, r#"{"kind":"slot-nth","file":"content/index.md","slot":"pitch","index":1}"#);
     }
 
     // ── NED suggestion JSON roundtrip ────────────────────────────────────────

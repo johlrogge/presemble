@@ -76,44 +76,7 @@ function parsePresembleHash(hash) {
   }
 }
 
-// Set the presemble mode.
-// 'schema' triggers real navigation to the canonical /_schema/... URL via
-// _enterSchemaMode() — no hash is written.
-// When currently on a /_schema/... URL and switching to a non-schema mode,
-// _leaveSchemaMode() navigates back to the corresponding content page.
-// 'view' removes the hash (no page reload); other modes set #_<mode>.
-// Also canonicalizes the pathname by stripping /index.html or /index.htm.
-function setPresembleMode(mode) {
-  if (mode === 'schema') {
-    _enterSchemaMode();
-    return;
-  }
-  // If we are currently on a schema URL, leaving any non-schema mode requires
-  // navigating back to the content page via the page-for API.
-  if (location.pathname.indexOf('/_schema/') === 0) {
-    _leaveSchemaMode();
-    return;
-  }
-  var p = location.pathname;
-  if (p.endsWith('/index.html')) {
-    p = p.slice(0, -('index.html'.length)); // keeps trailing /
-  } else if (p.endsWith('/index.htm')) {
-    p = p.slice(0, -('index.htm'.length));
-  }
-  var pathChanged = p !== location.pathname;
-
-  if (mode === 'view') {
-    history.replaceState(null, '', p + location.search);
-  } else if (pathChanged) {
-    // replaceState doesn't fire hashchange, so update URL then dispatch manually.
-    history.replaceState(null, '', p + location.search + '#_' + mode);
-    _applyHashMode();
-  } else {
-    location.hash = '_' + mode;
-  }
-}
-
-// --- end Phase D helpers ---
+// --- end Phase D helpers (setPresembleMode is defined inside the mode-management IIFE below) ---
 
 var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');
 var _userScrolled=false;var _scrollTimer=null;var _presembleScrolling=false;
@@ -132,6 +95,11 @@ setTimeout(function(){_presembleScrolling=false;},500);
 }
 }
 }
+return;
+}
+if(m.type==='suggestion-list-changed'){
+if(window._fetchSuggestionFiles){window._fetchSuggestionFiles();}
+if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
 return;
 }
 if(m.anchor){sessionStorage.setItem('presemble-anchor',m.anchor);}
@@ -207,7 +175,8 @@ viewBtn.className=mode==='view'?'active':'';
 editBtn.className=mode==='edit'?'active':'';
 suggestBtn.className=mode==='suggest'?'active':'';
 structureBtn.className=mode==='schema'?'active':'';
-if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}else{document.body.classList.remove('presemble-edit-mode');}
+document.body.classList.toggle('presemble-edit-mode',mode==='edit');
+document.body.classList.toggle('presemble-suggest-mode',mode==='suggest');
 }
 update();
 icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};
@@ -415,6 +384,11 @@ function _suggestFindTarget(sug){
 // NED suggestions: use anchor field when present (source === 'ned')
 if(sug._source==='ned'&&sug.anchor){
 var a=sug.anchor;
+if(a.kind==='slot-nth'){
+var sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]');
+if(sibs.length===0){sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"]');}
+return sibs[a.index]||sibs[0]||null;
+}
 if(a.kind==='slot'){
 return document.querySelector('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]')||document.querySelector('[data-presemble-slot="'+a.slot+'"]');
 }
@@ -464,6 +438,7 @@ _suggestToolbar.querySelector('.presemble-suggest-reason').textContent=reasonTex
 var targetText='';
 if(sug._source==='ned'&&sug.anchor){
 if(sug.anchor.kind==='slot'){targetText=sug.anchor.slot;}
+else if(sug.anchor.kind==='slot-nth'){targetText=sug.anchor.slot+'['+sug.anchor.index+']';}
 else if(sug.anchor.kind==='body-nth'){targetText='body['+sug.anchor.index+']';}
 }else{
 targetText=sug.target_type==='slot'?sug.slot:(sug.search?'"'+sug.search.substring(0,30)+'..."':'');
@@ -748,7 +723,7 @@ container.style.display=(html==='')?'none':'block';
 setInterval(_fetchDirtyCount,2000);
 setInterval(_fetchSuggestionFiles,5000);
 _fetchSuggestionFiles();
-function _suggestEnter(){
+function _suggestEnter(targetId){
 var fileEl=document.querySelector('[data-presemble-file]');
 if(!fileEl){return;}
 var file=fileEl.getAttribute('data-presemble-file');
@@ -766,7 +741,12 @@ var legacyTagged=legacy.map(function(s){return Object.assign({},s,{_source:'lega
 var nedTagged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});
 var merged=legacyTagged.concat(nedTagged);
 _suggestions=merged;
+if(targetId){
+var foundIdx=merged.findIndex(function(s){return s.id===targetId;});
+_suggestIdx=foundIdx>=0?foundIdx:0;
+}else{
 _suggestIdx=0;
+}
 var cnt=merged.length;
 _editorialSuggestCount=cnt;
 if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}
@@ -778,6 +758,7 @@ _suggestHighlight();
 });
 }
 function setMode(m){
+console.log('[presemble:mode] setMode(', m, ') from current mode:', mode);
 if(m!=='edit'){cleanupEditing();_editCleanup();}
 if(m!=='suggest'){_suggestCleanup();}
 mode=m;
@@ -809,22 +790,29 @@ location.href=data.url;
 console.error('schema-for error:',err);
 });
 }
-function _leaveSchemaMode(){
+function _appendModeHash(url,targetMode){
+if(!targetMode||targetMode==='view')return url;
+if(targetMode==='edit'||targetMode==='suggest')return url+'#_'+targetMode;
+return url;
+}
+function _leaveSchemaMode(targetMode){
 var schemaUrl=location.pathname;
 fetch('/_presemble/page-for?schema='+encodeURIComponent(schemaUrl))
 .then(function(r){
-if(r.status===404){location.href='/';return null;}
+if(r.status===404){location.href=_appendModeHash('/',targetMode);return null;}
 return r.json();
 })
 .then(function(data){
-if(data&&data.url){location.href=data.url;}
+if(data&&data.url){location.href=_appendModeHash(data.url,targetMode);}
+else if(data!==null&&data!==undefined){location.href=_appendModeHash('/',targetMode);}
 })
 .catch(function(err){
 console.error('page-for error:',err);
-location.href='/';
+location.href=_appendModeHash('/',targetMode);
 });
 }
 function _applyHashMode(){
+console.log('[presemble:mode] _applyHashMode hash=', location.hash, '→ parsed:', parsePresembleHash(location.hash));
 _handlingHashChange=true;
 var m=parsePresembleHash(location.hash);
 // Schema mode is a URL-path concern (/_schema/...), not a hash concern.
@@ -835,6 +823,52 @@ return;
 }
 setMode(m);
 _handlingHashChange=false;
+}
+// Set the presemble mode.
+// 'schema' triggers real navigation to the canonical /_schema/... URL via
+// _enterSchemaMode() — no hash is written.
+// When currently on a /_schema/... URL and switching to a non-schema mode,
+// _leaveSchemaMode() navigates back to the corresponding content page.
+// 'view' removes the hash (no page reload); other modes set #_<mode>.
+// Also canonicalizes the pathname by stripping /index.html or /index.htm.
+// NOTE: defined here (inside the mode-management IIFE) so it can close over
+// _enterSchemaMode, _leaveSchemaMode and _applyHashMode.
+function setPresembleMode(mode) {
+  console.log('[presemble:mode] setPresembleMode start:', mode, 'pathname:', location.pathname);
+  if (mode === 'schema') {
+    console.log('[presemble:mode] → _enterSchemaMode');
+    _enterSchemaMode();
+    return;
+  }
+  // If we are currently on a schema URL, leaving any non-schema mode requires
+  // navigating back to the content page via the page-for API.
+  if (location.pathname.indexOf('/_schema/') === 0) {
+    console.log('[presemble:mode] → _leaveSchemaMode(', mode, ')');
+    _leaveSchemaMode(mode);
+    return;
+  }
+  var p = location.pathname;
+  if (p.endsWith('/index.html')) {
+    p = p.slice(0, -('index.html'.length)); // keeps trailing /
+  } else if (p.endsWith('/index.htm')) {
+    p = p.slice(0, -('index.htm'.length));
+  }
+  var pathChanged = p !== location.pathname;
+  console.log('[presemble:mode] canonicalized p=', p, 'pathChanged=', pathChanged);
+
+  if (mode === 'view') {
+    console.log('[presemble:mode] → replaceState (view, no hash)');
+    history.replaceState(null, '', p + location.search);
+  } else if (pathChanged) {
+    console.log('[presemble:mode] → replaceState + _applyHashMode (path changed)');
+    // replaceState doesn't fire hashchange, so update URL then dispatch manually.
+    history.replaceState(null, '', p + location.search + '#_' + mode);
+    _applyHashMode();
+  } else {
+    console.log('[presemble:mode] → location.hash = _' + mode + ' (no canonicalization)');
+    location.hash = '_' + mode;
+  }
+  console.log('[presemble:mode] setPresembleMode end. location.hash now:', location.hash);
 }
 window.addEventListener('hashchange',_applyHashMode);
 // Schema-mode link intercept: when in schema mode, content link clicks are
@@ -876,6 +910,7 @@ suggestBtn.onclick=function(){setMode('suggest');};
 structureBtn.onclick=function(){setMode('schema');};
 window._fetchDirtyCount=_fetchDirtyCount;
 window._fetchSuggestionCount=_fetchSuggestionCount;
+window._suggestEnter=_suggestEnter;
 window._fetchSuggestionFiles=_fetchSuggestionFiles;
 window._foldToggle=function(el){_foldToggle(el);};
 })();
@@ -1110,7 +1145,7 @@ if(e.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('key
 });
 });
 document.addEventListener('click',function(e){
-var suggestMode=mode==='suggest';
+var suggestMode=document.body.classList.contains('presemble-suggest-mode');
 if(!suggestMode){return;}
 var el=e.target.closest('[data-presemble-slot]');
 if(!el||el.classList.contains('presemble-editing')){return;}
@@ -1144,7 +1179,11 @@ fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'appl
 body:JSON.stringify({file:bfile,selection:'(ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){var berr=document.createElement('div');berr.className='presemble-edit-error';berr.textContent=data.error||'Suggest failed';el.after(berr);}
-if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+if(data.ok&&data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
+window._suggestEnter(data.id);
+}else if(window._fetchSuggestionCount){
+window._fetchSuggestionCount();
+}
 }).catch(function(){});
 }
 btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
@@ -1178,15 +1217,20 @@ var origText=original.replace(/\u00a0/g,' ');
 cleanup();
 var diff=minimalDiff(origText,value);
 if(!diff){return;}
+var idx=slotChildIndex(el);
 fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,selection:'(ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
+body:JSON.stringify({file:pfile,selection:'(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){
 var err=document.createElement('div');err.className='presemble-edit-error';
 err.textContent=data.error||'Suggest failed';el.after(err);
 }
 el.innerText=original;
-if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+if(data.ok&&data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
+window._suggestEnter(data.id);
+}else if(window._fetchSuggestionCount){
+window._fetchSuggestionCount();
+}
 }).catch(function(e){
 el.innerText=original;
 });
