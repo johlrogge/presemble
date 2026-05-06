@@ -174,24 +174,35 @@ impl<'a> Reader<'a> {
 
     fn read_string(&mut self) -> Result<Form, ReadError> {
         self.advance(); // consume opening '"'
-        let mut s = String::new();
+        let mut buf: Vec<u8> = Vec::new();
         loop {
             match self.advance() {
                 None => return Err(ReadError("unterminated string".into())),
-                Some(b'"') => return Ok(Form::Str(s)),
+                Some(b'"') => {
+                    // SAFETY-EQUIVALENT: `self.input` came from `&str`, so it is
+                    // valid UTF-8. Every byte we pushed is either a verbatim
+                    // input byte (preserving UTF-8 boundaries) or an ASCII
+                    // substitution from an escape sequence. The result is
+                    // therefore valid UTF-8.
+                    let s = String::from_utf8(buf)
+                        .expect("input is valid UTF-8 and substitutions are ASCII");
+                    return Ok(Form::Str(s));
+                }
                 Some(b'\\') => match self.advance() {
-                    Some(b'n') => s.push('\n'),
-                    Some(b't') => s.push('\t'),
-                    Some(b'r') => s.push('\r'),
-                    Some(b'"') => s.push('"'),
-                    Some(b'\\') => s.push('\\'),
+                    Some(b'n') => buf.push(b'\n'),
+                    Some(b't') => buf.push(b'\t'),
+                    Some(b'r') => buf.push(b'\r'),
+                    Some(b'"') => buf.push(b'"'),
+                    Some(b'\\') => buf.push(b'\\'),
                     Some(ch) => {
-                        s.push('\\');
-                        s.push(ch as char);
+                        return Err(ReadError(format!(
+                            "invalid escape sequence: \\{}",
+                            ch as char
+                        )));
                     }
                     None => return Err(ReadError("unterminated string escape".into())),
                 },
-                Some(ch) => s.push(ch as char),
+                Some(byte) => buf.push(byte),
             }
         }
     }
@@ -431,6 +442,53 @@ mod tests {
         assert_eq!(
             read(r#""back\\slash""#).unwrap(),
             Form::Str("back\\slash".into())
+        );
+    }
+
+    #[test]
+    fn read_string_with_em_dash() {
+        let form = read("\"hello \u{2014} world\"").unwrap();
+        assert_eq!(form, Form::Str("hello \u{2014} world".into()));
+    }
+
+    #[test]
+    fn read_string_with_multibyte_utf8_roundtrip() {
+        // Mix 1-, 2-, 3-, and 4-byte UTF-8 sequences in one string.
+        let input = "\"a \u{00f1} \u{20ac} \u{1d11e}\"";
+        let form = read(input).unwrap();
+        assert_eq!(form, Form::Str("a \u{00f1} \u{20ac} \u{1d11e}".into()));
+    }
+
+    #[test]
+    fn read_string_mixed_ascii_and_utf8() {
+        let form = read("\"price: 5\u{20ac} \u{2014} discount: 10%\"").unwrap();
+        assert_eq!(
+            form,
+            Form::Str("price: 5\u{20ac} \u{2014} discount: 10%".into())
+        );
+    }
+
+    #[test]
+    fn read_string_utf8_with_escape() {
+        let form = read("\"line1 \u{2014}\\nline2 \u{20ac}\"").unwrap();
+        assert_eq!(
+            form,
+            Form::Str("line1 \u{2014}\nline2 \u{20ac}".into())
+        );
+    }
+
+    #[test]
+    fn read_string_utf8_only() {
+        let form = read("\"\u{65e5}\u{672c}\u{8a9e}\"").unwrap();
+        assert_eq!(form, Form::Str("\u{65e5}\u{672c}\u{8a9e}".into()));
+    }
+
+    #[test]
+    fn read_string_rejects_unknown_escape() {
+        let result = read("\"bad \\x escape\"");
+        assert!(
+            result.is_err(),
+            "expected Err for unknown escape, got {result:?}"
         );
     }
 

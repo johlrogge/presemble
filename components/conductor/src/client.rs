@@ -3,8 +3,16 @@ use nng::options::Options;
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
 
 /// Client for sending commands to the conductor via nng REQ socket.
+///
+/// **Concurrency contract:** `send` is atomic — calls from multiple threads
+/// are serialized internally. The underlying nng REQ0 protocol is strictly
+/// request/response and cannot interleave concurrent send/recv pairs on a
+/// single socket. Slow commands (e.g. full-graph rebuilds) block all other
+/// commands on the same client. If you need true parallelism across
+/// independent commands, hold multiple `ConductorClient` instances
+/// (one per logical caller) rather than sharing one across threads.
 pub struct ConductorClient {
-    socket: nng::Socket,
+    socket: std::sync::Mutex<nng::Socket>,
 }
 
 impl ConductorClient {
@@ -22,7 +30,7 @@ impl ConductorClient {
         socket
             .dial(url)
             .map_err(|e| format!("failed to connect to conductor at {url}: {e}"))?;
-        Ok(Self { socket })
+        Ok(Self { socket: std::sync::Mutex::new(socket) })
     }
 
     /// Send a command and receive a response.
@@ -30,11 +38,11 @@ impl ConductorClient {
         let data = serde_json::to_vec(cmd)
             .map_err(|e| format!("failed to serialize command: {e}"))?;
         let msg = nng::Message::from(data.as_slice());
-        self.socket
+        let socket = self.socket.lock().unwrap();
+        socket
             .send(msg)
             .map_err(|(_msg, e)| format!("failed to send: {e}"))?;
-        let reply = self
-            .socket
+        let reply = socket
             .recv()
             .map_err(|e| format!("failed to receive reply: {e}"))?;
         serde_json::from_slice(&reply)
@@ -237,4 +245,84 @@ pub fn socket_url(site_dir: &std::path::Path) -> String {
     let _ = std::fs::create_dir_all(&socket_dir);
 
     format!("ipc://{}/{:x}", socket_dir.display(), hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    /// Spin up an in-process Rep0 echo server that responds Pong to every Ping.
+    /// Returns the URL the client should connect to. The server thread
+    /// terminates when the test process exits (it loops on `recv`).
+    fn spawn_echo_server() -> String {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let url = format!("ipc:///tmp/presemble-test-{pid}-{nanos}");
+
+        let url_for_server = url.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || {
+            let server = nng::Socket::new(nng::Protocol::Rep0).unwrap();
+            server.listen(&url_for_server).unwrap();
+            ready_tx.send(()).unwrap();
+            loop {
+                let msg = match server.recv() {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let cmd: Command = match serde_json::from_slice(&msg) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let reply = match cmd {
+                    Command::Ping => Response::Pong,
+                    _ => Response::Error("test server only handles Ping".to_string()),
+                };
+                let bytes = serde_json::to_vec(&reply).unwrap();
+                let out = nng::Message::from(bytes.as_slice());
+                if server.send(out).is_err() {
+                    break;
+                }
+            }
+        });
+        ready_rx.recv().unwrap();
+        url
+    }
+
+    #[test]
+    fn send_is_atomic_under_concurrent_callers() {
+        let url = spawn_echo_server();
+        let client = Arc::new(ConductorClient::connect(&url).unwrap());
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let c = Arc::clone(&client);
+            handles.push(thread::spawn(move || {
+                let mut results = Vec::new();
+                for _ in 0..10 {
+                    results.push(c.ping());
+                }
+                results
+            }));
+        }
+
+        let mut all_results = Vec::new();
+        for h in handles {
+            all_results.extend(h.join().unwrap());
+        }
+
+        let failures: Vec<_> = all_results.iter().filter(|r| r.is_err()).collect();
+        assert!(
+            failures.is_empty(),
+            "{} of {} pings failed: first error = {:?}",
+            failures.len(),
+            all_results.len(),
+            failures.first(),
+        );
+    }
 }
