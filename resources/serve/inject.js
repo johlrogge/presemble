@@ -22,6 +22,168 @@ function slotChildIndex(el) {
   return idx;
 }
 
+// --- Phase 2: Structural-anchor selectors (dead code; Phase 4 wires callers) ---
+// Composer helpers — build NED Clojure source strings.
+function nedDoc(file) {
+  return '(ned/doc-by-path '+cljStr(file)+')';
+}
+function nedSlot(file, slot) {
+  return '(ned/slot '+nedDoc(file)+' '+cljStr(slot)+')';
+}
+function nedChildrenSlot(file, slot) {
+  return '(ned/children '+nedSlot(file, slot)+')';
+}
+function nedHeadingWithText(slotChildrenExpr, text) {
+  return '(ned/heading-with-text '+slotChildrenExpr+' '+cljStr(text)+')';
+}
+function nedNthAfter(anchorExpr, kind, idx) {
+  return '(ned/nth-after '+anchorExpr+' '+cljStr(kind)+' '+idx+')';
+}
+function nedNthOfKind(selExpr, kind, idx) {
+  return '(ned/nth-of-kind '+selExpr+' '+cljStr(kind)+' '+idx+')';
+}
+
+// Map a DOM element to its NodeStore element-name (kind) per content_bridge.
+function kindFromTag(el) {
+  var t = el.tagName;
+  if (/^H[1-6]$/.test(t)) return 'heading';
+  if (t === 'P') return 'paragraph';
+  if (t === 'PRE' || el.querySelector('code')) return 'code-block';
+  if (t === 'BLOCKQUOTE') return 'blockquote';
+  if (t === 'IMG') return 'image';
+  if (t === 'TABLE') return 'table';
+  if (t === 'UL' || t === 'OL') return 'list';
+  if (t === 'DIV') {
+    var md = el.getAttribute('data-presemble-md') || '';
+    if (/^\s*([-*+]|\d+\.)\s/.test(md)) return 'list';
+    return 'raw-html';
+  }
+  return null;
+}
+
+// Collect all body-slot elements for a given file in document order.
+function bodySiblingsForFile(file) {
+  return Array.prototype.slice.call(
+    document.querySelectorAll('[data-presemble-slot="body"][data-presemble-file="'+file+'"]')
+  );
+}
+
+// Find the most-recent heading at or before `targetEl` within `sibs` (an
+// ordered list of body-slot elements). Returns {el, text, anchorPos, targetPos}
+// or null when targetEl has no preceding heading. anchorPos/targetPos are
+// indices into sibs. Text is whitespace-normalised to match
+// ned/heading-with-text's exact-equality semantics.
+function findPreviousHeadingForElement(sibs, targetEl) {
+  var targetPos = sibs.indexOf(targetEl);
+  if (targetPos < 0) return null;
+  for (var i = targetPos; i >= 0; i--) {
+    if (/^H[1-6]$/.test(sibs[i].tagName)) {
+      return {
+        el: sibs[i],
+        text: sibs[i].innerText.trim().replace(/\s+/g, ' '),
+        anchorPos: i,
+        targetPos: targetPos
+      };
+    }
+  }
+  return null;
+}
+
+// Count elements in sibs[fromExclusive..toExclusive) whose kind matches.
+function countKindInRange(sibs, fromExclusive, toExclusive, kind) {
+  var count = 0;
+  for (var i = fromExclusive + 1; i < toExclusive; i++) {
+    if (kindFromTag(sibs[i]) === kind) count++;
+  }
+  return count;
+}
+
+// Count elements in sibs[0..toExclusive) whose kind matches.
+function countKindBeforeIndex(sibs, toExclusive, kind) {
+  var count = 0;
+  for (var i = 0; i < toExclusive; i++) {
+    if (kindFromTag(sibs[i]) === kind) count++;
+  }
+  return count;
+}
+
+// Build a NED selection for a body-slot element, anchored on the nearest
+// preceding heading when possible. Pure DOM-relative — no positional IDs.
+function buildBodyAnchor(el, file) {
+  var bodyEl = el.closest('[data-presemble-slot="body"]') || el;
+  var sibs = bodySiblingsForFile(file);
+  var targetPos = sibs.indexOf(bodyEl);
+  if (targetPos < 0) {
+    console.warn('buildBodyAnchor: target not in body slot list; falling back', bodyEl);
+    return '(ned/nth-child '+nedSlot(file, 'body')+' '+slotChildIndex(el)+')';
+  }
+  var kind = kindFromTag(bodyEl);
+  if (kind === null) {
+    console.warn('buildBodyAnchor: unknown kind from tag', bodyEl.tagName);
+    return '(ned/nth-child '+nedSlot(file, 'body')+' '+slotChildIndex(el)+')';
+  }
+  var slotChildren = nedChildrenSlot(file, 'body');
+  var anchor = findPreviousHeadingForElement(sibs, bodyEl);
+  if (anchor && anchor.anchorPos === targetPos) {
+    // Editing the heading itself.
+    return nedHeadingWithText(slotChildren, anchor.text);
+  }
+  if (anchor) {
+    var relIdx = countKindInRange(sibs, anchor.anchorPos, targetPos, kind);
+    return nedNthAfter(nedHeadingWithText(slotChildren, anchor.text), kind, relIdx);
+  }
+  // No preceding heading — slot-boundary fallback.
+  var preIdx = countKindBeforeIndex(sibs, targetPos, kind);
+  return nedNthOfKind(slotChildren, kind, preIdx);
+}
+
+// Build a NED selection for a preamble-slot element.
+function buildPreambleAnchor(el, file, slot) {
+  var bySlot = Array.prototype.slice.call(
+    document.querySelectorAll('[data-presemble-slot="'+slot+'"][data-presemble-file="'+file+'"]')
+  );
+  var bySource = Array.prototype.slice.call(
+    document.querySelectorAll('[data-presemble-source-slot="'+slot+'"][data-presemble-file="'+file+'"]')
+  );
+  var sibs = bySlot.slice();
+  for (var i = 0; i < bySource.length; i++) {
+    if (sibs.indexOf(bySource[i]) === -1) sibs.push(bySource[i]);
+  }
+  sibs.sort(function(a, b) {
+    var pos = a.compareDocumentPosition(b);
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+  if (sibs.length === 1) {
+    return nedSlot(file, slot);
+  }
+  var kind = kindFromTag(el);
+  if (kind === null) {
+    console.warn('buildPreambleAnchor: unknown kind for', el.tagName);
+    return '(ned/nth-child '+nedSlot(file, slot)+' '+slotChildIndex(el)+')';
+  }
+  var idx = 0;
+  for (var m = 0; m < sibs.length; m++) {
+    if (sibs[m] === el) break;
+    if (kindFromTag(sibs[m]) === kind) idx++;
+  }
+  return nedNthOfKind(nedChildrenSlot(file, slot), kind, idx);
+}
+
+// Top-level dispatcher. Returns null when the element lacks file/slot data,
+// letting callers fall back to the legacy slotChildIndex path.
+function buildStructuralSelection(el) {
+  var fileEl = el.closest('[data-presemble-file]');
+  if (!fileEl) return null;
+  var file = fileEl.getAttribute('data-presemble-file');
+  var slot = el.getAttribute('data-presemble-source-slot') || el.getAttribute('data-presemble-slot');
+  if (!file || !slot) return null;
+  if (slot === 'body') return buildBodyAnchor(el, file);
+  return buildPreambleAnchor(el, file, slot);
+}
+// --- end Phase 2 helpers ---
+
 // Guardrails: if the server ever emits data-presemble-file="" these helpers
 // fail fast rather than issuing /_presemble/grammar?stem=undefined requests.
 
