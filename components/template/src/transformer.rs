@@ -451,6 +451,10 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
     // For relative paths like "title" (inside data-each), look in graph["_presemble_file"].
     let presemble_file = resolve_presemble_file(&path_segments, graph);
 
+    // Resolve per-slot schema constraint attributes for structure-mode overlays.
+    // These become data-presemble-schema-constraints-* attributes on the outer element.
+    let constraint_attrs = resolve_slot_constraint_form_attrs(data_path, graph);
+
     // Check for :apply attribute — resolve to Form (native from hiccup, re-parsed from HTML strings)
     let apply_form = match el.attr_form("apply") {
         Some(form @ (Form::Symbol(_) | Form::List(_))) => Some(form.clone()),
@@ -465,7 +469,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
         // Try the fast NodeId path first (avoids Value materialization).
         // Falls back to legacy Value path for unhandled node types (e.g. body).
         if let Some(ref resolved) = graph.resolve_node(&path_segments)
-            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file)?
+            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs)?
         {
             return Ok(nodes);
         }
@@ -490,6 +494,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
                 {
                     attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
                 }
+                attrs.extend(constraint_attrs);
                 let element = Element {
                     name: tag,
                     attrs,
@@ -506,13 +511,15 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
 
         Some(Value::Text(text)) => {
             let tag = as_tag.unwrap_or("span").to_string();
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
                 name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
+                attrs,
                 children: vec![Node::Text(text)],
             };
             Ok(vec![Node::Element(element)])
@@ -578,8 +585,14 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
                 attrs.push(("alt".to_string(), Form::Str(String::new())));
                 attrs.push(("src".to_string(), Form::Str(String::new())));
             } else if effective_tag == "a" {
-                attrs.push(("href".to_string(), Form::Str("#".to_string())));
+                // When a TypeLink constraint is present, point the href at the
+                // corresponding schema's index page (ADR-042 fragment mode).
+                // Otherwise fall back to the generic placeholder "#".
+                let href = typelink_schema_href(&constraint_attrs)
+                    .unwrap_or_else(|| "#".to_string());
+                attrs.push(("href".to_string(), Form::Str(href)));
             }
+            attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
                 name: effective_tag.to_string(),
                 attrs,
@@ -593,29 +606,25 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
 
         Some(Value::Integer(n)) => {
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(n.to_string())],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
+            let element = Element { name: tag, attrs, children: vec![Node::Text(n.to_string())] };
             Ok(vec![Node::Element(element)])
         }
 
         Some(Value::Bool(b)) => {
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(b.to_string())],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
+            let element = Element { name: tag, attrs, children: vec![Node::Text(b.to_string())] };
             Ok(vec![Node::Element(element)])
         }
 
@@ -625,30 +634,26 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
                 None => format!(":{name}"),
             };
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(text)],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs.iter().cloned());
+            let element = Element { name: tag, attrs, children: vec![Node::Text(text)] };
             Ok(vec![Node::Element(element)])
         }
 
         Some(Value::Fn(c)) => {
             let text = format!("#<fn {}>", c.name().unwrap_or("anonymous"));
             let tag = as_tag.unwrap_or("span").to_string();
-            let element = Element {
-                name: tag,
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ],
-                children: vec![Node::Text(text)],
-            };
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            attrs.extend(constraint_attrs);
+            let element = Element { name: tag, attrs, children: vec![Node::Text(text)] };
             Ok(vec![Node::Element(element)])
         }
 
@@ -668,6 +673,7 @@ fn render_insert_native(
     class: &str,
     data_path: &str,
     presemble_file: &str,
+    constraint_attrs: &[(String, Form)],
 ) -> Result<Option<Vec<Node>>, RenderError> {
     let store = resolved.store;
     let id = resolved.id;
@@ -677,13 +683,15 @@ fn render_insert_native(
         Some(node) => match node {
             node_store::Node::Text(text) => {
                 let tag = as_tag.unwrap_or("span").to_string();
+                let mut attrs = vec![
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                ];
+                attrs.extend(constraint_attrs.iter().cloned());
                 let element = Element {
                     name: tag,
-                    attrs: vec![
-                        ("class".to_string(), Form::Str(class.to_string())),
-                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                    ],
+                    attrs,
                     children: vec![Node::Text(text.clone())],
                 };
                 Ok(Some(vec![Node::Element(element)]))
@@ -691,13 +699,15 @@ fn render_insert_native(
 
             node_store::Node::Integer(n) => {
                 let tag = as_tag.unwrap_or("span").to_string();
+                let mut attrs = vec![
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                ];
+                attrs.extend(constraint_attrs.iter().cloned());
                 let element = Element {
                     name: tag,
-                    attrs: vec![
-                        ("class".to_string(), Form::Str(class.to_string())),
-                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                    ],
+                    attrs,
                     children: vec![Node::Text(n.to_string())],
                 };
                 Ok(Some(vec![Node::Element(element)]))
@@ -705,13 +715,15 @@ fn render_insert_native(
 
             node_store::Node::Boolean(b) => {
                 let tag = as_tag.unwrap_or("span").to_string();
+                let mut attrs = vec![
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                ];
+                attrs.extend(constraint_attrs.iter().cloned());
                 let element = Element {
                     name: tag,
-                    attrs: vec![
-                        ("class".to_string(), Form::Str(class.to_string())),
-                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                    ],
+                    attrs,
                     children: vec![Node::Text(b.to_string())],
                 };
                 Ok(Some(vec![Node::Element(element)]))
@@ -720,13 +732,15 @@ fn render_insert_native(
             node_store::Node::Keyword(name) => {
                 let text = format!(":{}", store.resolve_name(*name));
                 let tag = as_tag.unwrap_or("span").to_string();
+                let mut attrs = vec![
+                    ("class".to_string(), Form::Str(class.to_string())),
+                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                ];
+                attrs.extend(constraint_attrs.iter().cloned());
                 let element = Element {
                     name: tag,
-                    attrs: vec![
-                        ("class".to_string(), Form::Str(class.to_string())),
-                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                    ],
+                    attrs,
                     children: vec![Node::Text(text)],
                 };
                 Ok(Some(vec![Node::Element(element)]))
@@ -740,7 +754,7 @@ fn render_insert_native(
                 let mut result = Vec::new();
                 for child_id in store.children(id) {
                     let child_resolved = ResolvedNode { id: child_id, store };
-                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file)? {
+                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file, &[])? {
                         result.append(&mut rendered);
                     }
                 }
@@ -932,13 +946,15 @@ fn render_insert_native(
                     });
                     if let Some(text) = text {
                         let tag = as_tag.unwrap_or("span").to_string();
+                        let mut elem_attrs = vec![
+                            ("class".to_string(), Form::Str(class.to_string())),
+                            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                        ];
+                        elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
                             name: tag,
-                            attrs: vec![
-                                ("class".to_string(), Form::Str(class.to_string())),
-                                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                            ],
+                            attrs: elem_attrs,
                             children: vec![Node::Text(text)],
                         };
                         return Ok(Some(vec![Node::Element(element)]));
@@ -1010,6 +1026,7 @@ fn render_insert_native(
                             if let Some(source) = source_slot {
                                 elem_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
                             }
+                            elem_attrs.extend(constraint_attrs.iter().cloned());
                             Ok(Some(vec![Node::Element(Element {
                                 name: "a".to_string(),
                                 attrs: elem_attrs,
@@ -1017,11 +1034,12 @@ fn render_insert_native(
                             })]))
                         }
                         _ => {
-                            let inner_attrs = vec![
+                            let mut inner_attrs = vec![
                                 ("class".to_string(), Form::Str(class.to_string())),
                                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
                                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                             ];
+                            inner_attrs.extend(constraint_attrs.iter().cloned());
                             let inner = Element {
                                 name: effective_tag.to_string(),
                                 attrs: inner_attrs,
@@ -1050,15 +1068,17 @@ fn render_insert_native(
                     }).unwrap_or_default();
                     let tag = as_tag.unwrap_or("img").to_string();
                     let slot = slot_name_from_path(data_path);
+                    let mut img_attrs = vec![
+                        ("src".to_string(), Form::Str(src)),
+                        ("alt".to_string(), Form::Str(alt)),
+                        ("class".to_string(), Form::Str(class.to_string())),
+                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
+                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                    ];
+                    img_attrs.extend(constraint_attrs.iter().cloned());
                     let element = Element {
                         name: tag,
-                        attrs: vec![
-                            ("src".to_string(), Form::Str(src)),
-                            ("alt".to_string(), Form::Str(alt)),
-                            ("class".to_string(), Form::Str(class.to_string())),
-                            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
-                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                        ],
+                        attrs: img_attrs,
                         children: vec![],
                     };
                     return Ok(Some(vec![Node::Element(element)]));
@@ -1085,15 +1105,16 @@ fn render_insert_native(
                         let text = text.unwrap_or_default();
                         let slot = slot_name_from_path(data_path);
                         let effective_tag = as_tag.unwrap_or("a");
-                        let attrs = vec![
+                        let mut link_elem_attrs = vec![
                             ("href".to_string(), Form::Str(href)),
                             ("class".to_string(), Form::Str(class.to_string())),
                             (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
                             (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                         ];
+                        link_elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
                             name: effective_tag.to_string(),
-                            attrs,
+                            attrs: link_elem_attrs,
                             children: vec![Node::Text(text)],
                         };
                         return Ok(Some(vec![Node::Element(element)]));
@@ -1168,6 +1189,50 @@ fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> Stri
         .or_else(|| graph.resolve(&[key_file])
             .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None }))
         .unwrap_or_default()
+}
+
+/// Look up per-slot schema constraint attributes from the graph and return them as
+/// `(attribute-name, Form::Str(value))` pairs ready to append to an element's attrs list.
+///
+/// The slot name is derived as the last segment of `data_path` (e.g. "input.title" → "title").
+/// The constraint record is stored as `"_presemble_schema_constraints_<slotname>"` within
+/// the same parent record that holds the slot value.  For `data="input.title"` the lookup
+/// path is `["input", "_presemble_schema_constraints_title"]`; for `data="title"` it is
+/// `["_presemble_schema_constraints_title"]`.  Falls back to a top-level lookup if the
+/// scoped lookup returns nothing (mirrors `resolve_presemble_file`).
+fn resolve_slot_constraint_form_attrs(data_path: &str, graph: &dyn GraphView) -> Vec<(String, Form)> {
+    let slot_name = slot_name_from_path(data_path);
+    let key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, slot_name);
+
+    // Build a scoped path by replacing the last segment with the constraint key.
+    let path_segments: Vec<&str> = data_path.split('.').collect();
+    let mut scoped: Vec<&str> = path_segments.clone();
+    if let Some(last) = scoped.last_mut() {
+        *last = key.as_str();
+    }
+
+    let resolved = graph.resolve(&scoped)
+        .or_else(|| graph.resolve(&[key.as_str()]));
+
+    match resolved {
+        Some(data_ref) => {
+            if let Value::Record(record) = data_ref.into_owned() {
+                record.iter()
+                    .map(|(suffix, val)| {
+                        let attr_name = crate::constraints::constraint_attr_name(suffix);
+                        let attr_val = match val {
+                            Value::Text(t) => t.clone(),
+                            _ => String::new(),
+                        };
+                        (attr_name, Form::Str(attr_val))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    }
 }
 
 /// Handle a `<presemble:apply>` element.
@@ -1436,6 +1501,106 @@ fn extract_text(graph: &DataGraph, key: &str) -> Option<String> {
         Some(Value::Text(t)) => Some(t.clone()),
         _ => None,
     }
+}
+
+/// Given a list of constraint `(attr-name, Form)` pairs, look for a TypeLink
+/// constraint and return the corresponding canonical schema URL
+/// (`/_schema/<name>/item`).
+///
+/// Returns `None` if no TypeLink constraint is present.
+fn typelink_schema_href(constraint_attrs: &[(String, Form)]) -> Option<String> {
+    let typelink_attr = crate::constraints::constraint_attr_name("typelink");
+    constraint_attrs.iter().find_map(|(name, val)| {
+        if name == &typelink_attr
+            && let Form::Str(schema_name) = val
+            && !schema_name.is_empty()
+        {
+            Some(format!("/_schema/{}/item", schema_name))
+        } else {
+            None
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Schema instance badge data
+// ---------------------------------------------------------------------------
+
+/// Attach schema-instance count and optional sample URL data attributes to the
+/// first root element of a rendered node list.
+///
+/// Called by the render pipeline after `transform` completes, when the caller
+/// has resolved the number of content documents for a schema stem and wishes to
+/// surface that information to the browser structure-mode badge overlay.
+///
+/// Attribute contract:
+///
+/// - `data-presemble-schema-instance-count` is always emitted; its value is
+///   the decimal count (e.g. `"3"` or `"0"`).
+/// - `data-presemble-schema-instance-sample-url` is emitted only when
+///   `sample_url` is `Some` (count > 0).  The value is a root-relative URL
+///   (e.g. `"/blog/2025-04-28-my-post"`).
+///
+/// If `nodes` contains no root `Element` (e.g. pure text or empty) the list
+/// is returned unmodified.
+pub fn attach_schema_instance_attrs(
+    mut nodes: Vec<Node>,
+    count: usize,
+    sample_url: Option<&str>,
+) -> Vec<Node> {
+    for node in &mut nodes {
+        if let Node::Element(el) = node {
+            el.attrs.push((
+                crate::constants::ATTR_SCHEMA_INSTANCE_COUNT.to_string(),
+                Form::Str(count.to_string()),
+            ));
+            if let Some(url) = sample_url {
+                el.attrs.push((
+                    crate::constants::ATTR_SCHEMA_INSTANCE_SAMPLE_URL.to_string(),
+                    Form::Str(url.to_string()),
+                ));
+            }
+            break;
+        }
+    }
+    nodes
+}
+
+// ---------------------------------------------------------------------------
+// Schema "included by" back-reference data
+// ---------------------------------------------------------------------------
+
+/// Attach a `data-presemble-schema-included-by` attribute to the first root
+/// element of a rendered node list.
+///
+/// Called by the render pipeline after `transform` completes, when the caller
+/// has resolved which other schemas reference this schema via `TypeLink`.
+///
+/// Attribute contract:
+///
+/// - The value is a JSON array of `{"schema":"<stem>","url":"/<stem>/#_schema"}`
+///   objects, e.g. `[{"schema":"post","url":"/post/#_schema"}]`.
+/// - When there are no referencing schemas the value is `"[]"`.
+/// - The attribute is **always** emitted (even for an empty list) so the browser
+///   can distinguish "no data" from "attribute not present."
+///
+/// `included` is a slice of `(schema_stem, schema_url)` pairs.  The caller is
+/// responsible for supplying the correct stem + URL for each referencing schema.
+///
+/// If `nodes` contains no root `Element` (e.g. pure text or empty) the list
+/// is returned unmodified.
+pub fn attach_schema_included_by_attr(mut nodes: Vec<Node>, included: &[(&str, &str)]) -> Vec<Node> {
+    let json = crate::data::build_schema_included_by_json(included);
+    for node in &mut nodes {
+        if let Node::Element(el) = node {
+            el.attrs.push((
+                crate::constants::ATTR_SCHEMA_INCLUDED_BY.to_string(),
+                Form::Str(json),
+            ));
+            break;
+        }
+    }
+    nodes
 }
 
 // ---------------------------------------------------------------------------
@@ -3013,5 +3178,80 @@ mod tests {
         let part1_pos = html.find("<span").expect("span from part1 should appear");
         let part2_pos = html.find("<em").expect("em from part2 should appear");
         assert!(part1_pos < part2_pos, "part1 output should come before part2: {html}");
+    }
+
+    // ---------------------------------------------------------------------------
+    // attach_schema_included_by_attr tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn attach_schema_included_by_attr_adds_json_to_root_element() {
+        let nodes = parse_template_xml(r#"<div class="schema-doc"><p>content</p></div>"#).unwrap();
+        let pairs: &[(&str, &str)] = &[("post", "/post/#_schema"), ("event", "/event/#_schema")];
+        let result = attach_schema_included_by_attr(nodes, pairs);
+        let html = serialize_nodes(&result);
+        assert!(
+            html.contains(r#"data-presemble-schema-included-by="[{&quot;schema&quot;:&quot;post&quot;"#)
+                || html.contains("data-presemble-schema-included-by="),
+            "expected data-presemble-schema-included-by attribute: {html}"
+        );
+        // Also verify the raw attribute is on the root element
+        if let Some(Node::Element(el)) = result.first() {
+            let has_attr = el.attrs.iter().any(|(k, _)| k == "data-presemble-schema-included-by");
+            assert!(has_attr, "root element should have data-presemble-schema-included-by attribute");
+        } else {
+            panic!("expected root element");
+        }
+    }
+
+    #[test]
+    fn attach_schema_included_by_attr_empty_list_emits_empty_array() {
+        let nodes = parse_template_xml(r#"<div></div>"#).unwrap();
+        let result = attach_schema_included_by_attr(nodes, &[]);
+        if let Some(Node::Element(el)) = result.first() {
+            let attr = el.attrs.iter().find(|(k, _)| k == "data-presemble-schema-included-by");
+            assert!(attr.is_some(), "attribute should be present even for empty list");
+            if let Some((_, Form::Str(val))) = attr {
+                assert_eq!(val, "[]", "empty list should produce '[]'");
+            }
+        } else {
+            panic!("expected root element");
+        }
+    }
+
+    #[test]
+    fn attach_schema_included_by_attr_on_pure_text_nodes_is_noop() {
+        let nodes = vec![Node::Text("hello".to_string())];
+        let result = attach_schema_included_by_attr(nodes, &[("post", "/post/#_schema")]);
+        // No element to inject into — result unchanged (still one Text node)
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], Node::Text(_)));
+    }
+
+    // ---------------------------------------------------------------------------
+    // build_schema_included_by_json tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn build_schema_included_by_json_empty_slice() {
+        assert_eq!(crate::data::build_schema_included_by_json(&[]), "[]");
+    }
+
+    #[test]
+    fn build_schema_included_by_json_single_entry() {
+        let json = crate::data::build_schema_included_by_json(&[("post", "/post/#_schema")]);
+        assert_eq!(json, r#"[{"schema":"post","url":"/post/#_schema"}]"#);
+    }
+
+    #[test]
+    fn build_schema_included_by_json_two_entries() {
+        let json = crate::data::build_schema_included_by_json(&[
+            ("event", "/event/#_schema"),
+            ("post", "/post/#_schema"),
+        ]);
+        assert_eq!(
+            json,
+            r#"[{"schema":"event","url":"/event/#_schema"},{"schema":"post","url":"/post/#_schema"}]"#
+        );
     }
 }

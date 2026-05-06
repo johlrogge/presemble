@@ -30,6 +30,10 @@ enum BrowserMessage {
     ScrollTo {
         anchor: String,
     },
+    /// Suggestion overlay metadata changed — no HTML was mutated, no page reload needed.
+    SuggestionListChanged {
+        file: Option<String>,
+    },
 }
 
 impl BrowserMessage {
@@ -61,6 +65,16 @@ impl BrowserMessage {
                     r#"{{"type":"scroll","anchor":"{}"}}"#,
                     anchor.replace('\\', "\\\\").replace('"', "\\\"")
                 )
+            }
+            BrowserMessage::SuggestionListChanged { file } => {
+                let file_json = match file {
+                    Some(f) => format!(
+                        r#","file":"{}""#,
+                        f.replace('\\', "\\\\").replace('"', "\\\"")
+                    ),
+                    None => String::new(),
+                };
+                format!(r#"{{"type":"suggestion-list-changed"{}}}"#, file_json)
             }
         }
     }
@@ -150,11 +164,25 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                         Ok(conductor::ConductorEvent::SuggestionAccepted { pages, .. }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
                         }
-                        Ok(conductor::ConductorEvent::SuggestionCreated { .. }) |
-                        Ok(conductor::ConductorEvent::SuggestionRejected { .. }) |
-                        Ok(conductor::ConductorEvent::NedSuggestionCreated { .. }) |
-                        Ok(conductor::ConductorEvent::NedSuggestionStaled { .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages: vec![], anchor: None });
+                        Ok(conductor::ConductorEvent::SuggestionCreated { suggestion }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(suggestion.file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::SuggestionRejected { file, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionCreated { suggestion }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(suggestion.file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionStaled { file, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(file.to_string()),
+                            });
                         }
                         Err(e) => {
                             eprintln!("Conductor subscription error: {e}");
@@ -179,6 +207,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/apply", post(apply_handler))
+        .route("/_presemble/render", get(render_handler))
         .route("/_presemble/grammar", get(grammar_handler))
         .route("/_presemble/links", get(links_handler))
         .route("/_presemble/schemas", get(schemas_handler))
@@ -202,6 +231,8 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/font-moods", get(font_moods_handler))
         .route("/_presemble/palette-types", get(palette_types_handler))
         .route("/_presemble/style-preview", post(style_preview_handler))
+        .route("/_presemble/schema-for", get(schema_for_handler))
+        .route("/_presemble/page-for", get(page_for_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -348,6 +379,51 @@ async fn grammar_handler(
         }
         Ok(conductor::Response::Error(e)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
+        }
+        _ => {
+            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], b"unexpected conductor response".to_vec()).into_response()
+        }
+    }
+}
+
+/// Query parameters for `GET /_presemble/render`.
+#[derive(serde::Deserialize)]
+struct RenderQuery {
+    path: String,
+    mode: String,
+}
+
+async fn render_handler(
+    State(state): State<AppState>,
+    Query(query): Query<RenderQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let mode = match query.mode.as_str() {
+        "view" => conductor::RenderMode::View,
+        "schema" => conductor::RenderMode::Schema,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain")],
+                format!("invalid mode: {:?}; expected 'view' or 'schema'", query.mode).into_bytes(),
+            ).into_response();
+        }
+    };
+
+    match state.conductor.send(&conductor::Command::RenderPage { path: query.path, mode }) {
+        Ok(conductor::Response::PageRendered { html }) => {
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                html.into_bytes(),
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
         }
         Err(e) => {
             (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
@@ -1094,6 +1170,62 @@ async fn schemas_handler(State(state): State<AppState>) -> axum::response::Respo
     }
 }
 
+#[derive(serde::Deserialize)]
+struct SchemaForQuery {
+    page: String,
+}
+
+async fn schema_for_handler(
+    State(state): State<AppState>,
+    Query(q): Query<SchemaForQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    match state.conductor.send(&conductor::Command::SchemaUrlForPage { page_url: q.page.clone() }) {
+        Ok(conductor::Response::SchemaUrl(Some(url))) => {
+            let json = format!(r#"{{"url":{:?}}}"#, url);
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::SchemaUrl(None)) => {
+            let msg = format!("no schema for {}", q.page);
+            let json = format!(r#"{{"error":{:?}}}"#, msg);
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let json = format!(r#"{{"error":{:?}}}"#, e);
+            (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected response").into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PageForQuery {
+    schema: String,
+}
+
+async fn page_for_handler(
+    State(state): State<AppState>,
+    Query(q): Query<PageForQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    match state.conductor.send(&conductor::Command::PageUrlForSchema { schema_url: q.schema.clone() }) {
+        Ok(conductor::Response::PageUrl(Some(url))) => {
+            let json = format!(r#"{{"url":{:?}}}"#, url);
+            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::PageUrl(None)) => {
+            let msg = format!("no page for {}", q.schema);
+            let json = format!(r#"{{"error":{:?}}}"#, msg);
+            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            let json = format!(r#"{{"error":{:?}}}"#, e);
+            (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected response").into_response(),
+    }
+}
+
 async fn create_content_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<CreateContentRequest>,
@@ -1230,6 +1362,36 @@ async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
     }
 }
 
+/// Render a canonical `/_schema/...` URL by asking the conductor and injecting
+/// the reload script (same as regular content pages).
+async fn render_schema_url_directly(state: AppState, path: &str) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    match state.conductor.send(&conductor::Command::RenderPage {
+        path: path.to_string(),
+        mode: conductor::RenderMode::Schema,
+    }) {
+        Ok(conductor::Response::PageRendered { html }) => {
+            let final_bytes = inject_reload_script(html.into_bytes());
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                final_bytes,
+            ).into_response()
+        }
+        Ok(conductor::Response::Error(e)) => {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("schema render error: {e}").into_bytes(),
+            ).into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected conductor response",
+        ).into_response(),
+    }
+}
+
 async fn file_handler(
     State(state): State<AppState>,
     uri: axum::http::Uri,
@@ -1237,6 +1399,11 @@ async fn file_handler(
     use axum::http::{StatusCode, header};
 
     let path = uri.path();
+
+    // Intercept canonical `/_schema/...` URLs and render them directly.
+    if site_index::parse_schema_url(path).is_some() {
+        return render_schema_url_directly(state, path).await;
+    }
 
     // Check for build errors before attempting to serve from disk.
     // Normalise: look up with and without trailing slash.
@@ -1545,8 +1712,21 @@ fn watch_and_rebuild(
 enum AnchorJson {
     /// Derived from `(ned/slot (ned/doc-by-path "FILE") "SLOT")`
     Slot { file: String, slot: String },
+    /// Derived from `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)`
+    SlotNth { file: String, slot: String, index: usize },
     /// Derived from `(ned/body-at (ned/doc-by-path "FILE") IDX)`
     BodyNth { file: String, index: usize },
+    /// Derived from `(ned/nth-after (ned/heading-with-text ...) "KIND" N)` or
+    /// `(ned/heading-with-text ...)` or `(ned/nth-of-kind ...)`
+    Structural {
+        file: String,
+        slot: String,
+        #[serde(rename = "heading-text")]
+        heading_text: Option<String>,
+        #[serde(rename = "node-kind")]
+        node_kind: String,
+        offset: usize,
+    },
     /// Fallback — doc found or nothing matched
     Doc { file: Option<String> },
 }
@@ -1673,15 +1853,73 @@ fn parse_doc_by_path(src: &str, pos: usize) -> Option<(String, usize)> {
     Some((file, pos))
 }
 
+/// Parse `(ned/children (ned/slot (ned/doc-by-path "FILE") "SLOT"))` starting
+/// at `pos`. Returns `(file, slot, pos_after_outer_close)` or `None`.
+fn parse_children_slot(src: &str, pos: usize) -> Option<(String, String, usize)> {
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "(")?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/children")?;
+    let pos = skip_ws(src, pos);
+    // Inner `(ned/slot ...)`
+    let pos = match_literal(src, pos, "(")?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/slot")?;
+    let pos = skip_ws(src, pos);
+    let (file, pos) = parse_doc_by_path(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "\"")?;
+    let (slot, pos) = scan_string(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, ")")?; // close ned/slot
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, ")")?; // close ned/children
+    Some((file, slot, pos))
+}
+
+/// Parse a non-negative decimal integer starting at `pos`.
+/// Returns `(value, pos_after_digits)` or `None` if no digits present.
+fn parse_usize(src: &str, pos: usize) -> Option<(usize, usize)> {
+    let bytes = src.as_bytes();
+    let mut end = pos;
+    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
+        end += 1;
+    }
+    if end == pos {
+        return None;
+    }
+    let n: usize = src[pos..end].parse().ok()?;
+    Some((n, end))
+}
+
 /// Derive an `AnchorJson` from a NED selection string.
 ///
-/// Patterns matched (tolerant of interior whitespace/newlines):
+/// Patterns matched (tolerant of interior whitespace/newlines), most-specific first:
+/// - `(ned/nth-after (ned/heading-with-text (ned/children (ned/slot ...)) "X") "K" N)` → `Structural`
+/// - `(ned/heading-with-text (ned/children (ned/slot ...)) "X")` → `Structural` (heading_only)
+/// - `(ned/nth-of-kind (ned/children (ned/slot ...)) "K" N)` → `Structural` (no heading)
+/// - `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)` → `AnchorJson::SlotNth`
 /// - `(ned/slot (ned/doc-by-path "FILE") "SLOT")` → `AnchorJson::Slot`
 /// - `(ned/body-at (ned/doc-by-path "FILE") IDX)` → `AnchorJson::BodyNth`
 /// - `(ned/doc-by-path "FILE")` anywhere → `AnchorJson::Doc { file: Some(...) }`
 /// - anything else → `AnchorJson::Doc { file: None }`
 fn derive_anchor(selection: &str) -> AnchorJson {
-    // Try ned/slot first
+    // Most-specific structural forms first
+    if let Some(anchor) = try_parse_structural_after_heading(selection) {
+        return anchor;
+    }
+    if let Some(anchor) = try_parse_structural_heading_only(selection) {
+        return anchor;
+    }
+    if let Some(anchor) = try_parse_structural_nth_of_kind(selection) {
+        return anchor;
+    }
+    // Try ned/nth-child (slot) — must come before ned/slot because
+    // `(ned/slot ...)` is a substring of the nth-child form.
+    if let Some(anchor) = try_parse_ned_nth_child_slot(selection) {
+        return anchor;
+    }
+    // Try ned/slot
     if let Some(anchor) = try_parse_ned_slot(selection) {
         return anchor;
     }
@@ -1694,6 +1932,88 @@ fn derive_anchor(selection: &str) -> AnchorJson {
         return AnchorJson::Doc { file: Some(file) };
     }
     AnchorJson::Doc { file: None }
+}
+
+/// Try to parse:
+/// `(ned/nth-after (ned/heading-with-text (ned/children (ned/slot ...)) "X") "K" N)`
+fn try_parse_structural_after_heading(src: &str) -> Option<AnchorJson> {
+    let start = src.find("(ned/nth-after")?;
+    let pos = start + 1; // skip `(`
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/nth-after")?;
+    let pos = skip_ws(src, pos);
+    // Inner `(ned/heading-with-text ...)`
+    let pos = match_literal(src, pos, "(")?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/heading-with-text")?;
+    let pos = skip_ws(src, pos);
+    let (file, slot, pos) = parse_children_slot(src, pos)?;
+    let pos = skip_ws(src, pos);
+    // Heading text string
+    let pos = match_literal(src, pos, "\"")?;
+    let (heading_text, pos) = scan_string(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, ")")?; // close ned/heading-with-text
+    let pos = skip_ws(src, pos);
+    // node kind string
+    let pos = match_literal(src, pos, "\"")?;
+    let (node_kind, pos) = scan_string(src, pos)?;
+    let pos = skip_ws(src, pos);
+    // offset integer
+    let (offset, _pos) = parse_usize(src, pos)?;
+    Some(AnchorJson::Structural {
+        file,
+        slot,
+        heading_text: Some(heading_text),
+        node_kind,
+        offset,
+    })
+}
+
+/// Try to parse: `(ned/heading-with-text (ned/children (ned/slot ...)) "X")`
+fn try_parse_structural_heading_only(src: &str) -> Option<AnchorJson> {
+    let start = src.find("(ned/heading-with-text")?;
+    // Make sure this is NOT part of an nth-after wrapper — if so, skip
+    if start > 0 && src[..start].contains("ned/nth-after") {
+        return None;
+    }
+    let pos = start + 1; // skip `(`
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/heading-with-text")?;
+    let pos = skip_ws(src, pos);
+    let (file, slot, pos) = parse_children_slot(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "\"")?;
+    let (heading_text, _pos) = scan_string(src, pos)?;
+    Some(AnchorJson::Structural {
+        file,
+        slot,
+        heading_text: Some(heading_text),
+        node_kind: "heading".to_string(),
+        offset: 0,
+    })
+}
+
+/// Try to parse: `(ned/nth-of-kind (ned/children (ned/slot ...)) "K" N)`
+fn try_parse_structural_nth_of_kind(src: &str) -> Option<AnchorJson> {
+    let start = src.find("(ned/nth-of-kind")?;
+    let pos = start + 1; // skip `(`
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/nth-of-kind")?;
+    let pos = skip_ws(src, pos);
+    let (file, slot, pos) = parse_children_slot(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "\"")?;
+    let (node_kind, pos) = scan_string(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let (offset, _pos) = parse_usize(src, pos)?;
+    Some(AnchorJson::Structural {
+        file,
+        slot,
+        heading_text: None,
+        node_kind,
+        offset,
+    })
 }
 
 /// Try to parse `(ned/slot (ned/doc-by-path "FILE") "SLOT")`.
@@ -1712,6 +2032,29 @@ fn try_parse_ned_slot(src: &str) -> Option<AnchorJson> {
     Some(AnchorJson::Slot { file, slot })
 }
 
+/// Try to parse `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)`.
+fn try_parse_ned_nth_child_slot(src: &str) -> Option<AnchorJson> {
+    let start = src.find("(ned/nth-child")?;
+    let pos = start + 1; // skip `(`
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/nth-child")?;
+    let pos = skip_ws(src, pos);
+    // Expect `(ned/slot ...)` sub-form
+    let pos = match_literal(src, pos, "(")?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "ned/slot")?;
+    let pos = skip_ws(src, pos);
+    let (file, pos) = parse_doc_by_path(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, "\"")?;
+    let (slot, pos) = scan_string(src, pos)?;
+    let pos = skip_ws(src, pos);
+    let pos = match_literal(src, pos, ")")?; // close (ned/slot ...)
+    let pos = skip_ws(src, pos);
+    let (index, _pos) = parse_usize(src, pos)?;
+    Some(AnchorJson::SlotNth { file, slot, index })
+}
+
 /// Try to parse `(ned/body-at (ned/doc-by-path "FILE") IDX)`.
 fn try_parse_ned_body_at(src: &str) -> Option<AnchorJson> {
     let start = src.find("(ned/body-at")?;
@@ -1721,16 +2064,7 @@ fn try_parse_ned_body_at(src: &str) -> Option<AnchorJson> {
     let pos = skip_ws(src, pos);
     let (file, pos) = parse_doc_by_path(src, pos)?;
     let pos = skip_ws(src, pos);
-    // Parse integer index
-    let bytes = src.as_bytes();
-    let mut end = pos;
-    while end < bytes.len() && (bytes[end] as char).is_ascii_digit() {
-        end += 1;
-    }
-    if end == pos {
-        return None; // no digits
-    }
-    let index: usize = src[pos..end].parse().ok()?;
+    let (index, _pos) = parse_usize(src, pos)?;
     Some(AnchorJson::BodyNth { file, index })
 }
 
@@ -2020,6 +2354,211 @@ mod tests {
         let anchor = AnchorJson::Doc { file: None };
         let json = serde_json::to_string(&anchor).unwrap();
         assert_eq!(json, r#"{"kind":"doc","file":null}"#);
+    }
+
+    #[test]
+    fn derive_anchor_slot_nth_basic() {
+        let sel = r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "pitch") 1)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::SlotNth {
+                file: "content/index.md".to_string(),
+                slot: "pitch".to_string(),
+                index: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_slot_nth_index_zero() {
+        let sel = r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "pitch") 0)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::SlotNth {
+                file: "content/index.md".to_string(),
+                slot: "pitch".to_string(),
+                index: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_slot_nth_whitespace_tolerance() {
+        let sel = "(ned/nth-child\n  (ned/slot\n    (ned/doc-by-path\n      \"content/index.md\"\n    )\n    \"pitch\"\n  )\n  2\n)";
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::SlotNth {
+                file: "content/index.md".to_string(),
+                slot: "pitch".to_string(),
+                index: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_slot_still_works() {
+        // Regression guard: bare (ned/slot ...) must still return Slot, not SlotNth
+        let sel = r#"(ned/slot (ned/doc-by-path "posts/foo.md") "title")"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Slot {
+                file: "posts/foo.md".to_string(),
+                slot: "title".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn anchor_json_slot_nth_serializes_correctly() {
+        let anchor = AnchorJson::SlotNth {
+            file: "content/index.md".to_string(),
+            slot: "pitch".to_string(),
+            index: 1,
+        };
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert_eq!(json, r#"{"kind":"slot-nth","file":"content/index.md","slot":"pitch","index":1}"#);
+    }
+
+    // ── Structural anchor tests ──────────────────────────────────────────────
+
+    #[test]
+    fn derive_anchor_structural_after_heading_basic() {
+        let sel = r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Why Presemble") "paragraph" 1)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Structural {
+                file: "content/index.md".to_string(),
+                slot: "body".to_string(),
+                heading_text: Some("Why Presemble".to_string()),
+                node_kind: "paragraph".to_string(),
+                offset: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_structural_after_heading_offset_zero() {
+        let sel = r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Intro") "paragraph" 0)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Structural {
+                file: "content/index.md".to_string(),
+                slot: "body".to_string(),
+                heading_text: Some("Intro".to_string()),
+                node_kind: "paragraph".to_string(),
+                offset: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_structural_heading_only() {
+        let sel = r#"(ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/page.md") "body")) "About Us")"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Structural {
+                file: "content/page.md".to_string(),
+                slot: "body".to_string(),
+                heading_text: Some("About Us".to_string()),
+                node_kind: "heading".to_string(),
+                offset: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_structural_nth_of_kind_no_heading() {
+        let sel = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/page.md") "body")) "paragraph" 3)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Structural {
+                file: "content/page.md".to_string(),
+                slot: "body".to_string(),
+                heading_text: None,
+                node_kind: "paragraph".to_string(),
+                offset: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_structural_whitespace_tolerance() {
+        let sel = "(ned/nth-after\n  (ned/heading-with-text\n    (ned/children\n      (ned/slot\n        (ned/doc-by-path \"content/index.md\")\n        \"body\"\n      )\n    )\n    \"Why Presemble\"\n  )\n  \"paragraph\"\n  2\n)";
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Structural {
+                file: "content/index.md".to_string(),
+                slot: "body".to_string(),
+                heading_text: Some("Why Presemble".to_string()),
+                node_kind: "paragraph".to_string(),
+                offset: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_structural_escaped_quotes_in_heading() {
+        let sel = r#"(ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/page.md") "body")) "\"q\"")"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Structural {
+                file: "content/page.md".to_string(),
+                slot: "body".to_string(),
+                heading_text: Some("\"q\"".to_string()),
+                node_kind: "heading".to_string(),
+                offset: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn derive_anchor_slot_still_works_with_new_parsers() {
+        // Regression: bare (ned/slot ...) → Slot (not Structural)
+        let slot_sel = r#"(ned/slot (ned/doc-by-path "posts/foo.md") "title")"#;
+        assert_eq!(
+            derive_anchor(slot_sel),
+            AnchorJson::Slot {
+                file: "posts/foo.md".to_string(),
+                slot: "title".to_string(),
+            }
+        );
+        // Regression: (ned/nth-child (ned/slot ...) N) → SlotNth (not Structural)
+        let nth_sel = r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "pitch") 2)"#;
+        assert_eq!(
+            derive_anchor(nth_sel),
+            AnchorJson::SlotNth {
+                file: "content/index.md".to_string(),
+                slot: "pitch".to_string(),
+                index: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn anchor_json_structural_serializes_correctly() {
+        let anchor = AnchorJson::Structural {
+            file: "content/index.md".to_string(),
+            slot: "body".to_string(),
+            heading_text: Some("Why Presemble".to_string()),
+            node_kind: "paragraph".to_string(),
+            offset: 1,
+        };
+        let json = serde_json::to_string(&anchor).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"structural","file":"content/index.md","slot":"body","heading-text":"Why Presemble","node-kind":"paragraph","offset":1}"#
+        );
+
+        // heading_text: None → "heading-text":null
+        let anchor_no_heading = AnchorJson::Structural {
+            file: "content/page.md".to_string(),
+            slot: "body".to_string(),
+            heading_text: None,
+            node_kind: "paragraph".to_string(),
+            offset: 3,
+        };
+        let json2 = serde_json::to_string(&anchor_no_heading).unwrap();
+        assert!(json2.contains(r#""heading-text":null"#), "got: {json2}");
     }
 
     // ── NED suggestion JSON roundtrip ────────────────────────────────────────

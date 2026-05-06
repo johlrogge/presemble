@@ -158,3 +158,15 @@ pub enum AltRequirement {
 pub struct BodyRules {
     pub heading_range: Option<HeadingLevelRange>,
 }
+
+/// Whether a schema describes an individual content item or a collection index page.
+///
+/// Used by the schema-document synthesizer to tag which shape is being synthesized.
+/// The grammar itself already encodes the structure; this enum is metadata about intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaKind {
+    /// An individual content item (e.g., `schemas/post/item.md`).
+    Item,
+    /// A collection index page (e.g., `schemas/post/index.md`).
+    Index,
+}

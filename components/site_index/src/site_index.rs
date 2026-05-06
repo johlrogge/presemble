@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+pub use schema::SchemaKind;
+
 /// Conventional directory names within a site.
 pub const DIR_SCHEMAS: &str = "schemas";
 pub const DIR_CONTENT: &str = "content";
@@ -49,6 +51,68 @@ impl UrlPath {
 impl std::fmt::Display for UrlPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// Parse a canonical schema URL of the form `/_schema/...` into a `(stem, kind)` pair.
+///
+/// Valid forms:
+/// - `/_schema/index`        → `Some(("", SchemaKind::Index))` (root collection index)
+/// - `/_schema/<stem>/index` → `Some(("<stem>", SchemaKind::Index))`
+/// - `/_schema/<stem>/item`  → `Some(("<stem>", SchemaKind::Item))`
+/// - Anything else           → `None`
+///
+/// Trailing slashes are stripped before parsing.
+pub fn parse_schema_url(url: &str) -> Option<(String, SchemaKind)> {
+    // Strip trailing slash
+    let url = url.trim_end_matches('/');
+    // Must start with /_schema/
+    let rest = url.strip_prefix("/_schema/")?;
+    if rest.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = rest.split('/').collect();
+    match segments.as_slice() {
+        // /_schema/index → root collection index (stem = "")
+        ["index"] => Some((String::new(), SchemaKind::Index)),
+        // /_schema/<stem>/index or /_schema/<stem>/item
+        [stem, "index"] => Some(((*stem).to_string(), SchemaKind::Index)),
+        [stem, "item"] => Some(((*stem).to_string(), SchemaKind::Item)),
+        _ => None,
+    }
+}
+
+/// Infer whether a URL path refers to a collection index or an item page.
+///
+/// Rules (by URL segment depth):
+/// - `""` (empty) → `Index` (root)
+/// - `"/"` (root) → `Index`
+/// - `/foo/` or `/foo/index.html` (depth 1) → `Index` (collection)
+/// - `/foo/bar/`, `/foo/bar`, `/foo/bar/index.html` (depth 2+) → `Item`
+///
+/// The algorithm:
+/// 1. Strip `index.html` suffix if present (canonical form)
+/// 2. Strip trailing slash
+/// 3. Split by `/` and filter empty segments
+/// 4. Count: 0 → root Index, 1 → collection Index, 2+ → Item
+///
+/// # Deprecation note
+///
+/// For canonical `/_schema/...` URLs, use [`parse_schema_url`] instead.
+/// This function is retained for callers that classify content-URL-shape paths.
+#[deprecated(note = "Use `parse_schema_url` for canonical `/_schema/...` URLs")]
+pub fn schema_kind_for_path(path: &UrlPath) -> SchemaKind {
+    let s = path.as_str();
+    // Canonical form: strip index.html suffix
+    let s = s.strip_suffix("index.html").unwrap_or(s);
+    // Strip trailing slash
+    let s = s.trim_end_matches('/');
+    // Count non-empty segments
+    let depth = s.split('/').filter(|seg| !seg.is_empty()).count();
+    if depth <= 1 {
+        SchemaKind::Index
+    } else {
+        SchemaKind::Item
     }
 }
 
@@ -241,6 +305,18 @@ impl SiteIndex {
         files
     }
 
+    /// Return the URL of the first (alphabetically sorted) content document for
+    /// a stem, or `None` if there are no content files for that stem.
+    ///
+    /// Intended for structure-mode badge data: callers pair this with
+    /// `content_files(stem).len()` to get the count + sample URL pair.
+    pub fn sample_url_for_stem(&self, stem: &str) -> Option<String> {
+        let files = self.content_files(stem);
+        let first = files.first()?;
+        let slug = first.file_stem()?.to_str()?;
+        Some(url_for_stem_slug(stem, slug))
+    }
+
     /// Given a schema stem, find the matching template (html first, then hiccup).
     /// Prefers the new directory-based convention (`templates/{stem}/item.html`)
     /// and falls back to the legacy flat convention (`templates/{stem}.html`).
@@ -360,6 +436,40 @@ impl SiteIndex {
         let src = std::fs::read_to_string(&schema_path).ok()?;
         schema::parse_schema(&src).ok()
     }
+
+    /// Return the list of schema stems that include the given `target_stem` via
+    /// `Constraint::TypeLink(target_stem)` in any of their slots.
+    ///
+    /// The returned vec is sorted alphabetically.  Each entry is just the stem
+    /// string — the caller can derive the URL with `/<stem>/#_schema`.
+    ///
+    /// Returns an empty vec if no schemas reference the target, or if the
+    /// schemas directory cannot be read.
+    pub fn schemas_including(&self, target_stem: &str) -> Vec<String> {
+        let all_stems = self.schema_stems();
+        let mut result = Vec::new();
+
+        for stem in &all_stems {
+            // Skip the stem itself — a schema cannot be "included by" itself
+            if stem == target_stem {
+                continue;
+            }
+            // Load the grammar and look for TypeLink constraints
+            if let Some(grammar) = self.load_grammar(stem) {
+                let references_target = grammar.preamble.iter().any(|slot| {
+                    slot.constraints.iter().any(|c| {
+                        matches!(c, schema::Constraint::TypeLink(name) if name == target_stem)
+                    })
+                });
+                if references_target {
+                    result.push(stem.clone());
+                }
+            }
+        }
+
+        result.sort();
+        result
+    }
 }
 
 /// Compute the output directory for a site: `<parent-of-site-dir>/output/<site-dir-name>/`
@@ -432,6 +542,81 @@ mod tests {
     fn index() -> SiteIndex {
         SiteIndex::new(fixture_site())
     }
+
+    // --- parse_schema_url tests ---
+
+    #[test]
+    fn parse_schema_url_root_index() {
+        assert_eq!(parse_schema_url("/_schema/index"), Some((String::new(), SchemaKind::Index)));
+    }
+
+    #[test]
+    fn parse_schema_url_collection_index() {
+        assert_eq!(parse_schema_url("/_schema/post/index"), Some(("post".to_string(), SchemaKind::Index)));
+    }
+
+    #[test]
+    fn parse_schema_url_item() {
+        assert_eq!(parse_schema_url("/_schema/post/item"), Some(("post".to_string(), SchemaKind::Item)));
+    }
+
+    #[test]
+    fn parse_schema_url_with_trailing_slash() {
+        assert_eq!(parse_schema_url("/_schema/post/item/"), Some(("post".to_string(), SchemaKind::Item)));
+    }
+
+    #[test]
+    fn parse_schema_url_not_schema_url_returns_none() {
+        assert_eq!(parse_schema_url("/post/foo"), None);
+        assert_eq!(parse_schema_url("/_schema/foo/bar/baz"), None);  // wrong shape
+        assert_eq!(parse_schema_url("/_schema/post/unknown"), None); // wrong kind
+    }
+
+    #[test]
+    fn parse_schema_url_empty_returns_none() {
+        assert_eq!(parse_schema_url(""), None);
+        assert_eq!(parse_schema_url("/_schema"), None);   // missing kind
+        assert_eq!(parse_schema_url("/_schema/"), None);  // empty kind segment
+    }
+
+    // --- schema_kind_for_path tests ---
+
+    #[test]
+    fn schema_kind_for_root_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/")), SchemaKind::Index);
+    }
+
+    #[test]
+    fn schema_kind_for_collection_with_trailing_slash_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/")), SchemaKind::Index);
+    }
+
+    #[test]
+    fn schema_kind_for_item_no_trailing_slash_is_item() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo")), SchemaKind::Item);
+    }
+
+    #[test]
+    fn schema_kind_for_empty_path_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("")), SchemaKind::Index);
+    }
+
+    #[test]
+    fn schema_kind_for_item_with_trailing_slash_is_item() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo/")), SchemaKind::Item);
+    }
+
+    #[test]
+    fn schema_kind_for_item_with_index_html_suffix_is_item() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo/index.html")), SchemaKind::Item);
+    }
+
+    #[test]
+    fn schema_kind_for_collection_with_index_html_suffix_is_index() {
+        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/index.html")), SchemaKind::Index);
+    }
+
+    // ---
 
     #[test]
     fn url_for_stem_slug_root_index() {
@@ -633,6 +818,27 @@ mod tests {
     }
 
     #[test]
+    fn sample_url_for_stem_returns_some_for_existing_content() {
+        let idx = index();
+        let url = idx.sample_url_for_stem("article");
+        assert!(url.is_some(), "should return a URL when content files exist");
+        let url = url.unwrap();
+        // URL should be root-relative and contain the stem
+        assert!(
+            url.starts_with("/article/"),
+            "article sample URL should start with /article/; got: {url}"
+        );
+    }
+
+    #[test]
+    fn sample_url_for_stem_returns_none_for_missing_stem() {
+        // Use a stem that has no content files in the fixture.
+        let idx = index();
+        let url = idx.sample_url_for_stem("nonexistent_stem_xyz");
+        assert!(url.is_none(), "should return None when no content files exist");
+    }
+
+    #[test]
     fn template_for_finds_html_template() {
         let idx = index();
         let tpl = idx.template_for("article");
@@ -765,5 +971,90 @@ mod tests {
         let idx = SiteIndex::new(tmp.path().to_path_buf());
         let grammar = idx.load_grammar("post");
         assert!(grammar.is_some(), "should parse dir-based grammar");
+    }
+
+    // -----------------------------------------------------------------------
+    // schemas_including tests
+    // -----------------------------------------------------------------------
+
+    /// Build a temp site with three schemas:
+    /// - "author": no TypeLink constraints
+    /// - "post":   has `type: link(author)` on the author slot
+    /// - "event":  also has `type: link(author)` on the organiser slot
+    fn make_typelink_site(tmp: &tempfile::TempDir) {
+        // schemas/author/item.md — no TypeLink
+        let author_schema_dir = tmp.path().join("schemas/author");
+        std::fs::create_dir_all(&author_schema_dir).unwrap();
+        std::fs::write(
+            author_schema_dir.join("item.md"),
+            "# Author name {#name}\noccurs\n: exactly once\n",
+        )
+        .unwrap();
+
+        // schemas/post/item.md — has TypeLink("author")
+        let post_schema_dir = tmp.path().join("schemas/post");
+        std::fs::create_dir_all(&post_schema_dir).unwrap();
+        std::fs::write(
+            post_schema_dir.join("item.md"),
+            "# Post title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#author}\ntype\n: link(author)\n",
+        )
+        .unwrap();
+
+        // schemas/event/item.md — also has TypeLink("author")
+        let event_schema_dir = tmp.path().join("schemas/event");
+        std::fs::create_dir_all(&event_schema_dir).unwrap();
+        std::fs::write(
+            event_schema_dir.join("item.md"),
+            "# Event title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#organiser}\ntype\n: link(author)\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn schemas_including_finds_schemas_with_typelink_to_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_typelink_site(&tmp);
+        let idx = SiteIndex::new(tmp.path().to_path_buf());
+
+        let including = idx.schemas_including("author");
+        assert!(
+            including.contains(&"post".to_string()),
+            "post should appear in schemas_including(author): {including:?}"
+        );
+        assert!(
+            including.contains(&"event".to_string()),
+            "event should appear in schemas_including(author): {including:?}"
+        );
+        // The target itself must not appear
+        assert!(
+            !including.contains(&"author".to_string()),
+            "author should not include itself: {including:?}"
+        );
+    }
+
+    #[test]
+    fn schemas_including_is_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_typelink_site(&tmp);
+        let idx = SiteIndex::new(tmp.path().to_path_buf());
+
+        let including = idx.schemas_including("author");
+        let mut sorted = including.clone();
+        sorted.sort();
+        assert_eq!(including, sorted, "schemas_including should return sorted results");
+    }
+
+    #[test]
+    fn schemas_including_empty_for_schema_with_no_dependents() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_typelink_site(&tmp);
+        let idx = SiteIndex::new(tmp.path().to_path_buf());
+
+        // "post" has no schemas that TypeLink to it
+        let including = idx.schemas_including("post");
+        assert!(
+            including.is_empty(),
+            "no schema has a TypeLink to 'post', expected empty: {including:?}"
+        );
     }
 }

@@ -1,5 +1,6 @@
 mod ast;
 pub mod constants;
+pub mod constraints;
 pub mod data;
 pub mod dom;
 mod error;
@@ -11,11 +12,13 @@ pub mod registry;
 pub mod transformer;
 
 pub use ast::{Expr, Transform};
-pub use data::{build_article_graph, build_article_graph_with_source, synthesize_link, Callable, DataGraph, SuggestionKind, Value};
+pub use constraints::{constraint_attr_name, extract_slot_constraint_attrs, CONSTRAINT_ATTR_PREFIX};
+pub use data::{build_article_graph, build_article_graph_with_source, build_schema_included_by_json, inject_schema_included_by, synthesize_link, Callable, DataGraph, SuggestionKind, Value};
 pub use graph_view::{DataRef, GraphView, ResolvedNode};
 pub use error::TemplateError;
 pub use expr::parse_expr;
-pub use transformer::{transform, RenderError};
+pub use transformer::{attach_schema_included_by_attr, attach_schema_instance_attrs, transform, RenderError};
+pub use constants::{ATTR_SCHEMA_INCLUDED_BY, ATTR_SCHEMA_INSTANCE_COUNT, ATTR_SCHEMA_INSTANCE_SAMPLE_URL, KEY_SCHEMA_INCLUDED_BY};
 pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes, Form, html_escape_text, html_escape_attr};
 pub use hiccup::parse_template_hiccup;
 pub use hiccup_serializer::serialize_to_hiccup;

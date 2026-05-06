@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use rayon::prelude::*;
 
-use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, Response};
+use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, RenderMode, Response};
 
 // ---------------------------------------------------------------------------
 // Clojure string literal escaping
@@ -514,6 +514,113 @@ impl Conductor {
     /// Look up a document root NodeId by URL path.
     pub fn document_by_url(&self, url: &str) -> Option<node_store::NodeId> {
         self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
+    }
+
+    /// Resolve the canonical schema URL for a given content page URL.
+    ///
+    /// Canonicalizes the URL (strips trailing `index.html`/`index.htm`, tries with/without
+    /// trailing slash), looks up the page in `url_to_root`, reads `stem` and `page-kind`
+    /// attributes, and constructs the `/_schema/<stem>/<index|item>` URL.
+    ///
+    /// Returns `None` if the page is not found in the NodeStore.
+    pub fn schema_url_for_page(&self, page_url: &str) -> Option<String> {
+        // Canonicalize: strip trailing index.html / index.htm, then normalize slashes.
+        let stripped = page_url
+            .trim_end_matches("index.html")
+            .trim_end_matches("index.htm");
+        let base = stripped.trim_end_matches('/');
+
+        // Build the with-slash and without-slash candidates.
+        let with_slash = if base.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{base}/")
+        };
+        let without_slash = base.to_string();
+
+        let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
+        let root_id = url_to_root
+            .get(&with_slash)
+            .or_else(|| url_to_root.get(&without_slash))
+            .or_else(|| url_to_root.get(page_url))
+            .copied()?;
+        drop(url_to_root);
+
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let stem =
+            node_store_bridge::content_bridge::find_attr_text(&store, root_id, "stem")?;
+        let page_kind =
+            node_store_bridge::content_bridge::find_attr_text(&store, root_id, "page-kind")?;
+        drop(store);
+
+        let kind_segment = match page_kind.as_str() {
+            "collection" => "index",
+            _ => "item",
+        };
+
+        let schema_url = if stem.is_empty() {
+            format!("/_schema/{kind_segment}")
+        } else {
+            format!("/_schema/{stem}/{kind_segment}")
+        };
+        Some(schema_url)
+    }
+
+    /// Resolve a best-effort representative content page URL for a given schema URL.
+    ///
+    /// Parses the `/_schema/<stem>/<index|item>` path to extract `(stem, kind)`, then:
+    /// - For `index`/root: returns `Some("/")`
+    /// - For `index`/named stem: returns `Some("/<stem>/")` if that collection page exists
+    /// - For `item`: walks all roots for the stem, picks the first item URL (sorted)
+    ///
+    /// Returns `None` for malformed or unknown schema URLs.
+    pub fn page_url_for_schema(&self, schema_url: &str) -> Option<String> {
+        let (stem, kind) = site_index::parse_schema_url(schema_url)?;
+
+        let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
+
+        match kind {
+            schema::SchemaKind::Index => {
+                if stem.is_empty() {
+                    Some("/".to_string())
+                } else {
+                    let collection_url = format!("/{stem}/");
+                    if url_to_root.contains_key(&collection_url) {
+                        Some(collection_url)
+                    } else {
+                        None
+                    }
+                }
+            }
+            schema::SchemaKind::Item => {
+                // Try the parent collection page first
+                let collection_url = format!("/{stem}/");
+                if url_to_root.contains_key(&collection_url) {
+                    return Some(collection_url);
+                }
+
+                // Fall back to first item by lexical URL sort
+                let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                let stem_to_roots = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
+                let roots = stem_to_roots.get(&stem).cloned().unwrap_or_default();
+                drop(stem_to_roots);
+
+                let mut item_urls: Vec<String> = roots
+                    .iter()
+                    .filter_map(|&root| {
+                        let pk =
+                            node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                        if pk != "item" {
+                            return None;
+                        }
+                        node_store_bridge::content_bridge::find_attr_text(&store, root, "url")
+                    })
+                    .collect();
+                drop(store);
+                item_urls.sort();
+                item_urls.into_iter().next()
+            }
+        }
     }
 
     /// Look up a document root NodeId by content file path.
@@ -2126,6 +2233,100 @@ impl Conductor {
         }
     }
 
+    fn stem_from_url_path(url: &str) -> String {
+        let trimmed = url.trim_start_matches('/');
+        if trimmed.is_empty() { return String::new(); }
+        trimmed.split('/').next().unwrap_or("").to_string()
+    }
+
+    fn render_page(&self, url_path: &str, mode: &RenderMode) -> Result<String, String> {
+        match mode {
+            RenderMode::View => {
+                let stem = Self::stem_from_url_path(url_path);
+                let slug = if url_path.ends_with('/') || url_path == "/" {
+                    "index".to_string()
+                } else {
+                    url_path.rsplit('/').next().unwrap_or("index").to_string()
+                };
+                let out = site_index::output_path_for_stem_slug(&self.output_dir, &stem, &slug);
+                std::fs::read_to_string(&out).map_err(|e| format!("no output for {url_path}: {e}"))
+            }
+            RenderMode::Schema => {
+                let (stem, kind) = site_index::parse_schema_url(url_path)
+                    .ok_or_else(|| format!("not a schema URL: {url_path}"))?;
+                let grammar_key = match kind {
+                    schema::SchemaKind::Index => site_index::schema_cache_key(&stem, "index"),
+                    schema::SchemaKind::Item => {
+                        let item_key = format!("{stem}/item");
+                        let c = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+                        if c.contains_key(&item_key) { item_key } else { stem.clone() }
+                    }
+                };
+                let grammar_src = {
+                    let c = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
+                    c.get(&grammar_key).cloned()
+                }.ok_or_else(|| format!("no schema for {url_path} (key={grammar_key})"))?;
+                let grammar = schema::parse_schema(&grammar_src)
+                    .map_err(|e| format!("schema parse: {e}"))?;
+                let doc = node_store_bridge::synthesize_schema_document(&grammar, kind);
+                let article_graph = template::build_article_graph(&doc, &grammar);
+                let mut ctx_graph = template::DataGraph::new();
+                ctx_graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
+                ctx_graph.insert("_presemble_file", template::Value::Text(String::new()));
+                ctx_graph.insert("url", template::Value::Text(url_path.to_string()));
+                ctx_graph.insert("input", template::Value::Record(article_graph));
+                let fresh_repo = site_repository::SiteRepository::builder().from_dir(&self.site_dir).build();
+                let stem_obj = site_index::SchemaStem::new(&stem);
+                let tmpl = if matches!(kind, schema::SchemaKind::Index) {
+                    fresh_repo.collection_template_source(&stem_obj)
+                        .or_else(|| fresh_repo.item_template_source(&stem_obj))
+                        .or_else(|| fresh_repo.partial_template_source(&stem))
+                } else {
+                    fresh_repo.item_template_source(&stem_obj)
+                        .or_else(|| fresh_repo.partial_template_source(&stem))
+                }.ok_or_else(|| format!("no template for stem {stem}"))?;
+                let (tmpl_src, is_hiccup) = tmpl;
+                let raw = if is_hiccup {
+                    template::parse_template_hiccup(&tmpl_src).map_err(|e| format!("{e}"))?
+                } else {
+                    template::parse_template_xml(&tmpl_src).map_err(|e| format!("{e}"))?
+                };
+                let reg = template_registry::FileTemplateRegistry::new(fresh_repo);
+                let (nodes, local_defs) = template::extract_definitions(raw);
+                let render_ctx = template::RenderContext::with_local_defs(&reg, &local_defs);
+                let transformed = template::transform(nodes, &ctx_graph, &render_ctx)
+                    .map_err(|e| format!("render: {e}"))?;
+
+                // T6: attach instance-count + sample-URL attrs to the first root element.
+                let count = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                    .content_files(&stem).len();
+                let sample_url = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                    .sample_url_for_stem(&stem);
+                let transformed = template::attach_schema_instance_attrs(
+                    transformed,
+                    count,
+                    sample_url.as_deref(),
+                );
+
+                // T7: attach included-by back-reference JSON attr.
+                let including_stems = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                    .schemas_including(&stem);
+                let included_pairs_owned: Vec<(String, String)> = including_stems.iter()
+                    .map(|s| (s.clone(), format!("/{s}/#_schema")))
+                    .collect();
+                let included_pairs: Vec<(&str, &str)> = included_pairs_owned.iter()
+                    .map(|(s, u)| (s.as_str(), u.as_str()))
+                    .collect();
+                let transformed = template::attach_schema_included_by_attr(
+                    transformed,
+                    &included_pairs,
+                );
+
+                Ok(template::serialize_nodes(&transformed))
+            }
+        }
+    }
+
     /// Handle a command and return a response plus any events to broadcast.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
         match cmd {
@@ -3071,6 +3272,27 @@ impl Conductor {
                     .cloned()
                     .collect();
                 CommandResult::with_response(Response::NedSuggestions(result))
+            }
+
+            // ── Phase D T4 stub: schema render endpoint ───────────────────────
+            Command::RenderPage { path, mode } => {
+                match self.render_page(&path, &mode) {
+                    Ok(html) => CommandResult::with_response(Response::PageRendered { html }),
+                    Err(e) => CommandResult::error(e),
+                }
+            }
+
+            // ── Phase D Slice 1.5 Wave A: schema URL routing ─────────────────
+            Command::SchemaUrlForPage { page_url } => {
+                CommandResult::with_response(Response::SchemaUrl(
+                    self.schema_url_for_page(&page_url),
+                ))
+            }
+
+            Command::PageUrlForSchema { schema_url } => {
+                CommandResult::with_response(Response::PageUrl(
+                    self.page_url_for_schema(&schema_url),
+                ))
             }
         }
     }
@@ -5665,5 +5887,232 @@ mod apply_ned_program_diagnostic_tests {
             Response::Error(e) => panic!("unexpected error from apply_ned_program: {e}"),
             other => panic!("expected Response::Applied, got: {other:?}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for schema_url_for_page and page_url_for_schema
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod schema_url_routing_tests {
+    use super::*;
+
+    /// Build a site with:
+    ///   - Root index (`content/index.md`, stem="", page-kind="collection", url="/")
+    ///   - Post collection (`content/post/index.md`, stem="post", page-kind="collection", url="/post/")
+    ///   - Two post items (`content/post/foo.md` url="/post/foo", `content/post/bar.md` url="/post/bar")
+    fn build_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        // schemas
+        std::fs::create_dir_all(root.join("schemas/post")).expect("schemas/post");
+        let item_schema = "# Title {#title}\noccurs\n: exactly once\n";
+        std::fs::write(root.join("schemas/post/item.md"), item_schema).expect("item schema");
+        std::fs::write(root.join("schemas/post/index.md"), item_schema).expect("collection schema");
+
+        // Root index schema (for the root page to appear in NodeStore)
+        std::fs::write(root.join("schemas/index.md"), item_schema).expect("root schema");
+
+        // templates (minimal so pages can build)
+        std::fs::create_dir_all(root.join("templates/post")).expect("templates/post");
+        let tmpl = "[:div [:h1 title]]";
+        std::fs::write(root.join("templates/post/item.hiccup"), tmpl).expect("item template");
+        std::fs::write(root.join("templates/post/index.hiccup"), tmpl).expect("collection template");
+        std::fs::write(root.join("templates/index.hiccup"), tmpl).expect("root template");
+
+        // content
+        std::fs::create_dir_all(root.join("content/post")).expect("content/post");
+        let content = "title: Hello\n---\nBody\n";
+        std::fs::write(root.join("content/index.md"), content).expect("root index");
+        std::fs::write(root.join("content/post/index.md"), content).expect("post index");
+        std::fs::write(root.join("content/post/foo.md"), content).expect("foo");
+        std::fs::write(root.join("content/post/bar.md"), content).expect("bar");
+
+        tmp
+    }
+
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    // ── schema_url_for_page tests ────────────────────────────────────────────
+
+    #[test]
+    fn schema_url_for_page_root_index() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            conductor.schema_url_for_page("/"),
+            Some("/_schema/index".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_url_for_page_collection() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            conductor.schema_url_for_page("/post/"),
+            Some("/_schema/post/index".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_url_for_page_item() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            conductor.schema_url_for_page("/post/foo"),
+            Some("/_schema/post/item".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_url_for_page_canonicalizes_index_html() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        // /post/foo/index.html → strips index.html → /post/foo/ → tries /post/foo/ then /post/foo
+        assert_eq!(
+            conductor.schema_url_for_page("/post/foo/index.html"),
+            Some("/_schema/post/item".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_url_for_page_unknown_returns_none() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(conductor.schema_url_for_page("/no/such/page"), None);
+    }
+
+    #[test]
+    fn schema_url_for_page_canonicalizes_root_index_html() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            conductor.schema_url_for_page("/index.html"),
+            Some("/_schema/index".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_url_for_page_canonicalizes_collection_index_html() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            conductor.schema_url_for_page("/post/index.html"),
+            Some("/_schema/post/index".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_url_for_page_handles_item_with_trailing_slash() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        // The test fixture has /post/foo as an item URL (no trailing slash stored)
+        // but the canonicalization strips trailing slash, so /post/foo/ → /post/foo
+        assert_eq!(
+            conductor.schema_url_for_page("/post/foo/"),
+            Some("/_schema/post/item".to_string())
+        );
+    }
+
+    #[test]
+    fn schema_url_for_page_handles_collection_without_trailing_slash() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        // /post (no trailing slash) should resolve to the collection page
+        assert_eq!(
+            conductor.schema_url_for_page("/post"),
+            Some("/_schema/post/index".to_string())
+        );
+    }
+
+    // ── page_url_for_schema tests ────────────────────────────────────────────
+
+    #[test]
+    fn page_url_for_schema_root_index() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            conductor.page_url_for_schema("/_schema/index"),
+            Some("/".to_string())
+        );
+    }
+
+    #[test]
+    fn page_url_for_schema_collection() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            conductor.page_url_for_schema("/_schema/post/index"),
+            Some("/post/".to_string())
+        );
+    }
+
+    #[test]
+    fn page_url_for_schema_item_prefers_collection_page() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        // Fixture has /post/ collection page — that should be returned first
+        assert_eq!(
+            conductor.page_url_for_schema("/_schema/post/item"),
+            Some("/post/".to_string())
+        );
+    }
+
+    #[test]
+    fn page_url_for_schema_item_falls_back_to_first_item_when_no_collection() {
+        // Build a site WITHOUT a collection index page for "post"
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/post")).expect("schemas/post");
+        let item_schema = "# Title {#title}\noccurs\n: exactly once\n";
+        std::fs::write(root.join("schemas/post/item.md"), item_schema).expect("item schema");
+        // No schemas/post/index.md  (no collection schema)
+        std::fs::write(root.join("schemas/index.md"), item_schema).expect("root schema");
+
+        std::fs::create_dir_all(root.join("templates/post")).expect("templates/post");
+        let tmpl = "[:div [:h1 title]]";
+        std::fs::write(root.join("templates/post/item.hiccup"), tmpl).expect("item template");
+        std::fs::write(root.join("templates/index.hiccup"), tmpl).expect("root template");
+
+        std::fs::create_dir_all(root.join("content/post")).expect("content/post");
+        let content = "title: Hello\n---\nBody\n";
+        std::fs::write(root.join("content/index.md"), content).expect("root index");
+        // No content/post/index.md — no collection page
+        std::fs::write(root.join("content/post/foo.md"), content).expect("foo");
+        std::fs::write(root.join("content/post/bar.md"), content).expect("bar");
+
+        let conductor = make_conductor(&tmp);
+
+        // No collection page exists for "post", so falls back to first item (/post/bar sorts first)
+        let result = conductor.page_url_for_schema("/_schema/post/item");
+        assert!(result.is_some(), "expected Some(url) for known item schema without collection page");
+        let url = result.unwrap();
+        assert!(
+            url.starts_with("/post/"),
+            "result should be under /post/, got: {url}"
+        );
+    }
+
+    #[test]
+    fn page_url_for_schema_unknown_stem_returns_none() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(conductor.page_url_for_schema("/_schema/no-such-stem/item"), None);
+    }
+
+    #[test]
+    fn page_url_for_schema_malformed_returns_none() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(conductor.page_url_for_schema("/_schema/foo/bar/baz"), None);
     }
 }

@@ -258,6 +258,80 @@ NED_BAD_BODY='{"file":"content/post/hello-world.md","selection":"(ned/slot (ned/
 assert_curl "ned_suggestions_create_rejects_existing_node_ok_false" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" '"ok":false'
 assert_curl "ned_suggestions_create_rejects_existing_node_mentions_existing" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" 'Existing'
 
+# ── Test: Structure mode rendering via render endpoint ────────────────────
+
+log "Testing schema render endpoint..."
+
+# View mode: re-renders the content page (sanity check that the endpoint works)
+assert_curl "render endpoint view mode renders content" \
+    "/_presemble/render?path=/post/hello-world&mode=view" GET "" \
+    'data-presemble-slot="title"'
+
+# Schema mode: synthesizes empty document and renders schema-as-mockup
+assert_curl "render endpoint schema mode emits constraint attrs" \
+    "/_presemble/render?path=/_schema/post/item&mode=schema" GET "" \
+    'data-presemble-schema-constraints-occurs'
+
+assert_curl "render endpoint schema mode emits instance count attr" \
+    "/_presemble/render?path=/_schema/post/item&mode=schema" GET "" \
+    'data-presemble-schema-instance-count'
+
+assert_curl "render endpoint schema mode emits included-by attr" \
+    "/_presemble/render?path=/_schema/author/item&mode=schema" GET "" \
+    'data-presemble-schema-included-by'
+
+# Schema mode at root: synthesises root index schema
+assert_curl "render endpoint schema mode at root emits constraints" \
+    "/_presemble/render?path=/_schema/index&mode=schema" GET "" \
+    'data-presemble-schema-constraints'
+
+# Subschema link: post's author slot points at /author/#_schema in schema mode
+assert_curl "render endpoint schema mode emits typelink href" \
+    "/_presemble/render?path=/_schema/post/item&mode=schema" GET "" \
+    '/author/#_schema'
+
+# Bad mode: should return 400
+assert_status "render endpoint rejects bad mode" \
+    "/_presemble/render?path=/post/hello-world&mode=invalid" "400"
+
+# Missing path: Axum query-param deserialisation returns 400
+assert_status "render endpoint rejects missing path" \
+    "/_presemble/render?mode=schema" "400"
+
+# ── Test: Schema-for endpoint ────────────────────────────────────────────
+
+log "Testing schema-for endpoint..."
+assert_curl "schema-for endpoint resolves item URL" \
+    "/_presemble/schema-for?page=/post/hello-world" GET "" '"/_schema/post/item"'
+assert_curl "schema-for endpoint resolves collection URL" \
+    "/_presemble/schema-for?page=/post/" GET "" '"/_schema/post/index"'
+assert_curl "schema-for endpoint resolves root URL" \
+    "/_presemble/schema-for?page=/" GET "" '"/_schema/index"'
+assert_status "schema-for endpoint returns 404 for unknown page" \
+    "/_presemble/schema-for?page=/no/such/page" "404"
+
+# ── Test: Page-for endpoint ───────────────────────────────────────────────
+
+log "Testing page-for endpoint..."
+assert_curl "page-for endpoint resolves item schema" \
+    "/_presemble/page-for?schema=/_schema/post/item" GET "" '"/post/'
+assert_curl "page-for endpoint resolves collection schema" \
+    "/_presemble/page-for?schema=/_schema/post/index" GET "" '"/post/"'
+assert_curl "page-for endpoint resolves root schema" \
+    "/_presemble/page-for?schema=/_schema/index" GET "" '"/"'
+assert_status "page-for endpoint returns 404 for unknown schema" \
+    "/_presemble/page-for?schema=/_schema/no-such-stem/item" "404"
+
+# ── Test: Direct GET to schema URL ────────────────────────────────────────
+
+log "Testing direct schema URL rendering..."
+assert_curl "direct GET to /_schema/post/item renders schema" \
+    "/_schema/post/item" GET "" 'data-presemble-schema-constraints'
+assert_curl "direct GET to /_schema/post/index renders schema" \
+    "/_schema/post/index" GET "" 'data-presemble-schema-constraints'
+assert_curl "direct GET to /_schema/index renders root schema" \
+    "/_schema/index" GET "" 'data-presemble-schema-constraints'
+
 # ── Test: Save edits to disk for nREPL tests ─────────────────────────────
 
 log "Saving edits to disk for nREPL..."

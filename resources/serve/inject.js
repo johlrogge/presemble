@@ -8,8 +8,9 @@ function cljStr(s) {
   return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 }
 
-// Index of `el` among its siblings that share the same data-presemble-slot value.
-// Relies on the invariant that HTML is a 1:1 render of the node tree.
+// Legacy fallback used inside buildStructural* helpers when kind detection
+// fails or the element is not in the slot-sibling list. New code should
+// build selectors via buildStructuralSelection.
 function slotChildIndex(el) {
   var slot = el.getAttribute('data-presemble-slot');
   if (!slot) return 0;
@@ -21,6 +22,173 @@ function slotChildIndex(el) {
   }
   return idx;
 }
+
+// --- Phase 2: Structural-anchor selectors (dead code; Phase 4 wires callers) ---
+// Composer helpers — build NED Clojure source strings.
+function nedDoc(file) {
+  return '(ned/doc-by-path '+cljStr(file)+')';
+}
+function nedSlot(file, slot) {
+  return '(ned/slot '+nedDoc(file)+' '+cljStr(slot)+')';
+}
+function nedChildrenSlot(file, slot) {
+  return '(ned/children '+nedSlot(file, slot)+')';
+}
+function nedHeadingWithText(slotChildrenExpr, text) {
+  return '(ned/heading-with-text '+slotChildrenExpr+' '+cljStr(text)+')';
+}
+function nedNthAfter(anchorExpr, kind, idx) {
+  return '(ned/nth-after '+anchorExpr+' '+cljStr(kind)+' '+idx+')';
+}
+function nedNthOfKind(selExpr, kind, idx) {
+  return '(ned/nth-of-kind '+selExpr+' '+cljStr(kind)+' '+idx+')';
+}
+
+// Map a DOM element to its NodeStore element-name (kind) per content_bridge.
+function kindFromTag(el) {
+  var t = el.tagName;
+  if (/^H[1-6]$/.test(t)) return 'heading';
+  if (t === 'P') return 'paragraph';
+  if (t === 'PRE') return 'code-block';
+  if (t === 'BLOCKQUOTE') return 'blockquote';
+  if (t === 'IMG') return 'image';
+  if (t === 'TABLE') return 'table';
+  if (t === 'UL' || t === 'OL') return 'list';
+  if (t === 'DIV') {
+    var md = el.getAttribute('data-presemble-md') || '';
+    if (/^\s*([-*+]|\d+\.)\s/.test(md)) return 'list';
+    return 'raw-html';
+  }
+  return null;
+}
+
+// Collect all body-slot elements for a given file in document order.
+function bodySiblingsForFile(file) {
+  return Array.prototype.slice.call(
+    document.querySelectorAll('[data-presemble-slot="body"][data-presemble-file="'+file+'"]')
+  );
+}
+
+// Find the most-recent heading at or before `targetEl` within `sibs` (an
+// ordered list of body-slot elements). Returns {el, text, anchorPos, targetPos}
+// or null when targetEl has no preceding heading. anchorPos/targetPos are
+// indices into sibs. Text is whitespace-normalised to match
+// ned/heading-with-text's exact-equality semantics.
+function findPreviousHeadingForElement(sibs, targetEl) {
+  var targetPos = sibs.indexOf(targetEl);
+  if (targetPos < 0) return null;
+  for (var i = targetPos; i >= 0; i--) {
+    if (/^H[1-6]$/.test(sibs[i].tagName)) {
+      return {
+        el: sibs[i],
+        text: sibs[i].innerText.trim().replace(/\s+/g, ' '),
+        anchorPos: i,
+        targetPos: targetPos
+      };
+    }
+  }
+  return null;
+}
+
+// Count elements in sibs[fromExclusive..toExclusive) whose kind matches.
+function countKindInRange(sibs, fromExclusive, toExclusive, kind) {
+  var count = 0;
+  for (var i = fromExclusive + 1; i < toExclusive; i++) {
+    if (kindFromTag(sibs[i]) === kind) count++;
+  }
+  return count;
+}
+
+// Count elements in sibs[0..toExclusive) whose kind matches.
+function countKindBeforeIndex(sibs, toExclusive, kind) {
+  var count = 0;
+  for (var i = 0; i < toExclusive; i++) {
+    if (kindFromTag(sibs[i]) === kind) count++;
+  }
+  return count;
+}
+
+// Build a NED selection for a body-slot element, anchored on the nearest
+// preceding heading when possible. Pure DOM-relative — no positional IDs.
+function buildBodyAnchor(el, file) {
+  var bodyEl = el.closest('[data-presemble-slot="body"]') || el;
+  var sibs = bodySiblingsForFile(file);
+  var targetPos = sibs.indexOf(bodyEl);
+  if (targetPos < 0) {
+    console.warn('buildBodyAnchor: target not in body slot list; falling back', bodyEl);
+    return '(ned/nth-child '+nedSlot(file, 'body')+' '+slotChildIndex(el)+')';
+  }
+  var kind = kindFromTag(bodyEl);
+  if (kind === null) {
+    console.warn('buildBodyAnchor: unknown kind from tag', bodyEl.tagName);
+    return '(ned/nth-child '+nedSlot(file, 'body')+' '+slotChildIndex(el)+')';
+  }
+  var slotChildren = nedChildrenSlot(file, 'body');
+  var anchor = findPreviousHeadingForElement(sibs, bodyEl);
+  if (anchor && anchor.anchorPos === targetPos) {
+    // Editing the heading itself.
+    return nedHeadingWithText(slotChildren, anchor.text);
+  }
+  if (anchor) {
+    var relIdx = countKindInRange(sibs, anchor.anchorPos, targetPos, kind);
+    return nedNthAfter(nedHeadingWithText(slotChildren, anchor.text), kind, relIdx);
+  }
+  // No preceding heading — slot-boundary fallback.
+  var preIdx = countKindBeforeIndex(sibs, targetPos, kind);
+  return nedNthOfKind(slotChildren, kind, preIdx);
+}
+
+// Build a NED selection for a preamble-slot element.
+function buildPreambleAnchor(el, file, slot) {
+  el = el.closest('[data-presemble-slot]') || el;
+  var bySlot = Array.prototype.slice.call(
+    document.querySelectorAll('[data-presemble-slot="'+slot+'"][data-presemble-file="'+file+'"]')
+  );
+  var bySource = Array.prototype.slice.call(
+    document.querySelectorAll('[data-presemble-source-slot="'+slot+'"][data-presemble-file="'+file+'"]')
+  );
+  var sibs = bySlot.slice();
+  for (var i = 0; i < bySource.length; i++) {
+    if (sibs.indexOf(bySource[i]) === -1) sibs.push(bySource[i]);
+  }
+  sibs.sort(function(a, b) {
+    var pos = a.compareDocumentPosition(b);
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+  // Single-child slot: select the slot Element directly. Safe for set-text
+  // (descendants/texts walk the only child anyway). DO NOT use this branch
+  // if a future caller passes the result to ned/replace — that would replace
+  // the slot element rather than its child.
+  if (sibs.length === 1) {
+    return nedSlot(file, slot);
+  }
+  var kind = kindFromTag(el);
+  if (kind === null) {
+    console.warn('buildPreambleAnchor: unknown kind for', el.tagName);
+    return '(ned/nth-child '+nedSlot(file, slot)+' '+slotChildIndex(el)+')';
+  }
+  var idx = 0;
+  for (var m = 0; m < sibs.length; m++) {
+    if (sibs[m] === el) break;
+    if (kindFromTag(sibs[m]) === kind) idx++;
+  }
+  return nedNthOfKind(nedChildrenSlot(file, slot), kind, idx);
+}
+
+// Top-level dispatcher. Returns null when the element lacks file/slot data,
+// letting callers fall back to the legacy slotChildIndex path.
+function buildStructuralSelection(el) {
+  var fileEl = el.closest('[data-presemble-file]');
+  if (!fileEl) return null;
+  var file = fileEl.getAttribute('data-presemble-file');
+  var slot = el.getAttribute('data-presemble-source-slot') || el.getAttribute('data-presemble-slot');
+  if (!file || !slot) return null;
+  if (slot === 'body') return buildBodyAnchor(el, file);
+  return buildPreambleAnchor(el, file, slot);
+}
+// --- end Phase 2 helpers ---
 
 // Guardrails: if the server ever emits data-presemble-file="" these helpers
 // fail fast rather than issuing /_presemble/grammar?stem=undefined requests.
@@ -59,6 +227,25 @@ function stemFromFile(file) {
   return parts[1]; // content/<stem>/...
 }
 
+// --- Phase D: URL-fragment mode helpers (ADR-042) ---
+
+// Parse a URL hash into a presemble mode name.
+// Returns 'view' | 'edit' | 'suggest' | 'unknown'
+// Note: '#_schema' is no longer a valid hash-based mode; schema mode is
+// detected via location.pathname starting with '/_schema/'.
+function parsePresembleHash(hash) {
+  if (!hash || hash === '#') return 'view';
+  var bare = hash.replace(/^#/, '');
+  switch (bare) {
+    case '_edit':    return 'edit';
+    case '_suggest': return 'suggest';
+    case '':         return 'view';
+    default:         return 'unknown';
+  }
+}
+
+// --- end Phase D helpers (setPresembleMode is defined inside the mode-management IIFE below) ---
+
 var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');
 var _userScrolled=false;var _scrollTimer=null;var _presembleScrolling=false;
 window.addEventListener('scroll',function(){if(_presembleScrolling){return;}_userScrolled=true;clearTimeout(_scrollTimer);_scrollTimer=setTimeout(function(){_userScrolled=false;},3000);},true);
@@ -76,6 +263,11 @@ setTimeout(function(){_presembleScrolling=false;},500);
 }
 }
 }
+return;
+}
+if(m.type==='suggestion-list-changed'){
+if(window._fetchSuggestionFiles){window._fetchSuggestionFiles();}
+if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
 return;
 }
 if(m.anchor){sessionStorage.setItem('presemble-anchor',m.anchor);}
@@ -100,7 +292,14 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 else{tryScroll(10);}
 })();
 (function(){
-var mode=sessionStorage.getItem('presemble-mode')||'view';
+// Mode is derived from the URL path first (schema URLs), then hash (ADR-042, T11).
+// 'view' is the default; unknown or empty hashes also resolve to 'view'.
+var _initialHashMode=parsePresembleHash(location.hash);
+var mode=(location.pathname.indexOf('/_schema/')===0)
+    ?'schema'
+    :(_initialHashMode!=='unknown'?_initialHashMode:'view');
+// Flag to suppress re-writing the hash while we are reacting to a hashchange.
+var _handlingHashChange=false;
 var _editorialSuggestCount=0;
 var _dirtyCount=0;
 var _dirtyPaths=[];
@@ -122,7 +321,8 @@ var viewBtn=document.createElement('button');viewBtn.textContent='\u{1F441} View
 var editBtn=document.createElement('button');editBtn.textContent='\u{270F}\u{FE0F} Edit';
 var suggestBtn=document.createElement('button');suggestBtn.textContent='\u{1F4AC} Suggest';suggestBtn.style.position='relative';
 var suggestBadge=document.createElement('span');suggestBadge.className='presemble-suggest-badge';suggestBadge.style.display='none';suggestBtn.appendChild(suggestBadge);
-menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);
+var structureBtn=document.createElement('button');structureBtn.textContent='\u{1F4D0} Structure';
+menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);menu.appendChild(structureBtn);
 container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);
 document.body.appendChild(container);
 function update(){
@@ -135,13 +335,16 @@ if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}
 else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';
 if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}
 }
+else if(mode==='schema'){icon.textContent='\u{1F4D0}';icon.title='Structure mode \u{2014} viewing schema';}
 else if(totalBadge===0&&_dirtyCount===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}
 else if(_dirtyCount>0&&totalBadge===0){icon.textContent='\u{1F4BE}';icon.title=_dirtyCount+' unsaved change'+(_dirtyCount===1?'':'s')+' \u{2014} click to change';}
 else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+(_dirtyCount>0?' ('+_dirtyCount+' unsaved)':'')+' \u{2014} click to edit';}
 viewBtn.className=mode==='view'?'active':'';
 editBtn.className=mode==='edit'?'active':'';
 suggestBtn.className=mode==='suggest'?'active':'';
-if(mode==='edit'){document.body.classList.add('presemble-edit-mode');}else{document.body.classList.remove('presemble-edit-mode');}
+structureBtn.className=mode==='schema'?'active':'';
+document.body.classList.toggle('presemble-edit-mode',mode==='edit');
+document.body.classList.toggle('presemble-suggest-mode',mode==='suggest');
 }
 update();
 icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};
@@ -345,10 +548,62 @@ _suggestPreviewState=null;_suggestActiveEl=null;
 _suggestions=[];_suggestIdx=0;
 }
 function _stripMd(s){return s.replace(/`/g,'').replace(/\*\*/g,'').replace(/\*/g,'').replace(/_/g,'');}
+function _kindMatchesEl(kind,el){
+var t=el.tagName;
+if(kind==='paragraph')return t==='P';
+if(kind==='heading')return /^H[1-6]$/.test(t);
+if(kind==='code-block') return t === 'PRE';
+if(kind==='blockquote')return t==='BLOCKQUOTE';
+if(kind==='image')return t==='IMG';
+if(kind==='table')return t==='TABLE';
+if (kind === 'list') {
+  if (t === 'UL' || t === 'OL') return true;
+  if (t === 'DIV') {
+    var md = el.getAttribute('data-presemble-md') || '';
+    return /^\s*([-*+]|\d+\.)\s/.test(md);
+  }
+  return false;
+}
+return false;
+}
+function _suggestFindStructural(a){
+var nk=a['node-kind'];
+var heading=a['heading-text'];
+var sel='[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]';
+var sibs=document.querySelectorAll(sel);
+if(sibs.length===0){sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"]');}
+var arr=Array.prototype.slice.call(sibs);
+if(heading){
+var anchorIdx=-1;
+for(var i=0;i<arr.length;i++){
+var el=arr[i];
+if(/^H[1-6]$/.test(el.tagName)&&el.innerText.trim().replace(/\s+/g, ' ')===heading){anchorIdx=i;break;}
+}
+if(anchorIdx<0)return null;
+var count=0;
+for(var j=anchorIdx+1;j<arr.length;j++){
+if(_kindMatchesEl(nk,arr[j])){
+if(count===a.offset)return arr[j];
+count++;
+}
+}
+return null;
+}
+var matching=arr.filter(function(el){return _kindMatchesEl(nk,el);});
+return matching[a.offset]||null;
+}
 function _suggestFindTarget(sug){
 // NED suggestions: use anchor field when present (source === 'ned')
 if(sug._source==='ned'&&sug.anchor){
 var a=sug.anchor;
+if(a.kind==='structural'){
+return _suggestFindStructural(a);
+}
+if(a.kind==='slot-nth'){
+var sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]');
+if(sibs.length===0){sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"]');}
+return sibs[a.index]||sibs[0]||null;
+}
 if(a.kind==='slot'){
 return document.querySelector('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]')||document.querySelector('[data-presemble-slot="'+a.slot+'"]');
 }
@@ -398,7 +653,14 @@ _suggestToolbar.querySelector('.presemble-suggest-reason').textContent=reasonTex
 var targetText='';
 if(sug._source==='ned'&&sug.anchor){
 if(sug.anchor.kind==='slot'){targetText=sug.anchor.slot;}
+else if(sug.anchor.kind==='slot-nth'){targetText=sug.anchor.slot+'['+sug.anchor.index+']';}
 else if(sug.anchor.kind==='body-nth'){targetText='body['+sug.anchor.index+']';}
+else if(sug.anchor.kind==='structural'){
+var nk=sug.anchor['node-kind'];
+var off=sug.anchor.offset;
+if(sug.anchor['heading-text']){targetText='"'+sug.anchor['heading-text']+'" / '+nk+'['+off+']';}
+else{targetText=sug.anchor.slot+' / '+nk+'['+off+']';}
+}
 }else{
 targetText=sug.target_type==='slot'?sug.slot:(sug.search?'"'+sug.search.substring(0,30)+'..."':'');
 }
@@ -682,7 +944,7 @@ container.style.display=(html==='')?'none':'block';
 setInterval(_fetchDirtyCount,2000);
 setInterval(_fetchSuggestionFiles,5000);
 _fetchSuggestionFiles();
-function _suggestEnter(){
+function _suggestEnter(targetId){
 var fileEl=document.querySelector('[data-presemble-file]');
 if(!fileEl){return;}
 var file=fileEl.getAttribute('data-presemble-file');
@@ -700,7 +962,12 @@ var legacyTagged=legacy.map(function(s){return Object.assign({},s,{_source:'lega
 var nedTagged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});
 var merged=legacyTagged.concat(nedTagged);
 _suggestions=merged;
+if(targetId){
+var foundIdx=merged.findIndex(function(s){return s.id===targetId;});
+_suggestIdx=foundIdx>=0?foundIdx:0;
+}else{
 _suggestIdx=0;
+}
 var cnt=merged.length;
 _editorialSuggestCount=cnt;
 if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}
@@ -715,19 +982,146 @@ function setMode(m){
 if(m!=='edit'){cleanupEditing();_editCleanup();}
 if(m!=='suggest'){_suggestCleanup();}
 mode=m;
-sessionStorage.setItem('presemble-mode',m);
 menu.classList.remove('open');
 update();
 if(m==='edit'){_editEnter();}
 if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
+// Update the URL hash to reflect the new mode, unless we are already
+// responding to a hashchange (which would create an infinite loop).
+if(!_handlingHashChange){setPresembleMode(m);}
 }
+// --- Phase D Wave D: schema mode handlers (canonical URL navigation) ---
+function _enterSchemaMode(){
+var page=location.pathname;
+fetch('/_presemble/schema-for?page='+encodeURIComponent(page))
+.then(function(r){
+if(r.status===404){return null;}
+if(!r.ok){throw new Error('schema-for failed: '+r.status);}
+return r.json();
+})
+.then(function(data){
+if(!data||!data.url){
+console.warn('no schema available for',page);
+return;
+}
+location.href=data.url;
+})
+.catch(function(err){
+console.error('schema-for error:',err);
+});
+}
+function _appendModeHash(url,targetMode){
+if(!targetMode||targetMode==='view')return url;
+if(targetMode==='edit'||targetMode==='suggest')return url+'#_'+targetMode;
+return url;
+}
+function _leaveSchemaMode(targetMode){
+var schemaUrl=location.pathname;
+fetch('/_presemble/page-for?schema='+encodeURIComponent(schemaUrl))
+.then(function(r){
+if(r.status===404){location.href=_appendModeHash('/',targetMode);return null;}
+return r.json();
+})
+.then(function(data){
+if(data&&data.url){location.href=_appendModeHash(data.url,targetMode);}
+else if(data!==null&&data!==undefined){location.href=_appendModeHash('/',targetMode);}
+})
+.catch(function(err){
+console.error('page-for error:',err);
+location.href=_appendModeHash('/',targetMode);
+});
+}
+function _applyHashMode(){
+_handlingHashChange=true;
+var m=parsePresembleHash(location.hash);
+// Schema mode is a URL-path concern (/_schema/...), not a hash concern.
+// Stale #_schema hashes are treated as unknown and ignored.
+if(m==='unknown'){
+_handlingHashChange=false;
+return;
+}
+setMode(m);
+_handlingHashChange=false;
+}
+// Set the presemble mode.
+// 'schema' triggers real navigation to the canonical /_schema/... URL via
+// _enterSchemaMode() — no hash is written.
+// When currently on a /_schema/... URL and switching to a non-schema mode,
+// _leaveSchemaMode() navigates back to the corresponding content page.
+// 'view' removes the hash (no page reload); other modes set #_<mode>.
+// Also canonicalizes the pathname by stripping /index.html or /index.htm.
+// NOTE: defined here (inside the mode-management IIFE) so it can close over
+// _enterSchemaMode, _leaveSchemaMode and _applyHashMode.
+function setPresembleMode(mode) {
+  if (mode === 'schema') {
+    _enterSchemaMode();
+    return;
+  }
+  // If we are currently on a schema URL, leaving any non-schema mode requires
+  // navigating back to the content page via the page-for API.
+  if (location.pathname.indexOf('/_schema/') === 0) {
+    _leaveSchemaMode(mode);
+    return;
+  }
+  var p = location.pathname;
+  if (p.endsWith('/index.html')) {
+    p = p.slice(0, -('index.html'.length)); // keeps trailing /
+  } else if (p.endsWith('/index.htm')) {
+    p = p.slice(0, -('index.htm'.length));
+  }
+  var pathChanged = p !== location.pathname;
+
+  if (mode === 'view') {
+    history.replaceState(null, '', p + location.search);
+  } else if (pathChanged) {
+    // replaceState doesn't fire hashchange, so update URL then dispatch manually.
+    history.replaceState(null, '', p + location.search + '#_' + mode);
+    _applyHashMode();
+  } else {
+    location.hash = '_' + mode;
+  }
+}
+window.addEventListener('hashchange',_applyHashMode);
+// Schema-mode link intercept: when in schema mode, content link clicks are
+// resolved to their canonical schema URL via the schema-for API.
+document.addEventListener('click',function(e){
+if(mode!=='schema'){return;}
+var a=e.target.closest&&e.target.closest('a');
+if(!a){return;}
+var href=a.getAttribute('href');
+if(!href){return;}
+// Skip already-schema URLs
+if(href.indexOf('/_schema/')===0){return;}
+// Skip fragments, javascript:, mailto:
+if(href.startsWith('#')||href.startsWith('javascript:')||href.startsWith('mailto:')){return;}
+// Skip cross-origin external URLs
+if(/^https?:\/\//.test(href)){
+try{var u=new URL(href);if(u.origin!==location.origin){return;}}
+catch(_){return;}
+}
+e.preventDefault();
+fetch('/_presemble/schema-for?page='+encodeURIComponent(href))
+.then(function(r){
+if(r.status===404){location.href=href;return null;}
+return r.json();
+})
+.then(function(data){
+if(data&&data.url){location.href=data.url;}else if(data!==null){location.href=href;}
+})
+.catch(function(){
+location.href=href;
+});
+},true);
+// --- End Phase D Wave D ---
 if(mode==='edit'){_editEnter();}
 if(mode==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
 viewBtn.onclick=function(){setMode('view');};
 editBtn.onclick=function(){setMode('edit');};
 suggestBtn.onclick=function(){setMode('suggest');};
+structureBtn.onclick=function(){setMode('schema');};
 window._fetchDirtyCount=_fetchDirtyCount;
 window._fetchSuggestionCount=_fetchSuggestionCount;
+window._suggestEnter=_suggestEnter;
 window._fetchSuggestionFiles=_fetchSuggestionFiles;
 window._foldToggle=function(el){_foldToggle(el);};
 })();
@@ -822,9 +1216,6 @@ if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(wind
 e.preventDefault();
 var bfile=el.getAttribute('data-presemble-file');
 if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-var bidxAttr=el.id;
-var bidx=0;
-if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\d+)/);if(m){bidx=parseInt(m[1],10);}}
 var bmd=el.getAttribute('data-presemble-md')||el.innerText;
 el.style.display='none';
 var ta=document.createElement('textarea');
@@ -853,7 +1244,12 @@ if(!bvalue.trim()){return;}
 if(!bfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('bsave called without bfile',el);return;}
 var bstem=stemFromFile(bfile);
 fetchGrammar(bstem).then(function(schemaSrc){
-var program='(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    (ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  console.error('buildStructuralSelection returned null for body element', el);
+  return;
+}
+var program = '(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    '+sel+'\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
 return applyNed(program);
 }).then(function(){
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
@@ -943,7 +1339,12 @@ cleanup();
 if(value===original){return;}
 if(!value){return;}
 if(!pfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('save called without pfile',el);return;}
-var idx=slotChildIndex(el);var program='(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+') ned/descendants ned/texts) '+cljStr(value)+')';
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  var idx = slotChildIndex(el);
+  sel = '(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')';
+}
+var program = '(ned/set-text (-> '+sel+' ned/descendants ned/texts) '+cljStr(value)+')';
 applyNed(program).then(function(){
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(e){
@@ -962,7 +1363,7 @@ if(e.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('key
 });
 });
 document.addEventListener('click',function(e){
-var suggestMode=sessionStorage.getItem('presemble-mode')==='suggest';
+var suggestMode=document.body.classList.contains('presemble-suggest-mode');
 if(!suggestMode){return;}
 var el=e.target.closest('[data-presemble-slot]');
 if(!el||el.classList.contains('presemble-editing')){return;}
@@ -972,9 +1373,6 @@ if(slot==='body'){
 e.preventDefault();
 var bfile=el.getAttribute('data-presemble-file');
 if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-var bidxAttr=el.id;
-var bidx=0;
-if(bidxAttr){var m=bidxAttr.match(/presemble-body-(\d+)/);if(m){bidx=parseInt(m[1],10);}}
 var bmd=el.getAttribute('data-presemble-md')||el.innerText;
 el.style.display='none';
 var ta=document.createElement('textarea');
@@ -992,11 +1390,20 @@ var bvalue=ta.value;
 bcleanup();
 var diff=minimalDiff(bmd,bvalue);
 if(!diff){return;}
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  console.error('buildStructuralSelection returned null for body element', el);
+  return;
+}
 fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,selection:'(ned/body-at (ned/doc-by-path '+cljStr(bfile)+') '+bidx+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
+body:JSON.stringify({file:bfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){var berr=document.createElement('div');berr.className='presemble-edit-error';berr.textContent=data.error||'Suggest failed';el.after(berr);}
-if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+if(data.ok&&data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
+window._suggestEnter(data.id);
+}else if(window._fetchSuggestionCount){
+window._fetchSuggestionCount();
+}
 }).catch(function(){});
 }
 btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
@@ -1030,15 +1437,24 @@ var origText=original.replace(/\u00a0/g,' ');
 cleanup();
 var diff=minimalDiff(origText,value);
 if(!diff){return;}
+var sel = buildStructuralSelection(el);
+if (sel === null) {
+  var idx = slotChildIndex(el);
+  sel = '(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')';
+}
 fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,selection:'(ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
+body:JSON.stringify({file:pfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(r){return r.json();}).then(function(data){
 if(!data.ok){
 var err=document.createElement('div');err.className='presemble-edit-error';
 err.textContent=data.error||'Suggest failed';el.after(err);
 }
 el.innerText=original;
-if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
+if(data.ok&&data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
+window._suggestEnter(data.id);
+}else if(window._fetchSuggestionCount){
+window._fetchSuggestionCount();
+}
 }).catch(function(e){
 el.innerText=original;
 });

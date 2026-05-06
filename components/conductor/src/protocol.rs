@@ -28,6 +28,15 @@ pub struct DependentFile {
     pub kind: FileClassification,
 }
 
+/// Selects which rendering mode to use for `Command::RenderPage`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RenderMode {
+    /// Normal content rendering (view mode).
+    View,
+    /// Schema/structure rendering — synthesized Document, constraint attrs visible.
+    Schema,
+}
+
 /// Commands sent from clients (LSP, serve) to the conductor via nng REQ/REP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
@@ -143,6 +152,8 @@ pub enum Command {
     /// Returns the stem of the collection that the slot links to, or None if
     /// the slot isn't a link or the target can't be determined.
     ResolveLinkTargetStem { source_stem: String, slot: String },
+    /// Render a page at the given URL path, either in normal view mode or schema/structure mode.
+    RenderPage { path: String, mode: RenderMode },
     /// Create a NED-based editorial suggestion without applying it.
     CreateNedSuggestion {
         file: std::path::PathBuf,
@@ -163,6 +174,14 @@ pub enum Command {
     GetNedSuggestions {
         file: editorial_types::ContentPath,
     },
+    /// Resolve the canonical schema URL for a given content page URL.
+    /// Returns `Response::SchemaUrl(Some(url))` when the page is known,
+    /// `Response::SchemaUrl(None)` otherwise.
+    SchemaUrlForPage { page_url: String },
+    /// Resolve a best-effort representative content page URL for a given schema URL.
+    /// Returns `Response::PageUrl(Some(url))` when a page can be found,
+    /// `Response::PageUrl(None)` otherwise.
+    PageUrlForSchema { schema_url: String },
 }
 
 /// Responses from conductor to clients via nng REQ/REP.
@@ -203,6 +222,12 @@ pub enum Response {
     LinkTargetStem(Option<String>),
     /// List of NED suggestions for a file (all statuses).
     NedSuggestions(Vec<editorial_types::NedSuggestion>),
+    /// HTML string for a rendered page (response to `Command::RenderPage`).
+    PageRendered { html: String },
+    /// Canonical schema URL for a content page (response to `Command::SchemaUrlForPage`).
+    SchemaUrl(Option<String>),
+    /// Best-effort representative content page URL for a schema (response to `Command::PageUrlForSchema`).
+    PageUrl(Option<String>),
     /// Result of applying a NED program: counts of dirty paths and rebuilt/failed pages.
     Applied {
         rebuilt_pages: Vec<String>,
@@ -304,6 +329,60 @@ mod protocol_tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn schema_url_for_page_command_roundtrips_through_json() {
+        let cmd = Command::SchemaUrlForPage { page_url: "/post/hello".to_string() };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let decoded: Command = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Command::SchemaUrlForPage { page_url } => assert_eq!(page_url, "/post/hello"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn page_url_for_schema_command_roundtrips_through_json() {
+        let cmd = Command::PageUrlForSchema { schema_url: "/_schema/post/item".to_string() };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        let decoded: Command = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Command::PageUrlForSchema { schema_url } => assert_eq!(schema_url, "/_schema/post/item"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_url_response_roundtrips_through_json() {
+        let resp_some = Response::SchemaUrl(Some("/_schema/post/item".to_string()));
+        let json = serde_json::to_string(&resp_some).expect("serialize");
+        let decoded: Response = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Response::SchemaUrl(Some(url)) => assert_eq!(url, "/_schema/post/item"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let resp_none = Response::SchemaUrl(None);
+        let json_none = serde_json::to_string(&resp_none).expect("serialize");
+        let decoded_none: Response = serde_json::from_str(&json_none).expect("deserialize");
+        assert!(matches!(decoded_none, Response::SchemaUrl(None)));
+    }
+
+    #[test]
+    fn page_url_response_roundtrips_through_json() {
+        let resp_some = Response::PageUrl(Some("/post/hello".to_string()));
+        let json = serde_json::to_string(&resp_some).expect("serialize");
+        let decoded: Response = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            Response::PageUrl(Some(url)) => assert_eq!(url, "/post/hello"),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let resp_none = Response::PageUrl(None);
+        let json_none = serde_json::to_string(&resp_none).expect("serialize");
+        let decoded_none: Response = serde_json::from_str(&json_none).expect("deserialize");
+        assert!(matches!(decoded_none, Response::PageUrl(None)));
     }
 
     #[test]

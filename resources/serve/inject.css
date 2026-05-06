@@ -65,3 +65,26 @@ img.presemble-suggestion{min-width:200px;min-height:120px;display:block;}
 .presemble-buffer-link{display:block;padding:0.25rem 0.75rem;font-size:0.85rem;color:#333;text-decoration:none;border-radius:0.3rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .presemble-buffer-link:hover{background:#f0f0f0;}
 .presemble-buffer-link.current{font-weight:600;color:#5d8a6e;}
+/* ── Structure mode (body.presemble-mode-schema) ──────────────────────────
+   Accent color: muted blueprint-blue #4a6fa8 / tint #e8f0fb.
+   Distinct from edit-mode gold (#e8a838) and suggest-mode green (#5d8a6e).
+   All rules MUST be scoped under body.presemble-mode-schema.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* 1. Subtle page border so the schema frame is always visible */
+body.presemble-mode-schema{outline:3px solid #4a6fa8;outline-offset:-3px;}
+
+/* 3. Schema-document root: doc-count badge (above page content via ::before) */
+body.presemble-mode-schema [data-presemble-schema-instance-count]::before{content:attr(data-presemble-schema-instance-count) " documents use this schema";display:block;background:#e8f0fb;color:#2d4a7a;border:1px solid #b3c8ef;border-radius:0.4rem;font-family:system-ui,sans-serif;font-size:0.8rem;font-weight:600;padding:0.3rem 0.7rem;margin-bottom:1rem;width:fit-content;}
+
+/* 4. Slot hover pill — shows the "occurs" constraint on hover.
+   Pure CSS can only surface one attr at a time; we show just occurs for slice 1.
+   Other constraints (min-length, max-length, …) are deferred to a future iteration. */
+body.presemble-mode-schema [data-presemble-schema-constraints-occurs]:hover{position:relative;}
+body.presemble-mode-schema [data-presemble-schema-constraints-occurs]:hover::after{content:"occurs: " attr(data-presemble-schema-constraints-occurs);position:absolute;top:-1.6em;left:0;background:#2d4a7a;color:#fff;border-radius:0.3rem;font-family:system-ui,sans-serif;font-size:0.72rem;font-weight:600;padding:0.15rem 0.45rem;white-space:nowrap;pointer-events:none;z-index:9997;opacity:0.92;box-shadow:0 1px 4px rgba(0,0,0,0.18);}
+
+/* 5. Included-by footer — raw attribute value as a small footer note.
+   CSS cannot parse the JSON array; we render the raw value as informational text.
+   A future JS post-processor (T8/T11 wave) should replace this with a proper list.
+   TODO(T11): parse data-presemble-schema-included-by JSON and render as a link list. */
+body.presemble-mode-schema [data-presemble-schema-included-by]::after{content:"Included by: " attr(data-presemble-schema-included-by);display:block;margin-top:2rem;padding-top:0.75rem;border-top:1px dashed #b3c8ef;font-family:system-ui,sans-serif;font-size:0.78rem;color:#4a6fa8;font-style:italic;word-break:break-all;}
