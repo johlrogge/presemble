@@ -46,7 +46,7 @@ The LSP routes classify, grammar, completions, and document text through the con
 
 Each MCP tool call accepts a `site` parameter, so a single MCP server instance can work across multiple Presemble sites without restart. Content enumeration (`list_content`) goes through the conductor — the MCP server never reads the filesystem directly.
 
-The same suggestions appear as inline diffs in the browser preview with a toolbar to accept or reject them individually or in bulk. The diff is minimal — only the changed text is highlighted. Slot-scoped suggestions (`SuggestSlotEdit`) let a collaborator target a phrase within a slot rather than replacing the whole value.
+The same suggestions appear as inline diffs in the browser preview with a toolbar to accept or reject them individually or in bulk. The diff is minimal — only the changed text is highlighted. NED suggestions (`CreateNedSuggestion`) let a collaborator target any node in the content tree — a phrase within a slot, a full paragraph, or a structural change — using a selection expression that is re-evaluated against HEAD at accept time.
 
 ### Content assembles itself
 

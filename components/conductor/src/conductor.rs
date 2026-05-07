@@ -285,6 +285,10 @@ impl Conductor {
             ),
         };
 
+        // One-shot cleanup: delete any legacy sug-*.json files left over from
+        // before Wave C-ε (ADR-047). Idempotent — subsequent runs find nothing.
+        Self::delete_legacy_suggestion_files(&conductor.site_dir);
+
         // Load persisted NED suggestions from disk
         let ned_suggestions = Self::load_ned_suggestions(&conductor.ned_suggestions_dir());
         *conductor.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()) = ned_suggestions;
@@ -1745,6 +1749,34 @@ impl Conductor {
     /// Path to the `.presemble/suggestions/ned/` directory.
     fn ned_suggestions_dir(&self) -> PathBuf {
         self.site_dir.join(".presemble").join("suggestions").join("ned")
+    }
+
+    /// Delete legacy top-level `sug-*.json` files from `.presemble/suggestions/`.
+    ///
+    /// These were written by the pre-Wave-C-ε suggestion system (ADR-047).
+    /// The `ned/` subdirectory is left untouched — those are active NED suggestions.
+    /// Idempotent: if no files exist (or the directory doesn't exist), this is a no-op.
+    fn delete_legacy_suggestion_files(site_dir: &Path) {
+        let dir = site_dir.join(".presemble").join("suggestions");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => return, // No suggestions dir; nothing to do.
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Only top-level sug-*.json — skip the `ned/` subdirectory.
+            if path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with("sug-") && name.ends_with(".json")
+                && let Err(e) = std::fs::remove_file(&path)
+            {
+                eprintln!("conductor: failed to delete legacy suggestion {}: {e}", path.display());
+            }
+        }
     }
 
     /// Load all NED suggestions from the `.presemble/suggestions/ned/` directory.

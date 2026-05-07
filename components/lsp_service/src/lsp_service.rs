@@ -740,112 +740,32 @@ impl LanguageServer for PresembleLsp {
         for (_diag, maybe_action) in stored.into_iter().filter(|(d, _)| ranges_overlap(&d.range, &request_range)) {
             let Some(slot_action) = maybe_action else { continue };
 
-            match &slot_action {
-                SlotAction::AcceptSuggestion { suggestion_id, slot_name, proposed_value } => {
-                    // Accept: apply the proposed value via executeCommand so the conductor is notified.
-                    let accept_action = CodeAction {
-                        title: format!("Accept suggestion for {slot_name}"),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        command: Some(Command {
-                            title: format!("Accept suggestion for {slot_name}"),
-                            command: "presemble.acceptSuggestion".to_string(),
-                            arguments: Some(vec![
-                                serde_json::Value::String(suggestion_id.clone()),
-                                serde_json::Value::String(uri.to_string()),
-                                serde_json::Value::String(slot_name.clone()),
-                                serde_json::Value::String(proposed_value.clone()),
-                            ]),
-                        }),
-                        ..Default::default()
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(accept_action));
+            let title = match &slot_action {
+                SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
+                SlotAction::InsertSlot { slot_name, .. } => format!("Insert {slot_name}"),
+                SlotAction::InsertSeparator => "Insert body separator".to_string(),
+            };
 
-                    // Reject: notify conductor via executeCommand, no document edit.
-                    let reject_action = CodeAction {
-                        title: format!("Reject suggestion for {slot_name}"),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        command: Some(Command {
-                            title: format!("Reject suggestion for {slot_name}"),
-                            command: "presemble.rejectSuggestion".to_string(),
-                            arguments: Some(vec![
-                                serde_json::Value::String(suggestion_id.clone()),
-                                serde_json::Value::String(uri.to_string()),
-                            ]),
-                        }),
-                        ..Default::default()
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(reject_action));
-                }
-                SlotAction::AcceptBodySuggestion { suggestion_id, search, replace } => {
-                    // Accept: apply the text replacement via executeCommand.
-                    let accept_action = CodeAction {
-                        title: format!("Accept body suggestion: \"{}\" \u{2192} \"{}\"", search, replace),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        command: Some(Command {
-                            title: "Accept body suggestion".to_string(),
-                            command: "presemble.acceptSuggestion".to_string(),
-                            arguments: Some(vec![
-                                serde_json::Value::String(suggestion_id.clone()),
-                                serde_json::Value::String(uri.to_string()),
-                                serde_json::Value::String(String::new()), // no slot_name for body suggestions
-                                serde_json::Value::String(String::new()), // no proposed_value for body suggestions
-                                serde_json::Value::String(search.clone()),
-                                serde_json::Value::String(replace.clone()),
-                            ]),
-                        }),
-                        ..Default::default()
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(accept_action));
-
-                    // Reject: notify conductor via executeCommand, no document edit.
-                    let reject_action = CodeAction {
-                        title: format!("Reject body suggestion: \"{}\"", search),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        command: Some(Command {
-                            title: "Reject body suggestion".to_string(),
-                            command: "presemble.rejectSuggestion".to_string(),
-                            arguments: Some(vec![
-                                serde_json::Value::String(suggestion_id.clone()),
-                                serde_json::Value::String(uri.to_string()),
-                            ]),
-                        }),
-                        ..Default::default()
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(reject_action));
-                }
-                SlotAction::RejectSuggestion { .. } => {
-                    // Stored diagnostics only use AcceptSuggestion/AcceptBodySuggestion; reject is generated alongside it above.
-                }
-                _ => {
-                    let title = match &slot_action {
-                        SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
-                        SlotAction::InsertSlot { slot_name, .. } => format!("Insert {slot_name}"),
-                        SlotAction::InsertSeparator => "Insert body separator".to_string(),
-                        _ => continue,
-                    };
-
-                    // Build targeted source edits using the diff pipeline.
-                    let text_edits = build_targeted_edits(&src, &grammar, &slot_action);
-                    // If targeted edits returned nothing, skip this action (shouldn't happen).
-                    if text_edits.is_empty() {
-                        continue;
-                    }
-
-                    let mut changes = std::collections::HashMap::new();
-                    changes.insert(uri.clone(), text_edits);
-                    let workspace_edit = WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    };
-                    let code_action = CodeAction {
-                        title,
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        edit: Some(workspace_edit),
-                        ..Default::default()
-                    };
-                    actions.push(CodeActionOrCommand::CodeAction(code_action));
-                }
+            // Build targeted source edits using the diff pipeline.
+            let text_edits = build_targeted_edits(&src, &grammar, &slot_action);
+            // If targeted edits returned nothing, skip this action (shouldn't happen).
+            if text_edits.is_empty() {
+                continue;
             }
+
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), text_edits);
+            let workspace_edit = WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            };
+            let code_action = CodeAction {
+                title,
+                kind: Some(CodeActionKind::QUICKFIX),
+                edit: Some(workspace_edit),
+                ..Default::default()
+            };
+            actions.push(CodeActionOrCommand::CodeAction(code_action));
         }
         Ok(Some(actions))
     }

@@ -27,9 +27,9 @@ Claude can read your schemas to understand your content model, read your content
 
 This is the same suggestion protocol a human editor uses. There is no special Claude path — Claude is just another collaborator using the suggestion API.
 
-### Slot-scoped suggestions (SlotEdit)
+### NED-based suggestions
 
-In addition to full-slot replacement suggestions, the conductor accepts `SuggestSlotEdit` — a search/replace suggestion that targets part of a slot's content. This lets a collaborator correct one sentence in a long summary or fix a single phrase in a body section without proposing a full rewrite. Both kinds appear as LSP diagnostics with accept/reject code actions and as inline diffs in the browser.
+Suggestions are now expressed as NED mutations via `CreateNedSuggestion`. A NED suggestion carries a selection expression (re-evaluated against HEAD at accept time) and a structured mutation — `SetText`, `SearchReplace`, `Replace`, `InsertChild`, `InsertBefore`, `InsertAfter`, or `Delete`. This lets a collaborator target a single phrase within a slot, rewrite a paragraph, or restructure body content without proposing a full-file replacement. Suggestions appear as inline diffs in the browser and as LSP diagnostics with accept/reject code actions.
 
 ### Browser suggestion preview
 

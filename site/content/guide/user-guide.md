@@ -551,9 +551,9 @@ Suggestion UI is limited to Suggest mode. Edit mode no longer shows suggestion o
 
 The preview toggle switches between the current state and a preview of the page with all suggestions applied.
 
-### Slot-scoped suggestions (SlotEdit)
+### NED-based suggestions
 
-The `SuggestSlotEdit` command targets a specific slot with a search/replace operation rather than replacing the slot's entire value. This is distinct from full-slot suggestions — it makes targeted edits within a slot's content (for example, correcting one sentence in a long summary without replacing the rest). The conductor handles both suggestion kinds; they appear as separate diagnostic entries in the LSP and as separate nodes in the browser diff view.
+Suggestions are expressed as NED mutations via `CreateNedSuggestion`. Each suggestion carries a selection expression that is re-evaluated against HEAD when the suggestion is accepted, plus a structured mutation (`SetText`, `SearchReplace`, `Replace`, `InsertChild`, `InsertBefore`, `InsertAfter`, or `Delete`). This lets a collaborator target a phrase within a slot, rewrite a paragraph, or perform a structural change — and the accept-time re-evaluation catches conflicts before any edit is applied. Suggestions appear as separate diagnostic entries in the LSP and as separate nodes in the browser diff view.
 
 ### Creating new content from the browser
 
