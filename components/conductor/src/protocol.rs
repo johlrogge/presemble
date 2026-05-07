@@ -242,14 +242,14 @@ pub enum ConductorEvent {
     /// Pages were rebuilt successfully.
     PagesRebuilt {
         pages: Vec<String>,
-        anchor: Option<String>,
+        anchor: Option<editorial_types::StructuralAnchor>,
     },
     /// Build failed for some pages.
     BuildFailed {
         error_pages: Vec<String>,
     },
     /// Browser should scroll to follow cursor.
-    CursorScrollTo { anchor: String },
+    CursorScrollTo { anchor: editorial_types::StructuralAnchor },
     /// An editorial suggestion was created.
     SuggestionCreated {
         suggestion: editorial_types::Suggestion,
@@ -383,6 +383,69 @@ mod protocol_tests {
         let json_none = serde_json::to_string(&resp_none).expect("serialize");
         let decoded_none: Response = serde_json::from_str(&json_none).expect("deserialize");
         assert!(matches!(decoded_none, Response::PageUrl(None)));
+    }
+
+    #[test]
+    fn pages_rebuilt_event_with_structural_anchor_roundtrips() {
+        let anchor = editorial_types::StructuralAnchor {
+            file: "content/post/hello.md".to_string(),
+            slot: "body".to_string(),
+            heading_text: Some("Why Presemble".to_string()),
+            node_kind: "paragraph".to_string(),
+            offset: 1,
+        };
+        let event = ConductorEvent::PagesRebuilt {
+            pages: vec!["/post/hello".to_string()],
+            anchor: Some(anchor.clone()),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            ConductorEvent::PagesRebuilt { pages, anchor: Some(a) } => {
+                assert_eq!(pages, vec!["/post/hello".to_string()]);
+                assert_eq!(a.file, "content/post/hello.md");
+                assert_eq!(a.slot, "body");
+                assert_eq!(a.heading_text, Some("Why Presemble".to_string()));
+                assert_eq!(a.node_kind, "paragraph");
+                assert_eq!(a.offset, 1);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pages_rebuilt_event_without_anchor_roundtrips() {
+        let event = ConductorEvent::PagesRebuilt {
+            pages: vec!["/post/hello".to_string()],
+            anchor: None,
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(decoded, ConductorEvent::PagesRebuilt { anchor: None, .. }));
+    }
+
+    #[test]
+    fn cursor_scroll_to_event_with_structural_anchor_roundtrips() {
+        let anchor = editorial_types::StructuralAnchor {
+            file: "content/post/hello.md".to_string(),
+            slot: "body".to_string(),
+            heading_text: None,
+            node_kind: "paragraph".to_string(),
+            offset: 0,
+        };
+        let event = ConductorEvent::CursorScrollTo { anchor: anchor.clone() };
+        let json = serde_json::to_string(&event).expect("serialize");
+        let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            ConductorEvent::CursorScrollTo { anchor: a } => {
+                assert_eq!(a.file, "content/post/hello.md");
+                assert_eq!(a.slot, "body");
+                assert_eq!(a.heading_text, None);
+                assert_eq!(a.node_kind, "paragraph");
+                assert_eq!(a.offset, 0);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]

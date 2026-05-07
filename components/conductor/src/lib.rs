@@ -326,7 +326,9 @@ mod tests {
         assert_eq!(result.events.len(), 1, "expected one CursorScrollTo event");
         match &result.events[0] {
             ConductorEvent::CursorScrollTo { anchor } => {
-                assert_eq!(anchor, "presemble-body-0");
+                assert_eq!(anchor.node_kind, "paragraph", "expected paragraph kind");
+                assert_eq!(anchor.offset, 0, "expected offset 0 (first paragraph in section)");
+                assert_eq!(anchor.slot, "body", "expected body slot");
             }
             other => panic!("expected CursorScrollTo, got {other:?}"),
         }
@@ -358,13 +360,65 @@ mod tests {
         if !result.events.is_empty() {
             match &result.events[0] {
                 ConductorEvent::CursorScrollTo { anchor } => {
-                    assert!(
-                        anchor.starts_with("presemble-body-"),
-                        "expected presemble-body-* anchor, got: {anchor}"
-                    );
+                    // Must be a structural anchor for a body element
+                    assert_eq!(anchor.slot, "body", "expected body slot, got: {anchor:?}");
+                    assert!(!anchor.node_kind.is_empty(), "expected non-empty node_kind, got: {anchor:?}");
                 }
                 other => panic!("expected CursorScrollTo, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn cursor_follow_multi_section_lands_on_correct_paragraph() {
+        // Body fixture:
+        // body[0] = ## Intro      (heading)
+        // body[1] = p1 (First.)   (paragraph, offset 0 after "Intro")
+        // body[2] = p2 (Second.)  (paragraph, offset 1 after "Intro")
+        // body[3] = ## Why        (heading)
+        // body[4] = p3 (Third.)   (paragraph, offset 0 after "Why")
+        // body[5] = p4 (Fourth.)  (paragraph, offset 1 after "Why")
+        //
+        // Cursor on line of p4 → CursorScrollTo {
+        //   anchor: StructuralAnchor { heading_text: Some("Why"), node_kind: "paragraph", offset: 1 }
+        // }
+        let conductor = minimal_post_conductor();
+        let text = concat!(
+            "# My Post Title\n\n----\n\n",
+            "## Intro\n\n",
+            "First.\n\n",
+            "Second.\n\n",
+            "## Why\n\n",
+            "Third.\n\n",
+            "Fourth.\n",
+        ).to_string();
+        let abs_path = "/test-site/content/post/my-post.md".to_string();
+        conductor.handle_command(Command::DocumentChanged { path: abs_path, text: text.clone() });
+
+        // Count lines to the "Fourth." paragraph
+        let fourth_line = text.lines().enumerate()
+            .find(|(_, l)| l.trim() == "Fourth.")
+            .map(|(i, _)| i as u32)
+            .expect("Fourth. must exist");
+
+        let result = conductor.handle_command(Command::CursorMoved {
+            path: "content/post/my-post.md".to_string(),
+            line: fourth_line,
+        });
+
+        assert!(matches!(result.response, Response::Ok));
+        assert_eq!(result.events.len(), 1, "expected one CursorScrollTo event");
+        match &result.events[0] {
+            ConductorEvent::CursorScrollTo { anchor } => {
+                assert_eq!(anchor.node_kind, "paragraph", "expected paragraph kind");
+                assert_eq!(
+                    anchor.heading_text,
+                    Some("Why".to_string()),
+                    "expected heading_text 'Why'"
+                );
+                assert_eq!(anchor.offset, 1, "expected offset 1 (second paragraph after 'Why')");
+            }
+            other => panic!("expected CursorScrollTo, got {other:?}"),
         }
     }
 
@@ -631,12 +685,15 @@ mod tests {
             other => panic!("expected Ok, got {other:?}"),
         }
 
-        // Verify PagesRebuilt event was emitted with an anchor for body element 0
+        // Verify PagesRebuilt event was emitted with a structural anchor for body element 0
         assert_eq!(result.events.len(), 1, "expected one PagesRebuilt event");
         match &result.events[0] {
             ConductorEvent::PagesRebuilt { pages, anchor } => {
                 assert_eq!(pages, &vec!["/article/edit-test".to_string()]);
-                assert_eq!(anchor.as_deref(), Some("presemble-body-0"));
+                let a = anchor.as_ref().expect("anchor should be Some for EditBodyElement");
+                assert_eq!(a.slot, "body", "expected body slot");
+                assert_eq!(a.node_kind, "paragraph", "expected paragraph kind");
+                assert_eq!(a.offset, 0, "expected offset 0 (first paragraph)");
             }
             other => panic!("expected PagesRebuilt, got {other:?}"),
         }

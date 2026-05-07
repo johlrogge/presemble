@@ -67,6 +67,77 @@ fn line_to_byte_offset(src: &str, line: u32) -> usize {
         .sum()
 }
 
+/// Derive a [`StructuralAnchor`] for `body_idx` in `doc`.
+///
+/// Walks back from `body_idx` to find the nearest preceding heading, then
+/// counts same-kind elements between that heading and `body_idx` to determine
+/// the offset.  Returns `None` if `body_idx` is out of range or the element
+/// kind cannot be mapped.
+fn body_idx_to_structural(
+    doc: &content::Document,
+    file: &str,
+    body_idx: usize,
+) -> Option<editorial_types::StructuralAnchor> {
+    if body_idx >= doc.body.len() {
+        return None;
+    }
+    let target_kind = body_element_kind(&doc.body[body_idx].node)?;
+
+    let mut heading_idx: Option<usize> = None;
+    let mut heading_text: Option<String> = None;
+    for i in (0..body_idx).rev() {
+        if let content::ContentElement::Heading { text, .. } = &doc.body[i].node {
+            heading_idx = Some(i);
+            heading_text = Some(
+                text.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            break;
+        }
+    }
+
+    let offset = match heading_idx {
+        Some(h) => doc
+            .body
+            .iter()
+            .skip(h + 1)
+            .take(body_idx - (h + 1))
+            .filter(|s| body_element_kind(&s.node).as_deref() == Some(&target_kind))
+            .count(),
+        None => doc
+            .body
+            .iter()
+            .take(body_idx)
+            .filter(|s| body_element_kind(&s.node).as_deref() == Some(&target_kind))
+            .count(),
+    };
+
+    Some(editorial_types::StructuralAnchor {
+        file: file.to_string(),
+        slot: "body".to_string(),
+        heading_text,
+        node_kind: target_kind,
+        offset,
+    })
+}
+
+/// Map a [`content::ContentElement`] to its structural kind string, or `None`
+/// for elements that are not individually addressable (separators, links, etc.).
+fn body_element_kind(el: &content::ContentElement) -> Option<String> {
+    use content::ContentElement::*;
+    Some(match el {
+        Heading { .. } => "heading".to_string(),
+        Paragraph { .. } => "paragraph".to_string(),
+        Image { .. } => "image".to_string(),
+        CodeBlock { .. } => "code-block".to_string(),
+        Table { .. } => "table".to_string(),
+        RawHtml { .. } => "raw-html".to_string(),
+        Blockquote { .. } => "blockquote".to_string(),
+        List { .. } => "list".to_string(),
+        Separator | Link { .. } | LinkExpression { .. } => return None,
+    })
+}
 
 #[allow(dead_code)]
 pub struct Conductor {
@@ -1588,10 +1659,10 @@ impl Conductor {
         Ok(sem)
     }
 
-    /// Map a cursor line to the anchor of the nearest body element (or preamble slot).
+    /// Map a cursor line to the structural anchor of the nearest body element.
     ///
     /// Returns `None` if the document cannot be parsed or has no relevant elements.
-    fn body_element_anchor_at_line(&self, src: &str, path: &str, line: u32) -> Option<String> {
+    fn body_element_anchor_at_line(&self, src: &str, path: &str, line: u32) -> Option<editorial_types::StructuralAnchor> {
         // Derive schema stem from path.
         // "content/post/my-post.md" → "post"
         // "content/index.md" or "content/hello.md" → "" (root collection)
@@ -1623,7 +1694,7 @@ impl Conductor {
         // Check body elements — exact match
         for (idx, spanned) in doc.body.iter().enumerate() {
             if spanned.span.start <= byte_offset && byte_offset < spanned.span.end {
-                return Some(format!("presemble-body-{idx}"));
+                return body_idx_to_structural(&doc, path, idx);
             }
         }
 
@@ -1642,10 +1713,37 @@ impl Conductor {
                     closest_idx = idx;
                 }
             }
-            return Some(format!("presemble-body-{closest_idx}"));
+            return body_idx_to_structural(&doc, path, closest_idx);
         }
 
         None
+    }
+
+    /// Compute a [`StructuralAnchor`] for a body element at `body_idx` in `file`.
+    ///
+    /// Reads the document from the in-memory buffer (or disk), parses it, and
+    /// delegates to [`body_idx_to_structural`].  Returns `None` if the document
+    /// cannot be found/parsed or the index is out of range.
+    fn compute_body_anchor(&self, file: &str, body_idx: usize) -> Option<editorial_types::StructuralAnchor> {
+        // Derive schema stem from path: content/{stem}/file.md → stem, content/file.md → ""
+        let bpath = std::path::Path::new(file);
+        let bcomponents: Vec<_> = bpath.components().collect();
+        let stem = if bcomponents.len() == 2 {
+            String::new()
+        } else {
+            bcomponents.get(1)?.as_os_str().to_str()?.to_string()
+        };
+
+        let bslug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let schema_key = site_index::schema_cache_key(&stem, bslug);
+        let schema_src = self.schema_source(&schema_key)?;
+        let grammar = schema::parse_schema(&schema_src).ok()?;
+
+        let abs_path = self.site_dir.join(file);
+        let src = self.document_text(&abs_path)?;
+        let doc = content::parse_and_assign(&src, &grammar).ok()?;
+
+        body_idx_to_structural(&doc, file, body_idx)
     }
 
     /// Path to the .presemble/suggestions directory.
@@ -2762,10 +2860,11 @@ impl Conductor {
                         if pages.is_empty() {
                             CommandResult::ok()
                         } else {
+                            let anchor = self.compute_body_anchor(&file, body_idx);
                             CommandResult::ok_with_events(vec![
                                 ConductorEvent::PagesRebuilt {
                                     pages,
-                                    anchor: Some(format!("presemble-body-{body_idx}")),
+                                    anchor,
                                 },
                             ])
                         }
@@ -6113,5 +6212,96 @@ mod schema_url_routing_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         assert_eq!(conductor.page_url_for_schema("/_schema/foo/bar/baz"), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for body_idx_to_structural
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod body_idx_to_structural_tests {
+    use super::*;
+
+    /// Build a minimal Document from source text using a simple schema that allows a body.
+    fn parse_doc(src: &str) -> content::Document {
+        // Schema with a body section
+        let schema_src = "# Title {#title}\noccurs\n: exactly once\n\n----\nBody.\n";
+        let grammar = schema::parse_schema(schema_src).expect("parse schema");
+        content::parse_and_assign(src, &grammar).expect("parse doc")
+    }
+
+    #[test]
+    fn body_idx_to_structural_no_preceding_heading() {
+        // Body: p0, p1, p2 — no heading before any of them
+        let src = "# Title\n\n----\n\nFirst.\n\nSecond.\n\nThird.\n";
+        let doc = parse_doc(src);
+        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 1)
+            .expect("should produce anchor");
+        assert_eq!(anchor.slot, "body");
+        assert_eq!(anchor.node_kind, "paragraph");
+        assert_eq!(anchor.heading_text, None);
+        assert_eq!(anchor.offset, 1, "second paragraph with no heading has offset 1");
+        assert_eq!(anchor.file, "content/post/x.md");
+    }
+
+    #[test]
+    fn body_idx_to_structural_with_preceding_heading() {
+        // Body: ## Intro, p0, p1
+        // body[0] = heading "Intro", body[1] = p0, body[2] = p1
+        let src = "# Title\n\n----\n\n## Intro\n\nFirst para.\n\nSecond para.\n";
+        let doc = parse_doc(src);
+        // body[2] = "Second para." — heading_text = "Intro", offset = 1
+        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 2)
+            .expect("should produce anchor");
+        assert_eq!(anchor.node_kind, "paragraph");
+        assert_eq!(anchor.heading_text, Some("Intro".to_string()));
+        assert_eq!(anchor.offset, 1, "second paragraph after heading has offset 1");
+    }
+
+    #[test]
+    fn body_idx_to_structural_kind_dispatch_counts_only_matching_kind() {
+        // Body: ## Heading, p0, p1, h2, p2
+        // body[0] = ## Heading, body[1] = p0, body[2] = p1, body[3] = ## Another, body[4] = p2
+        let src = "# Title\n\n----\n\n## Heading\n\nFirst para.\n\nSecond para.\n\n## Another\n\nThird para.\n";
+        let doc = parse_doc(src);
+        // body[2] = "Second para." → after heading "Heading", offset among paragraphs = 1
+        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 2)
+            .expect("should produce anchor");
+        assert_eq!(anchor.node_kind, "paragraph");
+        assert_eq!(anchor.heading_text, Some("Heading".to_string()));
+        assert_eq!(anchor.offset, 1, "second paragraph after heading has offset 1 (heading not counted)");
+
+        // body[3] = ## Another → this is a heading, heading_text from body[0], offset 0
+        let anchor_h = body_idx_to_structural(&doc, "content/post/x.md", 3)
+            .expect("should produce anchor for heading");
+        assert_eq!(anchor_h.node_kind, "heading");
+        assert_eq!(anchor_h.heading_text, Some("Heading".to_string()));
+        assert_eq!(anchor_h.offset, 0, "first heading after heading has offset 0");
+    }
+
+    #[test]
+    fn body_idx_to_structural_normalises_heading_whitespace() {
+        // Heading with extra internal whitespace
+        let src = "# Title\n\n----\n\n## Why  Presemble\n\nA paragraph.\n";
+        let doc = parse_doc(src);
+        // body[1] = paragraph, heading_text should be normalised
+        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 1)
+            .expect("should produce anchor");
+        assert_eq!(
+            anchor.heading_text,
+            Some("Why Presemble".to_string()),
+            "extra whitespace should be collapsed"
+        );
+    }
+
+    #[test]
+    fn body_idx_to_structural_out_of_range_returns_none() {
+        let src = "# Title\n\n----\n\nOnly paragraph.\n";
+        let doc = parse_doc(src);
+        assert!(
+            body_idx_to_structural(&doc, "content/post/x.md", 99).is_none(),
+            "out-of-range index should return None"
+        );
     }
 }
