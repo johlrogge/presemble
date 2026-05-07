@@ -97,7 +97,14 @@ pub enum Command {
     RejectSuggestion {
         id: editorial_types::SuggestionId,
     },
-    /// Browser edit: replace a body element's markdown source and write to disk.
+    /// Browser edit: replace a body element's content. Routes through
+    /// `apply_body_element_edit`, which mutates the NodeStore via NED and
+    /// marks the document dirty (saved on explicit `SaveBuffer` /
+    /// `SaveAllBuffers`). Emits a `PagesRebuilt` event whose `anchor` field
+    /// carries the post-edit `StructuralAnchor` so the browser can scroll
+    /// back to the changed paragraph after reload. Retained alongside
+    /// `ApplyNedProgram` for compatibility with older clients during the
+    /// NED migration.
     EditBodyElement {
         file: String,
         body_idx: usize,
@@ -239,7 +246,11 @@ pub enum Response {
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConductorEvent {
-    /// Pages were rebuilt successfully.
+    /// Pages were rebuilt successfully. `anchor` is `Some` for events
+    /// triggered by a body-element edit, identifying the changed element so
+    /// the browser can restore scroll position after reload; `None` for
+    /// general rebuilds (file watcher, NED program apply without focused
+    /// target, etc.).
     PagesRebuilt {
         pages: Vec<String>,
         anchor: Option<editorial_types::StructuralAnchor>,
@@ -248,7 +259,11 @@ pub enum ConductorEvent {
     BuildFailed {
         error_pages: Vec<String>,
     },
-    /// Browser should scroll to follow cursor.
+    /// Browser should scroll to follow the editor cursor. `anchor` is the
+    /// `StructuralAnchor` of the body element under or nearest to the
+    /// cursor's line, derived by `body_element_anchor_at_line`. Sent on
+    /// cursor movement from LSP/Helix; the browser locates the DOM target
+    /// via `_findByStructuralAnchor` in `inject.js`.
     CursorScrollTo { anchor: editorial_types::StructuralAnchor },
     /// An editorial suggestion was created.
     SuggestionCreated {
