@@ -192,25 +192,20 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                         Ok(conductor::ConductorEvent::CursorScrollTo { anchor }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::ScrollTo { anchor });
                         }
-                        Ok(conductor::ConductorEvent::SuggestionAccepted { pages, .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
-                        }
-                        Ok(conductor::ConductorEvent::SuggestionCreated { suggestion }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
-                                file: Some(suggestion.file.to_string()),
-                            });
-                        }
-                        Ok(conductor::ConductorEvent::SuggestionRejected { file, .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
-                                file: Some(file.to_string()),
-                            });
-                        }
                         Ok(conductor::ConductorEvent::NedSuggestionCreated { suggestion }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
                                 file: Some(suggestion.file.to_string()),
                             });
                         }
                         Ok(conductor::ConductorEvent::NedSuggestionStaled { file, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionAccepted { pages, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionRejected { file, .. }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
                                 file: Some(file.to_string()),
                             });

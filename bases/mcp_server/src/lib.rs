@@ -528,63 +528,7 @@ fn handle_request(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    // Query legacy suggestions first.
-                    let (legacy_lines, legacy_error) = match cond.send(&conductor::Command::GetSuggestions {
-                        file: editorial_types::ContentPath::new(file),
-                    }) {
-                        Ok(conductor::Response::Suggestions(suggestions)) => {
-                            let lines: Vec<String> = suggestions
-                                .iter()
-                                .map(|s| {
-                                    match &s.target {
-                                        editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
-                                            format!(
-                                                "[{}] slot {}: {} \u{2192} \"{}\" ({})",
-                                                s.author,
-                                                slot,
-                                                s.reason,
-                                                proposed_value,
-                                                s.id
-                                            )
-                                        }
-                                        editorial_types::SuggestionTarget::BodyText { search, replace } => {
-                                            format!(
-                                                "[{}] body: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
-                                                s.author,
-                                                s.reason,
-                                                search,
-                                                replace,
-                                                s.id
-                                            )
-                                        }
-                                        editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
-                                            format!(
-                                                "[{}] slot-edit {}: {} \u{2192} \"{}\" \u{2192} \"{}\" ({})",
-                                                s.author,
-                                                slot,
-                                                s.reason,
-                                                search,
-                                                replace,
-                                                s.id
-                                            )
-                                        }
-                                    }
-                                })
-                                .collect();
-                            (lines, None)
-                        }
-                        Ok(conductor::Response::Error(e)) => {
-                            (vec![], Some(format!("[error fetching legacy suggestions: {e}]")))
-                        }
-                        Ok(other) => {
-                            (vec![], Some(format!("[unexpected legacy response: {other:?}]")))
-                        }
-                        Err(e) => {
-                            (vec![], Some(format!("[error fetching legacy suggestions: {e}]")))
-                        }
-                    };
-
-                    // Query NED suggestions second (sequential dispatch is fine for MCP).
+                    // Query NED suggestions.
                     let (ned_lines, ned_error) = match cond.send(&conductor::Command::GetNedSuggestions {
                         file: editorial_types::ContentPath::new(file),
                     }) {
@@ -596,31 +540,20 @@ fn handle_request(
                             (lines, None)
                         }
                         Ok(conductor::Response::Error(e)) => {
-                            (vec![], Some(format!("[error fetching NED suggestions: {e}]")))
+                            (vec![], Some(format!("[error fetching suggestions: {e}]")))
                         }
                         Ok(other) => {
-                            (vec![], Some(format!("[unexpected NED response: {other:?}]")))
+                            (vec![], Some(format!("[unexpected response: {other:?}]")))
                         }
                         Err(e) => {
-                            (vec![], Some(format!("[error fetching NED suggestions: {e}]")))
+                            (vec![], Some(format!("[error fetching suggestions: {e}]")))
                         }
                     };
 
-                    // Merge results.
                     let text = {
                         let mut parts: Vec<String> = Vec::new();
 
-                        if !legacy_lines.is_empty() {
-                            parts.push(legacy_lines.join("\n"));
-                        }
-                        if let Some(err) = legacy_error {
-                            parts.push(err);
-                        }
-
                         if !ned_lines.is_empty() {
-                            if !parts.is_empty() {
-                                parts.push("--- NED suggestions ---".to_string());
-                            }
                             parts.push(ned_lines.join("\n"));
                         }
                         if let Some(err) = ned_error {

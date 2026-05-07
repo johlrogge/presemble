@@ -1,7 +1,7 @@
 use lsp_capabilities::{
     build_transform, content_completions, definition_for_position, hover_for_line,
     link_completions,
-    schema_completions, slot_position, template_completions, template_definition,
+    schema_completions, template_completions, template_definition,
     validate_schema_with_positions, validate_template_paths, validate_with_positions,
     Severity, SlotAction, SlotCompletion, TemplateDefinitionTarget,
 };
@@ -183,7 +183,7 @@ impl PresembleLsp {
             return;
         };
         let positioned = validate_with_positions(&src, &grammar);
-        let mut stored: Vec<StoredDiagnostic> = positioned
+        let stored: Vec<StoredDiagnostic> = positioned
             .iter()
             .map(|p| {
                 let severity = match p.severity {
@@ -205,21 +205,6 @@ impl PresembleLsp {
                 }
             })
             .collect();
-
-        // Query the conductor for pending editorial suggestions on this file.
-        if let Some(content_path) = uri.to_file_path().ok()
-            .and_then(|p| p.strip_prefix(&self.site_dir).ok().map(|rel| rel.to_string_lossy().into_owned()))
-        {
-            let cond = self.conductor.lock().await;
-            let cmd = conductor::Command::GetSuggestions {
-                file: editorial_types::ContentPath::new(&content_path),
-            };
-            if let Ok(conductor::Response::Suggestions(suggestions)) = cond.send(&cmd) {
-                    for suggestion in &suggestions {
-                        stored.push(suggestion_to_diagnostic(suggestion, &src, &grammar));
-                    }
-            }
-        }
 
         let diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
         *self.doc_diagnostics.lock().await.entry(uri.to_string()).or_default() = stored;
@@ -407,108 +392,6 @@ impl LanguageServer for PresembleLsp {
             }
         }
 
-        // Spawn a background task that polls the conductor for new suggestions every 2 seconds.
-        // This ensures diagnostics update when Claude pushes a suggestion via MCP,
-        // without requiring the user to manually edit the file.
-        let client = self.client.clone();
-        let doc_sources = Arc::clone(&self.doc_sources);
-        let doc_diagnostics = Arc::clone(&self.doc_diagnostics);
-        let conductor = Arc::clone(&self.conductor);
-        let site_dir = self.site_dir.clone();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                // Collect the set of open content files and their sources.
-                let open_files: Vec<(String, String)> = {
-                    let sources = doc_sources.lock().await;
-                    sources.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                };
-
-                for (uri_str, src) in open_files {
-                    let Ok(uri) = uri_str.parse::<Url>() else { continue };
-                    let path = uri.to_file_path().unwrap_or_default();
-                    let path_str = path.to_string_lossy().to_string();
-
-                    // Only re-validate content files — templates and schemas don't have suggestions.
-                    let (_schema_stem, grammar) = {
-                        let cond = conductor.lock().await;
-                        let stem = match cond.classify(&path_str) {
-                            Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
-                            Ok(_) => continue,
-                            Err(e) => {
-                                eprintln!("presemble-lsp: poll classify error for {path_str}: {e}");
-                                continue;
-                            }
-                        };
-                        let Some(src_str) = cond.get_schema_source(&stem).ok().flatten() else { continue };
-                        let Some(g) = schema::parse_schema(&src_str).ok() else { continue };
-                        (stem, g)
-                    };
-
-                    // Query current suggestions from conductor.
-                    let suggestions = {
-                        let cond = conductor.lock().await;
-                        let Some(content_path) = path
-                            .strip_prefix(&site_dir)
-                            .ok()
-                            .map(|rel| rel.to_string_lossy().into_owned())
-                        else {
-                            continue;
-                        };
-                        let cmd = conductor::Command::GetSuggestions {
-                            file: editorial_types::ContentPath::new(&content_path),
-                        };
-                        match cond.send(&cmd) {
-                            Ok(conductor::Response::Suggestions(s)) => s,
-                            Ok(other) => {
-                                eprintln!("presemble-lsp: unexpected suggestion response: {other:?}");
-                                continue;
-                            }
-                            Err(e) => {
-                                eprintln!("presemble-lsp: suggestion poll error: {e}");
-                                continue;
-                            }
-                        }
-                    };
-
-                    // Build the stored diagnostics for the current open files.
-                    // We only update if the suggestion count has changed to avoid
-                    // flooding the editor with redundant publishDiagnostics notifications.
-                    let current_suggestion_count = {
-                        let diags = doc_diagnostics.lock().await;
-                        diags.get(&uri_str)
-                            .map(|v| v.iter().filter(|sd| matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. }) | Some(SlotAction::AcceptBodySuggestion { .. }))).count())
-                            .unwrap_or(0)
-                    };
-                    if suggestions.len() == current_suggestion_count {
-                        continue;
-                    }
-
-                    // Re-validate to pick up the new/removed suggestions and publish diagnostics.
-                    // We inline the suggestion-only part here to avoid duplicating full validation.
-                    // Fetch all stored diagnostics, replace suggestion entries, re-publish.
-                    let mut stored: Vec<StoredDiagnostic> = {
-                        let diags = doc_diagnostics.lock().await;
-                        diags.get(&uri_str)
-                            .map(|v| v.iter()
-                                .filter(|sd| !matches!(&sd.action, Some(SlotAction::AcceptSuggestion { .. }) | Some(SlotAction::AcceptBodySuggestion { .. })))
-                                .map(|sd| StoredDiagnostic { lsp_diag: sd.lsp_diag.clone(), action: sd.action.clone() })
-                                .collect())
-                            .unwrap_or_default()
-                    };
-
-                    for suggestion in &suggestions {
-                        stored.push(suggestion_to_diagnostic(suggestion, &src, &grammar));
-                    }
-
-                    let diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
-                    *doc_diagnostics.lock().await.entry(uri_str).or_default() = stored;
-                    client.publish_diagnostics(uri, diags, None).await;
-                }
-            }
-        });
     }
 
     async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
@@ -1015,88 +898,7 @@ impl LanguageServer for PresembleLsp {
         }
     }
 
-    async fn execute_command(&self, params: ExecuteCommandParams) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
-        match params.command.as_str() {
-            "presemble.acceptSuggestion" => {
-                // args: [suggestion_id, file_uri, slot_name, proposed_value]
-                // For body suggestions: args[4] = search, args[5] = replace
-                let args = &params.arguments;
-                let suggestion_id = args.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let file_uri_str = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let slot_name = args.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let proposed_value = args.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let body_search = args.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let body_replace = args.get(5).and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-                // Apply the edit to the document in the editor buffer.
-                if let Ok(uri) = file_uri_str.parse::<Url>() {
-                    let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
-
-                    if !body_search.is_empty() {
-                        // Body text replacement: find the search range and replace it.
-                        let (pos_start, pos_end) = find_text_position(&src, &body_search);
-                        let text_edit = TextEdit {
-                            range: Range {
-                                start: Position { line: pos_start.0, character: pos_start.1 },
-                                end: Position { line: pos_end.0, character: pos_end.1 },
-                            },
-                            new_text: body_replace.clone(),
-                        };
-                        let mut changes = std::collections::HashMap::new();
-                        changes.insert(uri.clone(), vec![text_edit]);
-                        let edit = WorkspaceEdit { changes: Some(changes), ..Default::default() };
-                        let _ = self.client.apply_edit(edit).await;
-                    } else if let Some((grammar, _)) = self.grammar_for_uri(&uri).await {
-                        // Slot suggestion: use the existing slot transform pipeline.
-                        let action = SlotAction::AcceptSuggestion {
-                            suggestion_id: suggestion_id.clone(),
-                            slot_name: slot_name.clone(),
-                            proposed_value: proposed_value.clone(),
-                        };
-                        let text_edits = build_targeted_edits(&src, &grammar, &action);
-                        if !text_edits.is_empty() {
-                            let mut changes = std::collections::HashMap::new();
-                            changes.insert(uri.clone(), text_edits);
-                            let edit = WorkspaceEdit { changes: Some(changes), ..Default::default() };
-                            let _ = self.client.apply_edit(edit).await;
-                        }
-                    }
-                }
-
-                // Notify conductor to mark the suggestion accepted.
-                {
-                    let cond = self.conductor.lock().await;
-                    let id = editorial_types::SuggestionId::from(suggestion_id);
-                    let _ = cond.send(&conductor::Command::AcceptSuggestion { id });
-                }
-
-                // Trigger revalidation to remove the suggestion diagnostic.
-                if let Ok(uri) = file_uri_str.parse::<Url>() {
-                    let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
-                    self.validate_and_publish(uri, src).await;
-                }
-            }
-            "presemble.rejectSuggestion" => {
-                // args: [suggestion_id, file_uri]
-                let args = &params.arguments;
-                let suggestion_id = args.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let file_uri_str = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-                // Notify conductor to dismiss the suggestion.
-                {
-                    let cond = self.conductor.lock().await;
-                    let id = editorial_types::SuggestionId::from(suggestion_id);
-                    let _ = cond.send(&conductor::Command::RejectSuggestion { id });
-                }
-
-                // Trigger revalidation to remove the suggestion diagnostic.
-                if let Ok(uri) = file_uri_str.parse::<Url>() {
-                    let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
-                    self.validate_and_publish(uri, src).await;
-                }
-            }
-            _ => {}
-        }
+    async fn execute_command(&self, _params: ExecuteCommandParams) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
         Ok(None)
     }
 }
@@ -1122,90 +924,3 @@ fn separator_line(src: &str) -> Option<u32> {
         .map(|(i, _)| i as u32)
 }
 
-/// Convert a single editorial suggestion into a `StoredDiagnostic`.
-///
-/// Handles all three `SuggestionTarget` variants and produces an LSP
-/// `INFORMATION`-severity diagnostic with the corresponding `SlotAction`.
-fn suggestion_to_diagnostic(
-    suggestion: &editorial_types::Suggestion,
-    src: &str,
-    grammar: &schema::Grammar,
-) -> StoredDiagnostic {
-    let (pos_start, pos_end, message, action) = match &suggestion.target {
-        editorial_types::SuggestionTarget::Slot { slot, proposed_value } => {
-            let (ps, pe) = slot_position(src, grammar, slot.as_str());
-            let msg = format!(
-                "[{}] {}: \"{}\"",
-                suggestion.author, suggestion.reason, proposed_value
-            );
-            let act = SlotAction::AcceptSuggestion {
-                suggestion_id: suggestion.id.to_string(),
-                slot_name: slot.to_string(),
-                proposed_value: proposed_value.clone(),
-            };
-            (ps, pe, msg, act)
-        }
-        editorial_types::SuggestionTarget::BodyText { search, replace } => {
-            let (ps, pe) = find_text_position(src, search);
-            let msg = format!(
-                "[{}] {}: \"{}\" \u{2192} \"{}\"",
-                suggestion.author, suggestion.reason, search, replace
-            );
-            let act = SlotAction::AcceptBodySuggestion {
-                suggestion_id: suggestion.id.to_string(),
-                search: search.clone(),
-                replace: replace.clone(),
-            };
-            (ps, pe, msg, act)
-        }
-        editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => {
-            let (ps, pe) = slot_position(src, grammar, slot.as_str());
-            let msg = format!(
-                "[{}] {}: slot {} \"{}\" \u{2192} \"{}\"",
-                suggestion.author, suggestion.reason, slot, search, replace
-            );
-            let act = SlotAction::AcceptBodySuggestion {
-                suggestion_id: suggestion.id.to_string(),
-                search: search.clone(),
-                replace: replace.clone(),
-            };
-            (ps, pe, msg, act)
-        }
-    };
-    let lsp_diag = Diagnostic {
-        range: Range {
-            start: Position { line: pos_start.0, character: pos_start.1 },
-            end: Position { line: pos_end.0, character: pos_end.1 },
-        },
-        severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION),
-        message,
-        ..Default::default()
-    };
-    StoredDiagnostic {
-        lsp_diag,
-        action: Some(action),
-    }
-}
-
-/// Find the LSP position range of a text string within source.
-///
-/// Returns `((start_line, start_char), (end_line, end_char))`.
-/// Falls back to `((0,0),(0,0))` if the text is not found.
-fn find_text_position(src: &str, search: &str) -> ((u32, u32), (u32, u32)) {
-    if let Some(byte_offset) = src.find(search) {
-        let before = &src[..byte_offset];
-        let start_line = before.lines().count().saturating_sub(1) as u32;
-        let last_newline = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let start_char = (byte_offset - last_newline) as u32;
-
-        let end_offset = byte_offset + search.len();
-        let before_end = &src[..end_offset];
-        let end_line = before_end.lines().count().saturating_sub(1) as u32;
-        let last_newline_end = before_end.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let end_char = (end_offset - last_newline_end) as u32;
-
-        ((start_line, start_char), (end_line, end_char))
-    } else {
-        ((0, 0), (0, 0))
-    }
-}
