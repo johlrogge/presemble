@@ -453,9 +453,13 @@ var next=allBody[j];
 if(/^H[1-6]$/.test(next.tagName)&&parseInt(next.tagName.charAt(1),10)<=level){break;}
 section.push(next);
 }
-if(section.length>0){map.set(el.id,{level:level,elements:section,heading:el});}
+if(section.length>0){map.set(i,{level:level,elements:section,heading:el});}
 }
 return map;
+}
+function _foldIndexOf(headingEl){
+var allBody=document.querySelectorAll('[data-presemble-slot="body"]');
+return Array.prototype.indexOf.call(allBody,headingEl);
 }
 function _foldSetup(){
 _sectionMap=_foldBuildSectionMap();
@@ -495,21 +499,25 @@ _foldSummaries={};
 }
 function _foldToggle(headingEl){
 if(!_sectionMap){return;}
-var info=_sectionMap.get(headingEl.id);
+var headingIdx=_foldIndexOf(headingEl);
+var info=_sectionMap.get(headingIdx);
 if(!info){return;}
 var isFolded=headingEl.classList.contains('presemble-heading-folded');
 var btn=headingEl.querySelector('.presemble-fold-toggle');
 if(isFolded){
 info.elements.forEach(function(el){el.classList.remove('presemble-folded-content');});
-var summary=_foldSummaries[headingEl.id];
-if(summary){summary.remove();delete _foldSummaries[headingEl.id];}
+var summary=_foldSummaries[headingIdx];
+if(summary){summary.remove();delete _foldSummaries[headingIdx];}
 if(btn){btn.textContent='\u25BC';}
 headingEl.classList.remove('presemble-heading-folded');
 // Re-apply folds for nested headings that were independently folded
 info.elements.forEach(function(el){
-if(/^H[1-6]$/.test(el.tagName)&&el.classList.contains('presemble-heading-folded')&&_sectionMap.has(el.id)){
-var nestedInfo=_sectionMap.get(el.id);
+if(/^H[1-6]$/.test(el.tagName)&&el.classList.contains('presemble-heading-folded')){
+var nestedIdx=_foldIndexOf(el);
+if(_sectionMap.has(nestedIdx)){
+var nestedInfo=_sectionMap.get(nestedIdx);
 if(nestedInfo){nestedInfo.elements.forEach(function(ne){ne.classList.add('presemble-folded-content');});}
+}
 }
 });
 }else{
@@ -524,7 +532,7 @@ foldSummary.className='presemble-fold-summary';
 foldSummary.textContent='\u2026 '+info.elements.length+' element'+(info.elements.length===1?'':'s')+' hidden';
 foldSummary.onclick=function(){_foldToggle(headingEl);};
 headingEl.after(foldSummary);
-_foldSummaries[headingEl.id]=foldSummary;
+_foldSummaries[headingIdx]=foldSummary;
 if(btn){btn.textContent='\u25B6';}
 headingEl.classList.add('presemble-heading-folded');
 }
@@ -826,7 +834,11 @@ body:JSON.stringify({file:bfile,slot:sug.slot,value:sug.proposed_value})});
 }else if(sug.target_type==='body'&&sug.search&&sug.replace){
 var bodyEl=_suggestFindTarget(sug);
 var bodyIdx=0;
-if(bodyEl&&bodyEl.id){var m=bodyEl.id.match(/presemble-body-(\d+)/);if(m){bodyIdx=parseInt(m[1],10);}}
+if(bodyEl){
+var bodySibs=document.querySelectorAll('[data-presemble-slot="body"]');
+bodyIdx=Array.prototype.indexOf.call(bodySibs,bodyEl);
+if(bodyIdx<0){bodyIdx=0;}
+}
 editPromise=fetch('/_presemble/edit-body',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({file:bfile,body_idx:bodyIdx,
 content:(bodyEl&&bodyEl.getAttribute('data-presemble-md')||'').replace(sug.search,sug.replace)})});

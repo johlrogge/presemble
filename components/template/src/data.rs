@@ -488,7 +488,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
     let attr_slot = crate::constants::ATTR_SLOT;
     let attr_md = crate::constants::ATTR_MD;
     let mut parts: Vec<String> = Vec::new();
-    for (idx, spanned) in elements.iter().enumerate() {
+    for spanned in elements.iter() {
         let md_attr = source.map(|s| {
             let raw = &s[spanned.span.start..spanned.span.end];
             format!(r#" {attr_md}="{}""#, crate::dom::html_escape_attr(raw))
@@ -497,23 +497,23 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
             ContentElement::Heading { level, text } => {
                 let l = level.value();
                 let inner = render_inline_markdown(text);
-                format!("<h{l} id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{inner}</h{l}>")
+                format!("<h{l} {attr_slot}=\"body\"{md_attr}>{inner}</h{l}>")
             }
             ContentElement::Paragraph { text } => {
                 let inner = render_inline_markdown(text);
-                format!("<p id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{inner}</p>")
+                format!("<p {attr_slot}=\"body\"{md_attr}>{inner}</p>")
             }
             ContentElement::Image { path, alt } => {
                 let alt_text = alt.as_deref().unwrap_or("");
                 format!(
-                    "<img id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr} src=\"{}\" alt=\"{}\">",
+                    "<img {attr_slot}=\"body\"{md_attr} src=\"{}\" alt=\"{}\">",
                     crate::dom::html_escape_text(path),
                     crate::dom::html_escape_text(alt_text)
                 )
             }
             ContentElement::Link { text, href } => {
                 format!(
-                    "<a id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
+                    "<a {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
                     crate::dom::html_escape_text(href),
                     crate::dom::html_escape_text(text)
                 )
@@ -522,27 +522,29 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
                 let escaped = crate::dom::html_escape_text(code);
                 match language {
                     Some(lang) => format!(
-                        "<pre id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}><code class=\"language-{}\">{}</code></pre>",
+                        "<pre {attr_slot}=\"body\"{md_attr}><code class=\"language-{}\">{}</code></pre>",
                         crate::dom::html_escape_text(lang),
                         escaped
                     ),
-                    None => format!("<pre id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}><code>{}</code></pre>", escaped),
+                    None => format!("<pre {attr_slot}=\"body\"{md_attr}><code>{}</code></pre>", escaped),
                 }
             }
-            ContentElement::Separator => continue,
+            ContentElement::Separator => {
+                format!("<span {attr_slot}=\"body\" hidden></span>")
+            }
             ContentElement::RawHtml { html } => {
                 format!(
-                    "<div id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{html}</div>"
+                    "<div {attr_slot}=\"body\"{md_attr}>{html}</div>"
                 )
             }
             ContentElement::Blockquote { text } => {
                 let inner = render_inline_markdown(text);
-                format!("<blockquote id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{inner}</blockquote>")
+                format!("<blockquote {attr_slot}=\"body\"{md_attr}>{inner}</blockquote>")
             }
             ContentElement::List { source } => {
                 // Render the raw markdown list source to HTML via pulldown-cmark.
                 let html = render_inline_markdown(source);
-                format!("<div id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}>{html}</div>")
+                format!("<div {attr_slot}=\"body\"{md_attr}>{html}</div>")
             }
             ContentElement::LinkExpression { text, target } => {
                 use content::{LinkTarget, LinkText};
@@ -556,7 +558,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
                     LinkTarget::ThreadExpr { source, .. } => crate::dom::html_escape_text(source),
                 };
                 format!(
-                    "<a id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
+                    "<a {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
                     href, display_text
                 )
             }
@@ -579,7 +581,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "<table id=\"presemble-body-{idx}\" {attr_slot}=\"body\"{md_attr}><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
+                    "<table {attr_slot}=\"body\"{md_attr}><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
                     header_cells, body_rows
                 )
             }
@@ -763,7 +765,7 @@ mod tests {
         });
         let html = super::render_body_html(&im::vector![code_block], None);
         assert!(
-            html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code class=\"language-rust\">"),
+            html.contains("<pre data-presemble-slot=\"body\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
         );
         assert!(
@@ -780,7 +782,7 @@ mod tests {
         });
         let html = super::render_body_html(&im::vector![code_block], None);
         assert!(
-            html.contains("<pre id=\"presemble-body-0\" data-presemble-slot=\"body\"><code>"),
+            html.contains("<pre data-presemble-slot=\"body\"><code>"),
             "expected plain pre/code in output; got: {html}"
         );
         assert!(
@@ -806,16 +808,18 @@ mod tests {
     }
 
     #[test]
-    fn render_body_html_assigns_sequential_ids() {
+    fn render_body_html_does_not_emit_legacy_ids() {
         let elements: im::Vector<_> = vec![
             spanned(ContentElement::Paragraph { text: "first".to_string() }),
             spanned(ContentElement::Separator),
             spanned(ContentElement::Paragraph { text: "second".to_string() }),
         ].into_iter().collect();
         let html = render_body_html(&elements, None);
-        assert!(html.contains("id=\"presemble-body-0\""), "first paragraph gets id 0");
-        assert!(html.contains("id=\"presemble-body-2\""), "element after separator gets id 2");
-        assert!(!html.contains("id=\"presemble-body-1\""), "separator produces no HTML");
+        assert!(!html.contains("presemble-body-"),
+            "render_body_html must not emit legacy presemble-body-N ids; got: {html}");
+        let count = html.matches("data-presemble-slot=\"body\"").count();
+        assert_eq!(count, 3, "expected 3 body-slot markers (P, Sep-marker, P); got {count} in: {html}");
+        assert!(html.contains("hidden></span>"), "separator should emit hidden marker; got: {html}");
     }
 
     #[test]
