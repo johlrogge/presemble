@@ -212,6 +212,19 @@ pub fn validate_no_existing(m: &NedMutation) -> Result<(), String> {
     }
 }
 
+/// A structural reference to a content node, anchored on the nearest
+/// preceding heading and offset by node kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct StructuralAnchor {
+    pub file: String,
+    pub slot: String,
+    /// `None` when no preceding heading exists in the slot.
+    pub heading_text: Option<String>,
+    pub node_kind: String,
+    pub offset: usize,
+}
+
 // ── Legacy suggestion types ───────────────────────────────────────────────────
 
 /// Where a suggestion targets within a content file.

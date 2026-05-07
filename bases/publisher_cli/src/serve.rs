@@ -25,10 +25,10 @@ use tokio::sync::broadcast;
 enum BrowserMessage {
     Reload {
         pages: Vec<String>,
-        anchor: Option<String>,
+        anchor: Option<editorial_types::StructuralAnchor>,
     },
     ScrollTo {
-        anchor: String,
+        anchor: editorial_types::StructuralAnchor,
     },
     /// Suggestion overlay metadata changed — no HTML was mutated, no page reload needed.
     SuggestionListChanged {
@@ -36,12 +36,42 @@ enum BrowserMessage {
     },
 }
 
+/// Serialisable projection of a [`editorial_types::StructuralAnchor`] for the
+/// browser wire format, adding a `kind` tag expected by the browser.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct AnchorWire<'a> {
+    kind: &'static str,
+    file: &'a str,
+    slot: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading_text: Option<&'a str>,
+    node_kind: &'a str,
+    offset: usize,
+}
+
+impl<'a> From<&'a editorial_types::StructuralAnchor> for AnchorWire<'a> {
+    fn from(a: &'a editorial_types::StructuralAnchor) -> Self {
+        AnchorWire {
+            kind: "structural",
+            file: &a.file,
+            slot: &a.slot,
+            heading_text: a.heading_text.as_deref(),
+            node_kind: &a.node_kind,
+            offset: a.offset,
+        }
+    }
+}
+
 impl BrowserMessage {
     fn to_json(&self) -> String {
         match self {
             BrowserMessage::Reload { pages, anchor } => {
                 let anchor_json = match anchor {
-                    Some(a) => format!(r#","anchor":"{}""#, a.replace('\\', "\\\\").replace('"', "\\\"")),
+                    Some(a) => {
+                        let wire = AnchorWire::from(a);
+                        format!(r#","anchor":{}"#, serde_json::to_string(&wire).unwrap_or_default())
+                    }
                     None => String::new(),
                 };
                 if pages.is_empty() {
@@ -61,9 +91,10 @@ impl BrowserMessage {
                 }
             }
             BrowserMessage::ScrollTo { anchor } => {
+                let wire = AnchorWire::from(anchor);
                 format!(
-                    r#"{{"type":"scroll","anchor":"{}"}}"#,
-                    anchor.replace('\\', "\\\\").replace('"', "\\\"")
+                    r#"{{"type":"scroll","anchor":{}}}"#,
+                    serde_json::to_string(&wire).unwrap_or_default()
                 )
             }
             BrowserMessage::SuggestionListChanged { file } => {
@@ -1714,19 +1745,9 @@ enum AnchorJson {
     Slot { file: String, slot: String },
     /// Derived from `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)`
     SlotNth { file: String, slot: String, index: usize },
-    /// Derived from `(ned/body-at (ned/doc-by-path "FILE") IDX)`
-    BodyNth { file: String, index: usize },
     /// Derived from `(ned/nth-after (ned/heading-with-text ...) "KIND" N)` or
     /// `(ned/heading-with-text ...)` or `(ned/nth-of-kind ...)`
-    Structural {
-        file: String,
-        slot: String,
-        #[serde(rename = "heading-text")]
-        heading_text: Option<String>,
-        #[serde(rename = "node-kind")]
-        node_kind: String,
-        offset: usize,
-    },
+    Structural(editorial_types::StructuralAnchor),
     /// Fallback — doc found or nothing matched
     Doc { file: Option<String> },
 }
@@ -1900,9 +1921,14 @@ fn parse_usize(src: &str, pos: usize) -> Option<(usize, usize)> {
 /// - `(ned/nth-of-kind (ned/children (ned/slot ...)) "K" N)` → `Structural` (no heading)
 /// - `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)` → `AnchorJson::SlotNth`
 /// - `(ned/slot (ned/doc-by-path "FILE") "SLOT")` → `AnchorJson::Slot`
-/// - `(ned/body-at (ned/doc-by-path "FILE") IDX)` → `AnchorJson::BodyNth`
 /// - `(ned/doc-by-path "FILE")` anywhere → `AnchorJson::Doc { file: Some(...) }`
 /// - anything else → `AnchorJson::Doc { file: None }`
+///
+/// Note: `(ned/body-at ...)` is intentionally NOT matched here. Per ADR-045, the
+/// `BodyNth` variant was removed. Legacy `body-at` selections fall through to the
+/// `find_doc_by_path_anywhere` fallback and produce a file-level indicator.
+/// Translation to `Structural` was rejected because it would require threading
+/// document context through a pure projection layer.
 fn derive_anchor(selection: &str) -> AnchorJson {
     // Most-specific structural forms first
     if let Some(anchor) = try_parse_structural_after_heading(selection) {
@@ -1923,11 +1949,8 @@ fn derive_anchor(selection: &str) -> AnchorJson {
     if let Some(anchor) = try_parse_ned_slot(selection) {
         return anchor;
     }
-    // Try ned/body-at
-    if let Some(anchor) = try_parse_ned_body_at(selection) {
-        return anchor;
-    }
     // Fallback: look for ned/doc-by-path anywhere in the string
+    // (Legacy `ned/body-at` selections reach here intentionally — see ADR-045)
     if let Some(file) = find_doc_by_path_anywhere(selection) {
         return AnchorJson::Doc { file: Some(file) };
     }
@@ -1961,13 +1984,13 @@ fn try_parse_structural_after_heading(src: &str) -> Option<AnchorJson> {
     let pos = skip_ws(src, pos);
     // offset integer
     let (offset, _pos) = parse_usize(src, pos)?;
-    Some(AnchorJson::Structural {
+    Some(AnchorJson::Structural(editorial_types::StructuralAnchor {
         file,
         slot,
         heading_text: Some(heading_text),
         node_kind,
         offset,
-    })
+    }))
 }
 
 /// Try to parse: `(ned/heading-with-text (ned/children (ned/slot ...)) "X")`
@@ -1985,13 +2008,13 @@ fn try_parse_structural_heading_only(src: &str) -> Option<AnchorJson> {
     let pos = skip_ws(src, pos);
     let pos = match_literal(src, pos, "\"")?;
     let (heading_text, _pos) = scan_string(src, pos)?;
-    Some(AnchorJson::Structural {
+    Some(AnchorJson::Structural(editorial_types::StructuralAnchor {
         file,
         slot,
         heading_text: Some(heading_text),
         node_kind: "heading".to_string(),
         offset: 0,
-    })
+    }))
 }
 
 /// Try to parse: `(ned/nth-of-kind (ned/children (ned/slot ...)) "K" N)`
@@ -2007,13 +2030,13 @@ fn try_parse_structural_nth_of_kind(src: &str) -> Option<AnchorJson> {
     let (node_kind, pos) = scan_string(src, pos)?;
     let pos = skip_ws(src, pos);
     let (offset, _pos) = parse_usize(src, pos)?;
-    Some(AnchorJson::Structural {
+    Some(AnchorJson::Structural(editorial_types::StructuralAnchor {
         file,
         slot,
         heading_text: None,
         node_kind,
         offset,
-    })
+    }))
 }
 
 /// Try to parse `(ned/slot (ned/doc-by-path "FILE") "SLOT")`.
@@ -2053,19 +2076,6 @@ fn try_parse_ned_nth_child_slot(src: &str) -> Option<AnchorJson> {
     let pos = skip_ws(src, pos);
     let (index, _pos) = parse_usize(src, pos)?;
     Some(AnchorJson::SlotNth { file, slot, index })
-}
-
-/// Try to parse `(ned/body-at (ned/doc-by-path "FILE") IDX)`.
-fn try_parse_ned_body_at(src: &str) -> Option<AnchorJson> {
-    let start = src.find("(ned/body-at")?;
-    let pos = start + 1; // skip `(`
-    let pos = skip_ws(src, pos);
-    let pos = match_literal(src, pos, "ned/body-at")?;
-    let pos = skip_ws(src, pos);
-    let (file, pos) = parse_doc_by_path(src, pos)?;
-    let pos = skip_ws(src, pos);
-    let (index, _pos) = parse_usize(src, pos)?;
-    Some(AnchorJson::BodyNth { file, index })
 }
 
 /// Scan `src` for any `(ned/doc-by-path "FILE")` occurrence and return the file.
@@ -2164,9 +2174,42 @@ mod tests {
     }
 
     #[test]
-    fn reload_message_with_anchor_includes_field() {
-        let msg = BrowserMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: Some("presemble-body-3".to_string()) };
-        assert!(msg.to_json().contains(r#""anchor":"presemble-body-3""#));
+    fn reload_message_with_structural_anchor_serializes() {
+        let anchor = editorial_types::StructuralAnchor {
+            file: "content/post/hello.md".to_string(),
+            slot: "body".to_string(),
+            heading_text: Some("Why Presemble".to_string()),
+            node_kind: "paragraph".to_string(),
+            offset: 2,
+        };
+        let msg = BrowserMessage::Reload {
+            pages: vec!["/article/hello".to_string()],
+            anchor: Some(anchor),
+        };
+        let json = msg.to_json();
+        assert!(json.contains(r#""anchor":"#), "should have anchor field");
+        assert!(json.contains(r#""kind":"structural""#), "anchor kind should be structural");
+        assert!(json.contains(r#""file":"content/post/hello.md""#), "should have file");
+        assert!(json.contains(r#""node-kind":"paragraph""#), "should have node-kind");
+        assert!(json.contains(r#""offset":2"#), "should have offset");
+        assert!(json.contains(r#""heading-text":"Why Presemble""#), "should have heading-text");
+    }
+
+    #[test]
+    fn scroll_message_with_structural_anchor_serializes() {
+        let anchor = editorial_types::StructuralAnchor {
+            file: "content/post/hello.md".to_string(),
+            slot: "body".to_string(),
+            heading_text: None,
+            node_kind: "paragraph".to_string(),
+            offset: 0,
+        };
+        let msg = BrowserMessage::ScrollTo { anchor };
+        let json = msg.to_json();
+        assert!(json.contains(r#""type":"scroll""#), "should have type scroll");
+        assert!(json.contains(r#""kind":"structural""#), "anchor kind should be structural");
+        assert!(json.contains(r#""node-kind":"paragraph""#), "should have node-kind");
+        assert!(!json.contains("heading-text"), "heading-text should be absent when None");
     }
 
     #[test]
@@ -2257,18 +2300,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_anchor_body_nth_basic() {
-        let sel = r#"(ned/body-at (ned/doc-by-path "posts/foo.md") 2)"#;
-        assert_eq!(
-            derive_anchor(sel),
-            AnchorJson::BodyNth {
-                file: "posts/foo.md".to_string(),
-                index: 2,
-            }
-        );
-    }
-
-    #[test]
     fn derive_anchor_doc_only() {
         let sel = r#"(ned/doc-by-path "posts/bar.md")"#;
         assert_eq!(
@@ -2283,6 +2314,17 @@ mod tests {
     fn derive_anchor_fallback_no_match() {
         let sel = "(some/other-form 42)";
         assert_eq!(derive_anchor(sel), AnchorJson::Doc { file: None });
+    }
+
+    #[test]
+    fn derive_anchor_legacy_body_at_falls_through_to_doc() {
+        // Per ADR-045, legacy (ned/body-at ...) selections degrade to a
+        // file-level Doc indicator rather than translating to Structural.
+        let sel = r#"(ned/body-at (ned/doc-by-path "posts/foo.md") 2)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Doc { file: Some("posts/foo.md".to_string()) },
+        );
     }
 
     #[test]
@@ -2311,18 +2353,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_anchor_body_nth_index_zero() {
-        let sel = r#"(ned/body-at (ned/doc-by-path "content/page.md") 0)"#;
-        assert_eq!(
-            derive_anchor(sel),
-            AnchorJson::BodyNth {
-                file: "content/page.md".to_string(),
-                index: 0,
-            }
-        );
-    }
-
-    #[test]
     fn anchor_json_slot_serializes_correctly() {
         let anchor = AnchorJson::Slot {
             file: "posts/foo.md".to_string(),
@@ -2330,16 +2360,6 @@ mod tests {
         };
         let json = serde_json::to_string(&anchor).unwrap();
         assert_eq!(json, r#"{"kind":"slot","file":"posts/foo.md","slot":"title"}"#);
-    }
-
-    #[test]
-    fn anchor_json_body_nth_serializes_correctly() {
-        let anchor = AnchorJson::BodyNth {
-            file: "posts/foo.md".to_string(),
-            index: 2,
-        };
-        let json = serde_json::to_string(&anchor).unwrap();
-        assert_eq!(json, r#"{"kind":"body-nth","file":"posts/foo.md","index":2}"#);
     }
 
     #[test]
@@ -2426,13 +2446,13 @@ mod tests {
         let sel = r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Why Presemble") "paragraph" 1)"#;
         assert_eq!(
             derive_anchor(sel),
-            AnchorJson::Structural {
+            AnchorJson::Structural(editorial_types::StructuralAnchor {
                 file: "content/index.md".to_string(),
                 slot: "body".to_string(),
                 heading_text: Some("Why Presemble".to_string()),
                 node_kind: "paragraph".to_string(),
                 offset: 1,
-            }
+            })
         );
     }
 
@@ -2441,13 +2461,13 @@ mod tests {
         let sel = r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Intro") "paragraph" 0)"#;
         assert_eq!(
             derive_anchor(sel),
-            AnchorJson::Structural {
+            AnchorJson::Structural(editorial_types::StructuralAnchor {
                 file: "content/index.md".to_string(),
                 slot: "body".to_string(),
                 heading_text: Some("Intro".to_string()),
                 node_kind: "paragraph".to_string(),
                 offset: 0,
-            }
+            })
         );
     }
 
@@ -2456,13 +2476,13 @@ mod tests {
         let sel = r#"(ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/page.md") "body")) "About Us")"#;
         assert_eq!(
             derive_anchor(sel),
-            AnchorJson::Structural {
+            AnchorJson::Structural(editorial_types::StructuralAnchor {
                 file: "content/page.md".to_string(),
                 slot: "body".to_string(),
                 heading_text: Some("About Us".to_string()),
                 node_kind: "heading".to_string(),
                 offset: 0,
-            }
+            })
         );
     }
 
@@ -2471,13 +2491,13 @@ mod tests {
         let sel = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/page.md") "body")) "paragraph" 3)"#;
         assert_eq!(
             derive_anchor(sel),
-            AnchorJson::Structural {
+            AnchorJson::Structural(editorial_types::StructuralAnchor {
                 file: "content/page.md".to_string(),
                 slot: "body".to_string(),
                 heading_text: None,
                 node_kind: "paragraph".to_string(),
                 offset: 3,
-            }
+            })
         );
     }
 
@@ -2486,13 +2506,13 @@ mod tests {
         let sel = "(ned/nth-after\n  (ned/heading-with-text\n    (ned/children\n      (ned/slot\n        (ned/doc-by-path \"content/index.md\")\n        \"body\"\n      )\n    )\n    \"Why Presemble\"\n  )\n  \"paragraph\"\n  2\n)";
         assert_eq!(
             derive_anchor(sel),
-            AnchorJson::Structural {
+            AnchorJson::Structural(editorial_types::StructuralAnchor {
                 file: "content/index.md".to_string(),
                 slot: "body".to_string(),
                 heading_text: Some("Why Presemble".to_string()),
                 node_kind: "paragraph".to_string(),
                 offset: 2,
-            }
+            })
         );
     }
 
@@ -2501,13 +2521,13 @@ mod tests {
         let sel = r#"(ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/page.md") "body")) "\"q\"")"#;
         assert_eq!(
             derive_anchor(sel),
-            AnchorJson::Structural {
+            AnchorJson::Structural(editorial_types::StructuralAnchor {
                 file: "content/page.md".to_string(),
                 slot: "body".to_string(),
                 heading_text: Some("\"q\"".to_string()),
                 node_kind: "heading".to_string(),
                 offset: 0,
-            }
+            })
         );
     }
 
@@ -2536,13 +2556,13 @@ mod tests {
 
     #[test]
     fn anchor_json_structural_serializes_correctly() {
-        let anchor = AnchorJson::Structural {
+        let anchor = AnchorJson::Structural(editorial_types::StructuralAnchor {
             file: "content/index.md".to_string(),
             slot: "body".to_string(),
             heading_text: Some("Why Presemble".to_string()),
             node_kind: "paragraph".to_string(),
             offset: 1,
-        };
+        });
         let json = serde_json::to_string(&anchor).unwrap();
         assert_eq!(
             json,
@@ -2550,13 +2570,13 @@ mod tests {
         );
 
         // heading_text: None → "heading-text":null
-        let anchor_no_heading = AnchorJson::Structural {
+        let anchor_no_heading = AnchorJson::Structural(editorial_types::StructuralAnchor {
             file: "content/page.md".to_string(),
             slot: "body".to_string(),
             heading_text: None,
             node_kind: "paragraph".to_string(),
             offset: 3,
-        };
+        });
         let json2 = serde_json::to_string(&anchor_no_heading).unwrap();
         assert!(json2.contains(r#""heading-text":null"#), "got: {json2}");
     }

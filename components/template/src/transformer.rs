@@ -3254,4 +3254,114 @@ mod tests {
             r#"[{"schema":"event","url":"/event/#_schema"},{"schema":"post","url":"/post/#_schema"}]"#
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // Phase C symmetry test: data.rs and transformer.rs body rendering agree
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn render_body_html_and_transformer_body_render_agree_on_id_omission_and_slot_marker() {
+        use schema::{Span as SchemaSpan, Spanned};
+
+        // --- data.rs path ---
+        let mk_spanned = |node: content::ContentElement| Spanned {
+            node,
+            span: SchemaSpan { start: 0, end: 0 },
+        };
+        let elements: im::Vector<_> = vec![
+            mk_spanned(content::ContentElement::Heading {
+                level: schema::HeadingLevel::new(2).unwrap(),
+                text: "Section".to_string(),
+            }),
+            mk_spanned(content::ContentElement::Paragraph {
+                text: "A paragraph.".to_string(),
+            }),
+            mk_spanned(content::ContentElement::CodeBlock {
+                language: Some("rust".to_string()),
+                code: "fn main() {}\n".to_string(),
+            }),
+        ]
+        .into_iter()
+        .collect();
+        let data_html = crate::data::render_body_html(&elements, None);
+
+        // --- transformer.rs path (native NodeStore) ---
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+
+        let body_name = store.intern("body");
+        let body = store.add_node(node_store::Node::Element(body_name));
+
+        // heading child
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(node_store::Node::Element(heading_name));
+        let level_name = store.intern("level");
+        let level_val = store.add_node(node_store::Node::Integer(2));
+        store.add_edge(heading, node_store::Edge::Attribute { name: level_name, value: level_val });
+        let heading_text = store.add_node(node_store::Node::Text("Section".into()));
+        store.add_edge(heading, node_store::Edge::Child(heading_text));
+        store.add_edge(body, node_store::Edge::Child(heading));
+
+        // paragraph child
+        let para_name = store.intern("paragraph");
+        let para = store.add_node(node_store::Node::Element(para_name));
+        let para_text = store.add_node(node_store::Node::Text("A paragraph.".into()));
+        store.add_edge(para, node_store::Edge::Child(para_text));
+        store.add_edge(body, node_store::Edge::Child(para));
+
+        // code-block child
+        let cb_name = store.intern("code-block");
+        let cb = store.add_node(node_store::Node::Element(cb_name));
+        let lang_name = store.intern("language");
+        let lang_val = store.add_node(node_store::Node::Text("rust".into()));
+        store.add_edge(cb, node_store::Edge::Attribute { name: lang_name, value: lang_val });
+        let code_text = store.add_node(node_store::Node::Text("fn main() {}\n".into()));
+        store.add_edge(cb, node_store::Edge::Child(code_text));
+        store.add_edge(body, node_store::Edge::Child(cb));
+
+        let body_co_name = store.intern("body");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+
+        let graph = NodeStoreGraphView { store, root };
+        let src = r#"<presemble:insert data="body" />"#;
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let result = transform(nodes, &graph, &ctx).unwrap();
+        let transformer_html = serialize_nodes(&result);
+
+        // Both paths must NOT emit legacy presemble-body-N IDs
+        assert!(
+            !data_html.contains("presemble-body-"),
+            "data.rs path must not emit legacy presemble-body-N ids; got: {data_html}"
+        );
+        assert!(
+            !transformer_html.contains("presemble-body-"),
+            "transformer.rs path must not emit legacy presemble-body-N ids; got: {transformer_html}"
+        );
+
+        // Both paths must emit data-presemble-slot="body" on every body element
+        let data_slot_count = data_html.matches("data-presemble-slot=\"body\"").count();
+        let transformer_slot_count = transformer_html.matches("data-presemble-slot=\"body\"").count();
+        assert_eq!(
+            data_slot_count, 3,
+            "data.rs path: expected 3 body-slot markers; got {data_slot_count} in: {data_html}"
+        );
+        assert_eq!(
+            transformer_slot_count, 3,
+            "transformer.rs path: expected 3 body-slot markers; got {transformer_slot_count} in: {transformer_html}"
+        );
+
+        // Both must contain kind-marker tags
+        assert!(data_html.contains("<h2"), "data.rs path: expected <h2 tag; got: {data_html}");
+        assert!(data_html.contains("<p"), "data.rs path: expected <p tag; got: {data_html}");
+        assert!(data_html.contains("<pre"), "data.rs path: expected <pre tag; got: {data_html}");
+
+        assert!(transformer_html.contains("<h2"), "transformer.rs path: expected <h2 tag; got: {transformer_html}");
+        assert!(transformer_html.contains("<p"), "transformer.rs path: expected <p tag; got: {transformer_html}");
+        assert!(transformer_html.contains("<pre"), "transformer.rs path: expected <pre tag; got: {transformer_html}");
+
+        // TODO(post-Phase-C): assert data-presemble-md parity once transformer.rs emits it
+    }
 }

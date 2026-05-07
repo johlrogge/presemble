@@ -252,8 +252,8 @@ window.addEventListener('scroll',function(){if(_presembleScrolling){return;}_use
 ws.onmessage=function(e){
 var m=JSON.parse(e.data);
 if(m.type==='scroll'){
-if(m.anchor){
-var el=document.getElementById(m.anchor);
+if(m.anchor&&typeof m.anchor==='object'){
+var el=_findByStructuralAnchor(m.anchor);
 if(el){
 var r=el.getBoundingClientRect();
 if(r.top<0||r.bottom>window.innerHeight){
@@ -262,6 +262,8 @@ el.scrollIntoView({behavior:'smooth',block:'center'});
 setTimeout(function(){_presembleScrolling=false;},500);
 }
 }
+}else if(m.anchor){
+console.warn('presemble: legacy string anchor ignored');
 }
 return;
 }
@@ -270,18 +272,21 @@ if(window._fetchSuggestionFiles){window._fetchSuggestionFiles();}
 if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
 return;
 }
-if(m.anchor){sessionStorage.setItem('presemble-anchor',m.anchor);}
+if(m.anchor){sessionStorage.setItem('presemble-anchor',JSON.stringify(m.anchor));}
 if(document.querySelector('.presemble-editing,.presemble-body-editor')){return;}
 if(!m.pages||!m.pages.length||m.pages.indexOf(location.pathname)!==-1){location.reload();}
 else{location.href=m.primary;}
 };
 ws.onclose=function(){setTimeout(function(){location.reload();},1000);};
 (function(){
-var anchor=sessionStorage.getItem('presemble-anchor');
-if(!anchor){return;}
+var anchorRaw=sessionStorage.getItem('presemble-anchor');
+if(!anchorRaw){return;}
 sessionStorage.removeItem('presemble-anchor');
+var anchor;
+try{anchor=JSON.parse(anchorRaw);}catch(e){return;}
+if(!anchor||typeof anchor!=='object'){return;}
 function tryScroll(n){
-var el=document.getElementById(anchor);
+var el=_findByStructuralAnchor(anchor);
 if(el){
 el.scrollIntoView({behavior:'smooth',block:'center'});
 el.classList.add('presemble-changed');
@@ -291,6 +296,51 @@ setTimeout(function(){el.classList.remove('presemble-changed');},1500);
 if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){tryScroll(10);});}
 else{tryScroll(10);}
 })();
+// Structural-anchor DOM lookup helpers — shared by scroll, post-reload, and suggest modes.
+function _kindMatchesEl(kind,el){
+var t=el.tagName;
+if(kind==='paragraph')return t==='P';
+if(kind==='heading')return /^H[1-6]$/.test(t);
+if(kind==='code-block') return t === 'PRE';
+if(kind==='blockquote')return t==='BLOCKQUOTE';
+if(kind==='image')return t==='IMG';
+if(kind==='table')return t==='TABLE';
+if (kind === 'list') {
+  if (t === 'UL' || t === 'OL') return true;
+  if (t === 'DIV') {
+    var md = el.getAttribute('data-presemble-md') || '';
+    return /^\s*([-*+]|\d+\.)\s/.test(md);
+  }
+  return false;
+}
+return false;
+}
+function _findByStructuralAnchor(a){
+var nk=a['node-kind'];
+var heading=a['heading-text'];
+var sel='[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]';
+var sibs=document.querySelectorAll(sel);
+if(sibs.length===0){sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"]');}
+var arr=Array.prototype.slice.call(sibs);
+if(heading){
+var anchorIdx=-1;
+for(var i=0;i<arr.length;i++){
+var el=arr[i];
+if(/^H[1-6]$/.test(el.tagName)&&el.innerText.trim().replace(/\s+/g, ' ')===heading){anchorIdx=i;break;}
+}
+if(anchorIdx<0)return null;
+var count=0;
+for(var j=anchorIdx+1;j<arr.length;j++){
+if(_kindMatchesEl(nk,arr[j])){
+if(count===a.offset)return arr[j];
+count++;
+}
+}
+return null;
+}
+var matching=arr.filter(function(el){return _kindMatchesEl(nk,el);});
+return matching[a.offset]||null;
+}
 (function(){
 // Mode is derived from the URL path first (schema URLs), then hash (ADR-042, T11).
 // 'view' is the default; unknown or empty hashes also resolve to 'view'.
@@ -403,9 +453,13 @@ var next=allBody[j];
 if(/^H[1-6]$/.test(next.tagName)&&parseInt(next.tagName.charAt(1),10)<=level){break;}
 section.push(next);
 }
-if(section.length>0){map.set(el.id,{level:level,elements:section,heading:el});}
+if(section.length>0){map.set(i,{level:level,elements:section,heading:el});}
 }
 return map;
+}
+function _foldIndexOf(headingEl){
+var allBody=document.querySelectorAll('[data-presemble-slot="body"]');
+return Array.prototype.indexOf.call(allBody,headingEl);
 }
 function _foldSetup(){
 _sectionMap=_foldBuildSectionMap();
@@ -445,21 +499,25 @@ _foldSummaries={};
 }
 function _foldToggle(headingEl){
 if(!_sectionMap){return;}
-var info=_sectionMap.get(headingEl.id);
+var headingIdx=_foldIndexOf(headingEl);
+var info=_sectionMap.get(headingIdx);
 if(!info){return;}
 var isFolded=headingEl.classList.contains('presemble-heading-folded');
 var btn=headingEl.querySelector('.presemble-fold-toggle');
 if(isFolded){
 info.elements.forEach(function(el){el.classList.remove('presemble-folded-content');});
-var summary=_foldSummaries[headingEl.id];
-if(summary){summary.remove();delete _foldSummaries[headingEl.id];}
+var summary=_foldSummaries[headingIdx];
+if(summary){summary.remove();delete _foldSummaries[headingIdx];}
 if(btn){btn.textContent='\u25BC';}
 headingEl.classList.remove('presemble-heading-folded');
 // Re-apply folds for nested headings that were independently folded
 info.elements.forEach(function(el){
-if(/^H[1-6]$/.test(el.tagName)&&el.classList.contains('presemble-heading-folded')&&_sectionMap.has(el.id)){
-var nestedInfo=_sectionMap.get(el.id);
+if(/^H[1-6]$/.test(el.tagName)&&el.classList.contains('presemble-heading-folded')){
+var nestedIdx=_foldIndexOf(el);
+if(_sectionMap.has(nestedIdx)){
+var nestedInfo=_sectionMap.get(nestedIdx);
 if(nestedInfo){nestedInfo.elements.forEach(function(ne){ne.classList.add('presemble-folded-content');});}
+}
 }
 });
 }else{
@@ -474,7 +532,7 @@ foldSummary.className='presemble-fold-summary';
 foldSummary.textContent='\u2026 '+info.elements.length+' element'+(info.elements.length===1?'':'s')+' hidden';
 foldSummary.onclick=function(){_foldToggle(headingEl);};
 headingEl.after(foldSummary);
-_foldSummaries[headingEl.id]=foldSummary;
+_foldSummaries[headingIdx]=foldSummary;
 if(btn){btn.textContent='\u25B6';}
 headingEl.classList.add('presemble-heading-folded');
 }
@@ -548,56 +606,12 @@ _suggestPreviewState=null;_suggestActiveEl=null;
 _suggestions=[];_suggestIdx=0;
 }
 function _stripMd(s){return s.replace(/`/g,'').replace(/\*\*/g,'').replace(/\*/g,'').replace(/_/g,'');}
-function _kindMatchesEl(kind,el){
-var t=el.tagName;
-if(kind==='paragraph')return t==='P';
-if(kind==='heading')return /^H[1-6]$/.test(t);
-if(kind==='code-block') return t === 'PRE';
-if(kind==='blockquote')return t==='BLOCKQUOTE';
-if(kind==='image')return t==='IMG';
-if(kind==='table')return t==='TABLE';
-if (kind === 'list') {
-  if (t === 'UL' || t === 'OL') return true;
-  if (t === 'DIV') {
-    var md = el.getAttribute('data-presemble-md') || '';
-    return /^\s*([-*+]|\d+\.)\s/.test(md);
-  }
-  return false;
-}
-return false;
-}
-function _suggestFindStructural(a){
-var nk=a['node-kind'];
-var heading=a['heading-text'];
-var sel='[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]';
-var sibs=document.querySelectorAll(sel);
-if(sibs.length===0){sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"]');}
-var arr=Array.prototype.slice.call(sibs);
-if(heading){
-var anchorIdx=-1;
-for(var i=0;i<arr.length;i++){
-var el=arr[i];
-if(/^H[1-6]$/.test(el.tagName)&&el.innerText.trim().replace(/\s+/g, ' ')===heading){anchorIdx=i;break;}
-}
-if(anchorIdx<0)return null;
-var count=0;
-for(var j=anchorIdx+1;j<arr.length;j++){
-if(_kindMatchesEl(nk,arr[j])){
-if(count===a.offset)return arr[j];
-count++;
-}
-}
-return null;
-}
-var matching=arr.filter(function(el){return _kindMatchesEl(nk,el);});
-return matching[a.offset]||null;
-}
 function _suggestFindTarget(sug){
 // NED suggestions: use anchor field when present (source === 'ned')
 if(sug._source==='ned'&&sug.anchor){
 var a=sug.anchor;
 if(a.kind==='structural'){
-return _suggestFindStructural(a);
+return _findByStructuralAnchor(a);
 }
 if(a.kind==='slot-nth'){
 var sibs=document.querySelectorAll('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]');
@@ -606,9 +620,6 @@ return sibs[a.index]||sibs[0]||null;
 }
 if(a.kind==='slot'){
 return document.querySelector('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]')||document.querySelector('[data-presemble-slot="'+a.slot+'"]');
-}
-if(a.kind==='body-nth'){
-return document.getElementById('presemble-body-'+a.index);
 }
 // 'doc' kind — no specific element
 console.warn('NED suggestion '+sug.id+' has doc-level anchor; no DOM target');
@@ -654,7 +665,6 @@ var targetText='';
 if(sug._source==='ned'&&sug.anchor){
 if(sug.anchor.kind==='slot'){targetText=sug.anchor.slot;}
 else if(sug.anchor.kind==='slot-nth'){targetText=sug.anchor.slot+'['+sug.anchor.index+']';}
-else if(sug.anchor.kind==='body-nth'){targetText='body['+sug.anchor.index+']';}
 else if(sug.anchor.kind==='structural'){
 var nk=sug.anchor['node-kind'];
 var off=sug.anchor.offset;
@@ -824,7 +834,11 @@ body:JSON.stringify({file:bfile,slot:sug.slot,value:sug.proposed_value})});
 }else if(sug.target_type==='body'&&sug.search&&sug.replace){
 var bodyEl=_suggestFindTarget(sug);
 var bodyIdx=0;
-if(bodyEl&&bodyEl.id){var m=bodyEl.id.match(/presemble-body-(\d+)/);if(m){bodyIdx=parseInt(m[1],10);}}
+if(bodyEl){
+var bodySibs=document.querySelectorAll('[data-presemble-slot="body"]');
+bodyIdx=Array.prototype.indexOf.call(bodySibs,bodyEl);
+if(bodyIdx<0){bodyIdx=0;}
+}
 editPromise=fetch('/_presemble/edit-body',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({file:bfile,body_idx:bodyIdx,
 content:(bodyEl&&bodyEl.getAttribute('data-presemble-md')||'').replace(sug.search,sug.replace)})});
