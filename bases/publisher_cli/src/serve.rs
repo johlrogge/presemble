@@ -1714,8 +1714,6 @@ enum AnchorJson {
     Slot { file: String, slot: String },
     /// Derived from `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)`
     SlotNth { file: String, slot: String, index: usize },
-    /// Derived from `(ned/body-at (ned/doc-by-path "FILE") IDX)`
-    BodyNth { file: String, index: usize },
     /// Derived from `(ned/nth-after (ned/heading-with-text ...) "KIND" N)` or
     /// `(ned/heading-with-text ...)` or `(ned/nth-of-kind ...)`
     Structural {
@@ -1900,9 +1898,14 @@ fn parse_usize(src: &str, pos: usize) -> Option<(usize, usize)> {
 /// - `(ned/nth-of-kind (ned/children (ned/slot ...)) "K" N)` → `Structural` (no heading)
 /// - `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)` → `AnchorJson::SlotNth`
 /// - `(ned/slot (ned/doc-by-path "FILE") "SLOT")` → `AnchorJson::Slot`
-/// - `(ned/body-at (ned/doc-by-path "FILE") IDX)` → `AnchorJson::BodyNth`
 /// - `(ned/doc-by-path "FILE")` anywhere → `AnchorJson::Doc { file: Some(...) }`
 /// - anything else → `AnchorJson::Doc { file: None }`
+///
+/// Note: `(ned/body-at ...)` is intentionally NOT matched here. Per ADR-045, the
+/// `BodyNth` variant was removed. Legacy `body-at` selections fall through to the
+/// `find_doc_by_path_anywhere` fallback and produce a file-level indicator.
+/// Translation to `Structural` was rejected because it would require threading
+/// document context through a pure projection layer.
 fn derive_anchor(selection: &str) -> AnchorJson {
     // Most-specific structural forms first
     if let Some(anchor) = try_parse_structural_after_heading(selection) {
@@ -1923,11 +1926,8 @@ fn derive_anchor(selection: &str) -> AnchorJson {
     if let Some(anchor) = try_parse_ned_slot(selection) {
         return anchor;
     }
-    // Try ned/body-at
-    if let Some(anchor) = try_parse_ned_body_at(selection) {
-        return anchor;
-    }
     // Fallback: look for ned/doc-by-path anywhere in the string
+    // (Legacy `ned/body-at` selections reach here intentionally — see ADR-045)
     if let Some(file) = find_doc_by_path_anywhere(selection) {
         return AnchorJson::Doc { file: Some(file) };
     }
@@ -2053,19 +2053,6 @@ fn try_parse_ned_nth_child_slot(src: &str) -> Option<AnchorJson> {
     let pos = skip_ws(src, pos);
     let (index, _pos) = parse_usize(src, pos)?;
     Some(AnchorJson::SlotNth { file, slot, index })
-}
-
-/// Try to parse `(ned/body-at (ned/doc-by-path "FILE") IDX)`.
-fn try_parse_ned_body_at(src: &str) -> Option<AnchorJson> {
-    let start = src.find("(ned/body-at")?;
-    let pos = start + 1; // skip `(`
-    let pos = skip_ws(src, pos);
-    let pos = match_literal(src, pos, "ned/body-at")?;
-    let pos = skip_ws(src, pos);
-    let (file, pos) = parse_doc_by_path(src, pos)?;
-    let pos = skip_ws(src, pos);
-    let (index, _pos) = parse_usize(src, pos)?;
-    Some(AnchorJson::BodyNth { file, index })
 }
 
 /// Scan `src` for any `(ned/doc-by-path "FILE")` occurrence and return the file.
@@ -2257,18 +2244,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_anchor_body_nth_basic() {
-        let sel = r#"(ned/body-at (ned/doc-by-path "posts/foo.md") 2)"#;
-        assert_eq!(
-            derive_anchor(sel),
-            AnchorJson::BodyNth {
-                file: "posts/foo.md".to_string(),
-                index: 2,
-            }
-        );
-    }
-
-    #[test]
     fn derive_anchor_doc_only() {
         let sel = r#"(ned/doc-by-path "posts/bar.md")"#;
         assert_eq!(
@@ -2283,6 +2258,17 @@ mod tests {
     fn derive_anchor_fallback_no_match() {
         let sel = "(some/other-form 42)";
         assert_eq!(derive_anchor(sel), AnchorJson::Doc { file: None });
+    }
+
+    #[test]
+    fn derive_anchor_legacy_body_at_falls_through_to_doc() {
+        // Per ADR-045, legacy (ned/body-at ...) selections degrade to a
+        // file-level Doc indicator rather than translating to Structural.
+        let sel = r#"(ned/body-at (ned/doc-by-path "posts/foo.md") 2)"#;
+        assert_eq!(
+            derive_anchor(sel),
+            AnchorJson::Doc { file: Some("posts/foo.md".to_string()) },
+        );
     }
 
     #[test]
@@ -2311,18 +2297,6 @@ mod tests {
     }
 
     #[test]
-    fn derive_anchor_body_nth_index_zero() {
-        let sel = r#"(ned/body-at (ned/doc-by-path "content/page.md") 0)"#;
-        assert_eq!(
-            derive_anchor(sel),
-            AnchorJson::BodyNth {
-                file: "content/page.md".to_string(),
-                index: 0,
-            }
-        );
-    }
-
-    #[test]
     fn anchor_json_slot_serializes_correctly() {
         let anchor = AnchorJson::Slot {
             file: "posts/foo.md".to_string(),
@@ -2330,16 +2304,6 @@ mod tests {
         };
         let json = serde_json::to_string(&anchor).unwrap();
         assert_eq!(json, r#"{"kind":"slot","file":"posts/foo.md","slot":"title"}"#);
-    }
-
-    #[test]
-    fn anchor_json_body_nth_serializes_correctly() {
-        let anchor = AnchorJson::BodyNth {
-            file: "posts/foo.md".to_string(),
-            index: 2,
-        };
-        let json = serde_json::to_string(&anchor).unwrap();
-        assert_eq!(json, r#"{"kind":"body-nth","file":"posts/foo.md","index":2}"#);
     }
 
     #[test]

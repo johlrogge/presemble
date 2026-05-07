@@ -607,9 +607,6 @@ return sibs[a.index]||sibs[0]||null;
 if(a.kind==='slot'){
 return document.querySelector('[data-presemble-slot="'+a.slot+'"][data-presemble-file="'+a.file+'"]')||document.querySelector('[data-presemble-slot="'+a.slot+'"]');
 }
-if(a.kind==='body-nth'){
-return document.getElementById('presemble-body-'+a.index);
-}
 // 'doc' kind — no specific element
 console.warn('NED suggestion '+sug.id+' has doc-level anchor; no DOM target');
 return null;
@@ -654,7 +651,6 @@ var targetText='';
 if(sug._source==='ned'&&sug.anchor){
 if(sug.anchor.kind==='slot'){targetText=sug.anchor.slot;}
 else if(sug.anchor.kind==='slot-nth'){targetText=sug.anchor.slot+'['+sug.anchor.index+']';}
-else if(sug.anchor.kind==='body-nth'){targetText='body['+sug.anchor.index+']';}
 else if(sug.anchor.kind==='structural'){
 var nk=sug.anchor['node-kind'];
 var off=sug.anchor.offset;
