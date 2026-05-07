@@ -4400,7 +4400,6 @@ mod update_document_in_store_tests {
 
 #[cfg(test)]
 mod feature_card_rendering_tests {
-    use super::*;
     use std::collections::HashMap;
 
     // ── schemas ──────────────────────────────────────────────────────────────

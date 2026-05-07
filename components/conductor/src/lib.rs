@@ -14,7 +14,6 @@ pub use editorial_types;
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
-    use site_index;
     use template;
     use node_store_bridge;
     use node_store;
@@ -33,14 +32,6 @@ mod tests {
     fn minimal_post_conductor() -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .schema("post", POST_SCHEMA_SRC)
-            .build();
-        Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap()
-    }
-
-    fn minimal_post_conductor_with_template() -> Conductor {
-        let repo = site_repository::SiteRepository::builder()
-            .schema("post", POST_SCHEMA_SRC)
-            .item_template("post", POST_TEMPLATE_SRC, false)
             .build();
         Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap()
     }

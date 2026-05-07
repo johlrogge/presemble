@@ -1338,7 +1338,7 @@ mod tests {
 
     #[test]
     fn build_article_graph_stores_constraint_record_for_slot_with_occurs() {
-        use schema::{BodyRules, Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+        use schema::{Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
 
         let grammar = Grammar {
             preamble: vec![Slot {
