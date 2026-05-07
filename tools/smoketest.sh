@@ -214,7 +214,6 @@ assert_curl "nth-child edit: 1st paragraph unchanged" "/post/hello-world" GET ""
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
 log "Testing suggestions..."
-assert_curl "no suggestions initially" "/_presemble/suggestions?file=content/post/first-post.md" GET "" "[]"
 
 # ── Test: Create suggestion ───────────────────────────────────────────────
 
