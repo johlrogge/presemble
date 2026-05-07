@@ -192,25 +192,20 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
                         Ok(conductor::ConductorEvent::CursorScrollTo { anchor }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::ScrollTo { anchor });
                         }
-                        Ok(conductor::ConductorEvent::SuggestionAccepted { pages, .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
-                        }
-                        Ok(conductor::ConductorEvent::SuggestionCreated { suggestion }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
-                                file: Some(suggestion.file.to_string()),
-                            });
-                        }
-                        Ok(conductor::ConductorEvent::SuggestionRejected { file, .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
-                                file: Some(file.to_string()),
-                            });
-                        }
                         Ok(conductor::ConductorEvent::NedSuggestionCreated { suggestion }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
                                 file: Some(suggestion.file.to_string()),
                             });
                         }
                         Ok(conductor::ConductorEvent::NedSuggestionStaled { file, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
+                                file: Some(file.to_string()),
+                            });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionAccepted { pages, .. }) => {
+                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
+                        }
+                        Ok(conductor::ConductorEvent::NedSuggestionRejected { file, .. }) => {
                             let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
                                 file: Some(file.to_string()),
                             });
@@ -243,14 +238,7 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/links", get(links_handler))
         .route("/_presemble/schemas", get(schemas_handler))
         .route("/_presemble/create-content", post(create_content_handler))
-        .route("/_presemble/suggestions", get(suggestions_handler))
-        .route("/_presemble/accept-suggestion", post(accept_suggestion_handler))
-        .route("/_presemble/reject-suggestion", post(reject_suggestion_handler))
-        .route("/_presemble/suggest-slot", post(suggest_slot_handler))
-        .route("/_presemble/suggest-body", post(suggest_body_handler))
-        .route("/_presemble/suggest-slot-edit", post(suggest_slot_edit_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
-        .route("/_presemble/suggestion-files", get(suggestion_files_handler))
         .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
         .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
         .route("/_presemble/ned-suggestions/accept", post(ned_suggestions_accept_handler))
@@ -465,199 +453,6 @@ async fn render_handler(
     }
 }
 
-#[derive(serde::Deserialize)]
-struct SuggestSlotRequest {
-    file: String,
-    slot: String,
-    value: String,
-}
-
-#[derive(serde::Deserialize)]
-struct SuggestBodyRequest {
-    file: String,
-    #[allow(dead_code)]
-    body_idx: usize,
-    search: String,
-    replace: String,
-}
-
-async fn suggest_slot_handler(
-    State(state): State<AppState>,
-    axum::Json(req): axum::Json<SuggestSlotRequest>,
-) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestSlotValue {
-        file: editorial_types::ContentPath::new(&req.file),
-        slot: editorial_types::SlotName::new(&req.slot),
-        value: req.value,
-        reason: "Browser suggestion".to_string(),
-        author: editorial_types::Author::Human("browser".to_string()),
-    }))
-}
-
-async fn suggest_body_handler(
-    State(state): State<AppState>,
-    axum::Json(req): axum::Json<SuggestBodyRequest>,
-) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestBodyEdit {
-        file: editorial_types::ContentPath::new(&req.file),
-        search: req.search,
-        replace: req.replace,
-        reason: "Browser suggestion".to_string(),
-        author: editorial_types::Author::Human("browser".to_string()),
-    }))
-}
-
-/// Browser-friendly representation of a suggestion.
-#[derive(serde::Serialize)]
-struct SuggestionJson {
-    id: String,
-    author: String,
-    target_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    slot: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    proposed_value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    search: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    replace: Option<String>,
-    reason: String,
-}
-
-impl From<editorial_types::Suggestion> for SuggestionJson {
-    fn from(s: editorial_types::Suggestion) -> Self {
-        match s.target {
-            editorial_types::SuggestionTarget::Slot { slot, proposed_value } => SuggestionJson {
-                id: s.id.to_string(),
-                author: s.author.to_string(),
-                target_type: "slot",
-                slot: Some(slot.to_string()),
-                proposed_value: Some(proposed_value),
-                search: None,
-                replace: None,
-                reason: s.reason,
-            },
-            editorial_types::SuggestionTarget::BodyText { search, replace } => SuggestionJson {
-                id: s.id.to_string(),
-                author: s.author.to_string(),
-                target_type: "body",
-                slot: None,
-                proposed_value: None,
-                search: Some(search),
-                replace: Some(replace),
-                reason: s.reason,
-            },
-            editorial_types::SuggestionTarget::SlotEdit { slot, search, replace } => SuggestionJson {
-                id: s.id.to_string(),
-                author: s.author.to_string(),
-                target_type: "slot_edit",
-                slot: Some(slot.to_string()),
-                proposed_value: None,
-                search: Some(search),
-                replace: Some(replace),
-                reason: s.reason,
-            },
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct SuggestSlotEditRequest {
-    file: String,
-    slot: String,
-    search: String,
-    replace: String,
-}
-
-async fn suggest_slot_edit_handler(
-    State(state): State<AppState>,
-    axum::Json(req): axum::Json<SuggestSlotEditRequest>,
-) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::SuggestSlotEdit {
-        file: editorial_types::ContentPath::new(&req.file),
-        slot: editorial_types::SlotName::new(&req.slot),
-        search: req.search,
-        replace: req.replace,
-        reason: "Browser suggestion".to_string(),
-        author: editorial_types::Author::Human("browser".to_string()),
-    }))
-}
-
-#[derive(serde::Deserialize)]
-struct SuggestionsQuery {
-    file: String,
-}
-
-async fn suggestions_handler(
-    State(state): State<AppState>,
-    Query(query): Query<SuggestionsQuery>,
-) -> axum::response::Response {
-    use axum::http::{StatusCode, header};
-
-    match state.conductor.send(&conductor::Command::GetSuggestions {
-        file: editorial_types::ContentPath::new(&query.file),
-    }) {
-        Ok(conductor::Response::Suggestions(suggestions)) => {
-            let browser: Vec<SuggestionJson> = suggestions.into_iter().map(Into::into).collect();
-            let json = serde_json::to_vec(&browser).unwrap_or_default();
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                json,
-            ).into_response()
-        }
-        Ok(conductor::Response::Error(e)) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            ).into_response()
-        }
-        Err(e) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            ).into_response()
-        }
-        _ => {
-            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            ).into_response()
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct SuggestionActionRequest {
-    id: String,
-}
-
-/// Mark a suggestion as accepted. The browser JS applies the actual edit
-/// via /_presemble/edit or /_presemble/edit-body before calling this.
-async fn accept_suggestion_handler(
-    State(state): State<AppState>,
-    axum::Json(req): axum::Json<SuggestionActionRequest>,
-) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::AcceptSuggestion {
-        id: editorial_types::SuggestionId::from(req.id),
-    }))
-}
-
-async fn reject_suggestion_handler(
-    State(state): State<AppState>,
-    axum::Json(req): axum::Json<SuggestionActionRequest>,
-) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::RejectSuggestion {
-        id: editorial_types::SuggestionId::from(req.id),
-    }))
-}
-
 async fn dirty_buffers_handler(
     State(state): State<AppState>,
 ) -> axum::response::Response {
@@ -703,47 +498,6 @@ async fn save_all_handler(
     State(state): State<AppState>,
 ) -> axum::Json<EditResponse> {
     conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers))
-}
-
-async fn suggestion_files_handler(
-    State(state): State<AppState>,
-) -> axum::response::Response {
-    use axum::http::{StatusCode, header};
-
-    match state.conductor.send(&conductor::Command::GetSuggestionFiles) {
-        Ok(conductor::Response::SuggestionFiles(paths)) => {
-            let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                json,
-            ).into_response()
-        }
-        Ok(conductor::Response::Error(e)) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            ).into_response()
-        }
-        Err(e) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            ).into_response()
-        }
-        _ => {
-            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            ).into_response()
-        }
-    }
 }
 
 // ── NED suggestion HTTP endpoints ────────────────────────────────────────────

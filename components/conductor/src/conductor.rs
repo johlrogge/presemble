@@ -148,7 +148,6 @@ pub struct Conductor {
     doc_sources: RwLock<HashMap<PathBuf, String>>, // path -> in-memory text
     site_index: RwLock<site_index::SiteIndex>,
     repo: site_repository::SiteRepository,
-    suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::Suggestion>>,
     build_errors: RwLock<HashMap<String, Vec<String>>>,
     node_store: Arc<RwLock<node_store::NodeStore>>,
     url_to_root: RwLock<HashMap<String, node_store::NodeId>>,
@@ -271,7 +270,6 @@ impl Conductor {
             doc_sources: RwLock::new(HashMap::new()),
             site_index: RwLock::new(site_index),
             repo,
-            suggestions: RwLock::new(HashMap::new()),
             build_errors: RwLock::new(HashMap::new()),
             node_store: Arc::new(RwLock::new(node_store::NodeStore::new())),
             url_to_root: RwLock::new(HashMap::new()),
@@ -287,9 +285,9 @@ impl Conductor {
             ),
         };
 
-        // Load persisted pending suggestions from disk
-        let suggestions = conductor.load_suggestions();
-        *conductor.suggestions.write().unwrap_or_else(|e| e.into_inner()) = suggestions;
+        // One-shot cleanup: delete any legacy sug-*.json files left over from
+        // before Wave C-ε (ADR-047). Idempotent — subsequent runs find nothing.
+        Self::delete_legacy_suggestion_files(&conductor.site_dir);
 
         // Load persisted NED suggestions from disk
         let ned_suggestions = Self::load_ned_suggestions(&conductor.ned_suggestions_dir());
@@ -1746,44 +1744,39 @@ impl Conductor {
         body_idx_to_structural(&doc, file, body_idx)
     }
 
-    /// Path to the .presemble/suggestions directory.
-    fn suggestions_dir(&self) -> PathBuf {
-        self.site_dir.join(".presemble").join("suggestions")
-    }
-
-    /// Persist a suggestion to disk as JSON.
-    fn persist_suggestion(&self, suggestion: &editorial_types::Suggestion) -> Result<(), String> {
-        let dir = self.suggestions_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-        let path = dir.join(format!("{}.json", suggestion.id));
-        let json = serde_json::to_string_pretty(suggestion).map_err(|e| format!("json: {e}"))?;
-        std::fs::write(path, json).map_err(|e| format!("write: {e}"))?;
-        Ok(())
-    }
-
-    /// Load all pending suggestions from the suggestions directory.
-    fn load_suggestions(&self) -> HashMap<editorial_types::SuggestionId, editorial_types::Suggestion> {
-        let dir = self.suggestions_dir();
-        let mut map = HashMap::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|e| e == "json")
-                    && let Ok(contents) = std::fs::read_to_string(entry.path())
-                    && let Ok(s) = serde_json::from_str::<editorial_types::Suggestion>(&contents)
-                    && s.status == editorial_types::SuggestionStatus::Pending
-                {
-                    map.insert(s.id.clone(), s);
-                }
-            }
-        }
-        map
-    }
-
     // ── NED suggestion persistence helpers ───────────────────────────────────────
 
     /// Path to the `.presemble/suggestions/ned/` directory.
     fn ned_suggestions_dir(&self) -> PathBuf {
         self.site_dir.join(".presemble").join("suggestions").join("ned")
+    }
+
+    /// Delete legacy top-level `sug-*.json` files from `.presemble/suggestions/`.
+    ///
+    /// These were written by the pre-Wave-C-ε suggestion system (ADR-047).
+    /// The `ned/` subdirectory is left untouched — those are active NED suggestions.
+    /// Idempotent: if no files exist (or the directory doesn't exist), this is a no-op.
+    fn delete_legacy_suggestion_files(site_dir: &Path) {
+        let dir = site_dir.join(".presemble").join("suggestions");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => return, // No suggestions dir; nothing to do.
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Only top-level sug-*.json — skip the `ned/` subdirectory.
+            if path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with("sug-") && name.ends_with(".json")
+                && let Err(e) = std::fs::remove_file(&path)
+            {
+                eprintln!("conductor: failed to delete legacy suggestion {}: {e}", path.display());
+            }
+        }
     }
 
     /// Load all NED suggestions from the `.presemble/suggestions/ned/` directory.
@@ -2584,273 +2577,6 @@ impl Conductor {
                     Err(e) => CommandResult::error(e),
                 }
             }
-            Command::SuggestSlotValue { file, slot, value, reason, author } => {
-                // Attempt to read the current slot value for conflict detection
-                let abs_path = file.resolve(&self.site_dir);
-                let original_value = self.document_text(&abs_path).and_then(|text| {
-                    let stem = std::path::Path::new(file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
-                    let schema_src = self.schema_source(&stem)?;
-                    let grammar = schema::parse_schema(&schema_src).ok()?;
-                    let doc = content::parse_and_assign(&text, &grammar).ok()?;
-                    let graph = template::build_article_graph(&doc, &grammar);
-                    match graph.resolve(&[slot.as_str()]) {
-                        Some(template::Value::Text(t)) => Some(t.clone()),
-                        Some(template::Value::List(items)) => {
-                            let texts: Vec<String> = items.iter().filter_map(|v| {
-                                if let template::Value::Text(t) = v { Some(t.clone()) } else { None }
-                            }).collect();
-                            if texts.is_empty() { None } else { Some(texts.join("\n\n")) }
-                        }
-                        _ => None,
-                    }
-                });
-
-                let created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_string();
-
-                let id = editorial_types::SuggestionId::new();
-                let suggestion = editorial_types::Suggestion {
-                    id: id.clone(),
-                    author,
-                    file,
-                    target: editorial_types::SuggestionTarget::Slot {
-                        slot,
-                        proposed_value: value,
-                    },
-                    reason,
-                    status: editorial_types::SuggestionStatus::Pending,
-                    original_value,
-                    created_at,
-                };
-
-                if let Err(e) = self.persist_suggestion(&suggestion) {
-                    return CommandResult::error(format!("persist error: {e}"));
-                }
-                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), suggestion.clone());
-
-                CommandResult {
-                    response: Response::SuggestionCreated(id),
-                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
-                }
-            }
-            Command::SuggestBodyEdit { file, search, replace, reason, author } => {
-                // Verify the search string exists in the document
-                let abs_path = file.resolve(&self.site_dir);
-                let text = match self.document_text(&abs_path) {
-                    Some(t) => t,
-                    None => return CommandResult::error(format!("cannot read {file}")),
-                };
-                if !text.contains(&search) {
-                    return CommandResult::error(format!("search text not found in {file}: {search:?}"));
-                }
-
-                let original_value = Some(search.clone());
-
-                let created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_string();
-
-                let id = editorial_types::SuggestionId::new();
-                let suggestion = editorial_types::Suggestion {
-                    id: id.clone(),
-                    author,
-                    file,
-                    target: editorial_types::SuggestionTarget::BodyText {
-                        search,
-                        replace,
-                    },
-                    reason,
-                    status: editorial_types::SuggestionStatus::Pending,
-                    original_value,
-                    created_at,
-                };
-
-                if let Err(e) = self.persist_suggestion(&suggestion) {
-                    return CommandResult::error(format!("persist error: {e}"));
-                }
-                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), suggestion.clone());
-
-                CommandResult {
-                    response: Response::SuggestionCreated(id),
-                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
-                }
-            }
-            Command::SuggestSlotEdit { file, slot, search, replace, reason, author } => {
-                // Read the current slot value for conflict detection and to verify search exists
-                let abs_path = file.resolve(&self.site_dir);
-                let original_value = self.document_text(&abs_path).and_then(|text| {
-                    let stem = std::path::Path::new(file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
-                    let schema_src = self.schema_source(&stem)?;
-                    let grammar = schema::parse_schema(&schema_src).ok()?;
-                    let doc = content::parse_and_assign(&text, &grammar).ok()?;
-                    let graph = template::build_article_graph(&doc, &grammar);
-                    match graph.resolve(&[slot.as_str()]) {
-                        Some(template::Value::Text(t)) => Some(t.clone()),
-                        Some(template::Value::List(items)) => {
-                            // Multi-paragraph slot: join all text items
-                            let texts: Vec<String> = items.iter().filter_map(|v| {
-                                if let template::Value::Text(t) = v { Some(t.clone()) } else { None }
-                            }).collect();
-                            if texts.is_empty() { None } else { Some(texts.join(" ")) }
-                        }
-                        _ => None,
-                    }
-                });
-
-                // Require the slot to be readable; a missing slot value means
-                // the suggestion would be guaranteed to fail on accept.
-                let original_text = match original_value {
-                    Some(ref t) => t.clone(),
-                    None => return CommandResult::error(format!(
-                        "cannot read slot '{}' from {}",
-                        slot.as_str(), file.as_str()
-                    )),
-                };
-
-                // Verify the search string exists in the slot value
-                if !original_text.contains(&search) {
-                    return CommandResult::error(format!(
-                        "search text not found in slot '{}' of {file}: {search:?}",
-                        slot.as_str()
-                    ));
-                }
-
-                let created_at = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_string();
-
-                let id = editorial_types::SuggestionId::new();
-                let suggestion = editorial_types::Suggestion {
-                    id: id.clone(),
-                    author,
-                    file,
-                    target: editorial_types::SuggestionTarget::SlotEdit {
-                        slot,
-                        search,
-                        replace,
-                    },
-                    reason,
-                    status: editorial_types::SuggestionStatus::Pending,
-                    original_value: Some(original_text),
-                    created_at,
-                };
-
-                if let Err(e) = self.persist_suggestion(&suggestion) {
-                    return CommandResult::error(format!("persist error: {e}"));
-                }
-                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), suggestion.clone());
-
-                CommandResult {
-                    response: Response::SuggestionCreated(id),
-                    events: vec![ConductorEvent::SuggestionCreated { suggestion }],
-                }
-            }
-            Command::GetSuggestions { file } => {
-                let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
-                let pending: Vec<editorial_types::Suggestion> = suggestions
-                    .values()
-                    .filter(|s| s.file == file && s.status == editorial_types::SuggestionStatus::Pending)
-                    .cloned()
-                    .collect();
-                CommandResult::with_response(Response::Suggestions(pending))
-            }
-            Command::AcceptSuggestion { id } => {
-                // Look up the suggestion
-                let suggestion = {
-                    let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
-                    match suggestions.get(&id) {
-                        Some(s) if s.status == editorial_types::SuggestionStatus::Pending => s.clone(),
-                        Some(_) => return CommandResult::error(format!("suggestion {id} is not pending")),
-                        None => return CommandResult::error(format!("suggestion not found: {id}")),
-                    }
-                };
-
-                // For SlotEdit, apply the search/replace to the slot value and write back.
-                let pages = if let editorial_types::SuggestionTarget::SlotEdit { ref slot, ref search, ref replace } = suggestion.target {
-                    let abs_path = suggestion.file.resolve(&self.site_dir);
-                    // Read the current slot value
-                    let current_slot_value = self.document_text(&abs_path).and_then(|text| {
-                        let stem = std::path::Path::new(suggestion.file.as_str()).components().nth(1)?.as_os_str().to_str()?.to_string();
-                        let schema_src = self.schema_source(&stem)?;
-                        let grammar = schema::parse_schema(&schema_src).ok()?;
-                        let doc = content::parse_and_assign(&text, &grammar).ok()?;
-                        let graph = template::build_article_graph(&doc, &grammar);
-                        match graph.resolve(&[slot.as_str()]) {
-                            Some(template::Value::Text(t)) => Some(t.clone()),
-                            _ => None,
-                        }
-                    });
-
-                    match current_slot_value {
-                        None => return CommandResult::error(format!("cannot read slot '{}' from {}", slot.as_str(), suggestion.file)),
-                        Some(val) if !val.contains(search.as_str()) => {
-                            return CommandResult::error(format!(
-                                "search text not found in current slot '{}' of {} — content may have changed",
-                                slot.as_str(),
-                                suggestion.file
-                            ));
-                        }
-                        Some(val) => {
-                            let new_val = val.replacen(search.as_str(), replace.as_str(), 1);
-                            match self.apply_slot_edit(suggestion.file.as_str(), slot.as_str(), &new_val) {
-                                Ok(rebuilt) => rebuilt,
-                                // Rebuild failure (e.g. no template) is non-fatal: the memory
-                                // buffer was already updated inside apply_slot_edit.
-                                Err(e) => {
-                                    eprintln!("conductor: SlotEdit rebuild failed (non-fatal): {e}");
-                                    vec![]
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // The LSP applies the edit to the editor buffer via applyEdit.
-                    // The conductor only marks the suggestion as accepted — it does NOT
-                    // write to disk. The user saves when ready, which writes normally.
-                    vec![]
-                };
-
-                let mut updated = suggestion.clone();
-                updated.status = editorial_types::SuggestionStatus::Accepted;
-                if let Err(e) = self.persist_suggestion(&updated) {
-                    eprintln!("conductor: failed to persist accepted suggestion: {e}");
-                }
-                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
-
-                CommandResult::ok_with_events(vec![
-                    ConductorEvent::SuggestionAccepted { id, file: suggestion.file, pages },
-                ])
-            }
-            Command::RejectSuggestion { id } => {
-                // Look up the suggestion
-                let suggestion = {
-                    let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
-                    match suggestions.get(&id) {
-                        Some(s) if s.status == editorial_types::SuggestionStatus::Pending => s.clone(),
-                        Some(_) => return CommandResult::error(format!("suggestion {id} is not pending")),
-                        None => return CommandResult::error(format!("suggestion not found: {id}")),
-                    }
-                };
-
-                // Update status in memory and on disk
-                let mut updated = suggestion.clone();
-                updated.status = editorial_types::SuggestionStatus::Rejected;
-                if let Err(e) = self.persist_suggestion(&updated) {
-                    eprintln!("conductor: failed to persist rejected suggestion: {e}");
-                }
-                self.suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
-
-                CommandResult::ok_with_events(vec![
-                    ConductorEvent::SuggestionRejected { id, file: suggestion.file },
-                ])
-            }
             Command::EditBodyElement { file, body_idx, content } => {
                 // Apply the body edit via NED, then post-process to attach the anchor.
                 // `apply_body_element_edit` returns rebuilt URLs; we wrap them in
@@ -3043,17 +2769,6 @@ impl Conductor {
                 }
 
                 CommandResult::ok()
-            }
-            Command::GetSuggestionFiles => {
-                let suggestions = self.suggestions.read().unwrap_or_else(|e| e.into_inner());
-                let files: Vec<String> = suggestions
-                    .values()
-                    .filter(|s| s.status == editorial_types::SuggestionStatus::Pending)
-                    .map(|s| s.file.to_string())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                CommandResult::with_response(Response::SuggestionFiles(files))
             }
             Command::GetNedSuggestionFiles => {
                 let suggestions = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
@@ -3332,11 +3047,15 @@ impl Conductor {
                 if let Err(e) = self.persist_ned_suggestion(&updated) {
                     eprintln!("conductor: failed to persist accepted ned suggestion: {e}");
                 }
+                let accepted_file = updated.file.clone();
                 self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
 
-                let file_cp = sug.file.clone();
                 CommandResult::ok_with_events(vec![
-                    ConductorEvent::SuggestionAccepted { id, file: file_cp, pages },
+                    ConductorEvent::NedSuggestionAccepted {
+                        id,
+                        file: accepted_file,
+                        pages,
+                    },
                 ])
             }
 
@@ -3356,10 +3075,13 @@ impl Conductor {
                 if let Err(e) = self.persist_ned_suggestion(&updated) {
                     eprintln!("conductor: failed to persist rejected ned suggestion: {e}");
                 }
-                self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
+                self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated.clone());
 
                 CommandResult::ok_with_events(vec![
-                    ConductorEvent::SuggestionRejected { id, file: sug.file },
+                    ConductorEvent::NedSuggestionRejected {
+                        id,
+                        file: updated.file.clone(),
+                    },
                 ])
             }
 
@@ -3796,108 +3518,6 @@ mod smoke_tests {
             "grammar should have a 'title' slot; preamble slots: {:?}",
             grammar.preamble.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn suggestion_round_trip() {
-        let tmp = build_minimal_site();
-        let conductor = make_conductor(&tmp);
-
-        let file = editorial_types::ContentPath::new("content/post/hello.md");
-
-        // Submit a slot suggestion
-        let suggest_cmd = Command::SuggestSlotValue {
-            file: file.clone(),
-            slot: editorial_types::SlotName::new("title"),
-            value: "A Better Title".to_string(),
-            reason: "More descriptive".to_string(),
-            author: editorial_types::Author::Human("tester".to_string()),
-        };
-        let suggest_result = conductor.handle_command(suggest_cmd);
-
-        assert!(
-            matches!(suggest_result.response, Response::SuggestionCreated(_)),
-            "expected SuggestionCreated, got {:?}",
-            suggest_result.response
-        );
-
-        // Retrieve suggestions for the file
-        let get_cmd = Command::GetSuggestions { file: file.clone() };
-        let get_result = conductor.handle_command(get_cmd);
-
-        match get_result.response {
-            Response::Suggestions(suggestions) => {
-                assert_eq!(
-                    suggestions.len(),
-                    1,
-                    "expected exactly 1 pending suggestion, got {}",
-                    suggestions.len()
-                );
-                assert_eq!(suggestions[0].file, file);
-                assert!(
-                    matches!(
-                        &suggestions[0].target,
-                        editorial_types::SuggestionTarget::Slot { proposed_value, .. }
-                        if proposed_value == "A Better Title"
-                    ),
-                    "suggestion target should have proposed_value 'A Better Title'"
-                );
-            }
-            other => panic!("expected Suggestions response, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn suggest_slot_edit_round_trip() {
-        let tmp = build_minimal_site();
-        let conductor = make_conductor(&tmp);
-
-        let file = editorial_types::ContentPath::new("content/post/hello.md");
-
-        // Submit a SlotEdit suggestion
-        let suggest_cmd = Command::SuggestSlotEdit {
-            file: file.clone(),
-            slot: editorial_types::SlotName::new("title"),
-            search: "Hello World".to_string(),
-            replace: "Hello Universe".to_string(),
-            author: editorial_types::Author::Human("test".to_string()),
-            reason: "testing slot edit".to_string(),
-        };
-        let suggest_result = conductor.handle_command(suggest_cmd);
-
-        assert!(
-            matches!(suggest_result.response, Response::SuggestionCreated(_)),
-            "expected Response::SuggestionCreated, got {:?}",
-            suggest_result.response
-        );
-
-        // Retrieve suggestions for the file
-        let get_cmd = Command::GetSuggestions { file: file.clone() };
-        let get_result = conductor.handle_command(get_cmd);
-
-        match get_result.response {
-            Response::Suggestions(suggestions) => {
-                assert_eq!(
-                    suggestions.len(),
-                    1,
-                    "expected exactly 1 pending suggestion, got {}",
-                    suggestions.len()
-                );
-                assert_eq!(suggestions[0].file, file);
-                assert!(
-                    matches!(
-                        &suggestions[0].target,
-                        editorial_types::SuggestionTarget::SlotEdit { slot, search, replace }
-                        if slot.as_str() == "title"
-                            && search == "Hello World"
-                            && replace == "Hello Universe"
-                    ),
-                    "suggestion target should be SlotEdit with correct slot/search/replace, got {:?}",
-                    suggestions[0].target
-                );
-            }
-            other => panic!("expected Suggestions response, got {:?}", other),
-        }
     }
 
     #[test]
@@ -5367,10 +4987,11 @@ mod ned_suggestion_handler_tests {
             accept_result.response
         );
 
-        // Should emit SuggestionAccepted event
+        // AcceptNedSuggestion should emit NedSuggestionAccepted event
         assert!(
-            accept_result.events.iter().any(|ev| matches!(ev, ConductorEvent::SuggestionAccepted { .. })),
-            "should emit SuggestionAccepted event"
+            accept_result.events.iter().any(|ev| matches!(ev, ConductorEvent::NedSuggestionAccepted { .. })),
+            "should emit NedSuggestionAccepted event; got: {:?}",
+            accept_result.events
         );
 
         // Status in memory should be Accepted
@@ -5476,10 +5097,11 @@ mod ned_suggestion_handler_tests {
             reject_result.response
         );
 
-        // Should emit SuggestionRejected event
+        // RejectNedSuggestion should emit NedSuggestionRejected event
         assert!(
-            reject_result.events.iter().any(|ev| matches!(ev, ConductorEvent::SuggestionRejected { .. })),
-            "should emit SuggestionRejected event"
+            reject_result.events.iter().any(|ev| matches!(ev, ConductorEvent::NedSuggestionRejected { .. })),
+            "should emit NedSuggestionRejected event; got: {:?}",
+            reject_result.events
         );
 
         // Status in memory should be Rejected

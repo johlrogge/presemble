@@ -60,43 +60,6 @@ pub enum Command {
     Shutdown,
     /// Editor cursor moved to a new position.
     CursorMoved { path: String, line: u32 },
-    /// Create an editorial suggestion without applying it.
-    SuggestSlotValue {
-        file: editorial_types::ContentPath,
-        slot: editorial_types::SlotName,
-        value: String,
-        reason: String,
-        author: editorial_types::Author,
-    },
-    /// Suggest a text replacement in the body of a content file.
-    SuggestBodyEdit {
-        file: editorial_types::ContentPath,
-        search: String,
-        replace: String,
-        reason: String,
-        author: editorial_types::Author,
-    },
-    /// Suggest a search/replace edit scoped to a specific slot.
-    SuggestSlotEdit {
-        file: editorial_types::ContentPath,
-        slot: editorial_types::SlotName,
-        search: String,
-        replace: String,
-        reason: String,
-        author: editorial_types::Author,
-    },
-    /// Query all pending suggestions for a file.
-    GetSuggestions {
-        file: editorial_types::ContentPath,
-    },
-    /// Accept a suggestion: apply the edit and mark as accepted.
-    AcceptSuggestion {
-        id: editorial_types::SuggestionId,
-    },
-    /// Reject a suggestion: dismiss without applying.
-    RejectSuggestion {
-        id: editorial_types::SuggestionId,
-    },
     /// Browser edit: replace a body element's content. Routes through
     /// `apply_body_element_edit`, which mutates the NodeStore via NED and
     /// marks the document dirty (saved on explicit `SaveBuffer` /
@@ -122,8 +85,6 @@ pub enum Command {
     },
     /// List all dirty (unsaved) buffers.
     GetDirtyBuffers,
-    /// List distinct file paths that have at least one pending suggestion.
-    GetSuggestionFiles,
     /// List distinct file paths that have at least one pending NED suggestion.
     GetNedSuggestionFiles,
     /// Write a dirty buffer to disk.
@@ -202,14 +163,10 @@ pub enum Response {
     Pong,
     /// A suggestion was created successfully.
     SuggestionCreated(editorial_types::SuggestionId),
-    /// List of pending suggestions for a file.
-    Suggestions(Vec<editorial_types::Suggestion>),
     /// Content file created successfully. Returns the URL path.
     ContentCreated(String),
     /// List of dirty (unsaved) buffer paths.
     DirtyBuffers(Vec<String>),
-    /// Distinct file paths that have at least one pending suggestion (sorted).
-    SuggestionFiles(Vec<String>),
     /// Distinct file paths that have at least one pending NED suggestion (sorted).
     NedSuggestionFiles(Vec<String>),
     /// Classification of a file path.
@@ -265,21 +222,6 @@ pub enum ConductorEvent {
     /// cursor movement from LSP/Helix; the browser locates the DOM target
     /// via `_findByStructuralAnchor` in `inject.js`.
     CursorScrollTo { anchor: editorial_types::StructuralAnchor },
-    /// An editorial suggestion was created.
-    SuggestionCreated {
-        suggestion: editorial_types::Suggestion,
-    },
-    /// A suggestion was accepted and applied.
-    SuggestionAccepted {
-        id: editorial_types::SuggestionId,
-        file: editorial_types::ContentPath,
-        pages: Vec<String>,
-    },
-    /// A suggestion was rejected.
-    SuggestionRejected {
-        id: editorial_types::SuggestionId,
-        file: editorial_types::ContentPath,
-    },
     /// A NED-based editorial suggestion was created.
     NedSuggestionCreated {
         suggestion: editorial_types::NedSuggestion,
@@ -289,6 +231,18 @@ pub enum ConductorEvent {
         id: editorial_types::SuggestionId,
         file: editorial_types::ContentPath,
         reason: String,
+    },
+    /// A NED-based suggestion was accepted and its mutation applied.
+    /// `pages` lists the pages that were rebuilt as a result of the mutation.
+    NedSuggestionAccepted {
+        id: editorial_types::SuggestionId,
+        file: editorial_types::ContentPath,
+        pages: Vec<String>,
+    },
+    /// A NED-based suggestion was rejected (dismissed without applying).
+    NedSuggestionRejected {
+        id: editorial_types::SuggestionId,
+        file: editorial_types::ContentPath,
     },
 }
 
@@ -458,6 +412,48 @@ mod protocol_tests {
                 assert_eq!(a.heading_text, None);
                 assert_eq!(a.node_kind, "paragraph");
                 assert_eq!(a.offset, 0);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ned_suggestion_accepted_event_roundtrips_through_json() {
+        use editorial_types::{ContentPath, SuggestionId};
+        let id = SuggestionId::from("test-accept-id".to_string());
+        let file = ContentPath::new("content/post/hello.md");
+        let event = ConductorEvent::NedSuggestionAccepted {
+            id: id.clone(),
+            file: file.clone(),
+            pages: vec!["/post/hello".to_string(), "/post/world".to_string()],
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            ConductorEvent::NedSuggestionAccepted { id: d_id, file: d_file, pages } => {
+                assert_eq!(d_id, id);
+                assert_eq!(d_file, file);
+                assert_eq!(pages, vec!["/post/hello".to_string(), "/post/world".to_string()]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ned_suggestion_rejected_event_roundtrips_through_json() {
+        use editorial_types::{ContentPath, SuggestionId};
+        let id = SuggestionId::from("test-reject-id".to_string());
+        let file = ContentPath::new("content/post/hello.md");
+        let event = ConductorEvent::NedSuggestionRejected {
+            id: id.clone(),
+            file: file.clone(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            ConductorEvent::NedSuggestionRejected { id: d_id, file: d_file } => {
+                assert_eq!(d_id, id);
+                assert_eq!(d_file, file);
             }
             other => panic!("unexpected variant: {other:?}"),
         }

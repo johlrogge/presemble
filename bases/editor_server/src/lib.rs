@@ -149,69 +149,6 @@ pub fn register_conductor_builtins(root: &evaluator::RootEnv, conductor: &Arc<Co
         });
     }
 
-    {
-        let cond = Arc::clone(conductor);
-        prim_reg(root, "suggest", "(suggest file slot value reason)", "Submit a slot value suggestion.", move |args: Vec<template::Value>| {
-            if args.len() < 4 {
-                return Err("suggest requires 4 arguments: file, slot, value, reason".into());
-            }
-            let file_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: file must be a string".into()),
-            };
-            let slot_str = match &args[1] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: slot must be a string".into()),
-            };
-            let value_str = match &args[2] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: value must be a string".into()),
-            };
-            let reason_str = match &args[3] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("suggest: reason must be a string".into()),
-            };
-            match cond.handle_command(Command::SuggestSlotValue {
-                file: editorial_types::ContentPath::new(file_str),
-                slot: editorial_types::SlotName::new(slot_str),
-                value: value_str,
-                reason: reason_str,
-                author: editorial_types::Author::Tool("repl".to_string()),
-            }).response {
-                Response::SuggestionCreated(id) => Ok(template::Value::Text(id.to_string())),
-                Response::Error(e) => Err(e),
-                _ => Err("unexpected response from suggest".into()),
-            }
-        });
-    }
-
-    {
-        let cond = Arc::clone(conductor);
-        prim_reg(root, "get-suggestions", "(get-suggestions file)", "Get pending suggestions for a file.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("get-suggestions requires 1 argument: file".into());
-            }
-            let file_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("get-suggestions: file must be a string".into()),
-            };
-            match cond.handle_command(Command::GetSuggestions {
-                file: editorial_types::ContentPath::new(file_str),
-            }).response {
-                Response::Suggestions(suggestions) => {
-                    let values: Vec<template::Value> = suggestions.iter().map(|s| {
-                        let mut record = template::DataGraph::new();
-                        record.insert("id", template::Value::Text(s.id.to_string()));
-                        record.insert("author", template::Value::Text(s.author.to_string()));
-                        record.insert("reason", template::Value::Text(s.reason.clone()));
-                        template::Value::Record(record)
-                    }).collect();
-                    Ok(template::Value::List(values))
-                }
-                _ => Err("unexpected response from get-suggestions".into()),
-            }
-        });
-    }
 }
 
 struct PresembleNreplHandler {
