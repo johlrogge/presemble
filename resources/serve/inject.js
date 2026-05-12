@@ -710,6 +710,7 @@ el.innerHTML=before+'<del class="presemble-diff-del">'+needleEsc+'</del><ins cla
 }else if(sug._source==='ned'&&sug.mutation&&sug.mutation.SetText){
 el.innerHTML='<del class="presemble-diff-del">'+el.textContent+'</del> <ins class="presemble-diff-ins">'+sug.mutation.SetText+'</ins>';
 }
+}
 _suggestRenderToolbar();
 }
 function _suggestNavigate(dir){

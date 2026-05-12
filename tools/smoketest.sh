@@ -46,6 +46,43 @@ if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
     sleep 2
 fi
 
+# ── Static check: browser JS resources parse ───────────────────────────────
+# Catches JS syntax errors before we spend a minute building presemble.
+# Add new JS resources to BROWSER_JS_FILES below.
+
+BROWSER_JS_FILES=(
+    "resources/serve/inject.js"
+)
+
+log "Static-checking browser JS resources..."
+if ! command -v deno &> /dev/null; then
+    fail "deno not available (required for JS parse check — add pkgs.deno to devenv.nix and re-enter shell)"
+    echo -e "══════════════════════════════════════"
+    echo -e "  ${GREEN}$PASS passed${NC}, ${RED}$FAIL failed${NC}"
+    echo -e "${RED}Failures:${ERRORS}${NC}"
+    echo -e "══════════════════════════════════════"
+    exit 1
+fi
+
+JS_CHECK_FAILED=0
+for js_file in "${BROWSER_JS_FILES[@]}"; do
+    if deno check "$js_file" 2>&1 | tee /tmp/presemble-deno-check.log | grep -qE '^(error|TS[0-9]+)'; then
+        fail "deno check $js_file"
+        cat /tmp/presemble-deno-check.log
+        JS_CHECK_FAILED=1
+    else
+        pass "deno check $js_file"
+    fi
+done
+
+if [ $JS_CHECK_FAILED -eq 1 ]; then
+    echo -e "══════════════════════════════════════"
+    echo -e "  ${GREEN}$PASS passed${NC}, ${RED}$FAIL failed${NC}"
+    echo -e "${RED}Failures:${ERRORS}${NC}"
+    echo -e "══════════════════════════════════════"
+    exit 1
+fi
+
 # Assert a curl response contains expected text
 assert_curl() {
     local desc="$1" url="$2" method="${3:-GET}" body="${4:-}" expected="$5"

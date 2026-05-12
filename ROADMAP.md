@@ -749,6 +749,11 @@ These are real parts of the vision, not cut — just not needed to prove the cor
 - The vision is preserved and rearchitected in M14
 - `s3_asset_store`, `cdn_asset_store`, and Unsplash browser remain on the long-term horizon (M14 Phase 3)
 
+**Browser JS to TypeScript migration:**
+- `resources/serve/inject.js` is hand-written JS shipped as a static resource. As it grows it becomes brittle to syntax-level regressions (one such regression slipped through `tools/smoketest.sh` in May 2026 because the smoketest only spoke HTTP, not JS — fixed by adding `deno check` to the smoketest).
+- Migration would give us proper structural editing, types, and a build step that fails loudly on parse errors. Likely shape: TypeScript source + a small `deno bundle` (or `esbuild`) step that produces the served `inject.js`.
+- Not scheduled — M14 (assets) and conductor jack-in are higher priority. Recording here so the option is visible when revisiting browser-side architecture.
+
 **Other deferred items:**
 - Real-time multiplayer editing
 - Comments, suggestions, track changes (beyond M5 suggest mode)

@@ -22,6 +22,7 @@ in
     pkgs.neovim
     pkgs.rep
     pkgs.jet
+    pkgs.deno
   ];
 
   claude.code.mcpServers.presemble = {
