@@ -25,17 +25,11 @@ write_files:
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
 
-  # Stopgap Caddy config. Replace with a real vhost once DNS exists:
-  #   conductor.example.com {
-  #       reverse_proxy localhost:<conductor-port>
-  #   }
-  # A DNS A record -> the floating IP lets Caddy auto-provision Let's Encrypt.
-  - path: /etc/caddy/Caddyfile
-    content: |
-      :80 {
-          respond "presemble: Caddy up. Conductor not yet deployed." 200
-      }
-
+# NOTE: the Caddyfile is intentionally NOT in write_files. Pre-creating
+# /etc/caddy/Caddyfile before the package is installed triggers a dpkg conffile
+# prompt during `apt install caddy`, which aborts the postinst that creates the
+# `caddy` system user (service then fails with status=217/USER). So: install
+# caddy first (clean), then drop our config in runcmd.
 runcmd:
   - systemctl reload ssh
   # Caddy is not in Debian repos; use the official cloudsmith apt repo.
@@ -43,5 +37,16 @@ runcmd:
   - curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
   - apt-get update -qq
   - DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+  # Now that /etc/caddy exists and the caddy user is created, write our config.
+  - |
+    cat > /etc/caddy/Caddyfile <<'CADDY'
+    # Stopgap. Replace with a real vhost once DNS exists:
+    #   conductor.example.com {
+    #       reverse_proxy localhost:<conductor-port>
+    #   }
+    :80 {
+        respond "presemble: Caddy up. Conductor not yet deployed." 200
+    }
+    CADDY
   - systemctl enable --now caddy
-  - systemctl reload caddy || systemctl restart caddy
+  - systemctl reload caddy
