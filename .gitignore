@@ -15,3 +15,15 @@ bases/publisher_cli/target
 site/.presemble/
 .nrepl-port
 /result
+
+# OpenTofu / Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

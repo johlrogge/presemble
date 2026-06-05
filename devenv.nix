@@ -24,6 +24,8 @@ in
     pkgs.jet
     pkgs.deno
     pkgs.openstackclient
+    pkgs.opentofu
+    pkgs.tofu-ls
   ];
 
   claude.code.mcpServers.presemble = {

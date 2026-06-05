@@ -1,0 +1,47 @@
+#cloud-config
+# First-boot configuration for the presemble conductor box.
+# Idempotent: re-running (fresh instance) converges to the same state.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - unattended-upgrades        # preinstalled on Debian cloud image; explicit here
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+  - curl
+  - gnupg
+
+write_files:
+  # Disable root SSH — the `debian` user has sudo.
+  - path: /etc/ssh/sshd_config.d/99-hardening.conf
+    content: |
+      PermitRootLogin no
+
+  # Automatic security updates (the low-maintenance win).
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  # Stopgap Caddy config. Replace with a real vhost once DNS exists:
+  #   conductor.example.com {
+  #       reverse_proxy localhost:<conductor-port>
+  #   }
+  # A DNS A record -> the floating IP lets Caddy auto-provision Let's Encrypt.
+  - path: /etc/caddy/Caddyfile
+    content: |
+      :80 {
+          respond "presemble: Caddy up. Conductor not yet deployed." 200
+      }
+
+runcmd:
+  - systemctl reload ssh
+  # Caddy is not in Debian repos; use the official cloudsmith apt repo.
+  - curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update -qq
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+  - systemctl enable --now caddy
+  - systemctl reload caddy || systemctl restart caddy
