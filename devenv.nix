@@ -23,6 +23,7 @@ in
     pkgs.rep
     pkgs.jet
     pkgs.deno
+    pkgs.openstackclient
   ];
 
   claude.code.mcpServers.presemble = {
