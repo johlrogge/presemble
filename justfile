@@ -16,6 +16,25 @@ secrets-file := env_var('HOME') / ".config/presemble/secrets.env"
 default:
     @just --list
 
+# --- conductor (openstack module) ---
+
+# Preview changes to the conductor box / network.
+conductor-plan:
+    tofu -chdir=infra/openstack plan
+
+# Apply the conductor box / network (non-interactive; plan first).
+conductor-apply:
+    tofu -chdir=infra/openstack apply -auto-approve
+
+# Re-provision the conductor box from scratch: destroys the instance and creates
+# a fresh one from cloud-init. The floating IP re-associates to the new box, so
+# its public address is unchanged. (Brief downtime — the blue-green workstream
+# will make this zero-downtime later.)
+conductor-replace:
+    tofu -chdir=infra/openstack apply -auto-approve -replace=openstack_compute_instance_v2.conductor
+
+# --- DNS (dnsimple module) ---
+
 # One-time provider download for the DNS module.
 dns-init:
     tofu -chdir=infra/dns init
