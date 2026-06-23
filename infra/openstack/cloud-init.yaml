@@ -40,12 +40,13 @@ runcmd:
   # Now that /etc/caddy exists and the caddy user is created, write our config.
   - |
     cat > /etc/caddy/Caddyfile <<'CADDY'
-    # Stopgap. Replace with a real vhost once DNS exists:
-    #   conductor.example.com {
-    #       reverse_proxy localhost:<conductor-port>
-    #   }
-    :80 {
-        respond "presemble: Caddy up. Conductor not yet deployed." 200
+    # conductor.presemble.pub — Caddy obtains and auto-renews a real Let's Encrypt
+    # certificate via the HTTP-01 challenge (port 80 is open and DNS resolves to
+    # this box). No ACME token lives here; renewal is fully on-box and continuous.
+    # Once the conductor binary is deployed, replace the `respond` line with:
+    #   reverse_proxy localhost:<conductor-port>
+    conductor.presemble.pub {
+        respond "presemble: conductor not yet deployed (TLS live)" 200
     }
     CADDY
   - systemctl enable --now caddy
