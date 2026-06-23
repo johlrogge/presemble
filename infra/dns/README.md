@@ -15,15 +15,18 @@ Currently it publishes one record:
    at DNSimple). The zone must exist in your DNSimple account before applying.
 2. **The conductor exists** in the `infra/openstack` module (it owns the
    floating IP this record points at).
-3. **Credentials in the environment** — never in the repo. The provider reads:
+3. **Credentials in a file outside the repo** — `~/.config/presemble/secrets.env`,
+   `chmod 600`, the same plaintext pattern as `~/.config/openstack/clouds.yaml`:
 
-       export DNSIMPLE_ACCOUNT=<account-id>
-       export DNSIMPLE_TOKEN=<account-api-token>
+       DNSIMPLE_ACCOUNT=<account-id>
+       DNSIMPLE_TOKEN=<account-api-token>
 
    Create the token under DNSimple → Account → Automation → API tokens. It is an
    *account* token (DNSimple has no per-domain tokens), so treat it like the
-   OpenStack password: shell env only, never committed. It is deliberately not a
-   Tofu variable, so it can't leak into state or a plan log.
+   OpenStack password. The `just dns-*` targets **source this file just-in-time**
+   into the single `tofu` call — the token is never exported into your shell,
+   never in shell history, and (because it's not a Tofu variable) never in state
+   or a plan log.
 
 ## Usage
 
@@ -36,16 +39,17 @@ The floating IP is not hardcoded — a `just` target looks it up from the
 
 `dns-plan`/`dns-apply` run, under the hood:
 
-    tofu -chdir=infra/dns <cmd> -var floating_ip=$(tofu -chdir=infra/openstack output -raw floating_ip)
+    set -a && . ~/.config/presemble/secrets.env && set +a && \
+      tofu -chdir=infra/dns <cmd> -var floating_ip=$(tofu -chdir=infra/openstack output -raw floating_ip)
 
-So `infra/openstack` must have been applied first (its state holds the IP).
+So `infra/openstack` must have been applied first (its state holds the IP), and
+`~/.config/presemble/secrets.env` must exist.
 
 ## Sandbox
 
-DNSimple runs a free [sandbox] for dry runs. Point a throwaway zone there and:
-
-    export DNSIMPLE_SANDBOX=true        # or: -var dnsimple_sandbox=true
-    just dns-plan
+DNSimple runs a free [sandbox] for dry runs. Point a throwaway zone there and add
+`DNSIMPLE_SANDBOX=true` to `~/.config/presemble/secrets.env` (or pass
+`-var dnsimple_sandbox=true`), then `just dns-plan`.
 
 ## Safety notes
 
@@ -55,8 +59,9 @@ DNSimple runs a free [sandbox] for dry runs. Point a throwaway zone there and:
   deliberately if you ever need to tear the record down.
 - **TTL is low (300s)** while bringing things up so changes propagate fast;
   raise `record_ttl` once the address is stable.
-- **State holds no secrets here** (the token stays in the env), but the state
-  file is gitignored alongside the rest of the Tofu state regardless.
+- **State holds no secrets here** (the token is sourced into the `tofu` process
+  just-in-time, never a Tofu value), but the state file is gitignored alongside
+  the rest of the Tofu state regardless.
 
 [DNSimple]: https://dnsimple.com/
 [sandbox]: https://developer.dnsimple.com/sandbox/

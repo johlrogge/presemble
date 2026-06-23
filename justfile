@@ -6,6 +6,12 @@
 # `tofu output` you can read and run by hand if you ever need to.
 _conductor-ip := `tofu -chdir=infra/openstack output -raw floating_ip 2>/dev/null || true`
 
+# DNSimple credentials live outside the repo as plaintext (chmod 600), the same
+# pattern as ~/.config/openstack/clouds.yaml. The dns-* recipes source this file
+# just-in-time into the single tofu command — it is never exported into your
+# shell or shell history. See infra/dns/README.md.
+secrets-file := env_var('HOME') / ".config/presemble/secrets.env"
+
 # List available targets.
 default:
     @just --list
@@ -15,11 +21,13 @@ dns-init:
     tofu -chdir=infra/dns init
 
 # Preview the conductor DNS record against the live floating IP.
-# Requires DNSIMPLE_ACCOUNT and DNSIMPLE_TOKEN in the environment.
+# Credentials are sourced from ~/.config/presemble/secrets.env just for the tofu call.
 dns-plan:
-    tofu -chdir=infra/dns plan -var floating_ip={{ _conductor-ip }}
+    @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
+    set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns plan -var floating_ip={{ _conductor-ip }}
 
 # Apply the conductor DNS record, pointing it at the live floating IP.
-# Requires DNSIMPLE_ACCOUNT and DNSIMPLE_TOKEN in the environment.
+# Credentials are sourced from ~/.config/presemble/secrets.env just for the tofu call.
 dns-apply:
-    tofu -chdir=infra/dns apply -var floating_ip={{ _conductor-ip }}
+    @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
+    set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns apply -var floating_ip={{ _conductor-ip }}
