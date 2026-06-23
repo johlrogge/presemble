@@ -28,6 +28,8 @@ dns-plan:
 
 # Apply the conductor DNS record, pointing it at the live floating IP.
 # Credentials are sourced from ~/.config/presemble/secrets.env just for the tofu call.
+# Non-interactive (-auto-approve) so it runs over the just MCP; `just dns-plan`
+# is the review gate — run it first.
 dns-apply:
     @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
-    set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns apply -var floating_ip={{ _conductor-ip }}
+    set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns apply -auto-approve -var floating_ip={{ _conductor-ip }}
