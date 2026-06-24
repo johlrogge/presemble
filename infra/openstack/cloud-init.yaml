@@ -25,6 +25,38 @@ write_files:
       APT::Periodic::Update-Package-Lists "1";
       APT::Periodic::Unattended-Upgrade "1";
 
+  # systemd unit for the presemble live-edit server. `presemble serve` auto-spawns
+  # the conductor daemon as a child (systemd's cgroup manages both). The binary at
+  # /usr/local/bin/presemble and the site at /var/lib/presemble/site are delivered
+  # by the deploy step (just conductor-deploy / CI), so the unit may fail-restart
+  # until the first deploy lands — expected.
+  - path: /etc/systemd/system/presemble.service
+    content: |
+      [Unit]
+      Description=Presemble live-edit server (browser editing + conductor)
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=presemble
+      Group=presemble
+      WorkingDirectory=/var/lib/presemble
+      Environment=XDG_RUNTIME_DIR=/run/presemble
+      RuntimeDirectory=presemble
+      ExecStart=/usr/local/bin/presemble serve /var/lib/presemble/site --url-style relative
+      StandardInput=null
+      Restart=on-failure
+      RestartSec=5
+      # Hardening — the service only needs to write under its state dir.
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      ReadWritePaths=/var/lib/presemble
+
+      [Install]
+      WantedBy=multi-user.target
+
 # NOTE: the Caddyfile is intentionally NOT in write_files. Pre-creating
 # /etc/caddy/Caddyfile before the package is installed triggers a dpkg conffile
 # prompt during `apt install caddy`, which aborts the postinst that creates the
@@ -43,11 +75,25 @@ runcmd:
     # conductor.presemble.pub — Caddy obtains and auto-renews a real Let's Encrypt
     # certificate via the HTTP-01 challenge (port 80 is open and DNS resolves to
     # this box). No ACME token lives here; renewal is fully on-box and continuous.
-    # Once the conductor binary is deployed, replace the `respond` line with:
-    #   reverse_proxy localhost:<conductor-port>
+    #
+    # Stopgap access control: HTTP basic_auth gates the live-edit UI (the /_presemble
+    # editing endpoints must never be open to the public). The bcrypt hash is injected
+    # by Tofu templatefile from a local secret — it is NOT in the repo. Real per-user
+    # control is the M11 milestone. Backend is the presemble serve HTTP listener.
     conductor.presemble.pub {
-        respond "presemble: conductor not yet deployed (TLS live)" 200
+        basic_auth {
+            editor ${caddy_editor_hash}
+        }
+        reverse_proxy 127.0.0.1:3000
     }
     CADDY
   - systemctl enable --now caddy
   - systemctl reload caddy
+  # presemble service account + state dir. The binary (/usr/local/bin/presemble)
+  # and site (/var/lib/presemble/site) are delivered by the deploy step, so the
+  # unit fail-restarts until the first deploy — expected. Enable it for boot.
+  - id presemble >/dev/null 2>&1 || useradd --system --home-dir /var/lib/presemble --create-home --shell /usr/sbin/nologin presemble
+  - mkdir -p /var/lib/presemble/site
+  - chown -R presemble:presemble /var/lib/presemble
+  - systemctl daemon-reload
+  - systemctl enable presemble

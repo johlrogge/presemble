@@ -77,7 +77,7 @@ resource "openstack_compute_instance_v2" "conductor" {
   flavor_name       = var.flavor_name
   key_pair          = openstack_compute_keypair_v2.presemble.name
   availability_zone = var.availability_zone
-  user_data         = file("${path.module}/cloud-init.yaml")
+  user_data         = templatefile("${path.module}/cloud-init.yaml", { caddy_editor_hash = var.caddy_editor_hash })
 
   network {
     port = openstack_networking_port_v2.conductor.id

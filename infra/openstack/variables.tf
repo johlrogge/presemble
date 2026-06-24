@@ -46,6 +46,12 @@ variable "ssh_public_key_path" {
   default     = "~/.ssh/presemble_ed25519.pub"
 }
 
+variable "caddy_editor_hash" {
+  description = "Caddy bcrypt hash for the stopgap live-edit basic_auth (user 'editor'). Sourced from ~/.config/presemble/presemble-auth.env by the just recipes — never in the repo. Rendered into cloud-init via templatefile."
+  type        = string
+  sensitive   = true
+}
+
 variable "volume_size" {
   description = "Boot volume size in GB"
   type        = number
