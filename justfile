@@ -33,6 +33,13 @@ conductor-apply:
 conductor-replace:
     tofu -chdir=infra/openstack apply -auto-approve -replace=openstack_compute_instance_v2.conductor
 
+# Cross-compile the conductor binary for the Bahnhof box (Debian 13 trixie,
+# x86_64, glibc 2.41). cargo-zigbuild pins the glibc version with a standard ELF
+# interpreter so the binary runs on stock Debian; profile `live` selects
+# fs_site_repository (production). Output: target/x86_64-unknown-linux-gnu/release/content_management
+conductor-build:
+    ZIG_GLOBAL_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zig" cargo polylith cargo --profile live zigbuild --release --target x86_64-unknown-linux-gnu.2.41 --bin content_management
+
 # --- DNS (dnsimple module) ---
 
 # One-time provider download for the DNS module.

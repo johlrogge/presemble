@@ -27,6 +27,12 @@ in
     pkgs.opentofu
     pkgs.tofu-ls
     pkgs.dnsutils
+    # Conductor cross-compile to the Bahnhof box (Debian 13, glibc 2.41).
+    # cargo-zigbuild pins the glibc version with a standard interpreter; zig cc
+    # cross-compiles nng-sys's C; cmake drives the bundled libnng build.
+    pkgs.zig
+    pkgs.cargo-zigbuild
+    pkgs.cmake
   ];
 
   claude.code.mcpServers.presemble = {
