@@ -681,6 +681,67 @@ five minutes following the install guide.
 
 ---
 
+## Horizon — "Presemble as a SaaS" (north star — not current work)
+
+**Status:** Future / north star. We are not there yet. This section records strategic
+direction so near-term milestones can be shaped with it in mind. Nothing here is scheduled.
+
+**The strategic bet:** A hosted Presemble lets a customer go from acquisition to a published
+site without ever provisioning, securing, or operating a conductor themselves. This is the
+"shortening distances" principle (see VISION.md) taken to its endpoint — the last remaining
+distance is "stand up and operate the infrastructure," and SaaS removes it.
+
+**Not speculative — already prototyped by hand.** The conductor-hosting infrastructure now
+being built is effectively the manual prototype of the SaaS provisioning path:
+- Bahnhof OpenStack VPC managed as Infrastructure-as-Code with OpenTofu
+- A conductor box reachable at `conductor.presemble.pub` with automatic Let's Encrypt TLS (Caddy)
+- DNS managed via DNSimple, also as IaC
+- A planned blue-green reprovisioning pipeline (patching, drift elimination, zero-downtime cutover)
+
+Every manual step in that stack — provision a conductor, point DNS, obtain TLS, jack in —
+maps one-to-one onto a step the SaaS must automate. The SaaS automation builds directly on
+this proven flow rather than inventing a new one.
+
+**The end-to-end customer journey (the path to design toward):**
+
+1. **Acquire** — a customer signs up / purchases Presemble.
+2. **Provision** — a dedicated conductor is stood up for them automatically (the IaC flow above,
+   triggered self-service instead of by hand), with DNS pointed and TLS issued.
+3. **Jack in** — the customer connects to their conductor (SSH / remote editing; see the jack-in
+   model — local workspace as cache, fetch-on-demand, suggestions for collaborators).
+4. **Publish** — the customer builds and publishes their site from their conductor.
+
+### Future — "Customer onboarding flow" (launch prerequisite)
+
+**Goal:** When Presemble launches as a product, customers need a guided onboarding that takes
+them from sign-up to a live first site without manual operator involvement. This is a hard
+prerequisite for launch, not an enhancement.
+
+**Scope (to be detailed when the milestone is scheduled):**
+- [ ] Self-service conductor provisioning — the IaC flow runs on customer sign-up, no operator in the loop
+- [ ] First-site setup — customer gets a working starter site (wizard-driven) on their new conductor
+- [ ] Jack-in setup — the customer is walked through connecting their editor / browser to their conductor
+- [ ] Acquisition → provisioning → jack-in → publish, end to end, self-serve
+
+### Future — "Dogfood: migrate agical.se onto Presemble" (readiness proof point)
+
+**Goal (future, not now):** Migrate `https://agical.se` and `https://blog.agical.se` onto
+Presemble. These are real, in-use sites — running them on Presemble is the concrete proof that
+"Presemble is ready for real sites," and a forcing function for the SaaS journey above.
+
+**Why this is the right proof point:** It exercises the full path end to end — a real conductor,
+real content, real publishing, real TLS and DNS — on sites we own and care about, before asking
+external customers to depend on it.
+
+- [ ] `https://agical.se` runs on Presemble
+- [ ] `https://blog.agical.se` runs on Presemble
+
+**Success gate (north star):** A customer can acquire Presemble, have a conductor provisioned for
+them automatically, jack in, and publish a site — with no manual operator steps. `agical.se` and
+`blog.agical.se` are served by Presemble as proof the path works on real sites.
+
+---
+
 ## Deferred (post-MVP)
 
 These are real parts of the vision, not cut — just not needed to prove the core value:
