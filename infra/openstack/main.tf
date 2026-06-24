@@ -47,6 +47,16 @@ resource "openstack_networking_secgroup_rule_v2" "ingress" {
 }
 
 # ---------------------------------------------------------------------------
+# SSH keypair — dedicated presemble key, managed as IaC. Only the PUBLIC key is
+# uploaded; the private half lives in ~/.ssh and never enters Tofu state.
+# ---------------------------------------------------------------------------
+
+resource "openstack_compute_keypair_v2" "presemble" {
+  name       = var.keypair_name
+  public_key = file(pathexpand(var.ssh_public_key_path))
+}
+
+# ---------------------------------------------------------------------------
 # Port on the tenant network. Holds the security group and gives the floating
 # IP a stable attachment point.
 # ---------------------------------------------------------------------------
@@ -65,7 +75,7 @@ resource "openstack_networking_port_v2" "conductor" {
 resource "openstack_compute_instance_v2" "conductor" {
   name              = var.instance_name
   flavor_name       = var.flavor_name
-  key_pair          = var.keypair_name
+  key_pair          = openstack_compute_keypair_v2.presemble.name
   availability_zone = var.availability_zone
   user_data         = file("${path.module}/cloud-init.yaml")
 

@@ -35,9 +35,15 @@ variable "external_network_name" {
 }
 
 variable "keypair_name" {
-  description = "Existing keypair to inject. Managed outside Tofu (uploaded once via Horizon/CLI)."
+  description = "Name of the OpenStack keypair to inject (now Tofu-managed from ssh_public_key_path)."
   type        = string
-  default     = "johlrogge"
+  default     = "presemble"
+}
+
+variable "ssh_public_key_path" {
+  description = "Path to the PUBLIC key uploaded as the keypair. Dedicated presemble local-dev key; the private half stays in ~/.ssh (never in Tofu state)."
+  type        = string
+  default     = "~/.ssh/presemble_ed25519.pub"
 }
 
 variable "volume_size" {
