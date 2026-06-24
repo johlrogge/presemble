@@ -740,6 +740,60 @@ external customers to depend on it.
 them automatically, jack in, and publish a site — with no manual operator steps. `agical.se` and
 `blog.agical.se` are served by Presemble as proof the path works on real sites.
 
+### Future — "Open standards: publish Presemble's innovations" (credibility / ecosystem play)
+
+**Status:** Future / north star. Not scheduled. This records a strategic direction
+so the format work can be shaped with eventual publication in mind.
+
+**The bet:** Some of Presemble's innovations are valuable independent of the
+product. Publishing them as lightweight open standards is a top-of-funnel,
+credibility, and lock-in-reducer play — it reaches people who will never run our
+binary, seeds an ecosystem of independent implementers, and reassures prospective
+SaaS customers that their content outlives any single vendor. A recognized standard
+is a marketing surface and a trust signal that lowers the cost of acquisition (step 1
+of the customer journey above).
+
+**This is explicitly NOT a heavyweight standards-body process.** No W3C working
+group, no RFC. The deliverable is a simple site that specifies the format clearly
+enough that someone else can implement it, optionally backed by example content and
+a conformance test-suite. The goal is reach and credibility, not governance.
+
+**Primary candidate — Markdown schemas (ADR-001).** Presemble's schema format
+describes markdown structure *in markdown itself* — the direct analog of JSON
+Schema's "describe JSON with JSON," but "describe markdown with markdown." The hook
+is memorable and the artifact is genuinely novel. Publishing it would let other
+tools validate and author markdown against shared schemas without depending on
+Presemble.
+- [ ] A simple specification site for the markdown-schema format
+- [ ] Bundled example schemas + conformance content so others can self-verify an
+      implementation
+- [ ] Optional conformance test-suite (input schema + content → expected
+      pass/fail) as the portable definition of "correct"
+
+**Secondary / contingent candidate — NED (ADR-032, ADR-040).** Once the Node Editor
+instruction set is properly fleshed out, NED — a homoiconic, EDN-based RISC vocabulary
+for structural transforms over node trees ("SED for trees") — *might* also be worth
+publishing. This is weaker and later: NED's value as a public standard depends on
+maturity it does not yet have, and it should not be promoted until it has stabilized
+through real use inside Presemble.
+
+**Sequencing — "stable enough to standardize":** A format must be stable before it is
+published, or the standard fragments from the implementation. For markdown schemas,
+"stable enough" means:
+- The constraint vocabulary (`occurs`, `orientation`, `headings`, `thumbnail`,
+  `alt`, `content`, …) is formally specified, not just sufficient-for-now — ADR-001
+  explicitly flags this as an open question.
+- The open positional-matching questions from ADR-001 (optional slots, inline-vs-block
+  link disambiguation, link/image `pattern` validation) are resolved, since they affect
+  what conforming validation means.
+- The format has survived enough real sites that breaking changes are unlikely
+  (the dogfood proof points above are good forcing functions).
+
+For NED, the bar is higher and further out: the instruction set (ADR-032) and the
+underlying node store (ADR-040) are still Proposed, and the M12 migration of existing
+transforms onto NED primitives must complete and settle before any external party
+could implement against a stable target.
+
 ---
 
 ## Deferred (post-MVP)
