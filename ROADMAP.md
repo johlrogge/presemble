@@ -711,6 +711,50 @@ this proven flow rather than inventing a new one.
    model — local workspace as cache, fetch-on-demand, suggestions for collaborators).
 4. **Publish** — the customer builds and publishes their site from their conductor.
 
+### Future — "Accounts, invites & collaborator seats" (hosted alpha shape)
+
+**Status:** Future / north star. Not scheduled. Records the account/identity and
+go-to-market shape decided in **ADR-051** (accounts, invites, seats) and
+**ADR-052** (published-tier distribution). This is the concrete shape of the
+**M11 per-user auth** milestone.
+
+**The bet:** Bootstrap hosted Presemble as an **invite-only alpha** (Gmail/Spotify
+style) — controlled load-ramp, accountability via the invite tree, and a way to
+fill the pre-paid Bahnhof terabytes with real, learnable usage. Collaboration is
+the wedge versus the Netlify/Vercel Jamstack-host category; a free collaborator
+floor is a deliberate strategic choice, not a giveaway.
+
+**Scope (to be detailed when scheduled):**
+- [ ] **Accounts (M11 auth):** a person logs in; two account types — *owner*
+      (creates/owns N sites) and *collaborator-only* (free, can't create sites,
+      editorial access only). Auth leaning magic-link/email.
+- [ ] **Editorial-plane boundary in `serve()`:** edit/comment/suggest/collaborate
+      requires login; published-site readership is public. (No such boundary
+      exists today — a hosting prerequisite.)
+- [ ] **Invite tree:** an invite = the right to create an account; tier-1 informal
+      (friends/colleagues), tier-2 formal (quotas + bounded invite budget).
+- [ ] **Vercel/Netlify-like dashboard:** create/manage/status of sites; differentiator
+      is that Presemble owns the content/editorial layer ("host Presemble", not
+      "host whatever").
+- [ ] **Collaborator seats:** per-account pool, 1–2 always-free, owner-pays-beyond;
+      collaborator always free; granular per-site access a premium candidate.
+- [ ] **Storage-GB quota** enforcement (egress is free on Bahnhof → stored bytes
+      are the scarce resource).
+- [ ] **Published-tier distribution (ADR-052):** published site = a "seed"; origin
+      on Bahnhof S3, distribution via a third-party CDN (Bunny candidate); metered
+      CDN egress as the fair billing lever.
+- [ ] **Instrumentation** for cross-account content-hash reuse — to decide
+      "one huge graph like GitHub" vs "isolate accounts" from data (measure-first).
+
+**Note vs the journey below:** the account/dashboard/multi-tenant model refines the
+earlier "a dedicated conductor is stood up per customer" framing — many alpha
+accounts share cheap multi-tenant infrastructure (ADR-050), with per-customer
+isolation a later, data-informed choice.
+
+**Open (parked):** exact free-seat number (1 vs 2); granular-access-as-premium;
+a billing/metering mechanism (paid seats, quota, metered egress all assume one);
+multi-tenant-conductor shape (process-per-account vs shared).
+
 ### Future — "Customer onboarding flow" (launch prerequisite)
 
 **Goal:** When Presemble launches as a product, customers need a guided onboarding that takes
