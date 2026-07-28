@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "components/accounts",
     "components/bencode",
     "components/conductor",
     "components/content",
@@ -47,6 +48,7 @@ version = "0.35.1"
 edition = "2024"
 
 [workspace.dependencies]
+accounts = { path = "components/accounts" }
 bencode = { path = "components/bencode" }
 conductor = { path = "components/conductor" }
 content = { path = "components/content" }

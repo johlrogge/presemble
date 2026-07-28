@@ -1,5 +1,6 @@
 use crate::error::CliError;
 use crate::{build_for_serve, UrlConfig};
+use accounts::{Session, SessionStore, DevSessionStore};
 use axum::{
     Router,
     extract::{Query, State, WebSocketUpgrade},
@@ -7,6 +8,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use axum::extract::FromRef;
 use lsp_service::PresembleLsp;
 use tower_lsp::{LspService, Server};
 use notify::event::{CreateKind, ModifyKind};
@@ -111,10 +113,15 @@ impl BrowserMessage {
     }
 }
 
-pub fn serve_site(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
+pub fn serve_site(
+    site_dir: &Path,
+    port: u16,
+    url_config: &UrlConfig,
+    dev_session_label: Option<String>,
+) -> Result<(), CliError> {
     tokio::runtime::Runtime::new()
         .map_err(|e| CliError::Render(format!("failed to create tokio runtime: {e}")))?
-        .block_on(serve_async(site_dir, port, url_config))
+        .block_on(serve_async(site_dir, port, url_config, dev_session_label))
 }
 
 #[derive(Clone)]
@@ -123,9 +130,21 @@ struct AppState {
     reload_tx: broadcast::Sender<BrowserMessage>,
     site_dir: std::path::PathBuf,
     conductor: Arc<conductor::ConductorClient>,
+    session_store: Arc<dyn SessionStore>,
 }
 
-async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Result<(), CliError> {
+impl FromRef<AppState> for Arc<dyn SessionStore> {
+    fn from_ref(state: &AppState) -> Self {
+        state.session_store.clone()
+    }
+}
+
+async fn serve_async(
+    site_dir: &Path,
+    port: u16,
+    url_config: &UrlConfig,
+    dev_session_label: Option<String>,
+) -> Result<(), CliError> {
     // Ensure the site directory exists so canonicalize produces an absolute path.
     // In serve mode the dir will be populated by scaffold or the user.
     if !site_dir.exists() {
@@ -220,15 +239,36 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         });
     }
 
+    // Build session store: create concrete DevSessionStore first so we can call .mint()
+    // if --dev-session is active, then coerce to Arc<dyn SessionStore> for AppState.
+    let (session_store, dev_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) = {
+        let ds = DevSessionStore::new_random();
+        let token = dev_session_label.as_deref().map(|label| ds.mint(label));
+        (Arc::new(ds) as Arc<dyn SessionStore>, token)
+    };
+
+    // Print dev login URL if token was minted.
+    if let Some(ref tok) = dev_token {
+        println!();
+        println!("  --dev-session active");
+        println!("  Cookie value: presemble_session={}", tok.as_str());
+        println!("  Login URL:    http://127.0.0.1:{port}/_presemble/dev-login?token={}", tok.as_str());
+        println!();
+    }
+
     let state = AppState {
         output_dir: out_dir.clone(),
         reload_tx,
         site_dir: site_dir.to_path_buf(),
         conductor: conductor_client,
+        session_store,
     };
 
-    let app = Router::new()
-        .route("/_presemble/ws", get(ws_handler))
+    // ── Router split ─────────────────────────────────────────────────────────
+    // editorial: all /_presemble/* routes that require authentication.
+    // public: /_presemble/ws (live-reload broadcast) and the fallback file handler.
+
+    let editorial = Router::new()
         .route("/_presemble/lsp", get(lsp_ws_handler))
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
@@ -251,7 +291,17 @@ async fn serve_async(site_dir: &Path, port: u16, url_config: &UrlConfig) -> Resu
         .route("/_presemble/palette-types", get(palette_types_handler))
         .route("/_presemble/style-preview", post(style_preview_handler))
         .route("/_presemble/schema-for", get(schema_for_handler))
-        .route("/_presemble/page-for", get(page_for_handler))
+        .route("/_presemble/page-for", get(page_for_handler));
+
+    // Mount dev-login route only when --dev-session flag is set.
+    let editorial = if dev_token.is_some() {
+        editorial.route("/_presemble/dev-login", get(dev_login_handler))
+    } else {
+        editorial
+    };
+
+    let app = editorial
+        .route("/_presemble/ws", get(ws_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -332,6 +382,7 @@ fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum:
 }
 
 async fn edit_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditRequest>,
 ) -> axum::Json<EditResponse> {
@@ -350,6 +401,7 @@ struct EditBodyRequest {
 }
 
 async fn edit_body_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<EditBodyRequest>,
 ) -> axum::Json<EditResponse> {
@@ -366,6 +418,7 @@ struct ApplyRequest {
 }
 
 async fn apply_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<ApplyRequest>,
 ) -> axum::Json<EditResponse> {
@@ -380,6 +433,7 @@ struct GrammarQuery {
 }
 
 async fn grammar_handler(
+    _session: Session,
     State(state): State<AppState>,
     Query(query): Query<GrammarQuery>,
 ) -> axum::response::Response {
@@ -416,6 +470,7 @@ struct RenderQuery {
 }
 
 async fn render_handler(
+    _session: Session,
     State(state): State<AppState>,
     Query(query): Query<RenderQuery>,
 ) -> axum::response::Response {
@@ -454,6 +509,7 @@ async fn render_handler(
 }
 
 async fn dirty_buffers_handler(
+    _session: Session,
     State(state): State<AppState>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
@@ -495,6 +551,7 @@ async fn dirty_buffers_handler(
 }
 
 async fn save_all_handler(
+    _session: Session,
     State(state): State<AppState>,
 ) -> axum::Json<EditResponse> {
     conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers))
@@ -520,6 +577,7 @@ struct NedSuggestionCreateResponse {
 }
 
 async fn ned_suggestions_create_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<NedSuggestionCreateRequest>,
 ) -> axum::Json<NedSuggestionCreateResponse> {
@@ -563,6 +621,7 @@ struct NedSuggestionsQuery {
 }
 
 async fn ned_suggestions_list_handler(
+    _session: Session,
     State(state): State<AppState>,
     Query(query): Query<NedSuggestionsQuery>,
 ) -> axum::response::Response {
@@ -629,6 +688,7 @@ struct NedSuggestionAcceptResponse {
 }
 
 async fn ned_suggestions_accept_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<NedSuggestionActionRequest>,
 ) -> impl axum::response::IntoResponse {
@@ -679,6 +739,7 @@ async fn ned_suggestions_accept_handler(
 }
 
 async fn ned_suggestions_reject_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<NedSuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
@@ -688,6 +749,7 @@ async fn ned_suggestions_reject_handler(
 }
 
 async fn ned_suggestion_files_handler(
+    _session: Session,
     State(state): State<AppState>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
@@ -729,7 +791,7 @@ async fn ned_suggestion_files_handler(
 }
 
 /// Return available site templates as JSON: `[{name, description}]`.
-async fn templates_handler() -> axum::response::Response {
+async fn templates_handler(_session: Session) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
     #[derive(serde::Serialize)]
@@ -768,7 +830,7 @@ struct ScaffoldRequest {
     theme: String,
 }
 
-async fn font_moods_handler() -> axum::Json<serde_json::Value> {
+async fn font_moods_handler(_session: Session) -> axum::Json<serde_json::Value> {
     let moods: Vec<serde_json::Value> = site_templates::FontMood::all().iter().map(|m| {
         let (heading, body, query) = m.fonts();
         serde_json::json!({
@@ -782,7 +844,7 @@ async fn font_moods_handler() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!(moods))
 }
 
-async fn palette_types_handler() -> axum::Json<serde_json::Value> {
+async fn palette_types_handler(_session: Session) -> axum::Json<serde_json::Value> {
     let types: Vec<serde_json::Value> = site_templates::PaletteType::all().iter().map(|p| {
         let desc = match p {
             site_templates::PaletteType::Warm => "Analogous — seed and neighbors",
@@ -814,6 +876,7 @@ struct StylePreviewRequest {
 }
 
 async fn style_preview_handler(
+    _session: Session,
     axum::Json(req): axum::Json<StylePreviewRequest>,
 ) -> impl IntoResponse {
     let config = site_templates::StyleConfig {
@@ -835,6 +898,7 @@ async fn style_preview_handler(
 
 /// Scaffold a new site from a template. Delegates to conductor `ScaffoldSite`.
 async fn scaffold_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<ScaffoldRequest>,
 ) -> axum::Json<EditResponse> {
@@ -883,6 +947,7 @@ struct LinksQuery {
 }
 
 async fn links_handler(
+    _session: Session,
     State(state): State<AppState>,
     Query(query): Query<LinksQuery>,
 ) -> axum::response::Response {
@@ -937,7 +1002,7 @@ struct CreateContentResponse {
     error: Option<String>,
 }
 
-async fn schemas_handler(State(state): State<AppState>) -> axum::response::Response {
+async fn schemas_handler(_session: Session, State(state): State<AppState>) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
     match state.conductor.send(&conductor::Command::ListSchemas) {
@@ -961,6 +1026,7 @@ struct SchemaForQuery {
 }
 
 async fn schema_for_handler(
+    _session: Session,
     State(state): State<AppState>,
     Query(q): Query<SchemaForQuery>,
 ) -> axum::response::Response {
@@ -989,6 +1055,7 @@ struct PageForQuery {
 }
 
 async fn page_for_handler(
+    _session: Session,
     State(state): State<AppState>,
     Query(q): Query<PageForQuery>,
 ) -> axum::response::Response {
@@ -1012,6 +1079,7 @@ async fn page_for_handler(
 }
 
 async fn create_content_handler(
+    _session: Session,
     State(state): State<AppState>,
     axum::Json(req): axum::Json<CreateContentRequest>,
 ) -> axum::Json<CreateContentResponse> {
@@ -1052,6 +1120,40 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws(socket, state.reload_tx.subscribe()))
 }
 
+/// Dev-login route — only mounted when `--dev-session` is active.
+/// Reads `?token=...`, sets the session cookie, and 302s to `/`.
+#[derive(serde::Deserialize)]
+struct DevLoginQuery {
+    token: String,
+}
+
+async fn dev_login_handler(
+    State(state): State<AppState>,
+    Query(q): Query<DevLoginQuery>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    // Verify the token is valid before setting the cookie.
+    // verify_str wraps the raw string crate-privately, ensuring the untrusted-input
+    // → SessionToken path is never exposed publicly.
+    if state.session_store.verify_str(&q.token).is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::CONTENT_TYPE, "text/plain")],
+            "Invalid or expired token",
+        ).into_response();
+    }
+    let cookie = accounts::set_session_cookie_str(&q.token);
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, "/".to_string()),
+            (header::SET_COOKIE, cookie),
+        ],
+        "",
+    ).into_response()
+}
+
 async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<BrowserMessage>) {
     loop {
         tokio::select! {
@@ -1073,6 +1175,7 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<BrowserMes
 }
 
 async fn lsp_ws_handler(
+    _session: Session,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -1180,13 +1283,27 @@ async fn render_schema_url_directly(state: AppState, path: &str) -> axum::respon
 async fn file_handler(
     State(state): State<AppState>,
     uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     use axum::http::{StatusCode, header};
 
     let path = uri.path();
 
-    // Intercept canonical `/_schema/...` URLs and render them directly.
+    // Intercept canonical `/_schema/...` URLs — editorial reads, must be authenticated.
     if site_index::parse_schema_url(path).is_some() {
+        let store: Arc<dyn SessionStore> = Arc::from_ref(&state);
+        let token = headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(accounts::read_session_cookie);
+        let authenticated = token.is_some_and(|t| store.verify(&t).is_some());
+        if !authenticated {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "401 Unauthorized".to_string(),
+            ).into_response();
+        }
         return render_schema_url_directly(state, path).await;
     }
 
@@ -2475,14 +2592,29 @@ mod tests {
         (client, tmp)
     }
 
+    /// Test session key — fixed so tests can mint cookies in advance.
+    const TEST_SESSION_KEY: &[u8] = b"presemble-test-session-key-fixed";
+
+    /// Mint a valid session cookie value for use in test requests.
+    #[cfg(test)]
+    fn test_session_cookie() -> String {
+        let store = accounts::DevSessionStore::with_key(TEST_SESSION_KEY);
+        let token = store.mint("test");
+        format!("presemble_session={}", token.as_str())
+    }
+
     #[cfg(test)]
     fn test_app(client: conductor::ConductorClient) -> axum::Router {
         let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
+        let session_store = Arc::new(
+            accounts::DevSessionStore::with_key(TEST_SESSION_KEY)
+        ) as Arc<dyn SessionStore>;
         let state = AppState {
             output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
             reload_tx,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: std::sync::Arc::new(client),
+            session_store,
         };
         Router::new()
             .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
@@ -2511,6 +2643,7 @@ mod tests {
             .method("POST")
             .uri("/_presemble/ned-suggestions")
             .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
 
@@ -2545,6 +2678,7 @@ mod tests {
             .method("POST")
             .uri("/_presemble/ned-suggestions")
             .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::from(serde_json::to_vec(&create_body).unwrap()))
             .unwrap();
         app.clone().oneshot(create_req).await.unwrap();
@@ -2553,6 +2687,7 @@ mod tests {
         let list_req = axum::http::Request::builder()
             .method("GET")
             .uri(format!("/_presemble/ned-suggestions?file={file}"))
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(list_req).await.unwrap();
@@ -2578,6 +2713,7 @@ mod tests {
         let req = axum::http::Request::builder()
             .method("GET")
             .uri("/_presemble/ned-suggestions?file=content/no-such-file.md")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2609,11 +2745,15 @@ mod tests {
         // Build app from a shared Arc so the state (and conductor) is accessible after oneshot.
         let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
         let conductor = std::sync::Arc::new(client);
+        let session_store = Arc::new(
+            accounts::DevSessionStore::with_key(TEST_SESSION_KEY)
+        ) as Arc<dyn SessionStore>;
         let state = AppState {
             output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
             reload_tx,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: conductor.clone(),
+            session_store,
         };
         let app = Router::new()
             .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
@@ -2628,6 +2768,7 @@ mod tests {
             .method("POST")
             .uri("/_presemble/ned-suggestions/accept")
             .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = app.oneshot(accept_req).await.unwrap();
@@ -2680,6 +2821,7 @@ mod tests {
             .method("POST")
             .uri("/_presemble/ned-suggestions/reject")
             .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::from(serde_json::to_vec(&reject_body).unwrap()))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -2693,6 +2835,7 @@ mod tests {
         let list_req = axum::http::Request::builder()
             .method("GET")
             .uri("/_presemble/ned-suggestions?file=content/test/doc.md")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::empty())
             .unwrap();
         let list_resp = app.oneshot(list_req).await.unwrap();
@@ -2725,6 +2868,7 @@ mod tests {
         let req = axum::http::Request::builder()
             .method("GET")
             .uri("/_presemble/ned-suggestion-files")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -2759,6 +2903,7 @@ mod tests {
             .method("POST")
             .uri("/_presemble/ned-suggestions")
             .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
 
@@ -2777,11 +2922,208 @@ mod tests {
         let list_req = axum::http::Request::builder()
             .method("GET")
             .uri("/_presemble/ned-suggestions?file=content/test/doc.md")
+            .header("cookie", test_session_cookie())
             .body(axum::body::Body::empty())
             .unwrap();
         let list_resp = app.oneshot(list_req).await.unwrap();
         let list_bytes = http_body_util::BodyExt::collect(list_resp.into_body()).await.unwrap().to_bytes();
         let list_val: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
         assert_eq!(list_val, serde_json::json!([]), "no suggestion should have been created");
+    }
+
+    // ── Auth boundary integration tests ─────────────────────────────────────
+    //
+    // These tests verify the session gate on editorial routes and confirm that
+    // public routes (/_presemble/ws, published HTML) remain unauthenticated.
+
+    /// Build a full app with all routes, backed by a test conductor.
+    /// Returns (app, temp_out_dir) — caller must keep _tmp alive.
+    #[cfg(test)]
+    fn test_app_full(
+        client: conductor::ConductorClient,
+        out_dir: std::path::PathBuf,
+    ) -> axum::Router {
+        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
+        let session_store = Arc::new(
+            accounts::DevSessionStore::with_key(TEST_SESSION_KEY)
+        ) as Arc<dyn SessionStore>;
+        let state = AppState {
+            output_dir: out_dir.clone(),
+            reload_tx,
+            site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
+            conductor: std::sync::Arc::new(client),
+            session_store,
+        };
+        Router::new()
+            .route("/_presemble/ws", get(ws_handler))
+            .route("/_presemble/lsp", get(lsp_ws_handler))
+            .route("/_presemble/edit", post(edit_handler))
+            .route("/_presemble/render", get(render_handler))
+            .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
+            .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
+            .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
+            .route("/_presemble/schemas", get(schemas_handler))
+            .fallback(get(file_handler))
+            .with_state(state)
+    }
+
+    // (a) POST /_presemble/edit without cookie → 401
+    #[tokio::test]
+    async fn auth_edit_no_cookie_returns_401() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full(client, out_dir);
+
+        let body = serde_json::json!({
+            "file": "content/test/doc.md",
+            "slot": "title",
+            "value": "New Title"
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/edit")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "edit without cookie must return 401");
+    }
+
+    // (b) POST /_presemble/edit with valid cookie → not 401
+    #[tokio::test]
+    async fn auth_edit_with_cookie_not_401() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full(client, out_dir);
+
+        let body = serde_json::json!({
+            "file": "content/test/doc.md",
+            "slot": "title",
+            "value": "New Title"
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/edit")
+            .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "edit with valid cookie must not return 401");
+    }
+
+    // (c) GET /_presemble/render without cookie → 401; with cookie → not 401
+    #[tokio::test]
+    async fn auth_render_no_cookie_returns_401() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full(client, out_dir);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_presemble/render?path=/test/doc&mode=view")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "render without cookie must return 401");
+    }
+
+    #[tokio::test]
+    async fn auth_render_with_cookie_not_401() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full(client, out_dir);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_presemble/render?path=/test/doc&mode=view")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "render with valid cookie must not return 401");
+    }
+
+    // (d) GET /_schema/<x> without cookie → 401
+    #[tokio::test]
+    async fn auth_schema_url_no_cookie_returns_401() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full(client, out_dir);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_schema/test/item")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "/_schema/ without cookie must return 401");
+    }
+
+    // (e) GET / (published page) without cookie → 200
+    #[tokio::test]
+    async fn auth_published_page_no_cookie_returns_200() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // Write a real HTML page so file_handler can serve it.
+        std::fs::write(
+            out_dir.join("index.html"),
+            b"<html><body>Hello</body></html>",
+        ).unwrap();
+        let app = test_app_full(client, out_dir);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK,
+            "published page without cookie must return 200");
+    }
+
+    // (f) GET /_presemble/ws upgrade without cookie → 101 (WebSocket upgrade accepted — public)
+    // We can't do a real WS upgrade in oneshot, but we can confirm it's not rejected with 401.
+    #[tokio::test]
+    async fn auth_ws_no_cookie_not_401() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full(client, out_dir);
+
+        // Send a non-upgrade GET — will get 400 (bad request, missing upgrade) but NOT 401.
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_presemble/ws")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "/_presemble/ws without cookie must not return 401");
     }
 }

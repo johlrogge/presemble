@@ -294,6 +294,11 @@ enum Command {
         base_path: Option<String>,
         #[arg(long)]
         base_url: Option<String>,
+        /// Mint a dev session token and print a login URL.
+        /// Optional value is the session label (defaults to "dev").
+        /// Without this flag the editorial plane is closed (no token minted).
+        #[arg(long, value_name = "LABEL")]
+        dev_session: Option<Option<String>>,
     },
     /// Scaffold a new hello-world Presemble site
     Init {
@@ -353,7 +358,7 @@ pub fn run() -> Result<(), CliError> {
             }
             Ok(())
         }
-        Some(Command::Serve { site_dir, config, url_style, base_path, base_url }) => {
+        Some(Command::Serve { site_dir, config, url_style, base_path, base_url, dev_session }) => {
             let site_path = Path::new(&site_dir);
             let url_config = load_url_config(
                 site_path,
@@ -362,7 +367,9 @@ pub fn run() -> Result<(), CliError> {
                 base_path.as_deref(),
                 base_url.as_deref(),
             )?;
-            serve::serve_site(site_path, 3000, &url_config)?;
+            // --dev-session with no value → label "dev"; with value → that label; absent → None
+            let dev_session_label = dev_session.map(|opt| opt.unwrap_or_else(|| "dev".to_string()));
+            serve::serve_site(site_path, 3000, &url_config, dev_session_label)?;
             Ok(())
         }
         Some(Command::Init { site_dir }) => {

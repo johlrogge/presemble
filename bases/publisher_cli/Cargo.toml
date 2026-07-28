@@ -4,6 +4,7 @@ version = "0.35.0"
 edition = "2024"
 
 [dependencies]
+accounts = { workspace = true }
 schema = { workspace = true }
 serve_ui = { workspace = true }
 content = { workspace = true }

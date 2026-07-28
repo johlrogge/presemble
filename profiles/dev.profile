@@ -1,4 +1,5 @@
 [implementations]
+accounts = "components/accounts"
 site_repository = "components/mem_site_repository"
 mem_site_repository = "components/mem_site_repository"
 bencode = "components/bencode"
