@@ -141,22 +141,93 @@ pub struct CreateSiteForm {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-/// `GET /login` — serve a minimal HTML email form.
-async fn get_login() -> Html<&'static str> {
-    Html(
+// ── Page shell and UI helpers ─────────────────────────────────────────────────
+
+/// Wraps `body` in a full HTML page with a shared inline stylesheet.
+///
+/// No external dependencies — everything is server-rendered strings.
+fn page(title: &str, body: &str) -> String {
+    format!(
         r#"<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Sign in — Presemble</title></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0; padding: 2rem 1rem; background: #f5f5f5; color: #111;
+    }}
+    .container {{ max-width: 640px; margin: 0 auto; }}
+    .card {{
+      background: #fff; border: 1px solid #ddd; border-radius: 6px;
+      padding: 1.5rem; margin-bottom: 1.5rem;
+    }}
+    h1 {{ margin-top: 0; font-size: 1.5rem; }}
+    h2 {{ font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }}
+    label {{ display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.25rem; }}
+    input[type="email"], input[type="text"], select {{
+      display: block; width: 100%; padding: 0.45rem 0.6rem;
+      border: 1px solid #bbb; border-radius: 4px; font-size: 1rem;
+      margin-bottom: 0.75rem;
+    }}
+    button, .btn {{
+      display: inline-block; padding: 0.45rem 1rem; font-size: 0.9rem;
+      background: #2563eb; color: #fff; border: none; border-radius: 4px;
+      cursor: pointer; text-decoration: none;
+    }}
+    button:hover, .btn:hover {{ background: #1d4ed8; }}
+    .btn-sm {{ padding: 0.25rem 0.6rem; font-size: 0.8rem; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+    th, td {{ text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #e5e5e5; }}
+    th {{ font-weight: 600; background: #fafafa; }}
+    .badge {{
+      display: inline-block; padding: 0.15rem 0.5rem; border-radius: 3px;
+      font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+    }}
+    .badge-ready    {{ background: #d1fae5; color: #065f46; }}
+    .badge-provisioning {{ background: #fef3c7; color: #92400e; }}
+    .badge-failed   {{ background: #fee2e2; color: #991b1b; }}
+    .badge-stopped  {{ background: #f3f4f6; color: #374151; }}
+    .site-actions {{ display: flex; gap: 0.4rem; align-items: center; }}
+  </style>
+</head>
 <body>
-  <h1>Sign in</h1>
-  <form method="post" action="/login">
-    <label for="email">Email address</label><br>
-    <input id="email" name="email" type="email" required autofocus>
-    <button type="submit">Send magic link</button>
-  </form>
+  <div class="container">
+    {body}
+  </div>
 </body>
 </html>"#,
+        title = title,
+        body = body,
     )
+}
+
+/// Returns an HTML `<span>` badge styled for the given `SiteStatus`.
+fn status_badge(status: site_registry::SiteStatus) -> String {
+    use site_registry::SiteStatus;
+    let (class, label) = match status {
+        SiteStatus::Ready => ("badge-ready", "Ready"),
+        SiteStatus::Provisioning => ("badge-provisioning", "Provisioning"),
+        SiteStatus::Failed => ("badge-failed", "Failed"),
+        SiteStatus::Stopped => ("badge-stopped", "Stopped"),
+    };
+    format!(r#"<span class="badge {class}">{label}</span>"#)
+}
+
+/// `GET /login` — serve a minimal HTML email form.
+async fn get_login() -> Html<String> {
+    let body = r#"<div class="card">
+      <h1>Sign in to Presemble</h1>
+      <form method="post" action="/login">
+        <label for="email">Email address</label>
+        <input id="email" name="email" type="email" required autofocus placeholder="you@example.com">
+        <button type="submit">Send magic link</button>
+      </form>
+    </div>"#;
+    Html(page("Sign in — Presemble", body))
 }
 
 /// `POST /login` — issue a magic-link and send it via the `MailSender`.
@@ -176,18 +247,15 @@ async fn post_login(
     );
     s.mail.send_login_link(&form.email, &url);
 
-    Html(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Check your email — Presemble</title></head>
-<body>
-  <h1>Check your email</h1>
-  <p>We sent a magic link to <strong>{email}</strong>. Click it to sign in.</p>
-  <p>The link expires in 15 minutes and can only be used once.</p>
-</body>
-</html>"#,
+    let body = format!(
+        r#"<div class="card">
+      <h1>Check your email</h1>
+      <p>We sent a magic link to <strong>{email}</strong>. Click it to sign in.</p>
+      <p>The link expires in 15 minutes and can only be used once.</p>
+    </div>"#,
         email = html_escape(&form.email),
-    ))
+    );
+    Html(page("Check your email — Presemble", &body))
 }
 
 /// `GET /auth/verify` — exchange a login token for a session cookie and redirect.
@@ -332,18 +400,18 @@ async fn get_dashboard(
         .collect::<Vec<_>>()
         .join("\n      ");
 
-    // Build site list rows.
+    // Build site table rows.
     let site_rows: String = if sites.is_empty() {
-        "<li><em>No sites yet. Create one above.</em></li>".to_string()
+        r#"<tr><td colspan="3"><em>No sites yet. Create one above.</em></td></tr>"#.to_string()
     } else {
         sites
             .iter()
             .map(|site| {
                 let subdomain = html_escape(site.subdomain.as_str());
-                let status = html_escape(&site.status.to_string());
-                let links = if site.status == SiteStatus::Ready {
+                let badge = status_badge(site.status);
+                let actions = if site.status == SiteStatus::Ready {
                     format!(
-                        r#" — <a href="/sites/{id}/open">Open editor</a> | <a href="https://{sub}.{base}/" target="_blank">Preview</a>"#,
+                        r#"<div class="site-actions"><a class="btn btn-sm" href="/sites/{id}/open">Open editor</a><a class="btn btn-sm" href="https://{sub}.{base}/" target="_blank">Preview</a></div>"#,
                         id = html_escape(site.id.as_str()),
                         sub = subdomain,
                         base = html_escape(&state.base_domain),
@@ -352,42 +420,44 @@ async fn get_dashboard(
                     String::new()
                 };
                 format!(
-                    "<li><strong>{subdomain}</strong> ({status}){links}</li>",
+                    "<tr><td>{subdomain}</td><td>{badge}</td><td>{actions}</td></tr>",
                     subdomain = subdomain,
-                    status = status,
-                    links = links,
+                    badge = badge,
+                    actions = actions,
                 )
             })
             .collect::<Vec<_>>()
             .join("\n    ")
     };
 
-    Html(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Dashboard — Presemble</title></head>
-<body>
-  <h1>Your sites</h1>
-  <h2>Create a new site</h2>
-  <form method="post" action="/sites">
-    <label for="subdomain">Subdomain</label><br>
-    <input id="subdomain" name="subdomain" type="text" required><br>
-    <label for="template">Template</label><br>
-    <select id="template" name="template">
-      {template_options}
-    </select><br>
-    <button type="submit">Create site</button>
-  </form>
-  <h2>Existing sites</h2>
-  <ul>
-    {site_rows}
-  </ul>
-</body>
-</html>"#,
+    let body = format!(
+        r#"<h1>Your sites</h1>
+    <div class="card">
+      <h2 style="margin-top:0">Create a new site</h2>
+      <form method="post" action="/sites">
+        <label for="subdomain">Subdomain</label>
+        <input id="subdomain" name="subdomain" type="text" required placeholder="mysite">
+        <label for="template">Template</label>
+        <select id="template" name="template">
+          {template_options}
+        </select>
+        <button type="submit">Create site</button>
+      </form>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Existing sites</h2>
+      <table>
+        <thead><tr><th>Subdomain</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          {site_rows}
+        </tbody>
+      </table>
+    </div>"#,
         template_options = template_options,
         site_rows = site_rows,
-    ))
-    .into_response()
+    );
+
+    Html(page("Dashboard — Presemble", &body)).into_response()
 }
 
 /// `GET /sites/{id}/open` — issue a session token and redirect to the site's editor.
@@ -594,6 +664,14 @@ mod tests {
         assert!(
             html.contains(r#"action="/login""#),
             "form must post to /login"
+        );
+        assert!(
+            html.contains(r#"type="submit""#) || html.contains("<button"),
+            "login page must have a submit button"
+        );
+        assert!(
+            html.contains("<title>"),
+            "login page must have a <title> element (page shell)"
         );
     }
 
@@ -979,6 +1057,16 @@ mod tests {
         assert!(
             !html.contains(&prov_link_marker),
             "Provisioning site must NOT have an Open editor link"
+        );
+
+        // Dashboard must show status badges for both sites.
+        assert!(
+            html.contains("badge-ready"),
+            "Ready site must have a 'badge-ready' CSS class in its status badge"
+        );
+        assert!(
+            html.contains("badge-provisioning"),
+            "Provisioning site must have a 'badge-provisioning' CSS class in its status badge"
         );
     }
 
