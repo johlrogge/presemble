@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 provisioning = { workspace = true }
 site_registry = { workspace = true }
+site_templates = { workspace = true }
 accounts = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

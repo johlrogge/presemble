@@ -452,6 +452,7 @@ dependencies = [
  "provisioning",
  "serde",
  "site_registry",
+ "site_templates",
  "tempfile",
  "tokio",
  "tower 0.5.3",

@@ -127,6 +127,12 @@ pub struct VerifyQuery {
     pub token: String,
 }
 
+#[derive(Deserialize)]
+pub struct CreateSiteForm {
+    pub subdomain: String,
+    pub template: String,
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// `GET /login` — serve a minimal HTML email form.
@@ -207,6 +213,83 @@ async fn get_verify(
     }
 }
 
+/// `POST /sites` — create a new hosted site for the authenticated account.
+///
+/// Flow:
+/// 1. Reject `Dev` principals with 403 (only real accounts can own hosted sites).
+/// 2. Validate the subdomain; return 400 on `SubdomainError`.
+/// 3. Validate the template name; return 400 if unknown.
+/// 4. Register the site in the registry; return 409 on duplicate subdomain.
+/// 5. Build a `Starter` and call the provisioner.
+/// 6. On success: 303 redirect to `/`.
+async fn create_site(
+    session: accounts::Session,
+    State(state): State<ControlPlaneState>,
+    Form(form): Form<CreateSiteForm>,
+) -> Response {
+    use accounts::Principal;
+    use site_registry::RegistryError;
+    use site_registry::Subdomain;
+
+    // Step 1: Only real accounts can own hosted sites.
+    let account_id = match session.principal() {
+        Principal::Account { account } => account.clone(),
+        Principal::Dev { .. } => {
+            return (
+                StatusCode::FORBIDDEN,
+                "Dev principals cannot create hosted sites",
+            )
+                .into_response();
+        }
+    };
+
+    // Step 2: Validate subdomain.
+    let subdomain = match Subdomain::new(&form.subdomain) {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+        }
+    };
+
+    // Step 3: Validate template name.
+    if site_templates::template_by_name(&form.template).is_none() {
+        return (StatusCode::BAD_REQUEST, "unknown template").into_response();
+    }
+
+    // Step 4: Register the site.
+    let site = match state.registry.register_site(&account_id, subdomain.clone()) {
+        Ok(site) => site,
+        Err(RegistryError::DuplicateSubdomain(_)) => {
+            return (StatusCode::CONFLICT, "subdomain already taken").into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    // Step 5: Build starter and provision.
+    let starter = provisioning::Starter {
+        template_name: form.template,
+        format: "hiccup".into(),
+        style: site_templates::StyleConfig::default(),
+    };
+
+    if let Err(e) = state
+        .provisioner
+        .provision(&account_id, &site.id, &subdomain, &starter)
+        .await
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+
+    // Step 6: Redirect to dashboard.
+    let mut response = (StatusCode::SEE_OTHER, "").into_response();
+    response
+        .headers_mut()
+        .insert("location", HeaderValue::from_static("/"));
+    response
+}
+
 /// Minimal HTML escaping for user-controlled strings embedded in HTML.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -223,11 +306,13 @@ fn html_escape(s: &str) -> String {
 /// - `GET  /login`       → email input form (public)
 /// - `POST /login`       → issue + send magic link (public)
 /// - `GET  /auth/verify` → exchange login token for session cookie + redirect (public)
+/// - `POST /sites`       → create a new hosted site (authenticated)
 pub fn router(state: ControlPlaneState) -> Router {
     Router::new()
         .route("/login", get(get_login))
         .route("/login", post(post_login))
         .route("/auth/verify", get(get_verify))
+        .route("/sites", post(create_site))
         .with_state(state)
 }
 
@@ -240,52 +325,24 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use accounts::{AccountId, InMemoryAccountStore, LoginTokenStore, MagicLinkSessionStore};
-    use async_trait::async_trait;
     use axum::body::to_bytes;
     use axum::http::StatusCode;
-    use provisioning::{ConductorProvisioner, ProvisionError, Starter};
-    use site_registry::{FileSiteStore, Placement, SiteId, Subdomain};
+    use provisioning::FakeProvisioner;
+    use site_registry::{FileSiteStore, SiteStatus, Subdomain};
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    // ── Fake provisioner ──────────────────────────────────────────────────────
-
-    struct FakeProvisioner;
-
-    #[async_trait]
-    impl ConductorProvisioner for FakeProvisioner {
-        async fn provision(
-            &self,
-            _account: &AccountId,
-            _site_id: &SiteId,
-            _subdomain: &Subdomain,
-            _starter: &Starter,
-        ) -> Result<Placement, ProvisionError> {
-            Ok(Placement {
-                host: "127.0.0.1".to_string(),
-                port: 9999,
-                site_path: std::path::PathBuf::from("/fake/path"),
-            })
-        }
-
-        async fn deprovision(
-            &self,
-            _subdomain: &Subdomain,
-            _site_id: &SiteId,
-        ) -> Result<(), ProvisionError> {
-            Ok(())
-        }
-
-        async fn reconcile(&self) -> Result<(), ProvisionError> {
-            Ok(())
-        }
-    }
-
     // ── Test AppState builder ─────────────────────────────────────────────────
 
-    /// Returns `(ControlPlaneState, Arc<Mutex<Vec<String>>>, TempDir)`.
+    /// Returns `(ControlPlaneState, Arc<FakeProvisioner>, Arc<SiteRegistry>, Arc<Mutex<Vec<String>>>, TempDir)`.
     /// `TempDir` must be kept alive for the duration of the test.
-    fn test_state() -> (ControlPlaneState, Arc<Mutex<Vec<String>>>, TempDir) {
+    fn test_state() -> (
+        ControlPlaneState,
+        Arc<FakeProvisioner>,
+        Arc<site_registry::SiteRegistry>,
+        Arc<Mutex<Vec<String>>>,
+        TempDir,
+    ) {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
 
@@ -301,33 +358,43 @@ mod tests {
                 captured_clone.lock().unwrap().push(msg);
             }));
 
-        // A temporary file-backed registry
+        // A temporary file-backed registry — shared between provisioner and AppState.
         let dir = TempDir::new().expect("tempdir for test registry");
         let registry = site_registry::SiteRegistry::new(
             FileSiteStore::new(dir.path().join("registry.json")),
         )
         .expect("test registry");
-        // SiteRegistry::new returns Arc<SiteRegistry> directly — no double-wrap needed
 
-        let provisioner: Arc<dyn provisioning::ConductorProvisioner> = Arc::new(FakeProvisioner);
+        // FakeProvisioner holds a clone of the shared registry Arc.
+        let fake_provisioner = FakeProvisioner::new(Arc::clone(&registry));
+
+        let provisioner: Arc<dyn provisioning::ConductorProvisioner> =
+            Arc::clone(&fake_provisioner) as Arc<dyn provisioning::ConductorProvisioner>;
 
         let state = ControlPlaneState::new(Arc::new(AppState::new(
             provisioner,
-            registry,
+            Arc::clone(&registry),
             sessions,
             login_tokens,
             account_store,
             mail,
             "http://test.local".to_string(),
         )));
-        (state, captured, dir)
+        (state, fake_provisioner, registry, captured, dir)
+    }
+
+    /// Mint a session cookie string for a given `AccountId` using the test key.
+    fn session_cookie_for(account_id: &AccountId) -> String {
+        let store = MagicLinkSessionStore::with_key(b"test-session-key-32-bytes-padded".to_vec());
+        let token = store.mint(account_id);
+        format!("presemble_session={}", token.as_str())
     }
 
     // ── Test: GET /login returns a form ───────────────────────────────────────
 
     #[tokio::test]
     async fn get_login_returns_form_with_email_input() {
-        let (state, _captured, _dir) = test_state();
+        let (state, _provisioner, _registry, _captured, _dir) = test_state();
         let app = router(state);
 
         let req = axum::http::Request::builder()
@@ -358,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_login_sends_magic_link_email() {
-        let (state, captured, _dir) = test_state();
+        let (state, _provisioner, _registry, captured, _dir) = test_state();
         let app = router(state);
 
         let req = axum::http::Request::builder()
@@ -382,7 +449,10 @@ mod tests {
 
     // ── Helper: do a POST /login and extract the token from the captured mail ──
 
-    async fn issue_token(state: &ControlPlaneState, captured: &Arc<Mutex<Vec<String>>>) -> String {
+    async fn issue_token(
+        state: &ControlPlaneState,
+        captured: &Arc<Mutex<Vec<String>>>,
+    ) -> String {
         let app = router(state.clone());
         let req = axum::http::Request::builder()
             .method("POST")
@@ -411,7 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_valid_token_redirects_with_session_cookie() {
-        let (state, captured, _dir) = test_state();
+        let (state, _provisioner, _registry, captured, _dir) = test_state();
         let token = issue_token(&state, &captured).await;
 
         let app = router(state.clone());
@@ -445,7 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_garbage_token_returns_401() {
-        let (state, _captured, _dir) = test_state();
+        let (state, _provisioner, _registry, _captured, _dir) = test_state();
         let app = router(state);
 
         let req = axum::http::Request::builder()
@@ -469,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn verify_single_use_second_use_returns_401() {
-        let (state, captured, _dir) = test_state();
+        let (state, _provisioner, _registry, captured, _dir) = test_state();
         let token = issue_token(&state, &captured).await;
 
         // First use — should succeed (302)
@@ -497,5 +567,163 @@ mod tests {
                 "second use of same token must return 401"
             );
         }
+    }
+
+    // ── Helper: POST /sites with a session cookie ─────────────────────────────
+
+    async fn post_create_site(
+        app: axum::Router,
+        cookie: &str,
+        body: &str,
+    ) -> axum::http::Response<axum::body::Body> {
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/sites")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", cookie)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    // ── Test: Authenticated POST /sites → 303 + site visible in registry ─────
+
+    #[tokio::test]
+    async fn create_site_authenticated_success() {
+        let (state, fake_provisioner, registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        let app = router(state);
+        let resp =
+            post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::SEE_OTHER,
+            "successful create_site must redirect (303)"
+        );
+        assert_eq!(
+            resp.headers().get("location").map(|v| v.as_bytes()),
+            Some(b"/".as_ref()),
+            "redirect must be to /"
+        );
+
+        // Site visible in registry with correct subdomain and Ready status.
+        let sites = registry.sites_for(&account_id);
+        assert_eq!(sites.len(), 1, "exactly one site must be registered");
+        let site = &sites[0];
+        assert_eq!(
+            site.subdomain,
+            Subdomain::new("demo").unwrap(),
+            "subdomain must match"
+        );
+        assert_eq!(
+            site.status,
+            SiteStatus::Ready,
+            "FakeProvisioner must have set the site to Ready"
+        );
+
+        // FakeProvisioner must have recorded one provision call with correct template.
+        let provisions = fake_provisioner.provisions().await;
+        assert_eq!(provisions.len(), 1, "exactly one provision call must be recorded");
+        assert_eq!(
+            provisions[0].starter.template_name,
+            "personal",
+            "starter.template_name must match form input"
+        );
+    }
+
+    // ── Test: Duplicate subdomain → 409 ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_site_duplicate_subdomain_returns_409() {
+        let (state, _fake_provisioner, _registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        // First creation — must succeed.
+        {
+            let app = router(state.clone());
+            let resp =
+                post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::SEE_OTHER,
+                "first create_site must succeed (303)"
+            );
+        }
+
+        // Second creation with same subdomain — must be 409.
+        {
+            let app = router(state.clone());
+            let resp =
+                post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::CONFLICT,
+                "duplicate subdomain must return 409"
+            );
+        }
+    }
+
+    // ── Test: Invalid subdomain → 400 ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_site_invalid_subdomain_returns_400() {
+        let (state, _fake_provisioner, _registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        let app = router(state);
+        // Uppercase is invalid per Subdomain rules.
+        let resp =
+            post_create_site(app, &cookie, "subdomain=UPPER_CASE&template=personal").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "invalid subdomain must return 400"
+        );
+    }
+
+    // ── Test: Unknown template → 400 ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_site_unknown_template_returns_400() {
+        let (state, _fake_provisioner, _registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        let app = router(state);
+        let resp =
+            post_create_site(app, &cookie, "subdomain=mysite&template=nope").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown template must return 400"
+        );
+    }
+
+    // ── Test: Unauthenticated POST /sites → 401 ───────────────────────────────
+
+    #[tokio::test]
+    async fn create_site_unauthenticated_returns_401() {
+        let (state, _fake_provisioner, _registry, _captured, _dir) = test_state();
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/sites")
+            .header("content-type", "application/x-www-form-urlencoded")
+            // No cookie — no session.
+            .body(axum::body::Body::from("subdomain=demo&template=personal"))
+            .unwrap();
+
+        let app = router(state);
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated request must return 401"
+        );
     }
 }
