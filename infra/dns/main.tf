@@ -8,6 +8,51 @@
 # the records we create keeps Tofu's reach to exactly what it provisioned.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Alpha box DNS records — additive only.
+# These are gated on alpha_floating_ip being set so that existing dns-plan /
+# dns-apply runs (which don't pass -var alpha_floating_ip) stay unchanged.
+# ---------------------------------------------------------------------------
+
+resource "dnsimple_zone_record" "alpha_app" {
+  count = var.alpha_floating_ip != "" ? 1 : 0
+
+  zone_name = var.domain
+  name      = "app"
+  type      = "A"
+  value     = var.alpha_floating_ip
+  ttl       = var.record_ttl
+
+  # prevent_destroy is intentionally left OUT for initial provisioning so the
+  # record can be cleanly removed if the alpha IP changes before DNS stabilises.
+  # ENABLE THIS after the first successful deploy + DNS wiring:
+  #
+  #   lifecycle {
+  #     prevent_destroy = true
+  #   }
+}
+
+resource "dnsimple_zone_record" "alpha_wildcard" {
+  count = var.alpha_floating_ip != "" ? 1 : 0
+
+  zone_name = var.domain
+  name      = "*"
+  type      = "A"
+  value     = var.alpha_floating_ip
+  ttl       = var.record_ttl
+
+  # prevent_destroy is intentionally left OUT for initial provisioning.
+  # ENABLE THIS after the first successful deploy + DNS wiring:
+  #
+  #   lifecycle {
+  #     prevent_destroy = true
+  #   }
+}
+
+# ---------------------------------------------------------------------------
+# Conductor record (unchanged — do not edit).
+# ---------------------------------------------------------------------------
+
 resource "dnsimple_zone_record" "conductor" {
   zone_name = var.domain
   name      = var.conductor_subdomain

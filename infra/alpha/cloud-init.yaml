@@ -1,0 +1,136 @@
+#cloud-config
+# First-boot configuration for the presemble alpha box.
+# Idempotent: re-running (fresh instance) converges to the same state.
+#
+# Key differences from infra/openstack/cloud-init.yaml (conductor box):
+#  - No basic_auth — the alpha box uses session-key auth in the control plane.
+#  - control-plane.service (Rust binary) replaces presemble.service.
+#  - /var/lib/presemble/accounts + registry.json bootstrapped on first boot.
+#  - 1 GB swapfile added (M-Medium is 2 GB RAM; swap gives headroom during
+#    multi-account load spikes before vertical scaling).
+#  - Caddyfile uses on-demand TLS for *.presemble.pub subdomains.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - unattended-upgrades        # preinstalled on Debian cloud image; explicit here
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+  - curl
+  - gnupg
+
+write_files:
+  # Disable root SSH — the `debian` user has sudo.
+  - path: /etc/ssh/sshd_config.d/99-hardening.conf
+    content: |
+      PermitRootLogin no
+
+  # Automatic security updates.
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  # systemd unit for the presemble control-plane service.
+  # The binary /usr/local/bin/control_plane is delivered by the deploy step
+  # (just alpha-deploy), so the unit may fail-restart until the first deploy
+  # lands — that is expected and intentional.
+  - path: /etc/systemd/system/control-plane.service
+    content: |
+      [Unit]
+      Description=Presemble control-plane (hosted alpha)
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=presemble
+      Group=presemble
+      WorkingDirectory=/var/lib/presemble
+      Environment=PRESEMBLE_SESSION_KEY=${presemble_session_key}
+      Environment=PRESEMBLE_LISTEN_ADDR=127.0.0.1:8080
+      Environment=PRESEMBLE_PUBLIC_BASE_URL=https://app.presemble.pub
+      Environment=PRESEMBLE_BASE_DOMAIN=presemble.pub
+      Environment=PRESEMBLE_ACCOUNTS_ROOT=/var/lib/presemble/accounts
+      Environment=PRESEMBLE_REGISTRY_PATH=/var/lib/presemble/registry.json
+      Environment=PATH=/usr/local/bin:/usr/bin:/bin
+      StandardInput=null
+      ExecStart=/usr/local/bin/control_plane
+      Restart=on-failure
+      RestartSec=5
+      # Hardening — the service only needs to write under its state dirs.
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ProtectHome=true
+      PrivateTmp=true
+      ReadWritePaths=/var/lib/presemble /run/presemble
+
+      [Install]
+      WantedBy=multi-user.target
+
+# NOTE: the Caddyfile is intentionally NOT in write_files. Pre-creating
+# /etc/caddy/Caddyfile before the package is installed triggers a dpkg conffile
+# prompt during `apt install caddy`, which aborts the postinst that creates the
+# `caddy` system user (service then fails with status=217/USER). So: install
+# caddy first (clean), then drop our config in runcmd.
+runcmd:
+  - systemctl reload ssh
+
+  # --- 1 GB swapfile (gives the 2 GB box headroom during multi-account spikes) ---
+  - |
+    if [ ! -f /swapfile ]; then
+      fallocate -l 1G /swapfile
+      chmod 600 /swapfile
+      mkswap /swapfile
+      swapon /swapfile
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
+
+  # --- Caddy (official Cloudsmith apt repo) ---
+  - curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update -qq
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+
+  # Now that /etc/caddy exists and the caddy user is created, write our config.
+  # On-demand TLS for *.presemble.pub: Caddy obtains a certificate per subdomain
+  # on first request via HTTP-01 / TLS-ALPN-01. No wildcard cert, no ACME DNS
+  # credentials required on the box. The control-plane injects per-account
+  # reverse-proxy route blocks (matching before the 503 fallback) via the Caddy
+  # admin API on 127.0.0.1:2019 — that port is NOT open in the security group.
+  - |
+    cat > /etc/caddy/Caddyfile <<'CADDY'
+    {
+        admin 127.0.0.1:2019
+    }
+
+    app.presemble.pub {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    *.presemble.pub {
+        tls {
+            on_demand
+        }
+        respond "No site found for this subdomain." 503
+    }
+    CADDY
+  - systemctl enable --now caddy
+  - systemctl reload caddy
+
+  # --- presemble service account + state directories ---
+  - id presemble >/dev/null 2>&1 || useradd --system --home-dir /var/lib/presemble --create-home --shell /usr/sbin/nologin presemble
+  - mkdir -p /var/lib/presemble/accounts
+  - mkdir -p /run/presemble
+  # Bootstrap an empty registry (the control-plane appends to it on account creation).
+  - |
+    if [ ! -f /var/lib/presemble/registry.json ]; then
+      echo '[]' > /var/lib/presemble/registry.json
+    fi
+  - chown -R presemble:presemble /var/lib/presemble
+  - chown presemble:presemble /run/presemble
+
+  # --- Enable the control-plane service ---
+  - systemctl daemon-reload
+  - systemctl enable control-plane

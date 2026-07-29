@@ -31,3 +31,18 @@ variable "dnsimple_sandbox" {
   type        = bool
   default     = false
 }
+
+# ---------------------------------------------------------------------------
+# Alpha box DNS — additive only. The conductor record above is untouched.
+# ---------------------------------------------------------------------------
+
+variable "alpha_floating_ip" {
+  description = "Public address of the alpha box. Looked up from the alpha module: tofu -chdir=infra/alpha output -raw floating_ip (wired by `just dns-apply-alpha`). Leave unset when only managing conductor records."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.alpha_floating_ip == "" || can(regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$", var.alpha_floating_ip))
+    error_message = "alpha_floating_ip must be an IPv4 dotted-quad or empty string."
+  }
+}

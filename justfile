@@ -6,6 +6,10 @@
 # `tofu output` you can read and run by hand if you ever need to.
 _conductor-ip := `tofu -chdir=infra/openstack output -raw floating_ip 2>/dev/null || true`
 
+# Resolve the alpha box's floating IP from the alpha module (parallel state).
+# Empty string when the alpha box has not been provisioned yet.
+_alpha-ip := `tofu -chdir=infra/alpha output -raw floating_ip 2>/dev/null || true`
+
 # DNSimple credentials live outside the repo as plaintext (chmod 600), the same
 # pattern as ~/.config/openstack/clouds.yaml. The dns-* recipes source this file
 # just-in-time into the single tofu command — it is never exported into your
@@ -16,6 +20,10 @@ secrets-file := env_var('HOME') / ".config/presemble/secrets.env"
 # (CADDY_EDITOR_HASH, single-quoted so its `$` survives sourcing). The conductor
 # tofu recipes source it just-in-time into -var. Generate it with: just conductor-auth.
 auth-file := env_var('HOME') / ".config/presemble/presemble-auth.env"
+
+# Alpha box session key — sourced just-in-time by the alpha-plan/apply recipes.
+# Generate with: openssl rand -base64 32 and store as PRESEMBLE_SESSION_KEY.
+alpha-secrets-file := env_var('HOME') / ".config/presemble/alpha-secrets.env"
 
 # ssh-mcp config (Host `conductor`) — reused by deploy so scp/ssh use the
 # dedicated presemble key and the project-local known_hosts.
@@ -102,3 +110,59 @@ dns-plan:
 dns-apply:
     @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
     set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns apply -auto-approve -var floating_ip={{ _conductor-ip }}
+
+# --- alpha box (infra/alpha module — separate Tofu state from conductor) ---
+
+# Cross-compile the alpha control-plane binary (Rust) for the Bahnhof box.
+# Output: target/x86_64-unknown-linux-gnu/release/control_plane
+alpha-build-cp:
+    ZIG_GLOBAL_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zig" cargo polylith cargo --profile live zigbuild --release --target x86_64-unknown-linux-gnu.2.41 --bin control_plane
+
+# Cross-compile the presemble binary for the alpha box (site builder / serve).
+# Output: target/x86_64-unknown-linux-gnu/release/presemble
+alpha-build-presemble:
+    ZIG_GLOBAL_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zig" cargo polylith cargo --profile live zigbuild --release --target x86_64-unknown-linux-gnu.2.41 --bin presemble
+
+# Cross-compile both alpha binaries.
+alpha-build: alpha-build-cp alpha-build-presemble
+
+# Preview changes to the alpha box / network.
+# The session key is sourced from alpha-secrets-file just-in-time into -var.
+alpha-plan:
+    @test -f {{ alpha-secrets-file }} || { echo "missing {{ alpha-secrets-file }} — create it with: printf 'PRESEMBLE_SESSION_KEY=%s\n' \"\$(openssl rand -base64 32)\" > {{ alpha-secrets-file }} && chmod 600 {{ alpha-secrets-file }}"; exit 1; }
+    set -a && . {{ alpha-secrets-file }} && set +a && tofu -chdir=infra/alpha plan -var presemble_session_key="$PRESEMBLE_SESSION_KEY"
+
+# Apply the alpha box / network (non-interactive; run alpha-plan first).
+alpha-apply:
+    @test -f {{ alpha-secrets-file }} || { echo "missing {{ alpha-secrets-file }} — create it with: printf 'PRESEMBLE_SESSION_KEY=%s\n' \"\$(openssl rand -base64 32)\" > {{ alpha-secrets-file }} && chmod 600 {{ alpha-secrets-file }}"; exit 1; }
+    set -a && . {{ alpha-secrets-file }} && set +a && tofu -chdir=infra/alpha apply -auto-approve -var presemble_session_key="$PRESEMBLE_SESSION_KEY"
+
+# Re-provision the alpha box from scratch (destroys the instance, re-creates from
+# cloud-init). The floating IP re-associates so the public address is unchanged.
+alpha-replace:
+    @test -f {{ alpha-secrets-file }} || { echo "missing {{ alpha-secrets-file }} — run: just alpha-plan to see the creation message"; exit 1; }
+    set -a && . {{ alpha-secrets-file }} && set +a && tofu -chdir=infra/alpha apply -auto-approve -var presemble_session_key="$PRESEMBLE_SESSION_KEY" -replace=openstack_compute_instance_v2.presemble_alpha
+
+# Deploy both binaries to the alpha box and restart the control-plane service.
+# Prerequisites: alpha-build + alpha box provisioned (alpha-apply).
+alpha-deploy cp_bin="target/x86_64-unknown-linux-gnu/release/control_plane" presemble_bin="target/x86_64-unknown-linux-gnu/release/presemble":
+    test -x {{ cp_bin }} || { echo "missing {{ cp_bin }} — run: just alpha-build-cp"; exit 1; }
+    test -x {{ presemble_bin }} || { echo "missing {{ presemble_bin }} — run: just alpha-build-presemble"; exit 1; }
+    scp -F {{ ssh-config }} {{ cp_bin }} alpha:/tmp/control_plane.new
+    scp -F {{ ssh-config }} {{ presemble_bin }} alpha:/tmp/presemble.new
+    ssh -F {{ ssh-config }} alpha 'sudo install -o root -g root -m0755 /tmp/control_plane.new /usr/local/bin/control_plane && sudo install -o root -g root -m0755 /tmp/presemble.new /usr/local/bin/presemble && sudo systemctl restart control-plane && rm -f /tmp/control_plane.new /tmp/presemble.new && sleep 1 && systemctl is-active control-plane'
+
+# --- alpha DNS ---
+
+# Preview the alpha DNS records (app + wildcard) against the live alpha floating IP.
+dns-plan-alpha:
+    @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
+    @test -n "{{ _alpha-ip }}" || { echo "alpha floating IP not available — provision the alpha box first (just alpha-apply)"; exit 1; }
+    set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns plan -var floating_ip={{ _conductor-ip }} -var alpha_floating_ip={{ _alpha-ip }}
+
+# Apply the alpha DNS records (app.presemble.pub + *.presemble.pub).
+# Run dns-plan-alpha first as the review gate.
+dns-apply-alpha:
+    @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
+    @test -n "{{ _alpha-ip }}" || { echo "alpha floating IP not available — provision the alpha box first (just alpha-apply)"; exit 1; }
+    set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns apply -auto-approve -var floating_ip={{ _conductor-ip }} -var alpha_floating_ip={{ _alpha-ip }}
