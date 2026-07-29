@@ -1,0 +1,17 @@
+[package]
+name = "site_registry"
+version = "0.35.1"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "site_registry"
+
+[dependencies]
+accounts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rand = "0.9"
+
+[dev-dependencies]
+tempfile = { workspace = true }

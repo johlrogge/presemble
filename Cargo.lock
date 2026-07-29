@@ -10,6 +10,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "rand 0.9.4",
+ "serde",
  "sha2",
  "tokio",
  "tower 0.5.3",

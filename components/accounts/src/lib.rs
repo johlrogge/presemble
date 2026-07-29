@@ -22,6 +22,7 @@ use axum::{
 };
 use axum::extract::FromRef;
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -33,7 +34,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Opaque identifier for a user account. Not stringly-typed at call sites.
 /// Internally represented as a 32-char lowercase-hex string (16 random bytes).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AccountId(String);
 
 impl AccountId {

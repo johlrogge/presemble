@@ -28,6 +28,7 @@ members = [
     "components/serve_ui",
     "components/site_builder",
     "components/site_index",
+    "components/site_registry",
     "components/site_templates",
     "components/stylesheet",
     "components/template",
@@ -77,6 +78,7 @@ schema = { path = "components/schema" }
 serve_ui = { path = "components/serve_ui" }
 site_builder = { path = "components/site_builder" }
 site_index = { path = "components/site_index" }
+site_registry = { path = "components/site_registry" }
 site_repository = { path = "components/mem_site_repository", package = "mem_site_repository" }
 site_templates = { path = "components/site_templates" }
 stylesheet = { path = "components/stylesheet" }
