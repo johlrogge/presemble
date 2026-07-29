@@ -10,6 +10,7 @@ interface = "accounts"
 axum = { workspace = true }
 hmac = "0.12"
 sha2 = "0.10"
+rand = "0.9"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
