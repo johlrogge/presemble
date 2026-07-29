@@ -435,6 +435,7 @@ name = "control-plane-bin"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "axum",
  "control_plane",
  "provisioning",
  "site_registry",
@@ -446,8 +447,14 @@ name = "control_plane"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "async-trait",
+ "axum",
  "provisioning",
+ "serde",
  "site_registry",
+ "tempfile",
+ "tokio",
+ "tower 0.5.3",
 ]
 
 [[package]]

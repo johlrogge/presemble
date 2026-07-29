@@ -12,4 +12,5 @@ control_plane = { workspace = true }
 provisioning = { workspace = true }
 site_registry = { workspace = true }
 accounts = { workspace = true }
+axum = { workspace = true }
 tokio = { workspace = true }

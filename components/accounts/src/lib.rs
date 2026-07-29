@@ -402,6 +402,16 @@ impl LoginTokenStore {
         LoginToken(token)
     }
 
+    /// Verify a login token supplied as a raw string (e.g. from a URL query parameter).
+    ///
+    /// Wraps the raw string into a `LoginToken` crate-internally and delegates to
+    /// `verify_login_token`. Returns `Some(AccountId)` on the first valid
+    /// presentation; `None` if tampered, expired, or already consumed.
+    pub fn verify_login_token_str(&self, raw: &str) -> Option<AccountId> {
+        let token = LoginToken(raw.to_string());
+        self.verify_login_token(&token)
+    }
+
     /// Verify a login token.
     ///
     /// Returns `Some(AccountId)` on the first valid presentation.

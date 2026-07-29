@@ -7,3 +7,12 @@ edition = "2021"
 provisioning = { workspace = true }
 site_registry = { workspace = true }
 accounts = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

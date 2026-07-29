@@ -1,7 +1,17 @@
 //! Control plane binary entry point.
 //!
-//! Constructs `AppState` from real infrastructure seams and exits cleanly.
-//! HTTP handlers and the dashboard are added in the next Task 3.1 step.
+//! Constructs `AppState` from real infrastructure seams and serves the
+//! control plane HTTP API via axum on a configurable address.
+//!
+//! Required environment variables:
+//! - `PRESEMBLE_SESSION_KEY` — HMAC signing key (fail-fast if absent/empty).
+//!
+//! Optional environment variables:
+//! - `PRESEMBLE_LISTEN_ADDR`      — bind address (default: `0.0.0.0:8080`)
+//! - `PRESEMBLE_PUBLIC_BASE_URL`  — absolute public URL (default: `http://localhost:8080`)
+//! - `PRESEMBLE_REGISTRY_PATH`    — registry JSON path (default: `/var/lib/presemble/registry.json`)
+//! - `PRESEMBLE_BASE_DOMAIN`      — Caddy base domain (default: `presemble.pub`)
+//! - `PRESEMBLE_ACCOUNTS_ROOT`    — per-account data root (default: `/var/lib/presemble/accounts`)
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +46,16 @@ async fn main() {
         }
     };
 
+    // ── Public base URL ───────────────────────────────────────────────────────
+
+    let public_base_url = std::env::var("PRESEMBLE_PUBLIC_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:8080".to_string());
+
+    // ── Bind address ──────────────────────────────────────────────────────────
+
+    let listen_addr = std::env::var("PRESEMBLE_LISTEN_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+
     // ── Real provisioning seams ───────────────────────────────────────────────
 
     let launcher: Arc<dyn provisioning::ConductorLauncher> =
@@ -68,10 +88,13 @@ async fn main() {
 
     // ── Accounts stores ───────────────────────────────────────────────────────
 
-    let sessions = accounts::MagicLinkSessionStore::with_key(session_key_str.as_bytes().to_vec());
+    let sessions = Arc::new(accounts::MagicLinkSessionStore::with_key(
+        session_key_str.as_bytes().to_vec(),
+    ));
     // LoginTokenStore's `consumed` set is per-process memory; the control plane
     // must remain single-instance unless this is moved to a shared store (ADR-055).
-    let login_tokens = accounts::LoginTokenStore::with_key(session_key_str.as_bytes().to_vec());
+    let login_tokens =
+        accounts::LoginTokenStore::with_key(session_key_str.as_bytes().to_vec());
     // Alpha placeholders — replace with a persistent AccountStore and a real
     // MailSender before any production deployment.
     let account_store: Arc<dyn accounts::AccountStore> =
@@ -80,14 +103,35 @@ async fn main() {
 
     // ── Assemble AppState ─────────────────────────────────────────────────────
 
-    let _state = control_plane::AppState::new(
+    let state = control_plane::ControlPlaneState::new(Arc::new(control_plane::AppState::new(
         provisioner,
         registry,
         sessions,
         login_tokens,
         account_store,
         mail,
+        public_base_url.clone(),
+    )));
+
+    // ── Build router and serve ────────────────────────────────────────────────
+
+    let app = control_plane::router(state);
+
+    let listener = tokio::net::TcpListener::bind(&listen_addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to bind to {listen_addr}: {e}");
+            std::process::exit(1);
+        });
+
+    eprintln!(
+        "control_plane listening on {listen_addr} (public: {public_base_url})"
     );
 
-    println!("control_plane initialized");
+    axum::serve(listener, app)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error: server error: {e}");
+            std::process::exit(1);
+        });
 }
