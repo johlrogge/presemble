@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Form,
     Router,
-    extract::{FromRef, Query, State},
+    extract::{FromRef, Path, Query, State},
     http::{HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -42,6 +42,9 @@ pub struct AppState {
     /// Absolute base URL of this control plane instance (e.g. `https://app.presemble.pub`).
     /// Used to build the `/auth/verify?token=…` magic-link URL.
     pub public_base_url: String,
+    /// Base domain for hosted sites (e.g. `presemble.pub`).
+    /// Used to build the editor hand-off URL `https://<subdomain>.<base_domain>/_presemble/login?token=`.
+    pub base_domain: String,
 }
 
 impl AppState {
@@ -49,6 +52,7 @@ impl AppState {
     ///
     /// All heavy construction (registry hydration, provisioner config) is done
     /// by the caller (`main`) before passing the fully-constructed values here.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provisioner: Arc<dyn provisioning::ConductorProvisioner>,
         registry: Arc<site_registry::SiteRegistry>,
@@ -57,6 +61,7 @@ impl AppState {
         accounts: Arc<dyn accounts::AccountStore>,
         mail: Arc<dyn accounts::MailSender>,
         public_base_url: String,
+        base_domain: String,
     ) -> Self {
         Self {
             provisioner,
@@ -66,6 +71,7 @@ impl AppState {
             accounts,
             mail,
             public_base_url,
+            base_domain,
         }
     }
 }
@@ -290,6 +296,171 @@ async fn create_site(
     response
 }
 
+/// `GET /` — dashboard listing for an authenticated account.
+///
+/// Shows a create-site form and the account's existing sites.
+/// "Open editor" and "Preview" links are shown only for `Ready` sites.
+/// Dev principals receive 403.
+async fn get_dashboard(
+    session: accounts::Session,
+    State(state): State<ControlPlaneState>,
+) -> Response {
+    use accounts::Principal;
+    use site_registry::SiteStatus;
+
+    let account_id = match session.principal() {
+        Principal::Account { account } => account.clone(),
+        Principal::Dev { .. } => {
+            return (StatusCode::FORBIDDEN, "Dev principals cannot use the dashboard")
+                .into_response();
+        }
+    };
+
+    let sites = state.registry.sites_for(&account_id);
+
+    // Build template options.
+    let template_options: String = site_templates::available_templates()
+        .iter()
+        .map(|t| {
+            format!(
+                r#"<option value="{}">{} — {}</option>"#,
+                html_escape(t.name),
+                html_escape(t.name),
+                html_escape(t.description),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n      ");
+
+    // Build site list rows.
+    let site_rows: String = if sites.is_empty() {
+        "<li><em>No sites yet. Create one above.</em></li>".to_string()
+    } else {
+        sites
+            .iter()
+            .map(|site| {
+                let subdomain = html_escape(site.subdomain.as_str());
+                let status = html_escape(&site.status.to_string());
+                let links = if site.status == SiteStatus::Ready {
+                    format!(
+                        r#" — <a href="/sites/{id}/open">Open editor</a> | <a href="https://{sub}.{base}/" target="_blank">Preview</a>"#,
+                        id = html_escape(site.id.as_str()),
+                        sub = subdomain,
+                        base = html_escape(&state.base_domain),
+                    )
+                } else {
+                    String::new()
+                };
+                format!(
+                    "<li><strong>{subdomain}</strong> ({status}){links}</li>",
+                    subdomain = subdomain,
+                    status = status,
+                    links = links,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n    ")
+    };
+
+    Html(format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Dashboard — Presemble</title></head>
+<body>
+  <h1>Your sites</h1>
+  <h2>Create a new site</h2>
+  <form method="post" action="/sites">
+    <label for="subdomain">Subdomain</label><br>
+    <input id="subdomain" name="subdomain" type="text" required><br>
+    <label for="template">Template</label><br>
+    <select id="template" name="template">
+      {template_options}
+    </select><br>
+    <button type="submit">Create site</button>
+  </form>
+  <h2>Existing sites</h2>
+  <ul>
+    {site_rows}
+  </ul>
+</body>
+</html>"#,
+        template_options = template_options,
+        site_rows = site_rows,
+    ))
+    .into_response()
+}
+
+/// `GET /sites/{id}/open` — issue a session token and redirect to the site's editor.
+///
+/// Guards:
+/// - Dev principal → 403
+/// - Unknown `SiteId` format → 404
+/// - Site not owned by this account → 404 (cross-account authz)
+/// - Site not Ready → 409
+///
+/// On success: 302 to `https://<subdomain>.<base_domain>/_presemble/login?token=<token>`.
+///
+/// The session token is base64url-encoded and contains only URL-safe characters
+/// (`A-Z`, `a-z`, `0-9`, `-`, `_`, `.`), so no additional percent-encoding is needed.
+async fn open_editor(
+    session: accounts::Session,
+    State(state): State<ControlPlaneState>,
+    Path(id): Path<String>,
+) -> Response {
+    use accounts::Principal;
+    use site_registry::{SiteId, SiteStatus};
+
+    let account_id = match session.principal() {
+        Principal::Account { account } => account.clone(),
+        Principal::Dev { .. } => {
+            return (StatusCode::FORBIDDEN, "Dev principals cannot open hosted sites")
+                .into_response();
+        }
+    };
+
+    // Validate SiteId format.
+    let site_id = match SiteId::parse(&id) {
+        Some(id) => id,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    // Only look up sites owned by this account (cross-account authz guard).
+    let site = match state
+        .registry
+        .sites_for(&account_id)
+        .into_iter()
+        .find(|s| s.id == site_id)
+    {
+        Some(s) => s,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    // Require the site to be Ready.
+    if site.status != SiteStatus::Ready {
+        return StatusCode::CONFLICT.into_response();
+    }
+
+    // Mint a session token for the hand-off.
+    let token = state.sessions.mint(&account_id);
+
+    // The base64url token alphabet is A-Za-z0-9-_.  These are all URL-safe
+    // characters per RFC 3986 §2.3, so we embed the token directly without
+    // additional percent-encoding.
+    let url = format!(
+        "https://{}.{}/_presemble/login?token={}",
+        site.subdomain.as_str(),
+        state.base_domain,
+        token.as_str(),
+    );
+
+    let mut response = (StatusCode::FOUND, "").into_response();
+    response.headers_mut().insert(
+        "location",
+        HeaderValue::from_str(&url).expect("redirect URL must be a valid header value"),
+    );
+    response
+}
+
 /// Minimal HTML escaping for user-controlled strings embedded in HTML.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -303,16 +474,20 @@ fn html_escape(s: &str) -> String {
 /// Build the axum router for the control plane, wiring `state` into all handlers.
 ///
 /// Routes mounted:
-/// - `GET  /login`       → email input form (public)
-/// - `POST /login`       → issue + send magic link (public)
-/// - `GET  /auth/verify` → exchange login token for session cookie + redirect (public)
-/// - `POST /sites`       → create a new hosted site (authenticated)
+/// - `GET  /`               → dashboard with site list + create form (authenticated)
+/// - `GET  /login`          → email input form (public)
+/// - `POST /login`          → issue + send magic link (public)
+/// - `GET  /auth/verify`    → exchange login token for session cookie + redirect (public)
+/// - `POST /sites`          → create a new hosted site (authenticated)
+/// - `GET  /sites/{id}/open` → issue session token and redirect to site editor (authenticated)
 pub fn router(state: ControlPlaneState) -> Router {
     Router::new()
+        .route("/", get(get_dashboard))
         .route("/login", get(get_login))
         .route("/login", post(post_login))
         .route("/auth/verify", get(get_verify))
         .route("/sites", post(create_site))
+        .route("/sites/{id}/open", get(open_editor))
         .with_state(state)
 }
 
@@ -324,7 +499,7 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    use accounts::{AccountId, InMemoryAccountStore, LoginTokenStore, MagicLinkSessionStore};
+    use accounts::{AccountId, InMemoryAccountStore, LoginTokenStore, MagicLinkSessionStore, SessionStore};
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use provisioning::FakeProvisioner;
@@ -379,6 +554,7 @@ mod tests {
             account_store,
             mail,
             "http://test.local".to_string(),
+            "test.local".to_string(),
         )));
         (state, fake_provisioner, registry, captured, dir)
     }
@@ -724,6 +900,246 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "unauthenticated request must return 401"
+        );
+    }
+
+    // ── Helper: GET request with optional cookie ──────────────────────────────
+
+    async fn get_with_cookie(
+        app: axum::Router,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> axum::http::Response<axum::body::Body> {
+        let mut builder = axum::http::Request::builder().uri(uri);
+        if let Some(c) = cookie {
+            builder = builder.header("cookie", c);
+        }
+        let req = builder.body(axum::body::Body::empty()).unwrap();
+        app.oneshot(req).await.unwrap()
+    }
+
+    // ── Test: Unauthenticated GET / → 401 ────────────────────────────────────
+
+    #[tokio::test]
+    async fn dashboard_unauthenticated_returns_401() {
+        let (state, _provisioner, _registry, _captured, _dir) = test_state();
+        let app = router(state);
+        let resp = get_with_cookie(app, "/", None).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated GET / must return 401"
+        );
+    }
+
+    // ── Test: Authenticated GET / → 200 with site info ───────────────────────
+
+    #[tokio::test]
+    async fn dashboard_authenticated_shows_sites() {
+        let (state, _provisioner, registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        // Register a Ready site.
+        let ready_site = registry
+            .register_site(&account_id, Subdomain::new("mysite").unwrap())
+            .unwrap();
+        registry
+            .set_status(&ready_site.id, SiteStatus::Ready)
+            .unwrap();
+
+        // Register a Provisioning site (not yet Ready).
+        let _prov_site = registry
+            .register_site(&account_id, Subdomain::new("pending").unwrap())
+            .unwrap();
+
+        let app = router(state);
+        let resp = get_with_cookie(app, "/", Some(&cookie)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "authenticated GET / must return 200");
+
+        let body = to_bytes(resp.into_body(), 32_768).await.unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+
+        // Both subdomains appear in the page.
+        assert!(html.contains("mysite"), "Ready site subdomain must appear in dashboard");
+        assert!(html.contains("pending"), "Provisioning site subdomain must appear in dashboard");
+
+        // Ready site shows "Open editor" link; Provisioning site must NOT.
+        assert!(
+            html.contains(&format!("/sites/{}/open", ready_site.id.as_str())),
+            "Ready site must have an Open editor link"
+        );
+        assert!(
+            html.contains("https://mysite.test.local/"),
+            "Ready site must have a Preview link"
+        );
+
+        // Provisioning site must not have an Open editor link.
+        let prov_link_marker = format!("/sites/{}/open", _prov_site.id.as_str());
+        assert!(
+            !html.contains(&prov_link_marker),
+            "Provisioning site must NOT have an Open editor link"
+        );
+    }
+
+    // ── Test: GET /sites/{id}/open for owned Ready site → 302 ────────────────
+
+    #[tokio::test]
+    async fn open_editor_ready_site_redirects() {
+        let (state, _provisioner, registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        let site = registry
+            .register_site(&account_id, Subdomain::new("coolsite").unwrap())
+            .unwrap();
+        registry.set_status(&site.id, SiteStatus::Ready).unwrap();
+
+        let app = router(state.clone());
+        let resp = get_with_cookie(
+            app,
+            &format!("/sites/{}/open", site.id.as_str()),
+            Some(&cookie),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FOUND,
+            "open_editor for Ready site must redirect (302)"
+        );
+
+        let location = resp
+            .headers()
+            .get("location")
+            .expect("302 response must have Location header")
+            .to_str()
+            .unwrap();
+
+        // Must start with the expected prefix.
+        let expected_prefix = "https://coolsite.test.local/_presemble/login?token=";
+        assert!(
+            location.starts_with(expected_prefix),
+            "Location must start with {expected_prefix}; got: {location}"
+        );
+
+        // Extract the token and verify it round-trips through the same session store.
+        let token_str = location
+            .strip_prefix(expected_prefix)
+            .expect("token must follow the prefix");
+        let verify_store = accounts::MagicLinkSessionStore::with_key(
+            b"test-session-key-32-bytes-padded".to_vec(),
+        );
+        let session = verify_store.verify_str(token_str);
+        assert!(
+            session.is_some(),
+            "minted token must verify under the same key; token: {token_str}"
+        );
+        if let Some(s) = session {
+            match s.principal() {
+                accounts::Principal::Account { account } => {
+                    assert_eq!(
+                        *account, account_id,
+                        "session principal must be the requesting account"
+                    );
+                }
+                accounts::Principal::Dev { .. } => {
+                    panic!("expected Account principal, got Dev");
+                }
+            }
+        }
+    }
+
+    // ── Test: Cross-account access → 404 ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_editor_cross_account_returns_404() {
+        let (state, _provisioner, registry, _captured, _dir) = test_state();
+
+        let account_a = AccountId::generate();
+        let account_b = AccountId::generate();
+
+        // Register a Ready site under account B.
+        let site_b = registry
+            .register_site(&account_b, Subdomain::new("bsite").unwrap())
+            .unwrap();
+        registry.set_status(&site_b.id, SiteStatus::Ready).unwrap();
+
+        // Authenticate as account A and try to open account B's site.
+        let cookie_a = session_cookie_for(&account_a);
+        let app = router(state);
+        let resp = get_with_cookie(
+            app,
+            &format!("/sites/{}/open", site_b.id.as_str()),
+            Some(&cookie_a),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "accessing another account's site must return 404"
+        );
+    }
+
+    // ── Test: Bad SiteId format → 404 ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_editor_bad_site_id_returns_404() {
+        let (state, _provisioner, _registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        let app = router(state);
+        let resp = get_with_cookie(app, "/sites/not-a-valid-id/open", Some(&cookie)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "invalid SiteId format must return 404"
+        );
+    }
+
+    // ── Test: Non-Ready site → 409 ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_editor_provisioning_site_returns_409() {
+        let (state, _provisioner, registry, _captured, _dir) = test_state();
+        let account_id = AccountId::generate();
+        let cookie = session_cookie_for(&account_id);
+
+        // Site starts in Provisioning status.
+        let site = registry
+            .register_site(&account_id, Subdomain::new("notready").unwrap())
+            .unwrap();
+
+        let app = router(state);
+        let resp = get_with_cookie(
+            app,
+            &format!("/sites/{}/open", site.id.as_str()),
+            Some(&cookie),
+        )
+        .await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "Provisioning site must return 409"
+        );
+    }
+
+    // ── Test: Unauthenticated GET /sites/:id/open → 401 ──────────────────────
+
+    #[tokio::test]
+    async fn open_editor_unauthenticated_returns_401() {
+        let (state, _provisioner, _registry, _captured, _dir) = test_state();
+        // Use a plausibly-formatted SiteId.
+        let fake_id = "a".repeat(32);
+        let app = router(state);
+        let resp = get_with_cookie(app, &format!("/sites/{fake_id}/open"), None).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated GET /sites/:id/open must return 401"
         );
     }
 }

@@ -68,7 +68,7 @@ async fn main() {
         .unwrap_or_else(|_| "presemble.pub".to_string());
 
     let router: Arc<dyn provisioning::CaddyRouter> =
-        Arc::new(provisioning::HttpCaddyRouter::new(base_domain));
+        Arc::new(provisioning::HttpCaddyRouter::new(base_domain.clone()));
 
     let accounts_root = std::env::var("PRESEMBLE_ACCOUNTS_ROOT")
         .map(PathBuf::from)
@@ -111,6 +111,7 @@ async fn main() {
         account_store,
         mail,
         public_base_url.clone(),
+        base_domain,
     )));
 
     // ── Build router and serve ────────────────────────────────────────────────
