@@ -294,6 +294,9 @@ enum Command {
         base_path: Option<String>,
         #[arg(long)]
         base_url: Option<String>,
+        /// Port to bind the server on (default: 3000).
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
         /// Mint a dev session token and print a login URL.
         /// Optional value is the session label (defaults to "dev").
         /// Without this flag the editorial plane is closed (no token minted).
@@ -358,7 +361,7 @@ pub fn run() -> Result<(), CliError> {
             }
             Ok(())
         }
-        Some(Command::Serve { site_dir, config, url_style, base_path, base_url, dev_session }) => {
+        Some(Command::Serve { site_dir, config, url_style, base_path, base_url, port, dev_session }) => {
             let site_path = Path::new(&site_dir);
             let url_config = load_url_config(
                 site_path,
@@ -369,7 +372,7 @@ pub fn run() -> Result<(), CliError> {
             )?;
             // --dev-session with no value → label "dev"; with value → that label; absent → None
             let dev_session_label = dev_session.map(|opt| opt.unwrap_or_else(|| "dev".to_string()));
-            serve::serve_site(site_path, 3000, &url_config, dev_session_label)?;
+            serve::serve_site(site_path, port, &url_config, dev_session_label)?;
             Ok(())
         }
         Some(Command::Init { site_dir }) => {
