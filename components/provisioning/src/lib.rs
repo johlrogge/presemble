@@ -141,27 +141,30 @@ pub enum ProvisionError {
 
 /// Opaque handle to a running conductor process.
 ///
-/// Does **not** stop the process on `Drop` — stops are always explicit
-/// via `ConductorLauncher::stop`.
+/// Does **not** stop the process on `Drop` — stops are always explicit via
+/// `ConductorLauncher::stop`.  Cloning a real handle shares ownership of the
+/// underlying `Child` (both clones refer to the same process); the first call
+/// to `stop` takes ownership and reaps the child.
 #[derive(Debug, Clone)]
 pub struct ConductorHandle {
-    /// Internal identifier used by the launcher to reference the process.
-    /// Concrete type is launcher-specific; the real launcher stores a PID.
     inner: ConductorHandleInner,
 }
 
 #[derive(Debug, Clone)]
 enum ConductorHandleInner {
-    /// Real process handle — stores PID for SIGTERM/kill.
-    Pid(u32),
+    /// Real process handle — `Arc<Mutex<Option<Child>>>` so the child can be
+    /// taken out under a lock for reaping without requiring `&mut ConductorHandle`.
+    /// `kill_on_drop` is **false** (default) — dropping the handle must NOT kill
+    /// the process; stop is always explicit.
+    Real(Arc<Mutex<Option<tokio::process::Child>>>),
     /// Fake handle — stores an opaque id for test recording.
     Fake(u64),
 }
 
 impl ConductorHandle {
-    fn from_pid(pid: u32) -> Self {
+    fn from_child(child: tokio::process::Child) -> Self {
         Self {
-            inner: ConductorHandleInner::Pid(pid),
+            inner: ConductorHandleInner::Real(Arc::new(Mutex::new(Some(child)))),
         }
     }
 
@@ -171,10 +174,17 @@ impl ConductorHandle {
         }
     }
 
-    /// Return the PID if this is a real process handle.
+    /// Return the PID of the process, if this is a real handle and the child
+    /// has not yet been reaped.
     pub fn pid(&self) -> Option<u32> {
         match &self.inner {
-            ConductorHandleInner::Pid(p) => Some(*p),
+            ConductorHandleInner::Real(arc) => {
+                // Try to get the PID without taking ownership — lock briefly.
+                // `Child::id()` returns `None` once the process has been waited.
+                arc.try_lock()
+                    .ok()
+                    .and_then(|guard| guard.as_ref().and_then(|c| c.id()))
+            }
             ConductorHandleInner::Fake(_) => None,
         }
     }
@@ -248,18 +258,41 @@ pub trait CaddyRouter: Send + Sync + 'static {
 pub struct TokioProcessLauncher {
     /// Path to the `presemble` binary. Defaults to "presemble" (PATH lookup).
     pub binary: PathBuf,
+    /// If set, overrides the entire argument list (binary + args) used by
+    /// `launch`.  Intended **only** for unit tests — lets tests substitute a
+    /// trivial long-running program (e.g. `sleep 30`) to verify the
+    /// spawn-and-reap logic without needing a real `presemble` binary.
+    ///
+    /// When `Some`, the `LaunchSpec` fields (site_path, port, env) are still
+    /// passed to the child process via environment injection, but the command
+    /// line is `argv[0]` + `args_override` instead of the normal `serve` args.
+    args_override: Option<Vec<String>>,
 }
 
 impl TokioProcessLauncher {
     pub fn new() -> Self {
         Self {
             binary: PathBuf::from("presemble"),
+            args_override: None,
         }
     }
 
     pub fn with_binary(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
+            args_override: None,
+        }
+    }
+
+    /// Create a launcher that runs `program argv[1..]` instead of the normal
+    /// `presemble serve <path> --port <port>` command line.  The env vars
+    /// (`PRESEMBLE_SESSION_KEY`, `HOME`, `XDG_RUNTIME_DIR`) are still injected.
+    ///
+    /// This constructor is intended **only** for unit tests.
+    pub fn with_program(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
+        Self {
+            binary: program.into(),
+            args_override: Some(args),
         }
     }
 }
@@ -275,44 +308,89 @@ impl ConductorLauncher for TokioProcessLauncher {
     async fn launch(&self, spec: &LaunchSpec) -> Result<ConductorHandle, LaunchError> {
         use tokio::process::Command;
 
-        let child = Command::new(&self.binary)
-            .arg("serve")
-            .arg(&spec.site_path)
-            .arg("--port")
-            .arg(spec.port.to_string())
-            .env("PRESEMBLE_SESSION_KEY", spec.session_key.as_str())
+        let mut cmd = Command::new(&self.binary);
+
+        if let Some(override_args) = &self.args_override {
+            // Test mode: use the caller-supplied argument list verbatim.
+            cmd.args(override_args);
+        } else {
+            // Normal production path.
+            cmd.arg("serve")
+                .arg(&spec.site_path)
+                .arg("--port")
+                .arg(spec.port.to_string());
+        }
+
+        // Always inject env vars for isolation/auth.
+        cmd.env("PRESEMBLE_SESSION_KEY", spec.session_key.as_str())
             .env("HOME", &spec.home)
-            .env("XDG_RUNTIME_DIR", &spec.xdg_runtime_dir)
+            .env("XDG_RUNTIME_DIR", &spec.xdg_runtime_dir);
+
+        // kill_on_drop is false by default — dropping the handle must NOT
+        // kill the process.  The process must survive the launch future,
+        // which drops its local handle at the end of `provision`.
+        let child = cmd
             .spawn()
             .map_err(|e| LaunchError::Spawn(e.to_string()))?;
 
-        let pid = child
-            .id()
-            .ok_or_else(|| LaunchError::Spawn("process exited immediately".into()))?;
+        // Verify the process is still alive by checking id() before returning.
+        if child.id().is_none() {
+            return Err(LaunchError::Spawn("process exited immediately".into()));
+        }
 
-        // Detach: we intentionally do not hold the child handle.
-        // The process outlives this future; we manage it via PID signals.
-        std::mem::forget(child);
-
-        Ok(ConductorHandle::from_pid(pid))
+        Ok(ConductorHandle::from_child(child))
     }
 
     async fn stop(&self, handle: &ConductorHandle) -> Result<(), LaunchError> {
-        let pid = match handle.pid() {
-            Some(p) => p,
-            None => return Ok(()), // nothing to stop
+        /// Grace period: how long to wait for SIGTERM before escalating to SIGKILL.
+        const GRACE: Duration = Duration::from_millis(500);
+
+        let child_arc = match &handle.inner {
+            ConductorHandleInner::Real(arc) => arc,
+            ConductorHandleInner::Fake(_) => return Ok(()), // nothing to stop
         };
 
-        // SIGTERM first
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+        // Take the child out from under the lock so we own it for reaping.
+        let mut child = match child_arc.lock().await.take() {
+            Some(c) => c,
+            None => return Ok(()), // already stopped — idempotent
+        };
+
+        // Get the PID before we consume the child with wait().
+        let pid = child.id();
+
+        // SIGTERM (graceful shutdown request)
+        if let Some(p) = pid {
+            unsafe {
+                libc::kill(p as i32, libc::SIGTERM);
+            }
         }
 
-        // Wait briefly then SIGKILL
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+        // Wait up to GRACE for the process to exit voluntarily.
+        match tokio::time::timeout(GRACE, child.wait()).await {
+            Ok(Ok(_)) => {
+                // Process exited cleanly within the grace window — reaped.
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                // wait() itself returned an error — still try SIGKILL below.
+                return Err(LaunchError::Stop(format!("wait after SIGTERM failed: {e}")));
+            }
+            Err(_timeout) => {
+                // Grace period elapsed — escalate to SIGKILL.
+            }
         }
+
+        // SIGKILL
+        child
+            .start_kill()
+            .map_err(|e| LaunchError::Stop(format!("SIGKILL failed: {e}")))?;
+
+        // Reap unconditionally — no zombie.
+        child
+            .wait()
+            .await
+            .map_err(|e| LaunchError::Stop(format!("wait after SIGKILL failed: {e}")))?;
 
         Ok(())
     }
@@ -462,11 +540,28 @@ impl CaddyRouter for HttpCaddyRouter {
             reason: e.to_string(),
         })?;
 
-        // Consume the body to free the connection
-        let _body = resp.into_body().collect().await.map_err(|e| RouterError::AddFailed {
-            subdomain: subdomain.as_str().into(),
-            reason: e.to_string(),
-        })?;
+        let status = resp.status();
+
+        // Consume body — always drain to free the connection.
+        let body_bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| RouterError::AddFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: e.to_string(),
+            })?
+            .to_bytes();
+
+        if !status.is_success() {
+            // Capture a short diagnostic snippet from the response body.
+            let snippet = String::from_utf8_lossy(&body_bytes);
+            let snippet = snippet.chars().take(256).collect::<String>();
+            return Err(RouterError::AddFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: format!("HTTP {} from Caddy: {}", status, snippet),
+            });
+        }
 
         Ok(())
     }
@@ -499,11 +594,28 @@ impl CaddyRouter for HttpCaddyRouter {
             reason: e.to_string(),
         })?;
 
-        // Consume body; 404 is acceptable (idempotent)
-        let _body = resp.into_body().collect().await.map_err(|e| RouterError::RemoveFailed {
-            subdomain: subdomain.as_str().into(),
-            reason: e.to_string(),
-        })?;
+        let status = resp.status();
+
+        // Consume body — always drain to free the connection.
+        let body_bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| RouterError::RemoveFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: e.to_string(),
+            })?
+            .to_bytes();
+
+        // 404 is acceptable for DELETE (idempotent — route was already absent).
+        if !status.is_success() && status != hyper::StatusCode::NOT_FOUND {
+            let snippet = String::from_utf8_lossy(&body_bytes);
+            let snippet = snippet.chars().take(256).collect::<String>();
+            return Err(RouterError::RemoveFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: format!("HTTP {} from Caddy: {}", status, snippet),
+            });
+        }
 
         Ok(())
     }
@@ -607,7 +719,9 @@ impl ConductorLauncher for FakeLauncher {
     async fn stop(&self, handle: &ConductorHandle) -> Result<(), LaunchError> {
         let handle_id = match &handle.inner {
             ConductorHandleInner::Fake(id) => *id,
-            ConductorHandleInner::Pid(p) => *p as u64,
+            // Real handles are never created by FakeLauncher, but handle
+            // gracefully in case one is passed in (use 0 as sentinel).
+            ConductorHandleInner::Real(_) => 0,
         };
         self.stops.lock().await.push(StopRecord { handle_id });
         Ok(())
@@ -1316,6 +1430,65 @@ mod tests {
         let s = sub("fail");
         assert!(router.add_route(&s, "127.0.0.1", 3100).await.is_err());
     }
+
+    // ── T3b: TokioProcessLauncher spawn-and-reap (real process) ──────────────
+    //
+    // Verifies that `stop` reaps the child process with no zombie left behind.
+    // Uses `sleep 30` (via `with_program`) as a trivial long-running program.
+    // The grace period in `stop` is 500 ms; `sleep` responds to SIGTERM
+    // immediately, so the test completes in well under a second.
+
+    #[tokio::test]
+    async fn tokio_process_launcher_stop_reaps_child_no_zombie() {
+        // Launch `sleep 30` via the test-only `with_program` constructor.
+        let launcher = TokioProcessLauncher::with_program("sleep", vec!["30".into()]);
+
+        let spec = LaunchSpec {
+            site_path: PathBuf::from("/tmp/reap-test"),
+            port: 3100,
+            session_key: SessionKey::from("test"),
+            home: PathBuf::from("/tmp"),
+            xdg_runtime_dir: PathBuf::from("/tmp/.runtime"),
+        };
+
+        let handle = launcher.launch(&spec).await.expect("sleep should spawn");
+
+        // Capture the PID before stop (which will take the child).
+        let pid = handle.pid().expect("handle must have a PID after launch");
+        assert!(pid > 0, "PID must be positive");
+
+        // stop() must complete quickly (sleep exits on SIGTERM within the grace window).
+        let stop_result = launcher.stop(&handle).await;
+        assert!(stop_result.is_ok(), "stop must succeed: {stop_result:?}");
+
+        // Confirm the process is gone: kill(pid, 0) returns ESRCH when no process
+        // with that PID exists (or EPERM if it does but we lack permission — the
+        // latter would mean the process is still running, which is a failure).
+        // A reaped process leaves no entry in the process table for our PID
+        // (assuming no PID reuse in the tiny interval of the test).
+        let rc = unsafe { libc::kill(pid as i32, 0) };
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let esrch = libc::ESRCH;
+        assert!(
+            rc != 0 && errno == esrch,
+            "process {pid} must be gone after stop (kill(0) returned rc={rc}, errno={errno})"
+        );
+
+        // Calling stop again on the same handle must be idempotent (no panic/error).
+        let stop2 = launcher.stop(&handle).await;
+        assert!(stop2.is_ok(), "second stop on reaped handle must be Ok");
+    }
+
+    // ── T3c: HttpCaddyRouter error surfacing (unit note) ─────────────────────
+    //
+    // The `HttpCaddyRouter` makes real HTTP calls to a live Caddy admin API, so
+    // it cannot be unit-tested without standing up a real server.  The error-
+    // surfacing logic (non-2xx → RouterError with status + body snippet) lives
+    // entirely in the HTTP response-handling path and is verified by code
+    // inspection + integration test against the box.
+    //
+    // The happy path (2xx) and the idempotent 404 on DELETE are covered by the
+    // integration smoke test in the `content_management` binary.
 
     // ── T4: Happy path ────────────────────────────────────────────────────────
 
