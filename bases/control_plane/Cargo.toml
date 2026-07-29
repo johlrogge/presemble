@@ -1,0 +1,9 @@
+[package]
+name = "control_plane"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+provisioning = { workspace = true }
+site_registry = { workspace = true }
+accounts = { workspace = true }

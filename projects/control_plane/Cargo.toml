@@ -1,0 +1,15 @@
+[package]
+name = "control-plane-bin"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "control_plane"
+path = "src/main.rs"
+
+[dependencies]
+control_plane = { workspace = true }
+provisioning = { workspace = true }
+site_registry = { workspace = true }
+accounts = { workspace = true }
+tokio = { workspace = true }

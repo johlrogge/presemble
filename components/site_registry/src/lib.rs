@@ -415,6 +415,34 @@ impl SiteRegistry {
             .collect()
     }
 
+    /// Like `all_placements` but only sites with status `Ready`.
+    ///
+    /// Used by `reconcile` so that Failed/Stopped sites are never re-routed.
+    pub fn ready_placements(&self) -> Vec<(Subdomain, Placement)> {
+        let inner = self.inner.lock().expect("site registry lock poisoned");
+        inner
+            .sites
+            .values()
+            .filter(|s| s.status == SiteStatus::Ready)
+            .filter_map(|s| s.placement.clone().map(|p| (s.subdomain.clone(), p)))
+            .collect()
+    }
+
+    /// Remove a site's placement record (idempotent).
+    ///
+    /// Used by `provision` compensation when a route-add fails after
+    /// `set_placement` has already been called.
+    pub fn clear_placement(&self, site_id: &SiteId) -> Result<(), RegistryError> {
+        let mut inner = self.inner.lock().expect("site registry lock poisoned");
+        let site = inner
+            .sites
+            .get_mut(site_id)
+            .ok_or_else(|| RegistryError::NotFound(site_id.to_string()))?;
+        site.placement = None;
+        let sites: Vec<Site> = inner.sites.values().cloned().collect();
+        inner.store.save(&sites)
+    }
+
     /// Allocate the next free port in `range` (not already held by a placement).
     ///
     /// Returns `Err(PortRangeExhausted)` if every port in the range is taken.
@@ -792,6 +820,114 @@ mod tests {
                 PathBuf::from("/data/accounts/persist/site")
             );
         }
+    }
+
+    // ── clear_placement ───────────────────────────────────────────────────────
+
+    #[test]
+    fn clear_placement_removes_placement() {
+        let (reg, _dir) = temp_registry();
+        let account = make_account();
+        let site = reg.register_site(&account, sub("clearme")).unwrap();
+        let placement = Placement {
+            host: "127.0.0.1".to_string(),
+            port: 3400,
+            site_path: PathBuf::from("/data/accounts/clear/site"),
+        };
+        reg.set_placement(&site.id, placement).unwrap();
+        // Confirm it's there
+        assert!(reg.placement_for(&sub("clearme")).is_some());
+        // Clear it
+        reg.clear_placement(&site.id).unwrap();
+        // Should be gone
+        assert!(reg.placement_for(&sub("clearme")).is_none());
+    }
+
+    #[test]
+    fn clear_placement_unknown_site_returns_not_found() {
+        let (reg, _dir) = temp_registry();
+        let unknown = SiteId::generate();
+        let err = reg.clear_placement(&unknown).unwrap_err();
+        assert!(matches!(err, RegistryError::NotFound(_)));
+    }
+
+    #[test]
+    fn clear_placement_on_site_without_placement_is_ok() {
+        let (reg, _dir) = temp_registry();
+        let account = make_account();
+        let site = reg.register_site(&account, sub("noplacementyet")).unwrap();
+        // Clearing a site that has no placement should still succeed (idempotent)
+        reg.clear_placement(&site.id).unwrap();
+        assert!(reg.placement_for(&sub("noplacementyet")).is_none());
+    }
+
+    // ── ready_placements ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ready_placements_returns_only_ready_sites() {
+        let (reg, _dir) = temp_registry();
+        let account = make_account();
+
+        // Provisioning site with placement (should NOT appear)
+        let s_prov = reg.register_site(&account, sub("prov")).unwrap();
+        reg.set_placement(
+            &s_prov.id,
+            Placement {
+                host: "127.0.0.1".to_string(),
+                port: 3500,
+                site_path: PathBuf::from("/data/a/prov"),
+            },
+        )
+        .unwrap();
+
+        // Ready site with placement (SHOULD appear)
+        let s_ready = reg.register_site(&account, sub("ready")).unwrap();
+        reg.set_placement(
+            &s_ready.id,
+            Placement {
+                host: "127.0.0.1".to_string(),
+                port: 3501,
+                site_path: PathBuf::from("/data/a/ready"),
+            },
+        )
+        .unwrap();
+        reg.set_status(&s_ready.id, SiteStatus::Ready).unwrap();
+
+        // Failed site with placement (should NOT appear)
+        let s_fail = reg.register_site(&account, sub("fail")).unwrap();
+        reg.set_placement(
+            &s_fail.id,
+            Placement {
+                host: "127.0.0.1".to_string(),
+                port: 3502,
+                site_path: PathBuf::from("/data/a/fail"),
+            },
+        )
+        .unwrap();
+        reg.set_status(&s_fail.id, SiteStatus::Failed).unwrap();
+
+        let ready = reg.ready_placements();
+        assert_eq!(ready.len(), 1, "only Ready sites should appear");
+        assert_eq!(ready[0].0, sub("ready"));
+        assert_eq!(ready[0].1.port, 3501);
+    }
+
+    #[test]
+    fn ready_placements_empty_when_none_ready() {
+        let (reg, _dir) = temp_registry();
+        let account = make_account();
+        let site = reg.register_site(&account, sub("notready")).unwrap();
+        reg.set_placement(
+            &site.id,
+            Placement {
+                host: "127.0.0.1".to_string(),
+                port: 3600,
+                site_path: PathBuf::from("/data/notready"),
+            },
+        )
+        .unwrap();
+        // Still Provisioning, not Ready
+        assert!(reg.ready_placements().is_empty());
     }
 
     // ── Concurrent registration ───────────────────────────────────────────────

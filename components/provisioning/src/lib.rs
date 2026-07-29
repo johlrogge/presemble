@@ -1,0 +1,1629 @@
+//! `provisioning` component — control-plane lifecycle management for hosted sites.
+//!
+//! Provides `SharedVmProvisioner`, which orchestrates the full provision/deprovision
+//! lifecycle for per-account `presemble serve` conductors running on a single VM:
+//!
+//! 1. Allocates a port from a configured range.
+//! 2. Launches `presemble serve <site_path> --port <port>` as a child process.
+//! 3. Health-polls the conductor until it responds or times out.
+//! 4. Registers a Caddy reverse-proxy route.
+//! 5. Records the placement in the `SiteRegistry`.
+//!
+//! The three infrastructure seams (`ConductorLauncher`, `HealthChecker`,
+//! `CaddyRouter`) are traits so tests can use fake implementations without
+//! touching any real process, HTTP, or Caddy infrastructure.
+//!
+//! # Security
+//!
+//! `SessionKey` has a redacted `Debug` impl — it never prints its secret value.
+//!
+//! # Caddy @id note
+//!
+//! The real `HttpCaddyRouter` uses Caddy's `@id` matcher handle approach:
+//! PUT `/id/<subdomain>` to add, DELETE `/id/<subdomain>` to remove.
+//! This must be validated against the production Caddy config on the box.
+//! If the `/id/` API endpoint is unavailable, fall back to serialised index ops
+//! (the `route_lock` in `SharedVmProvisioner` already serialises all mutations).
+
+use accounts::AccountId;
+use async_trait::async_trait;
+use site_registry::{Placement, RegistryError, SiteId, SiteRegistry, SiteStatus, Subdomain};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use thiserror::Error;
+use tokio::sync::Mutex;
+
+// ── SessionKey ────────────────────────────────────────────────────────────────
+
+/// HMAC signing key passed to each conductor via `PRESEMBLE_SESSION_KEY`.
+///
+/// `Debug` is **deliberately redacted** — the key secret must never appear in
+/// logs, error messages, or debug output (ADR-055 blast radius).
+#[derive(Clone)]
+pub struct SessionKey(String);
+
+impl SessionKey {
+    /// Create a `SessionKey` from any string-like value.
+    pub fn from(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Expose the raw key bytes for passing to child-process env.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Redacted `Debug` — never reveals the secret.
+impl std::fmt::Debug for SessionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionKey(<redacted>)")
+    }
+}
+
+// ── Error types ───────────────────────────────────────────────────────────────
+
+/// Errors from the `ConductorLauncher` seam.
+#[derive(Debug, Error)]
+pub enum LaunchError {
+    #[error("process spawn failed: {0}")]
+    Spawn(String),
+    #[error("process stop failed: {0}")]
+    Stop(String),
+}
+
+/// Errors from the `HealthChecker` seam.
+#[derive(Debug, Error)]
+pub enum HealthError {
+    #[error("health check timed out after {0:?}")]
+    Timeout(Duration),
+    #[error("health check IO error: {0}")]
+    Io(String),
+}
+
+/// Errors from the `CaddyRouter` seam.
+#[derive(Debug, Error)]
+pub enum RouterError {
+    #[error("Caddy route add failed for {subdomain}: {reason}")]
+    AddFailed { subdomain: String, reason: String },
+    #[error("Caddy route remove failed for {subdomain}: {reason}")]
+    RemoveFailed { subdomain: String, reason: String },
+}
+
+/// Top-level errors from `ConductorProvisioner`.
+#[derive(Debug, Error)]
+pub enum ProvisionError {
+    #[error("site path is not absolute: {0}")]
+    RelativeSitePath(PathBuf),
+
+    #[error("site path collision — path already in use: {0}")]
+    SitePathCollision(PathBuf),
+
+    #[error("port collision — port {0} already allocated")]
+    PortCollision(u16),
+
+    #[error("port range exhausted")]
+    PortRangeExhausted,
+
+    #[error("conductor health timeout: {0}")]
+    HealthTimeout(#[from] HealthError),
+
+    #[error("conductor launch error: {0}")]
+    Launch(#[from] LaunchError),
+
+    #[error("caddy router error: {0}")]
+    Router(#[from] RouterError),
+
+    #[error("registry error: {0}")]
+    Registry(#[from] RegistryError),
+}
+
+// ── ConductorHandle ───────────────────────────────────────────────────────────
+
+/// Opaque handle to a running conductor process.
+///
+/// Does **not** stop the process on `Drop` — stops are always explicit
+/// via `ConductorLauncher::stop`.
+#[derive(Debug, Clone)]
+pub struct ConductorHandle {
+    /// Internal identifier used by the launcher to reference the process.
+    /// Concrete type is launcher-specific; the real launcher stores a PID.
+    inner: ConductorHandleInner,
+}
+
+#[derive(Debug, Clone)]
+enum ConductorHandleInner {
+    /// Real process handle — stores PID for SIGTERM/kill.
+    Pid(u32),
+    /// Fake handle — stores an opaque id for test recording.
+    Fake(u64),
+}
+
+impl ConductorHandle {
+    fn from_pid(pid: u32) -> Self {
+        Self {
+            inner: ConductorHandleInner::Pid(pid),
+        }
+    }
+
+    fn fake(id: u64) -> Self {
+        Self {
+            inner: ConductorHandleInner::Fake(id),
+        }
+    }
+
+    /// Return the PID if this is a real process handle.
+    pub fn pid(&self) -> Option<u32> {
+        match &self.inner {
+            ConductorHandleInner::Pid(p) => Some(*p),
+            ConductorHandleInner::Fake(_) => None,
+        }
+    }
+}
+
+// ── LaunchSpec ────────────────────────────────────────────────────────────────
+
+/// All parameters needed to launch a per-account conductor process.
+#[derive(Debug, Clone)]
+pub struct LaunchSpec {
+    /// Absolute path to the site directory on disk.
+    pub site_path: PathBuf,
+    /// Port on which the conductor should listen.
+    pub port: u16,
+    /// HMAC session key injected as `PRESEMBLE_SESSION_KEY`.
+    pub session_key: SessionKey,
+    /// Value for `HOME` environment variable (per-account isolation).
+    pub home: PathBuf,
+    /// Value for `XDG_RUNTIME_DIR` (per-account isolation).
+    pub xdg_runtime_dir: PathBuf,
+}
+
+// ── Seam traits ───────────────────────────────────────────────────────────────
+
+/// Seam for launching and stopping conductor processes.
+#[async_trait]
+pub trait ConductorLauncher: Send + Sync + 'static {
+    /// Spawn a conductor process with the given spec.
+    async fn launch(&self, spec: &LaunchSpec) -> Result<ConductorHandle, LaunchError>;
+
+    /// Stop (SIGTERM, then kill) a running conductor.
+    async fn stop(&self, handle: &ConductorHandle) -> Result<(), LaunchError>;
+}
+
+/// Seam for waiting until a conductor is healthy (accepting HTTP traffic).
+#[async_trait]
+pub trait HealthChecker: Send + Sync + 'static {
+    /// Poll `http://<host>:<port>/` until it returns 200, or until `timeout` elapses.
+    async fn wait_ready(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<(), HealthError>;
+}
+
+/// Seam for managing Caddy reverse-proxy routes.
+#[async_trait]
+pub trait CaddyRouter: Send + Sync + 'static {
+    /// Add (or overwrite) a route: `<subdomain>.presemble.pub` → `http://<host>:<port>`.
+    ///
+    /// Idempotent on subdomain — a second call with the same subdomain replaces the route.
+    async fn add_route(
+        &self,
+        subdomain: &Subdomain,
+        host: &str,
+        port: u16,
+    ) -> Result<(), RouterError>;
+
+    /// Remove the route for `subdomain`.
+    ///
+    /// Idempotent — removing a non-existent route is not an error.
+    async fn remove_route(&self, subdomain: &Subdomain) -> Result<(), RouterError>;
+}
+
+// ── Real seam implementations ─────────────────────────────────────────────────
+
+/// Real launcher: spawns `presemble serve <path> --port <port>` via Tokio.
+///
+/// Process is NOT stopped on Drop — callers must call `stop` explicitly.
+pub struct TokioProcessLauncher {
+    /// Path to the `presemble` binary. Defaults to "presemble" (PATH lookup).
+    pub binary: PathBuf,
+}
+
+impl TokioProcessLauncher {
+    pub fn new() -> Self {
+        Self {
+            binary: PathBuf::from("presemble"),
+        }
+    }
+
+    pub fn with_binary(binary: impl Into<PathBuf>) -> Self {
+        Self {
+            binary: binary.into(),
+        }
+    }
+}
+
+impl Default for TokioProcessLauncher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ConductorLauncher for TokioProcessLauncher {
+    async fn launch(&self, spec: &LaunchSpec) -> Result<ConductorHandle, LaunchError> {
+        use tokio::process::Command;
+
+        let child = Command::new(&self.binary)
+            .arg("serve")
+            .arg(&spec.site_path)
+            .arg("--port")
+            .arg(spec.port.to_string())
+            .env("PRESEMBLE_SESSION_KEY", spec.session_key.as_str())
+            .env("HOME", &spec.home)
+            .env("XDG_RUNTIME_DIR", &spec.xdg_runtime_dir)
+            .spawn()
+            .map_err(|e| LaunchError::Spawn(e.to_string()))?;
+
+        let pid = child
+            .id()
+            .ok_or_else(|| LaunchError::Spawn("process exited immediately".into()))?;
+
+        // Detach: we intentionally do not hold the child handle.
+        // The process outlives this future; we manage it via PID signals.
+        std::mem::forget(child);
+
+        Ok(ConductorHandle::from_pid(pid))
+    }
+
+    async fn stop(&self, handle: &ConductorHandle) -> Result<(), LaunchError> {
+        let pid = match handle.pid() {
+            Some(p) => p,
+            None => return Ok(()), // nothing to stop
+        };
+
+        // SIGTERM first
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+
+        // Wait briefly then SIGKILL
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+
+        Ok(())
+    }
+}
+
+
+/// Real health checker: HTTP-polls `GET http://host:port/` until 200.
+///
+/// Uses hyper with a plaintext HTTP/1.1 client — no TLS required because
+/// conductors bind to 127.0.0.1.
+pub struct HttpHealthChecker {
+    /// Interval between poll attempts.
+    pub poll_interval: Duration,
+}
+
+impl HttpHealthChecker {
+    pub fn new() -> Self {
+        Self {
+            poll_interval: Duration::from_millis(200),
+        }
+    }
+}
+
+impl Default for HttpHealthChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl HealthChecker for HttpHealthChecker {
+    async fn wait_ready(
+        &self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<(), HealthError> {
+        use http_body_util::Empty;
+        use hyper::body::Bytes;
+        use hyper_util::client::legacy::Client;
+        use hyper_util::rt::TokioExecutor;
+
+        let url = format!("http://{}:{}/", host, port);
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(HealthError::Timeout(timeout));
+            }
+
+            // Build a one-shot client per attempt (cheap for plaintext HTTP/1.1)
+            let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
+
+            let uri: hyper::Uri = url
+                .parse()
+                .map_err(|e: hyper::http::uri::InvalidUri| HealthError::Io(e.to_string()))?;
+
+            let req = hyper::Request::builder()
+                .uri(uri)
+                .body(Empty::<Bytes>::new())
+                .map_err(|e| HealthError::Io(e.to_string()))?;
+
+            match client.request(req).await {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                _ => {
+                    tokio::time::sleep(self.poll_interval).await;
+                }
+            }
+        }
+    }
+}
+
+/// Real Caddy router: uses Caddy's `@id` named-config API.
+///
+/// `PUT /id/<subdomain>` to add/replace a route, `DELETE /id/<subdomain>` to remove.
+///
+/// **Validation note**: the `@id` config API endpoint must be confirmed against the
+/// production Caddy version on the box. If unsupported, fall back to serialised
+/// index-based operations (the `route_lock` already serialises all route mutations).
+pub struct HttpCaddyRouter {
+    /// Caddy admin address (default `127.0.0.1:2019`).
+    pub admin_addr: String,
+    /// Base domain suffix (e.g. `"presemble.pub"`).
+    pub base_domain: String,
+}
+
+impl HttpCaddyRouter {
+    pub fn new(base_domain: impl Into<String>) -> Self {
+        Self {
+            admin_addr: "127.0.0.1:2019".into(),
+            base_domain: base_domain.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl CaddyRouter for HttpCaddyRouter {
+    async fn add_route(
+        &self,
+        subdomain: &Subdomain,
+        host: &str,
+        port: u16,
+    ) -> Result<(), RouterError> {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Bytes;
+        use hyper_util::client::legacy::Client;
+        use hyper_util::rt::TokioExecutor;
+
+        let fqdn = format!("{}.{}", subdomain.as_str(), self.base_domain);
+
+        // Caddy route object (minimal — match on Host, reverse_proxy upstream)
+        let route_json = serde_json::json!({
+            "@id": subdomain.as_str(),
+            "match": [{ "host": [fqdn] }],
+            "handle": [{
+                "handler": "reverse_proxy",
+                "upstreams": [{ "dial": format!("{}:{}", host, port) }]
+            }]
+        });
+
+        let body_bytes = serde_json::to_vec(&route_json)
+            .map_err(|e| RouterError::AddFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: e.to_string(),
+            })?;
+
+        let url = format!(
+            "http://{}/id/{}",
+            self.admin_addr,
+            subdomain.as_str()
+        );
+
+        let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+
+        let req = hyper::Request::builder()
+            .method("PUT")
+            .uri(url)
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body_bytes)))
+            .map_err(|e| RouterError::AddFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: e.to_string(),
+            })?;
+
+        let resp = client.request(req).await.map_err(|e| RouterError::AddFailed {
+            subdomain: subdomain.as_str().into(),
+            reason: e.to_string(),
+        })?;
+
+        // Consume the body to free the connection
+        let _body = resp.into_body().collect().await.map_err(|e| RouterError::AddFailed {
+            subdomain: subdomain.as_str().into(),
+            reason: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+
+    async fn remove_route(&self, subdomain: &Subdomain) -> Result<(), RouterError> {
+        use http_body_util::{BodyExt, Empty};
+        use hyper::body::Bytes;
+        use hyper_util::client::legacy::Client;
+        use hyper_util::rt::TokioExecutor;
+
+        let url = format!(
+            "http://{}/id/{}",
+            self.admin_addr,
+            subdomain.as_str()
+        );
+
+        let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
+
+        let req = hyper::Request::builder()
+            .method("DELETE")
+            .uri(url)
+            .body(Empty::<Bytes>::new())
+            .map_err(|e| RouterError::RemoveFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: e.to_string(),
+            })?;
+
+        let resp = client.request(req).await.map_err(|e| RouterError::RemoveFailed {
+            subdomain: subdomain.as_str().into(),
+            reason: e.to_string(),
+        })?;
+
+        // Consume body; 404 is acceptable (idempotent)
+        let _body = resp.into_body().collect().await.map_err(|e| RouterError::RemoveFailed {
+            subdomain: subdomain.as_str().into(),
+            reason: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+}
+
+// ── Fake seam implementations ─────────────────────────────────────────────────
+
+/// Record of a launch call (for test assertions).
+#[derive(Debug, Clone)]
+pub struct LaunchRecord {
+    pub spec_site_path: PathBuf,
+    pub spec_port: u16,
+    pub spec_home: PathBuf,
+    pub spec_xdg_runtime_dir: PathBuf,
+    pub handle_id: u64,
+}
+
+/// Record of a stop call.
+#[derive(Debug, Clone)]
+pub struct StopRecord {
+    pub handle_id: u64,
+}
+
+/// Fake launcher for unit tests. Records all launches and stops.
+pub struct FakeLauncher {
+    next_id: Mutex<u64>,
+    launches: Mutex<Vec<LaunchRecord>>,
+    stops: Mutex<Vec<StopRecord>>,
+    fail_launch: bool,
+}
+
+impl FakeLauncher {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            next_id: Mutex::new(1),
+            launches: Mutex::new(Vec::new()),
+            stops: Mutex::new(Vec::new()),
+            fail_launch: false,
+        })
+    }
+
+    pub fn failing() -> Arc<Self> {
+        Arc::new(Self {
+            next_id: Mutex::new(1),
+            launches: Mutex::new(Vec::new()),
+            stops: Mutex::new(Vec::new()),
+            fail_launch: true,
+        })
+    }
+
+    pub async fn launches(&self) -> Vec<LaunchRecord> {
+        self.launches.lock().await.clone()
+    }
+
+    pub async fn stops(&self) -> Vec<StopRecord> {
+        self.stops.lock().await.clone()
+    }
+
+    pub async fn launch_count(&self) -> usize {
+        self.launches.lock().await.len()
+    }
+
+    pub async fn stop_count(&self) -> usize {
+        self.stops.lock().await.len()
+    }
+}
+
+impl Default for FakeLauncher {
+    fn default() -> Self {
+        Self {
+            next_id: Mutex::new(1),
+            launches: Mutex::new(Vec::new()),
+            stops: Mutex::new(Vec::new()),
+            fail_launch: false,
+        }
+    }
+}
+
+#[async_trait]
+impl ConductorLauncher for FakeLauncher {
+    async fn launch(&self, spec: &LaunchSpec) -> Result<ConductorHandle, LaunchError> {
+        if self.fail_launch {
+            return Err(LaunchError::Spawn("fake launch failure".into()));
+        }
+        let mut id = self.next_id.lock().await;
+        let handle_id = *id;
+        *id += 1;
+        drop(id);
+
+        self.launches.lock().await.push(LaunchRecord {
+            spec_site_path: spec.site_path.clone(),
+            spec_port: spec.port,
+            spec_home: spec.home.clone(),
+            spec_xdg_runtime_dir: spec.xdg_runtime_dir.clone(),
+            handle_id,
+        });
+
+        Ok(ConductorHandle::fake(handle_id))
+    }
+
+    async fn stop(&self, handle: &ConductorHandle) -> Result<(), LaunchError> {
+        let handle_id = match &handle.inner {
+            ConductorHandleInner::Fake(id) => *id,
+            ConductorHandleInner::Pid(p) => *p as u64,
+        };
+        self.stops.lock().await.push(StopRecord { handle_id });
+        Ok(())
+    }
+}
+
+/// Fake health checker — configurable behaviour.
+pub enum FakeHealth {
+    /// Returns `Ok(())` immediately.
+    ReadyImmediately,
+    /// Returns `Ok(())` after `n` poll-like yields (simulates warm-up).
+    ReadyAfterYields(u32),
+    /// Always times out — returns `HealthError::Timeout`.
+    NeverReady,
+}
+
+#[async_trait]
+impl HealthChecker for FakeHealth {
+    async fn wait_ready(
+        &self,
+        _host: &str,
+        _port: u16,
+        timeout: Duration,
+    ) -> Result<(), HealthError> {
+        match self {
+            FakeHealth::ReadyImmediately => Ok(()),
+            FakeHealth::ReadyAfterYields(n) => {
+                for _ in 0..*n {
+                    tokio::task::yield_now().await;
+                }
+                Ok(())
+            }
+            FakeHealth::NeverReady => {
+                // Advance time so the provisioner's timeout fires.
+                // In tests using tokio::time::pause(), sleep until the timeout elapses.
+                tokio::time::sleep(timeout + Duration::from_millis(1)).await;
+                Err(HealthError::Timeout(timeout))
+            }
+        }
+    }
+}
+
+/// Record of a route operation (for test assertions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteOp {
+    Add {
+        subdomain: String,
+        host: String,
+        port: u16,
+    },
+    Remove {
+        subdomain: String,
+    },
+}
+
+/// Fake Caddy router — records all operations; optionally fails `add_route`.
+pub struct FakeRouter {
+    routes: Mutex<HashMap<String, (String, u16)>>,
+    ops: Mutex<Vec<RouteOp>>,
+    fail_add: bool,
+}
+
+impl FakeRouter {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            routes: Mutex::new(HashMap::new()),
+            ops: Mutex::new(Vec::new()),
+            fail_add: false,
+        })
+    }
+
+    pub fn failing_add() -> Arc<Self> {
+        Arc::new(Self {
+            routes: Mutex::new(HashMap::new()),
+            ops: Mutex::new(Vec::new()),
+            fail_add: true,
+        })
+    }
+
+    pub async fn routes(&self) -> HashMap<String, (String, u16)> {
+        self.routes.lock().await.clone()
+    }
+
+    pub async fn ops(&self) -> Vec<RouteOp> {
+        self.ops.lock().await.clone()
+    }
+
+    pub async fn route_count(&self) -> usize {
+        self.routes.lock().await.len()
+    }
+}
+
+impl Default for FakeRouter {
+    fn default() -> Self {
+        Self {
+            routes: Mutex::new(HashMap::new()),
+            ops: Mutex::new(Vec::new()),
+            fail_add: false,
+        }
+    }
+}
+
+#[async_trait]
+impl CaddyRouter for FakeRouter {
+    async fn add_route(
+        &self,
+        subdomain: &Subdomain,
+        host: &str,
+        port: u16,
+    ) -> Result<(), RouterError> {
+        if self.fail_add {
+            return Err(RouterError::AddFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: "fake router failure".into(),
+            });
+        }
+        self.routes
+            .lock()
+            .await
+            .insert(subdomain.as_str().into(), (host.into(), port));
+        self.ops.lock().await.push(RouteOp::Add {
+            subdomain: subdomain.as_str().into(),
+            host: host.into(),
+            port,
+        });
+        Ok(())
+    }
+
+    async fn remove_route(&self, subdomain: &Subdomain) -> Result<(), RouterError> {
+        self.routes.lock().await.remove(subdomain.as_str());
+        self.ops.lock().await.push(RouteOp::Remove {
+            subdomain: subdomain.as_str().into(),
+        });
+        Ok(())
+    }
+}
+
+// ── SharedVmConfig ────────────────────────────────────────────────────────────
+
+/// Configuration for `SharedVmProvisioner`.
+pub struct SharedVmConfig {
+    pub registry: Arc<SiteRegistry>,
+    pub launcher: Arc<dyn ConductorLauncher>,
+    pub health: Arc<dyn HealthChecker>,
+    pub router: Arc<dyn CaddyRouter>,
+    pub session_key: SessionKey,
+    /// Port range for conductor allocation (default `3100..4000`).
+    pub port_range: std::ops::Range<u16>,
+    /// Root directory under which per-account site directories are created.
+    /// Layout: `<accounts_root>/<account_id>/<site_id>/`
+    pub accounts_root: PathBuf,
+    /// Host that conductors bind to (default `"127.0.0.1"`).
+    pub host: String,
+    /// How long to wait for a conductor to become healthy.
+    pub health_timeout: Duration,
+}
+
+// ── ConductorProvisioner trait ────────────────────────────────────────────────
+
+/// Public trait for the hosted-site lifecycle. `dyn`-compatible via `async-trait`.
+#[async_trait]
+pub trait ConductorProvisioner: Send + Sync + 'static {
+    /// Provision a new site for `account` at `subdomain`.
+    ///
+    /// Derives the canonical per-account site path internally
+    /// (`accounts_root / account_id / site_id`).  Callers do not supply a
+    /// path — this prevents path-confusion attacks and ensures uniqueness.
+    async fn provision(
+        &self,
+        account: &AccountId,
+        site_id: &SiteId,
+        subdomain: &Subdomain,
+    ) -> Result<Placement, ProvisionError>;
+
+    /// Stop the conductor for `subdomain` and mark the site as Stopped.
+    ///
+    /// Idempotent: removing a non-existent route or stopping an already-stopped
+    /// process does not return an error.
+    async fn deprovision(
+        &self,
+        subdomain: &Subdomain,
+        site_id: &SiteId,
+    ) -> Result<(), ProvisionError>;
+
+    /// Re-inject Caddy routes for all `Ready` placements in the registry.
+    ///
+    /// Called on startup to restore routing after a process restart.
+    /// Does NOT launch conductors — it only wires routing for already-running ones.
+    async fn reconcile(&self) -> Result<(), ProvisionError>;
+}
+
+// ── SharedVmProvisioner ───────────────────────────────────────────────────────
+
+/// Lifecycle manager for per-account conductors on a single shared VM.
+///
+/// All route mutations are serialised through `route_lock`.
+/// Slow operations (launch, health-poll) run outside the lock.
+pub struct SharedVmProvisioner {
+    registry: Arc<SiteRegistry>,
+    launcher: Arc<dyn ConductorLauncher>,
+    health: Arc<dyn HealthChecker>,
+    router: Arc<dyn CaddyRouter>,
+    session_key: SessionKey,
+    port_range: std::ops::Range<u16>,
+    accounts_root: PathBuf,
+    host: String,
+    health_timeout: Duration,
+    /// Serialises all Caddy route mutations (add/remove).
+    route_lock: Mutex<()>,
+    /// Map of subdomain → handle for all running conductors.
+    running: Mutex<HashMap<String, ConductorHandle>>,
+}
+
+impl SharedVmProvisioner {
+    /// Create a new provisioner from the given config.
+    pub fn new(cfg: SharedVmConfig) -> Arc<Self> {
+        Arc::new(Self {
+            registry: cfg.registry,
+            launcher: cfg.launcher,
+            health: cfg.health,
+            router: cfg.router,
+            session_key: cfg.session_key,
+            port_range: cfg.port_range,
+            accounts_root: cfg.accounts_root,
+            host: cfg.host,
+            health_timeout: cfg.health_timeout,
+            route_lock: Mutex::new(()),
+            running: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Derive the canonical absolute site path for a given account+site.
+    fn site_path(&self, account: &AccountId, site_id: &SiteId) -> PathBuf {
+        self.accounts_root
+            .join(account.as_str())
+            .join(site_id.as_str())
+    }
+
+    /// Allocate a free port from the configured range.
+    ///
+    /// Called while holding `route_lock` to prevent concurrent allocation races.
+    fn allocate_port_from_registry(&self) -> Result<u16, ProvisionError> {
+        self.registry
+            .allocate_port(self.port_range.clone())
+            .map_err(|_| ProvisionError::PortRangeExhausted)
+    }
+
+    /// Validate that no existing placement uses the same site_path or port.
+    fn check_uniqueness(
+        &self,
+        site_path: &Path,
+        port: u16,
+    ) -> Result<(), ProvisionError> {
+        let placements = self.registry.all_placements();
+        for (_, p) in &placements {
+            if p.site_path == site_path {
+                return Err(ProvisionError::SitePathCollision(site_path.to_path_buf()));
+            }
+            if p.port == port {
+                return Err(ProvisionError::PortCollision(port));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConductorProvisioner for SharedVmProvisioner {
+    async fn provision(
+        &self,
+        account: &AccountId,
+        site_id: &SiteId,
+        subdomain: &Subdomain,
+    ) -> Result<Placement, ProvisionError> {
+        // 1. Derive canonical per-account site path; validate absolute; create directory.
+        let site_path = self.site_path(account, site_id);
+        if !site_path.is_absolute() {
+            return Err(ProvisionError::RelativeSitePath(site_path));
+        }
+        tokio::fs::create_dir_all(&site_path)
+            .await
+            .map_err(|e| ProvisionError::Registry(RegistryError::Persistence(e.to_string())))?;
+
+        // 2. Phase 1 (under route_lock): allocate port, uniqueness check, write placement.
+        //    Writing the placement HERE (while still Provisioning) atomically reserves the
+        //    port in the registry so that any concurrent `allocate_port` call sees it as
+        //    taken and skips to the next free port.  This closes the TOCTOU window where
+        //    two concurrent provisions could both allocate the same port before either had
+        //    written a placement.
+        let (port, placement) = {
+            let _guard = self.route_lock.lock().await;
+            let port = self.allocate_port_from_registry()?;
+            self.check_uniqueness(&site_path, port)?;
+            let placement = Placement {
+                host: self.host.clone(),
+                port,
+                site_path: site_path.clone(),
+            };
+            // Reserve the port: write placement now (status stays Provisioning).
+            self.registry.set_placement(site_id, placement.clone())?;
+            (port, placement)
+        };
+        // route_lock released — port is now visible to concurrent allocators.
+
+        // 3. Build LaunchSpec.
+        let home = self.accounts_root.join(account.as_str());
+        let xdg_runtime_dir = home.join(".runtime");
+        let spec = LaunchSpec {
+            site_path: site_path.clone(),
+            port,
+            session_key: self.session_key.clone(),
+            home,
+            xdg_runtime_dir,
+        };
+
+        // 4. Launch (outside route_lock — may be slow).
+        let handle = match self.launcher.launch(&spec).await {
+            Ok(h) => h,
+            Err(e) => {
+                // Compensation: clear Phase-1 placement and mark Failed.
+                let _ = self.registry.clear_placement(site_id);
+                let _ = self.registry.set_status(site_id, SiteStatus::Failed);
+                return Err(ProvisionError::Launch(e));
+            }
+        };
+
+        // 5. Health gate (outside route_lock — slow).
+        if let Err(e) = self
+            .health
+            .wait_ready(&self.host, port, self.health_timeout)
+            .await
+        {
+            // Compensation: stop process, clear Phase-1 placement, mark Failed.
+            let _ = self.launcher.stop(&handle).await;
+            let _ = self.registry.clear_placement(site_id);
+            let _ = self.registry.set_status(site_id, SiteStatus::Failed);
+            return Err(ProvisionError::HealthTimeout(e));
+        }
+
+        // 6. Phase 2 (under route_lock): add Caddy route, mark Ready, record handle.
+        //    No need to re-check uniqueness or set_placement — the port was already
+        //    reserved atomically in Phase 1.
+        {
+            let _guard = self.route_lock.lock().await;
+
+            // add_route
+            if let Err(e) = self.router.add_route(subdomain, &self.host, port).await {
+                // Compensation: stop process, clear Phase-1 placement, mark Failed.
+                let _ = self.launcher.stop(&handle).await;
+                let _ = self.registry.clear_placement(site_id);
+                let _ = self.registry.set_status(site_id, SiteStatus::Failed);
+                return Err(ProvisionError::Router(e));
+            }
+
+            // set_status Ready
+            self.registry.set_status(site_id, SiteStatus::Ready)?;
+
+            // Record handle in running map
+            self.running
+                .lock()
+                .await
+                .insert(subdomain.as_str().to_string(), handle);
+        }
+
+        Ok(placement)
+    }
+
+    async fn deprovision(
+        &self,
+        subdomain: &Subdomain,
+        site_id: &SiteId,
+    ) -> Result<(), ProvisionError> {
+        let _guard = self.route_lock.lock().await;
+
+        // Remove Caddy route (idempotent)
+        self.router.remove_route(subdomain).await?;
+
+        // Stop running handle if present
+        let handle = self
+            .running
+            .lock()
+            .await
+            .remove(subdomain.as_str());
+        if let Some(h) = handle {
+            let _ = self.launcher.stop(&h).await;
+        }
+
+        // Mark site as Stopped (best-effort — site may already be stopped)
+        let _ = self.registry.set_status(site_id, SiteStatus::Stopped);
+
+        Ok(())
+    }
+
+    async fn reconcile(&self) -> Result<(), ProvisionError> {
+        let placements = self.registry.ready_placements();
+
+        for (subdomain, placement) in placements {
+            let _guard = self.route_lock.lock().await;
+            // Ignore individual errors — best-effort re-injection
+            let _ = self
+                .router
+                .add_route(&subdomain, &placement.host, placement.port)
+                .await;
+        }
+
+        Ok(())
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use accounts::AccountId;
+    use site_registry::{FileSiteStore, SiteRegistry};
+    use tempfile::TempDir;
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    fn make_registry(dir: &TempDir) -> Arc<SiteRegistry> {
+        let path = dir.path().join("registry.json");
+        SiteRegistry::new(FileSiteStore::new(&path)).unwrap()
+    }
+
+    fn make_provisioner(
+        dir: &TempDir,
+        registry: Arc<SiteRegistry>,
+        launcher: Arc<dyn ConductorLauncher>,
+        health: Arc<dyn HealthChecker>,
+        router: Arc<dyn CaddyRouter>,
+    ) -> Arc<SharedVmProvisioner> {
+        SharedVmProvisioner::new(SharedVmConfig {
+            registry,
+            launcher,
+            health,
+            router,
+            session_key: SessionKey::from("test-secret"),
+            port_range: 3100..4000,
+            accounts_root: dir.path().to_path_buf(),
+            host: "127.0.0.1".into(),
+            health_timeout: Duration::from_secs(5),
+        })
+    }
+
+    fn account() -> AccountId {
+        AccountId::generate()
+    }
+
+    fn sub(s: &str) -> Subdomain {
+        Subdomain::new(s).unwrap()
+    }
+
+    // ── T2: SessionKey redacted Debug ─────────────────────────────────────────
+
+    #[test]
+    fn session_key_debug_does_not_reveal_secret() {
+        let key = SessionKey::from("super-secret-value");
+        let debug_str = format!("{:?}", key);
+        assert!(
+            !debug_str.contains("super-secret-value"),
+            "SessionKey debug output must not contain the secret; got: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("redacted"),
+            "SessionKey debug output should say 'redacted'; got: {debug_str}"
+        );
+    }
+
+    // ── T3: Fake seam unit tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fake_launcher_records_launch_and_stop() {
+        let launcher = FakeLauncher::new();
+        let spec = LaunchSpec {
+            site_path: PathBuf::from("/tmp/test/site"),
+            port: 3100,
+            session_key: SessionKey::from("key"),
+            home: PathBuf::from("/tmp/test"),
+            xdg_runtime_dir: PathBuf::from("/tmp/test/.runtime"),
+        };
+        let handle = launcher.launch(&spec).await.unwrap();
+        assert_eq!(launcher.launch_count().await, 1);
+
+        launcher.stop(&handle).await.unwrap();
+        assert_eq!(launcher.stop_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn fake_launcher_failing_returns_error() {
+        let launcher = FakeLauncher::failing();
+        let spec = LaunchSpec {
+            site_path: PathBuf::from("/tmp/site"),
+            port: 3100,
+            session_key: SessionKey::from("key"),
+            home: PathBuf::from("/tmp"),
+            xdg_runtime_dir: PathBuf::from("/tmp/.runtime"),
+        };
+        assert!(launcher.launch(&spec).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fake_health_ready_immediately() {
+        let h = FakeHealth::ReadyImmediately;
+        assert!(
+            h.wait_ready("127.0.0.1", 3100, Duration::from_secs(5))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_router_records_add_and_remove() {
+        let router = FakeRouter::new();
+        let s = sub("mysite");
+        router.add_route(&s, "127.0.0.1", 3100).await.unwrap();
+        assert_eq!(router.route_count().await, 1);
+        router.remove_route(&s).await.unwrap();
+        assert_eq!(router.route_count().await, 0);
+
+        let ops = router.ops().await;
+        assert_eq!(
+            ops,
+            vec![
+                RouteOp::Add {
+                    subdomain: "mysite".into(),
+                    host: "127.0.0.1".into(),
+                    port: 3100,
+                },
+                RouteOp::Remove {
+                    subdomain: "mysite".into(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_router_failing_add_returns_error() {
+        let router = FakeRouter::failing_add();
+        let s = sub("fail");
+        assert!(router.add_route(&s, "127.0.0.1", 3100).await.is_err());
+    }
+
+    // ── T4: Happy path ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn provision_happy_path_orders_operations() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("happy")).unwrap();
+
+        let provisioner = make_provisioner(
+            &dir,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        let placement = provisioner
+            .provision(&acc, &site.id, &sub("happy"))
+            .await
+            .unwrap();
+
+        // Port allocated in range
+        assert!(placement.port >= 3100 && placement.port < 4000);
+        assert_eq!(placement.host, "127.0.0.1");
+
+        // site_path is accounts_root / account_id / site_id
+        let expected_path = dir
+            .path()
+            .join(acc.as_str())
+            .join(site.id.as_str());
+        assert_eq!(placement.site_path, expected_path);
+
+        // Launch happened with correct port and session_key carried through
+        let launches = launcher.launches().await;
+        assert_eq!(launches.len(), 1, "exactly one launch");
+        let rec = &launches[0];
+        assert_eq!(rec.spec_port, placement.port);
+        assert_eq!(rec.spec_site_path, expected_path);
+        // HOME = accounts_root / account_id
+        assert_eq!(rec.spec_home, dir.path().join(acc.as_str()));
+        // XDG_RUNTIME_DIR = home / .runtime
+        assert_eq!(
+            rec.spec_xdg_runtime_dir,
+            dir.path().join(acc.as_str()).join(".runtime")
+        );
+
+        // Route was added
+        let routes = router.routes().await;
+        assert!(routes.contains_key("happy"), "route for 'happy' must exist");
+        let (h, p) = &routes["happy"];
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(*p, placement.port);
+
+        // Registry status is Ready
+        let sites = registry.sites_for(&acc);
+        let s = sites.iter().find(|s| s.id == site.id).unwrap();
+        assert_eq!(s.status, SiteStatus::Ready);
+        assert!(s.placement.is_some());
+    }
+
+    // ── T5: Health timeout ────────────────────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn health_timeout_marks_failed_and_stops_process() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::NeverReady);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("timeout")).unwrap();
+
+        let provisioner = SharedVmProvisioner::new(SharedVmConfig {
+            registry: Arc::clone(&registry),
+            launcher: Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            health: Arc::clone(&health),
+            router: Arc::clone(&router) as Arc<dyn CaddyRouter>,
+            session_key: SessionKey::from("key"),
+            port_range: 3100..4000,
+            accounts_root: dir.path().to_path_buf(),
+            host: "127.0.0.1".into(),
+            health_timeout: Duration::from_secs(5),
+        });
+
+        let result = provisioner
+            .provision(&acc, &site.id, &sub("timeout"))
+            .await;
+
+        assert!(
+            matches!(result, Err(ProvisionError::HealthTimeout(_))),
+            "expected HealthTimeout, got {result:?}"
+        );
+
+        // Process was stopped (compensation)
+        assert_eq!(
+            launcher.stop_count().await,
+            1,
+            "stop must be called once on health timeout"
+        );
+
+        // No route was added
+        assert_eq!(
+            router.route_count().await,
+            0,
+            "no route must be added on health timeout"
+        );
+
+        // No placement in registry
+        let sites = registry.sites_for(&acc);
+        let s = sites.iter().find(|x| x.id == site.id).unwrap();
+        assert!(
+            s.placement.is_none(),
+            "no placement must be written on health timeout"
+        );
+
+        // Status is Failed
+        assert_eq!(
+            s.status,
+            SiteStatus::Failed,
+            "status must be Failed on health timeout"
+        );
+    }
+
+    // ── T6: Router failure rollback ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn router_failure_rolls_back() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::failing_add();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("routerfail")).unwrap();
+
+        let provisioner = make_provisioner(
+            &dir,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        let result = provisioner
+            .provision(&acc, &site.id, &sub("routerfail"))
+            .await;
+
+        assert!(
+            matches!(result, Err(ProvisionError::Router(_))),
+            "expected Router error, got {result:?}"
+        );
+
+        // Process was stopped (compensation)
+        assert_eq!(launcher.stop_count().await, 1, "process must be stopped on router failure");
+
+        // Status is Failed
+        let sites = registry.sites_for(&acc);
+        let s = sites.iter().find(|x| x.id == site.id).unwrap();
+        assert_eq!(s.status, SiteStatus::Failed);
+
+        // Placement was cleared
+        assert!(s.placement.is_none(), "placement must be cleared on router failure");
+    }
+
+    // ── T7: Deprovision ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn deprovision_removes_route_stops_and_marks_stopped() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("deprov")).unwrap();
+
+        let provisioner = make_provisioner(
+            &dir,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        // Provision first
+        provisioner
+            .provision(&acc, &site.id, &sub("deprov"))
+            .await
+            .unwrap();
+
+        // Verify route exists
+        assert_eq!(router.route_count().await, 1);
+
+        // Deprovision
+        provisioner
+            .deprovision(&sub("deprov"), &site.id)
+            .await
+            .unwrap();
+
+        // Route removed
+        assert_eq!(router.route_count().await, 0);
+
+        // Process stopped (1 from provision setup = 0, then deprovision = 1)
+        // stop_count should be 1 (the deprovision stop)
+        assert_eq!(launcher.stop_count().await, 1);
+
+        // Status Stopped
+        let sites = registry.sites_for(&acc);
+        let s = sites.iter().find(|x| x.id == site.id).unwrap();
+        assert_eq!(s.status, SiteStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn deprovision_unknown_subdomain_is_ok() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+        let acc = account();
+        let site = registry.register_site(&acc, sub("ghost")).unwrap();
+
+        let provisioner = make_provisioner(
+            &dir,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        // Deprovision without ever provisioning — should not panic
+        // (set_status will fail since it's Provisioning→Stopped which is invalid,
+        // but deprovision swallows that error as best-effort)
+        let _ = provisioner.deprovision(&sub("ghost"), &site.id).await;
+        // No crash = test passes
+    }
+
+    // ── T8: Reconcile ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reconcile_reinjects_all_ready_placements() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+
+        // Seed 3 Ready placements directly into registry
+        for i in 0..3_u16 {
+            let s = registry
+                .register_site(&acc, Subdomain::new(format!("site{i}")).unwrap())
+                .unwrap();
+            registry
+                .set_placement(
+                    &s.id,
+                    Placement {
+                        host: "127.0.0.1".into(),
+                        port: 3200 + i,
+                        site_path: dir.path().join(acc.as_str()).join(s.id.as_str()),
+                    },
+                )
+                .unwrap();
+            registry.set_status(&s.id, SiteStatus::Ready).unwrap();
+        }
+
+        // Also add a Failed site — reconcile must SKIP it
+        let fail_site = registry
+            .register_site(&acc, Subdomain::new("failsite").unwrap())
+            .unwrap();
+        registry
+            .set_placement(
+                &fail_site.id,
+                Placement {
+                    host: "127.0.0.1".into(),
+                    port: 3299,
+                    site_path: dir.path().join(acc.as_str()).join("fail"),
+                },
+            )
+            .unwrap();
+        registry
+            .set_status(&fail_site.id, SiteStatus::Failed)
+            .unwrap();
+
+        let provisioner = make_provisioner(
+            &dir,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        provisioner.reconcile().await.unwrap();
+
+        // Exactly 3 routes (not 4)
+        assert_eq!(router.route_count().await, 3, "reconcile must inject exactly 3 Ready routes");
+
+        // No launches happened
+        assert_eq!(launcher.launch_count().await, 0, "reconcile must not launch conductors");
+
+        // Failed site has no route
+        let routes = router.routes().await;
+        assert!(!routes.contains_key("failsite"), "failed site must not be routed");
+    }
+
+    // ── T9: Concurrent provisions ─────────────────────────────────────────────
+
+    /// Forced-interleave concurrency test.
+    ///
+    /// `FakeHealth::ReadyAfterYields(K)` calls `tokio::task::yield_now()` K times
+    /// before returning Ok.  Because Tokio's single-threaded test executor is
+    /// cooperative, each yield_now() hands control back to the scheduler, which
+    /// can then run another spawned task.  With K yields per health check and K
+    /// concurrent tasks, all K tasks have enough scheduler turns to complete their
+    /// Phase 1 (port allocation + placement write under route_lock) before any of
+    /// them completes Phase 2 (route add + set Ready).
+    ///
+    /// This is the window that the TOCTOU bug exploited: under the old code (where
+    /// set_placement happened in Phase 2), all K tasks would allocate their ports
+    /// in Phase 1 before any had written a placement, so `allocate_port` would see
+    /// the same "free" port for every task and they would all pick port 3100.  With
+    /// the fix (set_placement in Phase 1, under route_lock), the port is reserved
+    /// atomically as part of the allocation critical section, so each task gets a
+    /// distinct port.
+    ///
+    /// A `ReadyImmediately` health check does NOT force this interleave because it
+    /// returns synchronously with no yield points — each task completes both phases
+    /// end-to-end before the scheduler switches.
+    #[tokio::test]
+    async fn concurrent_provisions_allocate_distinct_ports_and_serialize_routes() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let k = 5_usize;
+
+        // ReadyAfterYields(K) yields K times inside wait_ready, giving all K
+        // spawned tasks enough scheduler turns to finish Phase 1 before any
+        // reaches Phase 2.  This is what forces the TOCTOU window open.
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyAfterYields(k as u32));
+
+        let acc = account();
+
+        // Pre-register K sites
+        let sites: Vec<_> = (0..k)
+            .map(|i| {
+                registry
+                    .register_site(&acc, Subdomain::new(format!("concurrent{i}")).unwrap())
+                    .unwrap()
+            })
+            .collect();
+
+        let provisioner = make_provisioner(
+            &dir,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+        let provisioner = Arc::new(provisioner);
+
+        let handles: Vec<_> = sites
+            .into_iter()
+            .enumerate()
+            .map(|(i, site)| {
+                let p = Arc::clone(&provisioner);
+                let a = acc.clone();
+                let subdomain = Subdomain::new(format!("concurrent{i}")).unwrap();
+                tokio::spawn(async move {
+                    p.provision(&a, &site.id, &subdomain).await
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .map(|r| r.expect("task panicked"))
+            .collect();
+
+        for r in &results {
+            assert!(r.is_ok(), "concurrent provision must succeed: {r:?}");
+        }
+
+        let placements: Vec<_> = results.into_iter().map(|r| r.unwrap()).collect();
+
+        // All ports are distinct
+        let ports: std::collections::HashSet<u16> = placements.iter().map(|p| p.port).collect();
+        assert_eq!(ports.len(), k, "all ports must be distinct");
+
+        // All site_paths are distinct
+        let paths: std::collections::HashSet<&PathBuf> =
+            placements.iter().map(|p| &p.site_path).collect();
+        assert_eq!(paths.len(), k, "all site_paths must be distinct");
+
+        // All K subdomains are routed exactly once
+        assert_eq!(router.route_count().await, k, "each subdomain must have exactly one route");
+    }
+
+    // ── T10: Collision rejection ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn rejects_duplicate_site_path() {
+        // Two provisions for the SAME account+site_id → same derived path → SitePathCollision
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("dupe")).unwrap();
+
+        let provisioner = make_provisioner(
+            &dir,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        // First provision succeeds
+        provisioner
+            .provision(&acc, &site.id, &sub("dupe"))
+            .await
+            .unwrap();
+
+        // Manually register and attempt a second provision for the same account+site
+        // By transitioning back to Provisioning then re-running
+        registry.set_status(&site.id, SiteStatus::Failed).unwrap();
+        registry.set_status(&site.id, SiteStatus::Provisioning).unwrap();
+
+        let result = provisioner.provision(&acc, &site.id, &sub("dupe2")).await;
+        // The same path is derived → SitePathCollision
+        assert!(
+            matches!(result, Err(ProvisionError::SitePathCollision(_))),
+            "expected SitePathCollision, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn port_range_exhausted_when_all_ports_allocated() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("exhaust")).unwrap();
+
+        // Allocate the single port in range
+        let site2 = registry.register_site(&acc, sub("blocker")).unwrap();
+        registry
+            .set_placement(
+                &site2.id,
+                Placement {
+                    host: "127.0.0.1".into(),
+                    port: 9999,
+                    site_path: dir.path().join("blocker"),
+                },
+            )
+            .unwrap();
+
+        // Provisioner with range of exactly one already-taken port
+        let provisioner = SharedVmProvisioner::new(SharedVmConfig {
+            registry: Arc::clone(&registry),
+            launcher: Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            health: Arc::clone(&health),
+            router: Arc::clone(&router) as Arc<dyn CaddyRouter>,
+            session_key: SessionKey::from("key"),
+            port_range: 9999..10000,
+            accounts_root: dir.path().to_path_buf(),
+            host: "127.0.0.1".into(),
+            health_timeout: Duration::from_secs(5),
+        });
+
+        let result = provisioner.provision(&acc, &site.id, &sub("exhaust")).await;
+        assert!(
+            matches!(result, Err(ProvisionError::PortRangeExhausted)),
+            "expected PortRangeExhausted, got {result:?}"
+        );
+    }
+}

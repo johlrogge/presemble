@@ -1,0 +1,25 @@
+[package]
+name = "provisioning"
+version = "0.35.1"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "provisioning"
+
+[dependencies]
+accounts = { workspace = true }
+site_registry = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "sync", "test-util", "time"] }
+futures = "0.3"
