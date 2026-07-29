@@ -9,6 +9,7 @@ interface = "provisioning"
 [dependencies]
 accounts = { workspace = true }
 site_registry = { workspace = true }
+site_templates = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

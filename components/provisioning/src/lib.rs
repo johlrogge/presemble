@@ -28,12 +28,26 @@
 use accounts::AccountId;
 use async_trait::async_trait;
 use site_registry::{Placement, RegistryError, SiteId, SiteRegistry, SiteStatus, Subdomain};
+use site_templates::StyleConfig;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Mutex;
+
+// ── Starter ───────────────────────────────────────────────────────────────────
+
+/// Describes which site template to scaffold for a newly provisioned site.
+#[derive(Debug, Clone)]
+pub struct Starter {
+    /// Name of the site template (e.g. `"personal"`, `"blog"`, `"portfolio"`).
+    pub template_name: String,
+    /// Template format: `"hiccup"` or `"html"`.
+    pub format: String,
+    /// CSS style configuration used to generate `assets/style.css`.
+    pub style: StyleConfig,
+}
 
 // ── SessionKey ────────────────────────────────────────────────────────────────
 
@@ -118,6 +132,9 @@ pub enum ProvisionError {
 
     #[error("registry error: {0}")]
     Registry(#[from] RegistryError),
+
+    #[error("scaffolding failed: {0}")]
+    Scaffold(String),
 }
 
 // ── ConductorHandle ───────────────────────────────────────────────────────────
@@ -728,6 +745,143 @@ impl CaddyRouter for FakeRouter {
     }
 }
 
+// ── FakeProvisioner ───────────────────────────────────────────────────────────
+
+/// Record of a `provision` call made to `FakeProvisioner`.
+#[derive(Debug, Clone)]
+pub struct ProvisionRecord {
+    pub account: AccountId,
+    pub site_id: SiteId,
+    pub subdomain: Subdomain,
+    pub starter: Starter,
+}
+
+/// Record of a `deprovision` call made to `FakeProvisioner`.
+#[derive(Debug, Clone)]
+pub struct DeprovisionRecord {
+    pub subdomain: Subdomain,
+    pub site_id: SiteId,
+}
+
+/// Fake provisioner for handler/integration tests.
+///
+/// Holds an injected `Arc<SiteRegistry>` so that tests share the same registry
+/// instance.  Unlike `SharedVmProvisioner` it never touches disk or processes.
+pub struct FakeProvisioner {
+    registry: Arc<SiteRegistry>,
+    provisions: Mutex<Vec<ProvisionRecord>>,
+    deprovisions: Mutex<Vec<DeprovisionRecord>>,
+    reconcile_count: Mutex<usize>,
+    fail: bool,
+}
+
+impl FakeProvisioner {
+    /// Create a `FakeProvisioner` that succeeds on every `provision` call.
+    pub fn new(registry: Arc<SiteRegistry>) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            provisions: Mutex::new(Vec::new()),
+            deprovisions: Mutex::new(Vec::new()),
+            reconcile_count: Mutex::new(0),
+            fail: false,
+        })
+    }
+
+    /// Create a `FakeProvisioner` whose `provision` always returns an error.
+    pub fn failing(registry: Arc<SiteRegistry>) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            provisions: Mutex::new(Vec::new()),
+            deprovisions: Mutex::new(Vec::new()),
+            reconcile_count: Mutex::new(0),
+            fail: true,
+        })
+    }
+
+    /// Return all recorded `provision` calls.
+    pub async fn provisions(&self) -> Vec<ProvisionRecord> {
+        self.provisions.lock().await.clone()
+    }
+
+    /// Return the number of `provision` calls made.
+    pub async fn provision_count(&self) -> usize {
+        self.provisions.lock().await.len()
+    }
+
+    /// Return all recorded `deprovision` calls.
+    pub async fn deprovisions(&self) -> Vec<DeprovisionRecord> {
+        self.deprovisions.lock().await.clone()
+    }
+
+    /// Return the number of `reconcile` calls made.
+    pub async fn reconcile_count(&self) -> usize {
+        *self.reconcile_count.lock().await
+    }
+}
+
+#[async_trait]
+impl ConductorProvisioner for FakeProvisioner {
+    async fn provision(
+        &self,
+        account: &AccountId,
+        site_id: &SiteId,
+        subdomain: &Subdomain,
+        starter: &Starter,
+    ) -> Result<Placement, ProvisionError> {
+        if self.fail {
+            return Err(ProvisionError::Scaffold("forced".into()));
+        }
+
+        // Record this call.
+        self.provisions.lock().await.push(ProvisionRecord {
+            account: account.clone(),
+            site_id: site_id.clone(),
+            subdomain: subdomain.clone(),
+            starter: starter.clone(),
+        });
+
+        // Allocate a port from the registry (uses the full valid range so tests
+        // don't need to pre-configure anything).
+        let port = self
+            .registry
+            .allocate_port(3100..4000)
+            .map_err(|_| ProvisionError::PortRangeExhausted)?;
+
+        // Derive a plausible (but non-real) site path from the site_id.
+        let site_path = PathBuf::from(format!("/fake/{}", site_id.as_str()));
+
+        let placement = Placement {
+            host: "127.0.0.1".into(),
+            port,
+            site_path,
+        };
+
+        // Write placement and mark Ready in the shared registry.
+        self.registry.set_placement(site_id, placement.clone())?;
+        self.registry.set_status(site_id, SiteStatus::Ready)?;
+
+        Ok(placement)
+    }
+
+    async fn deprovision(
+        &self,
+        subdomain: &Subdomain,
+        site_id: &SiteId,
+    ) -> Result<(), ProvisionError> {
+        self.deprovisions.lock().await.push(DeprovisionRecord {
+            subdomain: subdomain.clone(),
+            site_id: site_id.clone(),
+        });
+        let _ = self.registry.set_status(site_id, SiteStatus::Stopped);
+        Ok(())
+    }
+
+    async fn reconcile(&self) -> Result<(), ProvisionError> {
+        *self.reconcile_count.lock().await += 1;
+        Ok(())
+    }
+}
+
 // ── SharedVmConfig ────────────────────────────────────────────────────────────
 
 /// Configuration for `SharedVmProvisioner`.
@@ -758,11 +912,16 @@ pub trait ConductorProvisioner: Send + Sync + 'static {
     /// Derives the canonical per-account site path internally
     /// (`accounts_root / account_id / site_id`).  Callers do not supply a
     /// path — this prevents path-confusion attacks and ensures uniqueness.
+    ///
+    /// `starter` controls which site template is scaffolded onto disk before
+    /// the conductor is launched.  Scaffold failures return `ProvisionError::Scaffold`
+    /// and leave no port reservation or Caddy route (nothing to compensate).
     async fn provision(
         &self,
         account: &AccountId,
         site_id: &SiteId,
         subdomain: &Subdomain,
+        starter: &Starter,
     ) -> Result<Placement, ProvisionError>;
 
     /// Stop the conductor for `subdomain` and mark the site as Stopped.
@@ -864,6 +1023,7 @@ impl ConductorProvisioner for SharedVmProvisioner {
         account: &AccountId,
         site_id: &SiteId,
         subdomain: &Subdomain,
+        starter: &Starter,
     ) -> Result<Placement, ProvisionError> {
         // 1. Derive canonical per-account site path; validate absolute; create directory.
         let site_path = self.site_path(account, site_id);
@@ -873,6 +1033,20 @@ impl ConductorProvisioner for SharedVmProvisioner {
         tokio::fs::create_dir_all(&site_path)
             .await
             .map_err(|e| ProvisionError::Registry(RegistryError::Persistence(e.to_string())))?;
+
+        // 1b. Scaffold: resolve template and write starter files to site_path.
+        //     This happens BEFORE port reservation — a scaffold failure requires no
+        //     compensation because no port or route has been allocated yet.
+        let template = site_templates::template_by_name(&starter.template_name)
+            .ok_or_else(|| {
+                ProvisionError::Scaffold(format!(
+                    "unknown template: {}",
+                    starter.template_name
+                ))
+            })?;
+        template
+            .scaffold(&site_path, &starter.format, &starter.style)
+            .map_err(ProvisionError::Scaffold)?;
 
         // 2. Phase 1 (under route_lock): allocate port, uniqueness check, write placement.
         //    Writing the placement HERE (while still Provisioning) atomically reserves the
@@ -1044,6 +1218,15 @@ mod tests {
         Subdomain::new(s).unwrap()
     }
 
+    /// A real `Starter` using the "personal" template and default style.
+    fn personal_starter() -> Starter {
+        Starter {
+            template_name: "personal".into(),
+            format: "hiccup".into(),
+            style: StyleConfig::default(),
+        }
+    }
+
     // ── T2: SessionKey redacted Debug ─────────────────────────────────────────
 
     #[test]
@@ -1156,7 +1339,7 @@ mod tests {
         );
 
         let placement = provisioner
-            .provision(&acc, &site.id, &sub("happy"))
+            .provision(&acc, &site.id, &sub("happy"), &personal_starter())
             .await
             .unwrap();
 
@@ -1225,7 +1408,7 @@ mod tests {
         });
 
         let result = provisioner
-            .provision(&acc, &site.id, &sub("timeout"))
+            .provision(&acc, &site.id, &sub("timeout"), &personal_starter())
             .await;
 
         assert!(
@@ -1285,7 +1468,7 @@ mod tests {
         );
 
         let result = provisioner
-            .provision(&acc, &site.id, &sub("routerfail"))
+            .provision(&acc, &site.id, &sub("routerfail"), &personal_starter())
             .await;
 
         assert!(
@@ -1328,7 +1511,7 @@ mod tests {
 
         // Provision first
         provisioner
-            .provision(&acc, &site.id, &sub("deprov"))
+            .provision(&acc, &site.id, &sub("deprov"), &personal_starter())
             .await
             .unwrap();
 
@@ -1512,7 +1695,7 @@ mod tests {
                 let a = acc.clone();
                 let subdomain = Subdomain::new(format!("concurrent{i}")).unwrap();
                 tokio::spawn(async move {
-                    p.provision(&a, &site.id, &subdomain).await
+                    p.provision(&a, &site.id, &subdomain, &personal_starter()).await
                 })
             })
             .collect();
@@ -1566,7 +1749,7 @@ mod tests {
 
         // First provision succeeds
         provisioner
-            .provision(&acc, &site.id, &sub("dupe"))
+            .provision(&acc, &site.id, &sub("dupe"), &personal_starter())
             .await
             .unwrap();
 
@@ -1575,7 +1758,9 @@ mod tests {
         registry.set_status(&site.id, SiteStatus::Failed).unwrap();
         registry.set_status(&site.id, SiteStatus::Provisioning).unwrap();
 
-        let result = provisioner.provision(&acc, &site.id, &sub("dupe2")).await;
+        let result = provisioner
+            .provision(&acc, &site.id, &sub("dupe2"), &personal_starter())
+            .await;
         // The same path is derived → SitePathCollision
         assert!(
             matches!(result, Err(ProvisionError::SitePathCollision(_))),
@@ -1620,10 +1805,167 @@ mod tests {
             health_timeout: Duration::from_secs(5),
         });
 
-        let result = provisioner.provision(&acc, &site.id, &sub("exhaust")).await;
+        let result = provisioner
+            .provision(&acc, &site.id, &sub("exhaust"), &personal_starter())
+            .await;
         assert!(
             matches!(result, Err(ProvisionError::PortRangeExhausted)),
             "expected PortRangeExhausted, got {result:?}"
         );
+    }
+
+    // ── T11: Scaffold writes files to site_path ───────────────────────────────
+
+    /// Happy-path provision with a real Starter — verifies that scaffolded files
+    /// are present on disk under the derived site_path before the conductor is
+    /// launched.  Uses FakeLauncher + FakeRouter + FakeHealth::ReadyImmediately
+    /// so no real process or HTTP call is made.
+    #[tokio::test]
+    async fn provision_scaffold_writes_personal_template_files() {
+        let accounts_root = TempDir::new().unwrap();
+        let registry_dir = TempDir::new().unwrap();
+        let registry = make_registry(&registry_dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("scaffold-test")).unwrap();
+
+        let provisioner = make_provisioner(
+            &accounts_root,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        let starter = Starter {
+            template_name: "personal".into(),
+            format: "hiccup".into(),
+            style: StyleConfig::default(),
+        };
+
+        let placement = provisioner
+            .provision(&acc, &site.id, &sub("scaffold-test"), &starter)
+            .await
+            .unwrap();
+
+        // Check that the personal template laid down its characteristic files.
+        let site_path = &placement.site_path;
+        assert!(
+            site_path.join("schemas/page/item.md").exists(),
+            "schemas/page/item.md must be scaffolded; site_path={site_path:?}"
+        );
+        assert!(
+            site_path.join("assets/style.css").exists(),
+            "assets/style.css must be written by scaffold; site_path={site_path:?}"
+        );
+        // At least one template file should exist.
+        let templates_dir = site_path.join("templates");
+        assert!(
+            templates_dir.exists(),
+            "templates/ directory must be created; site_path={site_path:?}"
+        );
+    }
+
+    // ── T12: Unknown template returns Scaffold error ──────────────────────────
+
+    #[tokio::test]
+    async fn provision_scaffold_unknown_template_returns_error() {
+        let accounts_root = TempDir::new().unwrap();
+        let registry_dir = TempDir::new().unwrap();
+        let registry = make_registry(&registry_dir);
+        let launcher = FakeLauncher::new();
+        let router = FakeRouter::new();
+        let health: Arc<dyn HealthChecker> = Arc::new(FakeHealth::ReadyImmediately);
+
+        let acc = account();
+        let site = registry.register_site(&acc, sub("bad-template")).unwrap();
+
+        let provisioner = make_provisioner(
+            &accounts_root,
+            Arc::clone(&registry),
+            Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
+            Arc::clone(&health),
+            Arc::clone(&router) as Arc<dyn CaddyRouter>,
+        );
+
+        let bad_starter = Starter {
+            template_name: "does-not-exist".into(),
+            format: "hiccup".into(),
+            style: StyleConfig::default(),
+        };
+
+        let result = provisioner
+            .provision(&acc, &site.id, &sub("bad-template"), &bad_starter)
+            .await;
+
+        assert!(
+            matches!(result, Err(ProvisionError::Scaffold(_))),
+            "expected Scaffold error for unknown template, got {result:?}"
+        );
+
+        // No port should have been reserved — scaffold failure needs no compensation.
+        let sites = registry.sites_for(&acc);
+        let s = sites.iter().find(|x| x.id == site.id).unwrap();
+        assert!(
+            s.placement.is_none(),
+            "no placement must be recorded after scaffold failure"
+        );
+    }
+
+    // ── T13: FakeProvisioner ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fake_provisioner_records_call_and_marks_ready() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let acc = account();
+        let site = registry.register_site(&acc, sub("fake-site")).unwrap();
+
+        let fake = FakeProvisioner::new(Arc::clone(&registry));
+
+        let starter = personal_starter();
+        let placement = fake
+            .provision(&acc, &site.id, &sub("fake-site"), &starter)
+            .await
+            .unwrap();
+
+        // Returns a plausible placement.
+        assert_eq!(placement.host, "127.0.0.1");
+        assert!(placement.port >= 3100 && placement.port < 4000);
+
+        // Recorded the call.
+        assert_eq!(fake.provision_count().await, 1);
+        let records = fake.provisions().await;
+        assert_eq!(records[0].starter.template_name, "personal");
+
+        // Registry shows Ready with a placement.
+        let sites = registry.sites_for(&acc);
+        let s = sites.iter().find(|x| x.id == site.id).unwrap();
+        assert_eq!(s.status, SiteStatus::Ready);
+        assert!(s.placement.is_some());
+    }
+
+    #[tokio::test]
+    async fn fake_provisioner_failing_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let registry = make_registry(&dir);
+        let acc = account();
+        let site = registry.register_site(&acc, sub("fail-site")).unwrap();
+
+        let fake = FakeProvisioner::failing(Arc::clone(&registry));
+        let result = fake
+            .provision(&acc, &site.id, &sub("fail-site"), &personal_starter())
+            .await;
+
+        assert!(
+            matches!(result, Err(ProvisionError::Scaffold(_))),
+            "expected Scaffold error from failing FakeProvisioner, got {result:?}"
+        );
+
+        // No call recorded on failure.
+        assert_eq!(fake.provision_count().await, 0);
     }
 }
