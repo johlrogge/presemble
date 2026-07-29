@@ -1,6 +1,6 @@
 use crate::error::CliError;
 use crate::{build_for_serve, UrlConfig};
-use accounts::{Session, SessionStore, DevSessionStore};
+use accounts::{Session, SessionStore, DevSessionStore, MagicLinkSessionStore};
 use axum::{
     Router,
     extract::{Query, State, WebSocketUpgrade},
@@ -239,20 +239,30 @@ async fn serve_async(
         });
     }
 
-    // Build session store: create concrete DevSessionStore first so we can call .mint()
-    // if --dev-session is active, then coerce to Arc<dyn SessionStore> for AppState.
-    let (session_store, dev_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) = {
-        let ds = DevSessionStore::new_random();
-        let token = dev_session_label.as_deref().map(|label| ds.mint(label));
-        (Arc::new(ds) as Arc<dyn SessionStore>, token)
-    };
+    // Build session store.
+    //
+    // If PRESEMBLE_SESSION_KEY is set → use MagicLinkSessionStore (shared-key,
+    // stateless HMAC, verifies `acct:` tokens minted by the control plane).
+    // Otherwise → DevSessionStore with a random per-process key (local-dev fallback;
+    // --dev-session continues to work).
+    let (session_store, dev_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) =
+        if std::env::var("PRESEMBLE_SESSION_KEY").is_ok() {
+            println!("Session store: MagicLinkSessionStore (PRESEMBLE_SESSION_KEY set)");
+            let store = MagicLinkSessionStore::from_env();
+            (Arc::new(store) as Arc<dyn SessionStore>, None)
+        } else {
+            println!("Session store: DevSessionStore (random key; local-dev mode)");
+            let ds = DevSessionStore::new_random();
+            let token = dev_session_label.as_deref().map(|label| ds.mint(label));
+            (Arc::new(ds) as Arc<dyn SessionStore>, token)
+        };
 
     // Print dev login URL if token was minted.
     if let Some(ref tok) = dev_token {
         println!();
         println!("  --dev-session active");
         println!("  Cookie value: presemble_session={}", tok.as_str());
-        println!("  Login URL:    http://127.0.0.1:{port}/_presemble/dev-login?token={}", tok.as_str());
+        println!("  Login URL:    http://127.0.0.1:{port}/_presemble/login?token={}", tok.as_str());
         println!();
     }
 
@@ -293,15 +303,12 @@ async fn serve_async(
         .route("/_presemble/schema-for", get(schema_for_handler))
         .route("/_presemble/page-for", get(page_for_handler));
 
-    // Mount dev-login route only when --dev-session flag is set.
-    let editorial = if dev_token.is_some() {
-        editorial.route("/_presemble/dev-login", get(dev_login_handler))
-    } else {
-        editorial
-    };
-
+    // /_presemble/login is always mounted on the public side (no Session extractor).
+    // It is how a caller *obtains* a session — gating it would be a chicken-and-egg
+    // lock-out.  ws and file_handler are also public for the same structural reason.
     let app = editorial
         .route("/_presemble/ws", get(ws_handler))
+        .route("/_presemble/login", get(login_handler))
         .fallback(get(file_handler))
         .with_state(state);
 
@@ -1120,16 +1127,25 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_ws(socket, state.reload_tx.subscribe()))
 }
 
-/// Dev-login route — only mounted when `--dev-session` is active.
-/// Reads `?token=...`, sets the session cookie, and 302s to `/`.
+/// Public login hand-off — always mounted at `GET /_presemble/login`.
+///
+/// Reads `?token=<raw>`, calls `session_store.verify_str`, sets the
+/// `presemble_session` cookie on success and 302s to `/`.
+/// Returns 401 on an invalid or expired token.
+///
+/// This route is public (no `Session` extractor) because it is how a caller
+/// *obtains* a session; gating it would cause a chicken-and-egg lock-out.
+///
+/// In `--dev-session` mode the dev token printed at startup is accepted here.
+/// In `PRESEMBLE_SESSION_KEY` mode the control-plane `acct:` token is accepted.
 #[derive(serde::Deserialize)]
-struct DevLoginQuery {
+struct LoginQuery {
     token: String,
 }
 
-async fn dev_login_handler(
+async fn login_handler(
     State(state): State<AppState>,
-    Query(q): Query<DevLoginQuery>,
+    Query(q): Query<LoginQuery>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
@@ -3125,5 +3141,223 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
             "/_presemble/ws without cookie must not return 401");
+    }
+
+    // ── V1 auth hand-off integration tests ──────────────────────────────────
+    //
+    // Verify the cross-process property: a MagicLinkSessionStore minted in one
+    // "process" (same key) must be verifiable in a serve app using the same key.
+
+    /// Build a full app (same routes as `test_app_full`) with a caller-supplied
+    /// `SessionStore`.  This lets tests inject either a `DevSessionStore` or a
+    /// `MagicLinkSessionStore`.
+    #[cfg(test)]
+    fn test_app_full_with_store(
+        client: conductor::ConductorClient,
+        out_dir: std::path::PathBuf,
+        session_store: Arc<dyn SessionStore>,
+    ) -> axum::Router {
+        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
+        let state = AppState {
+            output_dir: out_dir,
+            reload_tx,
+            site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
+            conductor: std::sync::Arc::new(client),
+            session_store,
+        };
+        Router::new()
+            .route("/_presemble/ws", get(ws_handler))
+            .route("/_presemble/login", get(login_handler))
+            .route("/_presemble/edit", post(edit_handler))
+            .route("/_presemble/render", get(render_handler))
+            .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
+            .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
+            .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
+            .route("/_presemble/schemas", get(schemas_handler))
+            .fallback(get(file_handler))
+            .with_state(state)
+    }
+
+    // (V1-a) Token minted by MagicLinkSessionStore(K) verifies in a serve app
+    // using MagicLinkSessionStore(same K) — proves cross-process hand-off.
+    #[tokio::test]
+    async fn v1_magic_link_same_key_login_returns_302_and_sets_cookie() {
+        use tower::ServiceExt;
+
+        const KEY: &[u8] = b"v1-integration-test-key-abc123";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY);
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY))
+            as Arc<dyn SessionStore>;
+
+        let account_id = accounts::AccountId::generate();
+        let token = mint_store.mint(&account_id);
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full_with_store(client, out_dir, serve_store);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/_presemble/login?token={}", token.as_str()))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::FOUND,
+            "login with valid acct token must return 302");
+        let set_cookie = resp.headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("Set-Cookie header must be present")
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("presemble_session="),
+            "Set-Cookie must contain presemble_session; got: {set_cookie}");
+    }
+
+    // (V1-b) Token minted by MagicLinkSessionStore(K) when presented to a serve
+    // app with a DIFFERENT key must return 401 — wrong key yields no session.
+    #[tokio::test]
+    async fn v1_magic_link_wrong_key_returns_401() {
+        use tower::ServiceExt;
+
+        const KEY_A: &[u8] = b"v1-key-a-for-mint";
+        const KEY_B: &[u8] = b"v1-key-b-for-serve";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY_A);
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY_B))
+            as Arc<dyn SessionStore>;
+
+        let account_id = accounts::AccountId::generate();
+        let token = mint_store.mint(&account_id);
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full_with_store(client, out_dir, serve_store);
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/_presemble/login?token={}", token.as_str()))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "login with token minted under wrong key must return 401");
+        // Must NOT set a cookie
+        assert!(
+            resp.headers().get(axum::http::header::SET_COOKIE).is_none(),
+            "no Set-Cookie must be set on 401"
+        );
+    }
+
+    // (V1-c) GET /_presemble/login is reachable without any prior session.
+    //
+    // Strategy: send a request with NO prior session cookie but WITH a valid token.
+    // If /_presemble/login were gated by the Session extractor, the extractor would
+    // fire BEFORE the handler, return 401, and the token would never be verified.
+    // A 302 response proves the handler ran (and the route is public).
+    #[tokio::test]
+    async fn v1_login_route_is_public_no_prior_session_needed() {
+        use tower::ServiceExt;
+
+        const KEY: &[u8] = b"v1-public-check-key";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY);
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY))
+            as Arc<dyn SessionStore>;
+
+        let account_id = accounts::AccountId::generate();
+        let token = mint_store.mint(&account_id);
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full_with_store(client, out_dir, serve_store);
+
+        // No session cookie at all — request authenticated purely via the token
+        // query parameter.  A 302 proves the route is public (not gated).
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/_presemble/login?token={}", token.as_str()))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::FOUND,
+            "/_presemble/login with valid token and NO prior session cookie must return 302 \
+             (proves route is public — no Session extractor gate)");
+    }
+
+    // (V1-d) After obtaining a session cookie via /_presemble/login (magic-link path),
+    // a subsequent POST /_presemble/edit carrying that cookie is NOT 401.
+    #[tokio::test]
+    async fn v1_magic_link_cookie_authenticates_edit() {
+        use tower::ServiceExt;
+
+        const KEY: &[u8] = b"v1-edit-auth-test-key";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY);
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY))
+            as Arc<dyn SessionStore>;
+
+        let account_id = accounts::AccountId::generate();
+        let session_token = mint_store.mint(&account_id);
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full_with_store(client, out_dir, serve_store);
+
+        // Build the cookie value the same way login_handler would set it
+        let cookie_header = format!("presemble_session={}", session_token.as_str());
+
+        let edit_body = serde_json::json!({
+            "file": "content/test/doc.md",
+            "slot": "title",
+            "value": "V1 Authenticated Edit"
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/edit")
+            .header("content-type", "application/json")
+            .header("cookie", cookie_header)
+            .body(axum::body::Body::from(serde_json::to_vec(&edit_body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "POST /_presemble/edit with magic-link session cookie must not return 401");
+    }
+
+    // (V1-e) V0 regression: editorial routes still 401 without a cookie.
+    // This test uses MagicLinkSessionStore to confirm V0 gate is unchanged.
+    #[tokio::test]
+    async fn v1_editorial_routes_still_gate_without_cookie() {
+        use tower::ServiceExt;
+
+        let serve_store = Arc::new(
+            accounts::MagicLinkSessionStore::with_key(b"v1-gate-test-key")
+        ) as Arc<dyn SessionStore>;
+
+        let (client, _tmp) = start_test_conductor();
+        let out_dir = _tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let app = test_app_full_with_store(client, out_dir, serve_store);
+
+        // POST /_presemble/edit without any session cookie → must be 401
+        let edit_body = serde_json::json!({
+            "file": "content/test/doc.md",
+            "slot": "title",
+            "value": "Unauthenticated"
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/edit")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(serde_json::to_vec(&edit_body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
+            "editorial route must return 401 without session (MagicLinkSessionStore)");
     }
 }
