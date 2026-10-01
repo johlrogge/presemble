@@ -11,6 +11,7 @@ SITE_DIR=""
 COOKIE_JAR=""
 WS_ERR=""
 PID=""
+KEY_CHECK_DIR=""
 PASS=0
 FAIL=0
 ERRORS=""
@@ -34,6 +35,7 @@ cleanup() {
     fi
     [ -n "$COOKIE_JAR" ] && rm -f "$COOKIE_JAR"
     [ -n "$WS_ERR" ] && rm -f "$WS_ERR"
+    [ -n "$KEY_CHECK_DIR" ] && rm -rf "$KEY_CHECK_DIR"
     # Clean up nrepl port file
     rm -f "$(dirname "${SITE_DIR:-/tmp/x}")/.nrepl-port" 2>/dev/null || true
 }
@@ -224,6 +226,22 @@ JSON
 cat > "$SITE_DIR/.presemble/suggestions/ned/sug-legacy-stale.json" <<'JSON'
 {"id":"sug-legacy-stale","author":{"Human":"smoketest"},"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"SetText":"x"},"workspace_hash":"untracked","reason":"legacy stale no cause","status":{"Stale":{"reason":"old"}},"created_at":"2026-01-01T00:00:00Z"}
 JSON
+
+# ── Test: invalid PRESEMBLE_SESSION_KEY refuses to start (ADR-055 amendment) ──
+log "Checking that an empty/short PRESEMBLE_SESSION_KEY fails fast..."
+KEY_CHECK_DIR=$(mktemp -d /tmp/presemble-keycheck-XXXXXX)
+check_bad_key() {  # $1 = key value, $2 = expected message fragment, $3 = label
+    local out rc=0
+    out=$(PRESEMBLE_SESSION_KEY="$1" timeout 300 cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- serve "$KEY_CHECK_DIR/" --port 3999 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; then fail "$3: serve did not exit with an error (rc=$rc)"; return; fi
+    if ! grep -qF "$2" <<<"$out"; then fail "$3: missing '$2' in output"; return; fi
+    if grep -qF "MagicLinkSessionStore" <<<"$out"; then fail "$3: serve selected Hosted mode"; return; fi
+    if [ -n "$1" ] && grep -qF "$1" <<<"$out"; then fail "$3: error output leaked the key"; return; fi
+    pass "$3"
+}
+check_bad_key ""                       "PRESEMBLE_SESSION_KEY is set but empty" "empty session key refuses to start"
+check_bad_key "short-but-secret-value" "PRESEMBLE_SESSION_KEY is too short"     "short session key refuses to start"
+rm -rf "$KEY_CHECK_DIR"
 
 # Start serve with a dev session (ADR-054/055: editorial routes need a session).
 # PRESEMBLE_SESSION_KEY would make serve ignore --dev-session, so unset it.
