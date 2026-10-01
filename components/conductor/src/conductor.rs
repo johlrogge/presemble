@@ -6,6 +6,10 @@ use rayon::prelude::*;
 
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, RenderMode, Response};
 
+/// Element kind given to a document root that has been superseded by a
+/// re-ingest of the same file (ADR-056). See `Conductor::retire_document_root`.
+const SUPERSEDED_DOCUMENT_KIND: &str = "superseded-document";
+
 // ---------------------------------------------------------------------------
 // Clojure string literal escaping
 // ---------------------------------------------------------------------------
@@ -1545,7 +1549,6 @@ impl Conductor {
     /// 4. Update url_to_root, url_to_semantic, stem_to_roots, path_to_doc_root
     ///
     /// Returns the semantic root NodeId.
-    #[allow(dead_code)]
     fn update_document_in_store(
         &self,
         url: &str,
@@ -1567,9 +1570,30 @@ impl Conductor {
             page_kind: page_kind.to_string(),
         };
 
+        // Not atomic with the index updates below: a concurrent re-ingest of the
+        // same file can leave two live roots. Wave 1 swaps store and indexes
+        // atomically.
+        let old_root = self
+            .path_to_doc_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(Path::new(&meta.file))
+            .copied();
+
         let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
 
-        // Store the document (creates new nodes; old nodes become orphaned but that's OK)
+        // ADR-056 exact addressing: retire the superseded root by changing its
+        // kind to `superseded-document`, so every `:kind "document"` query
+        // (`doc-by-path`, `by-url`, ...) resolves to exactly one document. Its
+        // attributes and edges are kept: other pages' semantic Reference edges
+        // still point at it and must keep reading a correct `url` / `file`.
+        // Reclaiming the old subtree is left to garbage collection (Wave 1).
+        if let Some(old_root) = old_root {
+            Self::retire_document_root(&mut store, old_root);
+        }
+
+        // Store the document (creates new nodes; the old subtree stays behind
+        // as a retired, superseded root, see above)
         let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
 
         // Build stem_to_roots and url_to_root snapshots for link resolution.
@@ -1655,6 +1679,27 @@ impl Conductor {
             .insert(PathBuf::from(&meta.file), root);
 
         Ok(sem)
+    }
+
+    /// Retire a superseded document root by renaming its element kind from
+    /// `document` to [`SUPERSEDED_DOCUMENT_KIND`].
+    ///
+    /// The superseded root drops out of every `:kind "document"` query
+    /// (`doc-by-path`, `by-url`, `by-stem`, `posts`, `all-documents`,
+    /// `source-docs-of`, and the Rust `source_docs_of`). All attributes and
+    /// edges are kept, so stale references from other pages still read a
+    /// correct `url` / `file`. Wave 1 reclaims the subtree.
+    ///
+    /// No-op if `root` is not a `document` element.
+    fn retire_document_root(store: &mut node_store::NodeStore, root: node_store::NodeId) {
+        if !matches!(
+            store.get(root),
+            Some(node_store::Node::Element(name)) if store.resolve_name(*name) == "document"
+        ) {
+            return;
+        }
+        let kind = store.intern(SUPERSEDED_DOCUMENT_KIND);
+        store.replace_node(root, node_store::Node::Element(kind));
     }
 
     /// Map a cursor line to the structural anchor of the nearest body element.
@@ -4114,6 +4159,160 @@ mod update_document_in_store_tests {
             ),
             other => panic!("expected title Text value, got {other:?}"),
         }
+    }
+
+    // ── ADR-056 exact addressing: a re-ingested document must not leave a
+    //    second root carrying the same `file` / `url` attributes ──────────────
+
+    const OTHER_CONTENT: &str = "# Other Title\n\n----\n\nOther body\n";
+
+    fn build_two_post_site() -> tempfile::TempDir {
+        let tmp = build_single_post_site();
+        std::fs::write(tmp.path().join("content/post/other.md"), OTHER_CONTENT)
+            .expect("write other content");
+        // rebuild_page renders, so it needs a template that parses.
+        std::fs::write(tmp.path().join("templates/post/item.hiccup"), "[:div]")
+            .expect("write renderable template");
+        tmp
+    }
+
+    fn eval_count(conductor: &Conductor, program: &str) -> i64 {
+        let root = conductor.make_ned_root().expect("make_ned_root");
+        match evaluator::eval_str_with_root(program, &root) {
+            Ok(template::Value::Integer(n)) => n,
+            other => panic!("expected Integer from {program}, got {other:?}"),
+        }
+    }
+
+    fn rebuild_hello_twice(conductor: &Conductor, tmp: &tempfile::TempDir) {
+        let path = tmp.path().join("content/post/hello.md");
+        conductor.rebuild_page(&path, CONTENT_V2).expect("first rebuild_page");
+        conductor.rebuild_page(&path, CONTENT_V1).expect("second rebuild_page");
+    }
+
+    #[test]
+    fn rebuild_page_twice_leaves_single_doc_by_path() {
+        let tmp = build_two_post_site();
+        let conductor = make_conductor(&tmp);
+        rebuild_hello_twice(&conductor, &tmp);
+
+        assert_eq!(
+            eval_count(&conductor, r#"(ned/count (ned/doc-by-path "content/post/hello.md"))"#),
+            1,
+            "doc-by-path must resolve to exactly one document after repeated rebuilds"
+        );
+    }
+
+    #[test]
+    fn rebuild_page_twice_leaves_single_by_url() {
+        let tmp = build_two_post_site();
+        let conductor = make_conductor(&tmp);
+        rebuild_hello_twice(&conductor, &tmp);
+
+        assert_eq!(
+            eval_count(&conductor, r#"(ned/count (ned/by-url "/post/hello"))"#),
+            1,
+            "by-url must resolve to exactly one document after repeated rebuilds"
+        );
+    }
+
+    #[test]
+    fn rebuild_page_twice_indexes_point_at_live_root() {
+        let tmp = build_two_post_site();
+        let conductor = make_conductor(&tmp);
+        rebuild_hello_twice(&conductor, &tmp);
+
+        let by_url = conductor.document_by_url("/post/hello").expect("url_to_root entry");
+        let by_path = conductor
+            .doc_root_for_path(Path::new("content/post/hello.md"))
+            .expect("path_to_doc_root entry");
+        assert_eq!(by_url, by_path, "url_to_root and path_to_doc_root must agree");
+
+        let store = conductor.node_store.read().unwrap();
+        assert_eq!(
+            node_store_bridge::content_bridge::find_attr_text(&store, by_path, "file").as_deref(),
+            Some("content/post/hello.md"),
+            "indexed root must still carry its file attribute"
+        );
+        assert_eq!(
+            node_store_bridge::content_bridge::find_attr_text(&store, by_path, "url").as_deref(),
+            Some("/post/hello"),
+            "indexed root must still carry its url attribute"
+        );
+    }
+
+    #[test]
+    fn rebuild_page_twice_leaves_other_documents_unchanged() {
+        let tmp = build_two_post_site();
+        let conductor = make_conductor(&tmp);
+
+        let other_before = conductor.document_by_url("/post/other").expect("other indexed");
+        rebuild_hello_twice(&conductor, &tmp);
+        let other_after = conductor.document_by_url("/post/other").expect("other still indexed");
+
+        assert_eq!(other_before, other_after, "other document root must not change");
+        assert_eq!(
+            eval_count(&conductor, r#"(ned/count (ned/doc-by-path "content/post/other.md"))"#),
+            1
+        );
+        assert_eq!(
+            eval_count(&conductor, r#"(ned/count (ned/by-url "/post/other"))"#),
+            1
+        );
+        let store = conductor.node_store.read().unwrap();
+        assert_eq!(
+            node_store_bridge::content_bridge::find_attr_text(&store, other_after, "file").as_deref(),
+            Some("content/post/other.md")
+        );
+    }
+
+    #[test]
+    fn rebuild_page_twice_hides_superseded_roots_from_document_queries() {
+        let tmp = build_two_post_site();
+        let conductor = make_conductor(&tmp);
+
+        let documents_before = eval_count(&conductor, "(ned/count (ned/all-documents))");
+        rebuild_hello_twice(&conductor, &tmp);
+
+        assert_eq!(
+            eval_count(&conductor, "(ned/count (ned/all-documents))"),
+            documents_before,
+            "superseded roots must not show up in all-documents"
+        );
+        assert_eq!(
+            eval_count(&conductor, "(ned/count (ned/posts))"),
+            2,
+            "posts must list each post exactly once after repeated rebuilds"
+        );
+    }
+
+    #[test]
+    fn superseded_root_keeps_identity_attributes() {
+        let tmp = build_two_post_site();
+        let conductor = make_conductor(&tmp);
+
+        let old_root = conductor.document_by_url("/post/hello").expect("hello indexed");
+        rebuild_hello_twice(&conductor, &tmp);
+
+        let store = conductor.node_store.read().unwrap();
+        match store.get(old_root) {
+            Some(node_store::Node::Element(name)) => assert_eq!(
+                store.resolve_name(*name),
+                "superseded-document",
+                "old root must be retired, not left as a live document"
+            ),
+            other => panic!("expected old root to remain an Element, got {other:?}"),
+        }
+        assert_eq!(
+            node_store_bridge::content_bridge::find_attr_text(&store, old_root, "url").as_deref(),
+            Some("/post/hello"),
+            "stale references into the old root must still read the correct url"
+        );
+        assert_eq!(
+            node_store_bridge::content_bridge::find_attr_text(&store, old_root, "file").as_deref(),
+            Some("content/post/hello.md"),
+            "stale references into the old root must still read the correct file"
+        );
     }
 }
 
