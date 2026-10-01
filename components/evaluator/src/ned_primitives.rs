@@ -108,16 +108,40 @@ fn reg(
 // Registration entry point
 // ---------------------------------------------------------------------------
 
-/// Register NED primitives as core evaluator builtins.
+/// Names of every builtin registered by [`register_ned_mutation_builtins`].
+///
+/// These are the primitives that can write to the node store (or, in the case
+/// of `ned/store`, hand out the raw store handle that would allow writing).
+/// A root populated only by [`register_ned_query_builtins`] binds none of them.
+pub const NED_MUTATING_BUILTINS: &[&str] = &[
+    "ned/store",
+    "ned/set-text",
+    "ned/search-replace",
+    "ned/delete",
+    "ned/insert-child",
+    "ned/insert-before",
+    "ned/insert-after",
+    "ned/replace",
+    "ned/parse-body",
+];
+
+/// Register all NED primitives (query and mutation) as core evaluator builtins.
 /// The store is shared via Arc<RwLock<NodeStore>>.
+///
+/// Equivalent to calling [`register_ned_query_builtins`] followed by
+/// [`register_ned_mutation_builtins`].
 pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
-    // ── Store access ─────────────────────────────────────────────────────────
+    register_ned_query_builtins(root, store.clone());
+    register_ned_mutation_builtins(root, store);
+}
 
-    let s = store.clone();
-    reg(root, "ned/store", "(ned/store)", "Return the current node store.", move |_args| {
-        Ok(wrap_store(s.clone()))
-    });
-
+/// Register the read-only NED primitives: selection constructors, traversal,
+/// filtering, inspection, set operations, attribute and positional access,
+/// pure NodeTree constructors, and `ned/parse-grammar`.
+///
+/// None of these write to the store. None of the names in
+/// [`NED_MUTATING_BUILTINS`] are bound.
+pub fn register_ned_query_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
     // ── Selection constructors ────────────────────────────────────────────────
 
     let s = store.clone();
@@ -403,47 +427,6 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
         Ok(wrap_selection(sel.nth_of_kind(&st, &name, idx)))
     });
 
-    // ── Mutations ─────────────────────────────────────────────────────────────
-
-    let s = store.clone();
-    reg(root, "ned/set-text", "(ned/set-text sel text)", "Replace text content of selected Text nodes.", move |args| {
-        if args.len() < 2 { return Err("ned/set-text requires selection and text".into()); }
-        let sel = extract_selection(&args[0])?;
-        let text = match &args[1] {
-            Value::Text(s) => s.clone(),
-            _ => return Err("ned/set-text: second argument must be a string".into()),
-        };
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::set_text(&mut st, &sel, &text);
-        Ok(wrap_selection(result))
-    });
-
-    let s = store.clone();
-    reg(root, "ned/search-replace", "(ned/search-replace sel search replace)", "Replace all occurrences of search with replace in every Text descendant of sel.", move |args| {
-        if args.len() < 3 { return Err("ned/search-replace requires selection, search, and replace".into()); }
-        let sel = extract_selection(&args[0])?;
-        let search = match &args[1] {
-            Value::Text(s) => s.clone(),
-            _ => return Err("ned/search-replace: search must be a string".into()),
-        };
-        let replace = match &args[2] {
-            Value::Text(s) => s.clone(),
-            _ => return Err("ned/search-replace: replace must be a string".into()),
-        };
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::search_replace_text(&mut st, &sel, &search, &replace);
-        Ok(wrap_selection(result))
-    });
-
-    let s = store.clone();
-    reg(root, "ned/delete", "(ned/delete sel)", "Delete selected nodes and their descendants.", move |args| {
-        if args.is_empty() { return Err("ned/delete requires a selection".into()); }
-        let sel = extract_selection(&args[0])?;
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::delete(&mut st, &sel);
-        Ok(wrap_selection(result))
-    });
-
     // ── NodeTree constructors ─────────────────────────────────────────────────
 
     reg(root, "ned/mk-text", "(ned/mk-text s)", "Construct a text NodeTree leaf.", |args| {
@@ -483,6 +466,76 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
             _ => return Err("ned/with-attr: value must be a string".into()),
         };
         Ok(wrap_node_tree(tree.with_attr(name, value)))
+    });
+
+    // ── Grammar parsing (pure) ────────────────────────────────────────────────
+
+    reg(root, "ned/parse-grammar", "(ned/parse-grammar schema-src)", "Parse a schema source string into an opaque Grammar value.", |args| {
+        if args.is_empty() { return Err("ned/parse-grammar requires a schema source string".into()); }
+        let src = match &args[0] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/parse-grammar: argument must be a string".into()),
+        };
+        let grammar = schema::parse_schema(&src)
+            .map_err(|e| format!("ned/parse-grammar: schema parse error: {e}"))?;
+        Ok(wrap_grammar(Arc::new(grammar)))
+    });
+}
+
+/// Register the NED primitives that write to the node store (plus `ned/store`,
+/// which exposes the raw store handle). The registered names are exactly
+/// [`NED_MUTATING_BUILTINS`].
+pub fn register_ned_mutation_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
+    // ── Store access ─────────────────────────────────────────────────────────
+
+    let s = store.clone();
+    reg(root, "ned/store", "(ned/store)", "Return the current node store.", move |_args| {
+        Ok(wrap_store(s.clone()))
+    });
+
+    // ── Mutations ─────────────────────────────────────────────────────────────
+
+    let s = store.clone();
+    reg(root, "ned/set-text", "(ned/set-text sel text)", "Replace text content of selected Text nodes.", move |args| {
+        if args.len() < 2 { return Err("ned/set-text requires selection and text".into()); }
+        let sel = extract_selection(&args[0])?;
+        let text = match &args[1] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/set-text: second argument must be a string".into()),
+        };
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        let result = ned::mutation::set_text(&mut st, &sel, &text);
+        Ok(wrap_selection(result))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/search-replace", "(ned/search-replace sel search replace)", "Replace all occurrences of search with replace in every Text descendant of sel.", move |args| {
+        if args.len() < 3 { return Err("ned/search-replace requires selection, search, and replace".into()); }
+        let sel = extract_selection(&args[0])?;
+        let search = match &args[1] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/search-replace: search must be a string".into()),
+        };
+        let replace = match &args[2] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/search-replace: replace must be a string".into()),
+        };
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        // The primitive returns its input selection; the replacement count is
+        // not surfaced to scripts.
+        ned::mutation::search_replace_text(&mut st, &sel, &search, &replace);
+        Ok(wrap_selection(sel))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/delete", "(ned/delete sel)", "Delete selected nodes and their descendants.", move |args| {
+        if args.is_empty() { return Err("ned/delete requires a selection".into()); }
+        let sel = extract_selection(&args[0])?;
+        let mut st = s.write().map_err(|e| e.to_string())?;
+        // The primitive returns an empty selection; the removed-node count is
+        // not surfaced to scripts.
+        ned::mutation::delete(&mut st, &sel);
+        Ok(wrap_selection(Selection::new()))
     });
 
     // ── Tree-based mutation bindings ──────────────────────────────────────────
@@ -527,20 +580,9 @@ pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
         Ok(wrap_selection(result))
     });
 
-    // ── Grammar and body-fragment parsing ─────────────────────────────────────
+    // ── Body-fragment parsing (writes ingested nodes into the store) ──────────
 
-    reg(root, "ned/parse-grammar", "(ned/parse-grammar schema-src)", "Parse a schema source string into an opaque Grammar value.", |args| {
-        if args.is_empty() { return Err("ned/parse-grammar requires a schema source string".into()); }
-        let src = match &args[0] {
-            Value::Text(s) => s.clone(),
-            _ => return Err("ned/parse-grammar: argument must be a string".into()),
-        };
-        let grammar = schema::parse_schema(&src)
-            .map_err(|e| format!("ned/parse-grammar: schema parse error: {e}"))?;
-        Ok(wrap_grammar(Arc::new(grammar)))
-    });
-
-    let s = store.clone();
+    let s = store;
     reg(root, "ned/parse-body", "(ned/parse-body md-source grammar)", "Parse a markdown body fragment into a list of NodeTrees (already stored).", move |args| {
         if args.len() < 2 { return Err("ned/parse-body requires markdown source and grammar".into()); }
         let md_src = match &args[0] {
@@ -1701,5 +1743,72 @@ mod tests {
             }
             _ => panic!("expected List"),
         }
+    }
+
+    // ── Query-only vs mutation registration split ─────────────────────────────
+
+    fn setup_query_only(store: Arc<RwLock<NodeStore>>) -> RootEnv {
+        let root = RootEnv::new();
+        crate::init_root(&root).expect("core init failed");
+        register_ned_query_builtins(&root, store);
+        root
+    }
+
+    #[test]
+    fn mutating_builtins_are_registered_by_full_registration() {
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        for name in NED_MUTATING_BUILTINS {
+            assert!(
+                matches!(root_env.get(name), Some(Value::Fn(_))),
+                "{name} should be bound by register_ned_builtins"
+            );
+        }
+    }
+
+    #[test]
+    fn mutating_builtins_fail_in_query_only_root_and_store_is_unchanged() {
+        let store = make_store_with_tree();
+        let count_before = store.read().unwrap().node_count();
+        let root_env = setup_query_only(store.clone());
+        for name in NED_MUTATING_BUILTINS {
+            assert!(root_env.get(name).is_none(), "{name} must not be bound in a query-only root");
+            let src = format!(r#"({name} (ned/all) "a" "b")"#);
+            let result = crate::eval_str_with_root(&src, &root_env);
+            assert!(result.is_err(), "{name} should fail to evaluate in a query-only root, got {result:?}");
+            assert_eq!(
+                store.read().unwrap().node_count(),
+                count_before,
+                "{name} must not change the store's node count"
+            );
+        }
+    }
+
+    #[test]
+    fn ned_prelude_loads_and_runs_on_query_only_root() {
+        let store = make_doc_store();
+        let root_env = setup_query_only(store);
+        crate::load_ned_prelude(&root_env).expect("ned prelude must load on a query-only root");
+
+        let doc_count = crate::eval_str_with_root(
+            r#"(ned/count (ned/doc-by-path "content/post/foo.md"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(doc_count, Value::Integer(1)));
+
+        let slot_count = crate::eval_str_with_root(
+            r#"(ned/count (ned/slot (ned/doc-by-path "content/post/foo.md") "title"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(slot_count, Value::Integer(1)));
+
+        let heading_count = crate::eval_str_with_root(
+            r#"(ned/count (ned/heading-with-text (ned/descendants (ned/doc-by-path "content/post/foo.md")) "My Title"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(heading_count, Value::Integer(1)), "got {heading_count:?}");
     }
 }

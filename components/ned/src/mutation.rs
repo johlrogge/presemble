@@ -18,17 +18,19 @@ pub fn set_text(store: &mut NodeStore, sel: &Selection, text: &str) -> Selection
 }
 
 /// Delete selected nodes and all their descendants (cascade).
-/// Returns an empty Selection (all nodes removed).
-pub fn delete(store: &mut NodeStore, sel: &Selection) -> Selection {
+/// Returns the number of nodes removed from the store (selected nodes plus
+/// cascaded descendants; ids not present in the store are not counted).
+pub fn delete(store: &mut NodeStore, sel: &Selection) -> usize {
     // First collect all nodes to delete (selected + descendants)
     let to_delete = sel.union(&sel.descendants(store));
 
+    let count_before = store.node_count();
     // store.remove_node handles edge cleanup, so order doesn't matter
     for id in to_delete.iter() {
         store.remove_node(id);
     }
 
-    Selection::new()
+    count_before - store.node_count()
 }
 
 /// Insert a new child node under each selected element.
@@ -41,52 +43,6 @@ pub fn insert_child(store: &mut NodeStore, sel: &Selection, node: Node) -> Selec
             store.add_edge(id, Edge::Child(child));
             created.push(child);
         }
-    }
-    Selection::from_ids(created)
-}
-
-/// Insert a new sibling node before each selected node.
-/// For each selected node, finds its parent and inserts at the position
-/// just before the selected node in the parent's child list.
-/// Returns a Selection of the newly created nodes.
-pub fn insert_before(store: &mut NodeStore, sel: &Selection, node: Node) -> Selection {
-    let mut created = Vec::new();
-    // Collect (selected_id, parent, position) first so we can mutate store afterwards
-    let mut work: Vec<(NodeId, NodeId, usize)> = Vec::new();
-    for id in sel.iter() {
-        for parent in store.parents(id) {
-            let children = store.children(parent);
-            if let Some(pos) = children.iter().position(|&c| c == id) {
-                work.push((id, parent, pos));
-            }
-        }
-    }
-    for (_id, parent, pos) in work {
-        let new_node = store.add_node(node.clone());
-        store.insert_child_at(parent, pos, new_node);
-        created.push(new_node);
-    }
-    Selection::from_ids(created)
-}
-
-/// Insert a new sibling node after each selected node.
-/// Returns a Selection of the newly created nodes.
-pub fn insert_after(store: &mut NodeStore, sel: &Selection, node: Node) -> Selection {
-    let mut created = Vec::new();
-    // Collect (selected_id, parent, position) first so we can mutate store afterwards
-    let mut work: Vec<(NodeId, NodeId, usize)> = Vec::new();
-    for id in sel.iter() {
-        for parent in store.parents(id) {
-            let children = store.children(parent);
-            if let Some(pos) = children.iter().position(|&c| c == id) {
-                work.push((id, parent, pos));
-            }
-        }
-    }
-    for (_id, parent, pos) in work {
-        let new_node = store.add_node(node.clone());
-        store.insert_child_at(parent, pos + 1, new_node);
-        created.push(new_node);
     }
     Selection::from_ids(created)
 }
@@ -155,24 +111,31 @@ pub fn insert_after_tree(store: &mut NodeStore, sel: &Selection, tree: NodeTree)
 
 /// Replace all occurrences of `search` with `replace` in every Text node in `sel`.
 /// Non-Text nodes are skipped silently.
-/// If `search` is empty, returns the original selection unchanged.
-/// Returns the same selection (mutation in place; node identifiers do not change).
+/// Nodes are mutated in place (node identifiers do not change); nodes with no
+/// occurrence are left untouched.
+/// Returns the total number of replacements made across all nodes.
+/// If `search` is empty, nothing is replaced and 0 is returned.
 pub fn search_replace_text(
     store: &mut NodeStore,
     sel: &Selection,
     search: &str,
     replace: &str,
-) -> Selection {
+) -> usize {
     if search.is_empty() {
-        return sel.clone();
+        return 0;
     }
+    let mut total = 0;
     for id in sel.iter() {
         if let Some(Node::Text(s)) = store.get(id) {
-            let new_text = s.replace(search, replace);
-            store.replace_node(id, Node::Text(new_text));
+            let count = s.matches(search).count();
+            if count > 0 {
+                let new_text = s.replace(search, replace);
+                store.replace_node(id, Node::Text(new_text));
+                total += count;
+            }
         }
     }
-    sel.clone()
+    total
 }
 
 /// Replace each selected node with a materialized copy of `replacement` subtrees.
@@ -312,9 +275,8 @@ mod tests {
     fn search_replace_single_occurrence() {
         let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
         let sel = Selection::single(text1);
-        let result = search_replace_text(&mut store, &sel, "Hello", "Goodbye");
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(text1));
+        let count = search_replace_text(&mut store, &sel, "Hello", "Goodbye");
+        assert_eq!(count, 1);
         assert_eq!(store.get(text1), Some(&Node::Text("Goodbye".to_string())));
     }
 
@@ -327,8 +289,8 @@ mod tests {
         store.add_edge(root, Edge::Child(text));
 
         let sel = Selection::single(text);
-        let result = search_replace_text(&mut store, &sel, "foo", "X");
-        assert_eq!(result.len(), 1);
+        let count = search_replace_text(&mut store, &sel, "foo", "X");
+        assert_eq!(count, 2);
         assert_eq!(store.get(text), Some(&Node::Text("X bar X".to_string())));
     }
 
@@ -337,8 +299,8 @@ mod tests {
         let (mut store, _root, _h1, _p1, text1, text2) = sample_store();
         // text1 = "Hello", text2 = "World"
         let sel = Selection::from_ids([text1, text2]);
-        let result = search_replace_text(&mut store, &sel, "o", "0");
-        assert_eq!(result.len(), 2);
+        let count = search_replace_text(&mut store, &sel, "o", "0");
+        assert_eq!(count, 2);
         assert_eq!(store.get(text1), Some(&Node::Text("Hell0".to_string())));
         assert_eq!(store.get(text2), Some(&Node::Text("W0rld".to_string())));
     }
@@ -347,8 +309,8 @@ mod tests {
     fn search_replace_no_match_is_noop() {
         let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
         let sel = Selection::single(text1);
-        let result = search_replace_text(&mut store, &sel, "zzz", "X");
-        assert_eq!(result.len(), 1);
+        let count = search_replace_text(&mut store, &sel, "zzz", "X");
+        assert_eq!(count, 0);
         assert_eq!(store.get(text1), Some(&Node::Text("Hello".to_string())));
     }
 
@@ -356,9 +318,9 @@ mod tests {
     fn search_replace_empty_search_is_noop() {
         let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
         let sel = Selection::single(text1);
-        let result = search_replace_text(&mut store, &sel, "", "X");
-        // selection returned unchanged, no mutation
-        assert_eq!(result.len(), 1);
+        let count = search_replace_text(&mut store, &sel, "", "X");
+        // no replacements, no mutation
+        assert_eq!(count, 0);
         assert_eq!(store.get(text1), Some(&Node::Text("Hello".to_string())));
     }
 
@@ -367,8 +329,8 @@ mod tests {
         let (mut store, _root, h1, _p1, _text1, _text2) = sample_store();
         let sel = Selection::single(h1);
         // h1 is an Element; should be skipped silently
-        let result = search_replace_text(&mut store, &sel, "heading", "X");
-        assert_eq!(result.len(), 1);
+        let count = search_replace_text(&mut store, &sel, "heading", "X");
+        assert_eq!(count, 0);
         assert!(matches!(store.get(h1), Some(Node::Element(_))));
     }
 
@@ -377,8 +339,8 @@ mod tests {
         let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
         let count_before = store.node_count();
         let sel = Selection::single(text1);
-        let result = delete(&mut store, &sel);
-        assert!(result.is_empty());
+        let removed = delete(&mut store, &sel);
+        assert_eq!(removed, 1);
         assert!(store.get(text1).is_none());
         assert_eq!(store.node_count(), count_before - 1);
     }
@@ -388,8 +350,8 @@ mod tests {
         let (mut store, _root, h1, _p1, text1, _text2) = sample_store();
         let count_before = store.node_count();
         let sel = Selection::single(h1);
-        let result = delete(&mut store, &sel);
-        assert!(result.is_empty());
+        let removed = delete(&mut store, &sel);
+        assert_eq!(removed, 2);
         // h1 and its child text1 should both be gone
         assert!(store.get(h1).is_none());
         assert!(store.get(text1).is_none());
@@ -401,7 +363,8 @@ mod tests {
         let (mut store, _root, _h1, _p1, text1, text2) = sample_store();
         let count_before = store.node_count();
         let sel = Selection::from_ids([text1, text2]);
-        delete(&mut store, &sel);
+        let removed = delete(&mut store, &sel);
+        assert_eq!(removed, 2);
         assert_eq!(store.node_count(), count_before - 2);
     }
 
@@ -422,51 +385,6 @@ mod tests {
         let (mut store, _root, _h1, _p1, text1, _text2) = sample_store();
         let sel = Selection::single(text1);
         let created = insert_child(&mut store, &sel, Node::Text("new".to_string()));
-        assert!(created.is_empty());
-    }
-
-    #[test]
-    fn insert_before_inserts_before_selected_node() {
-        let (mut store, root, h1, _p1, _text1, _text2) = sample_store();
-        // h1 is the first child of root
-        let children_before = store.children(root).clone();
-        assert_eq!(children_before[0], h1);
-
-        let sel = Selection::single(h1);
-        let created = insert_before(&mut store, &sel, Node::Text("before".to_string()));
-        assert_eq!(created.len(), 1);
-
-        let children_after = store.children(root);
-        // The new node should be at position 0, h1 at position 1
-        let new_id = created.iter().next().unwrap();
-        assert_eq!(children_after[0], new_id);
-        assert_eq!(children_after[1], h1);
-    }
-
-    #[test]
-    fn insert_after_inserts_after_selected_node() {
-        let (mut store, root, h1, _p1, _text1, _text2) = sample_store();
-        // h1 is first child of root, p1 is second
-        let children_before = store.children(root).clone();
-        assert_eq!(children_before[0], h1);
-
-        let sel = Selection::single(h1);
-        let created = insert_after(&mut store, &sel, Node::Text("after".to_string()));
-        assert_eq!(created.len(), 1);
-
-        let children_after = store.children(root);
-        // h1 at position 0, new node at position 1, old p1 at position 2
-        let new_id = created.iter().next().unwrap();
-        assert_eq!(children_after[0], h1);
-        assert_eq!(children_after[1], new_id);
-    }
-
-    #[test]
-    fn insert_before_on_root_node_returns_empty_no_crash() {
-        let (mut store, root, _h1, _p1, _text1, _text2) = sample_store();
-        // root has no parent — insert_before should return empty selection without crashing
-        let sel = Selection::single(root);
-        let created = insert_before(&mut store, &sel, Node::Text("orphan".to_string()));
         assert!(created.is_empty());
     }
 
