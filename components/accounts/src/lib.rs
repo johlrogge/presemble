@@ -17,7 +17,7 @@
 
 use axum::{
     extract::FromRequestParts,
-    http::{StatusCode, request::Parts},
+    http::{HeaderMap, StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
 use axum::extract::FromRef;
@@ -138,6 +138,39 @@ pub trait SessionStore: Send + Sync + 'static {
     fn verify_str(&self, raw: &str) -> Option<Session> {
         let token = SessionToken::from_raw(raw);
         self.verify(&token)
+    }
+
+    /// Whether this store can ever produce a session. Stores that can issue
+    /// sessions report `Open`; a store that never verifies anything (editing
+    /// disabled) reports `Closed`, which selects the 401 explanation.
+    fn login_availability(&self) -> LoginAvailability {
+        LoginAvailability::Open
+    }
+}
+
+/// Whether a `SessionStore` can ever yield a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginAvailability {
+    /// Sessions can be obtained (via a login link or a control-plane token).
+    Open,
+    /// No session can ever be obtained — editing is disabled on this server.
+    Closed,
+}
+
+// ── ClosedSessionStore ───────────────────────────────────────────────────────
+
+/// A session store that never verifies any token. Used when the server runs
+/// without `--dev-session` and without `PRESEMBLE_SESSION_KEY`: the editorial
+/// plane is closed, and 401 responses explain how to enable it.
+pub struct ClosedSessionStore;
+
+impl SessionStore for ClosedSessionStore {
+    fn verify(&self, _token: &SessionToken) -> Option<Session> {
+        None
+    }
+
+    fn login_availability(&self) -> LoginAvailability {
+        LoginAvailability::Closed
     }
 }
 
@@ -703,18 +736,69 @@ pub fn read_session_cookie(cookie_header: &str) -> Option<SessionToken> {
 
 // ── Axum extractor ───────────────────────────────────────────────────────────
 
-/// Error returned by the `Session` extractor when the request is unauthenticated.
-pub struct Unauthorized;
+/// Error returned when a request is unauthenticated. The variant explains why,
+/// so the 401 body can tell the user what to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unauthorized {
+    /// Sessions can be obtained, but this request carries no valid one.
+    NotLoggedIn,
+    /// The server has no way to issue sessions — editing is disabled.
+    EditingDisabled,
+}
+
+impl Unauthorized {
+    /// The unauthorized reason for a store, based on its login availability.
+    pub fn for_store(store: &dyn SessionStore) -> Self {
+        match store.login_availability() {
+            LoginAvailability::Open => Unauthorized::NotLoggedIn,
+            LoginAvailability::Closed => Unauthorized::EditingDisabled,
+        }
+    }
+
+    /// Human-readable explanation. Never includes token, principal, or key material.
+    pub fn message(&self) -> &'static str {
+        match self {
+            Unauthorized::NotLoggedIn => {
+                "Not logged in, or your session has expired (for example after a server restart). Open the editor login link to start a session."
+            }
+            Unauthorized::EditingDisabled => {
+                "Editing is disabled on this server. Restart presemble serve with --dev-session to enable it."
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UnauthorizedBody {
+    ok: bool,
+    error: &'static str,
+}
 
 impl IntoResponse for Unauthorized {
     fn into_response(self) -> Response {
         (
             StatusCode::UNAUTHORIZED,
             [("www-authenticate", "Cookie realm=\"presemble\"")],
-            "401 Unauthorized",
+            axum::Json(UnauthorizedBody {
+                ok: false,
+                error: self.message(),
+            }),
         )
             .into_response()
     }
+}
+
+/// Authenticate a request from its headers against `store`.
+///
+/// Reads the `presemble_session` cookie and verifies it. On failure the
+/// `Unauthorized` variant is chosen from the store's login availability.
+pub fn authenticate(store: &dyn SessionStore, headers: &HeaderMap) -> Result<Session, Unauthorized> {
+    headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(read_session_cookie)
+        .and_then(|tok| store.verify(&tok))
+        .ok_or_else(|| Unauthorized::for_store(store))
 }
 
 impl<S> FromRequestParts<S> for Session
@@ -726,18 +810,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let store: Arc<dyn SessionStore> = Arc::from_ref(state);
-
-        // Find the Cookie header and extract the presemble_session value.
-        let token = parts
-            .headers
-            .get("cookie")
-            .and_then(|v| v.to_str().ok())
-            .and_then(read_session_cookie);
-
-        match token {
-            Some(tok) => store.verify(&tok).ok_or(Unauthorized),
-            None => Err(Unauthorized),
-        }
+        authenticate(store.as_ref(), &parts.headers)
     }
 }
 
@@ -927,6 +1000,131 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── ClosedSessionStore / Unauthorized reason tests ─────────────────────────
+
+    #[test]
+    fn closed_store_verifies_nothing() {
+        let closed = ClosedSessionStore;
+        for key in [&b"any-key"[..], b"another-key", b""] {
+            let token = DevSessionStore::with_key(key).mint("alice");
+            assert!(closed.verify(&token).is_none(), "closed store must verify nothing");
+            assert!(closed.verify_str(token.as_str()).is_none());
+        }
+    }
+
+    #[test]
+    fn closed_store_reports_closed() {
+        assert_eq!(ClosedSessionStore.login_availability(), LoginAvailability::Closed);
+    }
+
+    #[test]
+    fn dev_and_magic_link_stores_report_open() {
+        assert_eq!(
+            DevSessionStore::with_key(b"k").login_availability(),
+            LoginAvailability::Open
+        );
+        assert_eq!(
+            MagicLinkSessionStore::with_key(b"k").login_availability(),
+            LoginAvailability::Open
+        );
+    }
+
+    async fn extractor_response(
+        store: Arc<dyn SessionStore>,
+        cookie: Option<&str>,
+    ) -> (StatusCode, Option<String>, String) {
+        use tower::ServiceExt;
+
+        async fn handler(session: Session, State(_s): State<TestState>) -> &'static str {
+            let _ = session;
+            "ok"
+        }
+
+        let app = Router::new()
+            .route("/test", get(handler))
+            .with_state(TestState { session_store: store });
+
+        let mut builder = axum::http::Request::builder().uri("/test");
+        if let Some(c) = cookie {
+            builder = builder.header("cookie", c);
+        }
+        let req = builder.body(axum::body::Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, content_type, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn extractor_closed_store_explains_editing_disabled() {
+        let store = Arc::new(ClosedSessionStore) as Arc<dyn SessionStore>;
+        let (status, ct, body) = extractor_response(store, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(ct.as_deref(), Some("application/json"));
+        assert!(body.contains("Editing is disabled"), "body: {body}");
+        assert!(body.contains("--dev-session"), "body: {body}");
+        assert!(body.contains("\"ok\":false"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn extractor_dev_store_no_cookie_says_not_logged_in() {
+        let store = Arc::new(DevSessionStore::with_key(b"k-nl")) as Arc<dyn SessionStore>;
+        let (status, ct, body) = extractor_response(store, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(ct.as_deref(), Some("application/json"));
+        assert!(body.contains("Not logged in"), "body: {body}");
+        assert!(!body.contains("--dev-session"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn extractor_invalid_cookie_is_not_logged_in_and_does_not_echo_value() {
+        let store = Arc::new(DevSessionStore::with_key(b"k-inv")) as Arc<dyn SessionStore>;
+        let (status, _ct, body) =
+            extractor_response(store, Some("presemble_session=secret-garbage-xyz")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("Not logged in"), "body: {body}");
+        assert!(!body.contains("secret-garbage-xyz"), "body must not echo cookie: {body}");
+    }
+
+    #[test]
+    fn authenticate_invalid_cookie_returns_not_logged_in() {
+        let store = DevSessionStore::with_key(b"k-auth-inv");
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "presemble_session=secret-garbage-xyz".parse().unwrap());
+        assert_eq!(authenticate(&store, &headers).err(), Some(Unauthorized::NotLoggedIn));
+    }
+
+    #[test]
+    fn authenticate_closed_store_returns_editing_disabled() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "presemble_session=whatever".parse().unwrap());
+        assert_eq!(
+            authenticate(&ClosedSessionStore, &headers).err(),
+            Some(Unauthorized::EditingDisabled)
+        );
+    }
+
+    #[test]
+    fn authenticate_valid_cookie_returns_ok() {
+        let store = DevSessionStore::with_key(b"k-auth-ok");
+        let token = store.mint("carol");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            format!("presemble_session={}", token.as_str()).parse().unwrap(),
+        );
+        let session = authenticate(&store, &headers).expect("valid cookie must authenticate");
+        assert!(matches!(session.principal(), Principal::Dev { label } if label == "carol"));
     }
 
     // ── AccountId tests ───────────────────────────────────────────────────────

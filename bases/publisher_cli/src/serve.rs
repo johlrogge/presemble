@@ -1,6 +1,9 @@
 use crate::error::CliError;
 use crate::{build_for_serve, UrlConfig};
-use accounts::{Session, SessionStore, DevSessionStore, MagicLinkSessionStore};
+use accounts::{
+    ClosedSessionStore, DevSessionStore, LoginAvailability, MagicLinkSessionStore, Session,
+    SessionStore, Unauthorized,
+};
 use axum::{
     Router,
     extract::{Query, State, WebSocketUpgrade},
@@ -217,6 +220,66 @@ pub fn serve_site(
         .block_on(serve_async(site_dir, port, url_config, dev_session_label))
 }
 
+/// How the editorial plane is configured for this `serve` process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditorialMode {
+    /// `PRESEMBLE_SESSION_KEY` is set: verify control-plane `acct:` tokens.
+    /// `dev_session_ignored` records that `--dev-session` was also given.
+    Hosted { dev_session_ignored: bool },
+    /// `--dev-session <label>`: random per-process key and a printed login link.
+    DevLogin { label: String },
+    /// Neither: no session can be obtained, editing is disabled.
+    Closed,
+}
+
+/// Pick the editorial mode from the environment and CLI flags.
+fn select_editorial_mode(session_key_set: bool, dev_label: Option<String>) -> EditorialMode {
+    match (session_key_set, dev_label) {
+        (true, dev_label) => EditorialMode::Hosted { dev_session_ignored: dev_label.is_some() },
+        (false, Some(label)) => EditorialMode::DevLogin { label },
+        (false, None) => EditorialMode::Closed,
+    }
+}
+
+/// Startup text describing the editorial mode. Each line ends with `\n`.
+fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) -> String {
+    let mut out = String::new();
+    match mode {
+        EditorialMode::Hosted { dev_session_ignored } => {
+            out.push_str("Session store: MagicLinkSessionStore (PRESEMBLE_SESSION_KEY set)\n");
+            if *dev_session_ignored {
+                out.push_str(
+                    "  Warning: --dev-session is ignored because PRESEMBLE_SESSION_KEY is set.\n",
+                );
+            }
+        }
+        EditorialMode::DevLogin { .. } => {
+            out.push_str("Session store: DevSessionStore (random key; --dev-session)\n");
+            if let Some(tok) = login_token {
+                out.push('\n');
+                out.push_str("  --dev-session active\n");
+                out.push_str(&format!("  Cookie value: presemble_session={tok}\n"));
+                out.push_str(&format!(
+                    "  Login URL:    http://127.0.0.1:{port}/_presemble/login?token={tok}\n"
+                ));
+                out.push('\n');
+            }
+        }
+        EditorialMode::Closed => {
+            out.push_str("Session store: none (editing disabled)\n");
+            out.push('\n');
+            out.push_str(
+                "  Editing is disabled: rerun with --dev-session (local) or set PRESEMBLE_SESSION_KEY (hosted).\n",
+            );
+            out.push_str(
+                "  The published site and live reload work normally; editing endpoints (/_presemble/*, /_schema/*) answer 401.\n",
+            );
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[derive(Clone)]
 struct AppState {
     output_dir: std::path::PathBuf,
@@ -294,32 +357,29 @@ async fn serve_async(
         std::thread::spawn(move || relay_conductor_events(&pub_url, &reload_tx_clone));
     }
 
-    // Build session store.
-    //
-    // If PRESEMBLE_SESSION_KEY is set → use MagicLinkSessionStore (shared-key,
-    // stateless HMAC, verifies `acct:` tokens minted by the control plane).
-    // Otherwise → DevSessionStore with a random per-process key (local-dev fallback;
-    // --dev-session continues to work).
-    let (session_store, dev_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) =
-        if std::env::var("PRESEMBLE_SESSION_KEY").is_ok() {
-            println!("Session store: MagicLinkSessionStore (PRESEMBLE_SESSION_KEY set)");
-            let store = MagicLinkSessionStore::from_env();
-            (Arc::new(store) as Arc<dyn SessionStore>, None)
-        } else {
-            println!("Session store: DevSessionStore (random key; local-dev mode)");
-            let ds = DevSessionStore::new_random();
-            let token = dev_session_label.as_deref().map(|label| ds.mint(label));
-            (Arc::new(ds) as Arc<dyn SessionStore>, token)
+    // Build session store from the selected editorial mode.
+    let mode = select_editorial_mode(
+        std::env::var("PRESEMBLE_SESSION_KEY").is_ok(),
+        dev_session_label,
+    );
+    let (session_store, login_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) =
+        match &mode {
+            EditorialMode::Hosted { .. } => {
+                (Arc::new(MagicLinkSessionStore::from_env()) as Arc<dyn SessionStore>, None)
+            }
+            EditorialMode::DevLogin { label } => {
+                let ds = DevSessionStore::new_random();
+                let token = ds.mint(label);
+                (Arc::new(ds) as Arc<dyn SessionStore>, Some(token))
+            }
+            EditorialMode::Closed => {
+                (Arc::new(ClosedSessionStore) as Arc<dyn SessionStore>, None)
+            }
         };
-
-    // Print dev login URL if token was minted.
-    if let Some(ref tok) = dev_token {
-        println!();
-        println!("  --dev-session active");
-        println!("  Cookie value: presemble_session={}", tok.as_str());
-        println!("  Login URL:    http://127.0.0.1:{port}/_presemble/login?token={}", tok.as_str());
-        println!();
-    }
+    print!(
+        "{}",
+        editorial_banner(&mode, login_token.as_ref().map(|t| t.as_str()), port)
+    );
 
     let state = AppState {
         output_dir: out_dir.clone(),
@@ -1204,6 +1264,12 @@ async fn login_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
+    // No session can ever be issued: explain that editing is disabled instead of
+    // claiming the token is invalid.
+    if state.session_store.login_availability() == LoginAvailability::Closed {
+        return Unauthorized::EditingDisabled.into_response();
+    }
+
     // Verify the token is valid before setting the cookie.
     // verify_str wraps the raw string crate-privately, ensuring the untrusted-input
     // → SessionToken path is never exposed publicly.
@@ -1387,17 +1453,8 @@ async fn file_handler(
     // Intercept canonical `/_schema/...` URLs — editorial reads, must be authenticated.
     if site_index::parse_schema_url(path).is_some() {
         let store: Arc<dyn SessionStore> = Arc::from_ref(&state);
-        let token = headers
-            .get("cookie")
-            .and_then(|v| v.to_str().ok())
-            .and_then(accounts::read_session_cookie);
-        let authenticated = token.is_some_and(|t| store.verify(&t).is_some());
-        if !authenticated {
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(header::CONTENT_TYPE, "text/plain")],
-                "401 Unauthorized".to_string(),
-            ).into_response();
+        if let Err(unauthorized) = accounts::authenticate(store.as_ref(), &headers) {
+            return unauthorized.into_response();
         }
         return render_schema_url_directly(state, path).await;
     }
@@ -3668,5 +3725,159 @@ mod tests {
 
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
             "editorial route must return 401 without session (MagicLinkSessionStore)");
+    }
+
+    // ── Editorial mode selection and banner ─────────────────────────────────
+
+    #[test]
+    fn select_editorial_mode_no_key_no_dev_is_closed() {
+        assert_eq!(select_editorial_mode(false, None), EditorialMode::Closed);
+    }
+
+    #[test]
+    fn select_editorial_mode_dev_label_is_dev_login() {
+        assert_eq!(
+            select_editorial_mode(false, Some("dev".to_string())),
+            EditorialMode::DevLogin { label: "dev".to_string() }
+        );
+    }
+
+    #[test]
+    fn select_editorial_mode_key_set_is_hosted() {
+        assert_eq!(
+            select_editorial_mode(true, None),
+            EditorialMode::Hosted { dev_session_ignored: false }
+        );
+    }
+
+    #[test]
+    fn select_editorial_mode_key_and_dev_is_hosted_with_ignored_dev_session() {
+        assert_eq!(
+            select_editorial_mode(true, Some("dev".to_string())),
+            EditorialMode::Hosted { dev_session_ignored: true }
+        );
+    }
+
+    #[test]
+    fn closed_banner_explains_how_to_enable_editing() {
+        let banner = editorial_banner(&EditorialMode::Closed, None, 3000);
+        assert!(banner.contains("--dev-session"), "banner: {banner}");
+        assert!(banner.contains("PRESEMBLE_SESSION_KEY"), "banner: {banner}");
+        assert!(banner.starts_with("Session store: none (editing disabled)\n"), "banner: {banner}");
+    }
+
+    #[test]
+    fn dev_login_banner_keeps_smoketest_parseable_lines() {
+        let mode = EditorialMode::DevLogin { label: "dev".to_string() };
+        let banner = editorial_banner(&mode, Some("TOK"), 3000);
+        assert!(
+            banner.contains("Login URL:    http://127.0.0.1:3000/_presemble/login?token="),
+            "banner: {banner}"
+        );
+        assert!(banner.contains("  Cookie value: presemble_session=TOK\n"), "banner: {banner}");
+        assert!(
+            banner.starts_with("Session store: DevSessionStore (random key; --dev-session)\n"),
+            "banner: {banner}"
+        );
+    }
+
+    #[test]
+    fn hosted_banner_warns_when_dev_session_ignored() {
+        let warned = editorial_banner(&EditorialMode::Hosted { dev_session_ignored: true }, None, 3000);
+        assert!(warned.contains("is ignored"), "banner: {warned}");
+        let plain = editorial_banner(&EditorialMode::Hosted { dev_session_ignored: false }, None, 3000);
+        assert!(!plain.contains("is ignored"), "banner: {plain}");
+    }
+
+    // ── Closed editorial plane (no --dev-session, no PRESEMBLE_SESSION_KEY) ──
+
+    const EDITING_DISABLED: &str = "Editing is disabled on this server";
+
+    async fn body_string(resp: axum::response::Response) -> String {
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn closed_app(tmp: &tempfile::TempDir, client: conductor::ConductorClient) -> axum::Router {
+        let out_dir = tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("index.html"), b"<html><body>Hello</body></html>").unwrap();
+        test_app_full_with_store(
+            client,
+            out_dir,
+            Arc::new(accounts::ClosedSessionStore) as Arc<dyn SessionStore>,
+        )
+    }
+
+    #[tokio::test]
+    async fn closed_store_edit_returns_401_editing_disabled() {
+        use tower::ServiceExt;
+
+        let (client, tmp) = start_test_conductor();
+        let app = closed_app(&tmp, client);
+        let body = serde_json::json!({"file": "content/test/doc.md", "slot": "title", "value": "x"});
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/edit")
+            .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let text = body_string(resp).await;
+        assert!(text.contains(EDITING_DISABLED), "body: {text}");
+    }
+
+    #[tokio::test]
+    async fn closed_store_schema_url_returns_401_editing_disabled() {
+        use tower::ServiceExt;
+
+        let (client, tmp) = start_test_conductor();
+        let app = closed_app(&tmp, client);
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_schema/index")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_string);
+        assert_eq!(ct.as_deref(), Some("application/json"));
+        let text = body_string(resp).await;
+        assert!(text.contains(EDITING_DISABLED), "body: {text}");
+    }
+
+    #[tokio::test]
+    async fn closed_store_login_returns_401_editing_disabled() {
+        use tower::ServiceExt;
+
+        let (client, tmp) = start_test_conductor();
+        let app = closed_app(&tmp, client);
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_presemble/login?token=x")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().get(axum::http::header::SET_COOKIE).is_none());
+        let text = body_string(resp).await;
+        assert!(text.contains(EDITING_DISABLED), "body: {text}");
+    }
+
+    #[tokio::test]
+    async fn closed_store_published_page_returns_200() {
+        use tower::ServiceExt;
+
+        let (client, tmp) = start_test_conductor();
+        let app = closed_app(&tmp, client);
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
     }
 }

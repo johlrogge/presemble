@@ -375,6 +375,16 @@
       color: #c0392b;
     }
 
+    .auth-banner {
+      margin-bottom: 1.5rem;
+      padding: 0.75rem 1rem;
+      border: 1px solid #c0392b;
+      border-radius: 6px;
+      background: #fdecea;
+      color: #c0392b;
+      font-size: 0.95rem;
+    }
+
     /* Loading */
     .loading-cards {
       display: flex;
@@ -456,6 +466,7 @@
 <body>
   <div class="layout">
     <main class="main-panel">
+      <div class="auth-banner" id="auth-banner" role="alert" hidden></div>
       <div id="wizard"></div>
     </main>
     <aside class="preview-panel">
@@ -618,10 +629,32 @@
       });
     }
 
+    // ── Auth banner ──────────────────────────────────────────────────────────
+    // Shown when an editorial endpoint answers 401 (e.g. "Editing is disabled…").
+    function showAuthBanner(message) {
+      var el = document.getElementById('auth-banner');
+      if (!el) return;
+      el.textContent = message;
+      el.hidden = false;
+    }
+
+    // Parse a JSON response; on a non-OK status, surface the server's `error`
+    // (in the auth banner for 401) and reject so callers keep their fallback.
+    function jsonOrFail(r) {
+      if (r.ok) return r.json();
+      return r.json()
+        .catch(function() { return {}; })
+        .then(function(data) {
+          var msg = (data && data.error) || ('HTTP ' + r.status);
+          if (r.status === 401) { showAuthBanner(msg); }
+          throw new Error(msg);
+        });
+    }
+
     // ── Load font moods ──────────────────────────────────────────────────────
     function loadFontMoods(cb) {
       fetch('/_presemble/font-moods')
-        .then(function(r) { return r.json(); })
+        .then(jsonOrFail)
         .then(function(data) {
           fontMoods = data;
           cb();
@@ -632,7 +665,7 @@
     // ── Load palette types ───────────────────────────────────────────────────
     function loadPaletteTypes(cb) {
       fetch('/_presemble/palette-types')
-        .then(function(r) { return r.json(); })
+        .then(jsonOrFail)
         .then(function(data) {
           paletteTypes = data;
           cb();
@@ -1045,6 +1078,9 @@
 
     // ── Boot ─────────────────────────────────────────────────────────────────
     render();
+    // Probe the editorial plane up front (also preloads font moods) so a 401
+    // such as "Editing is disabled…" is shown before the user starts the steps.
+    loadFontMoods(function() {});
   </script>
 </body>
 </html>
