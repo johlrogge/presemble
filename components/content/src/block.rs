@@ -115,7 +115,7 @@ pub fn check_block_round_trip(el: &ContentElement) -> Result<(), RoundTripError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{LinkTarget, LinkText};
+    use crate::document::{LinkOp, LinkTarget, LinkText, RefsToTarget};
     use schema::HeadingLevel;
 
     /// Parse markdown that must produce exactly one block, and return it.
@@ -372,6 +372,37 @@ mod tests {
             ContentElement::Image {
                 alt: Some("a".to_string()),
                 path: "my img.png".to_string(),
+            },
+        ];
+        for el in cases {
+            assert_eq!(check_block_round_trip(&el), Ok(()), "{el:?}");
+        }
+    }
+
+    #[test]
+    fn link_expression_blocks_round_trip() {
+        let cases = [
+            ContentElement::LinkExpression {
+                text: LinkText::Empty,
+                target: LinkTarget::PathRef("fragments/header".to_string()),
+            },
+            ContentElement::LinkExpression {
+                text: LinkText::Binding("posts".to_string()),
+                target: LinkTarget::ThreadExpr {
+                    source: "post".to_string(),
+                    operations: vec![
+                        LinkOp::Filter {
+                            field: "category".to_string(),
+                            value: "news".to_string(),
+                        },
+                        LinkOp::RefsTo(RefsToTarget::SelfRef),
+                        LinkOp::SortBy {
+                            field: "published".to_string(),
+                            descending: false,
+                        },
+                        LinkOp::Take(4),
+                    ],
+                },
             },
         ];
         for el in cases {

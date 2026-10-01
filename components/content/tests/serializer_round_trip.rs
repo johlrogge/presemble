@@ -30,6 +30,22 @@
 //! language strings, and hrefs with spaces, parentheses, angle brackets,
 //! backslashes and entities.
 //!
+//! Link expressions are generated with `PathRef` and `ThreadExpr` targets
+//! (0-4 ops of every kind) and must read back exactly. Excluded are the known
+//! limits documented on `link_expression_target` in `serializer.rs`:
+//!
+//! - L1: `(-> …)` (the generator only builds values, which are always `->>`);
+//! - L2: `%20` in paths, values or URLs;
+//! - L3: `filter` values and `refs-to` URLs with whitespace, `"` or
+//!   unbalanced parentheses;
+//! - L4: sources and fields with whitespace or parentheses, or starting with
+//!   `:`;
+//! - L5: `Static`/`Binding` text that is empty, `Binding` text starting with
+//!   `(` and `Static` text not starting with `(`;
+//! - L6: link text with inline markup;
+//! - L7: plain `Link` hrefs starting with `:` or `(->` (the `hrefs` pool has
+//!   none).
+//!
 //! Besides the generated documents, `from_disk_corpus_is_written_unchanged`
 //! and `repository_markdown_round_trips` check markdown as it is found on
 //! disk.
@@ -43,7 +59,10 @@
 //! decision is lossy, by teaching `expected_after_round_trip` the canonical
 //! form. The properties themselves should not need to change.
 
-use content::{parse_document, serialize_document, ContentElement, Document, DocumentSlot};
+use content::{
+    parse_document, serialize_document, ContentElement, Document, DocumentSlot, LinkOp, LinkTarget,
+    LinkText, RefsToTarget,
+};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
 
 /// Fixed seed list. Each seed produces one document.
@@ -104,6 +123,19 @@ struct Domain {
     languages: &'static [&'static str],
     /// Link and image destinations.
     hrefs: &'static [&'static str],
+    /// Link expression `PathRef` paths.
+    link_paths: &'static [&'static str],
+    /// Link expression thread sources.
+    link_sources: &'static [&'static str],
+    /// Link expression op fields (`sort-by`, `filter`).
+    link_fields: &'static [&'static str],
+    /// Link expression `filter` values and `refs-to` URLs: no whitespace,
+    /// quotes, parentheses or `%20` (limit L3).
+    link_values: &'static [&'static str],
+    /// `LinkText::Binding` names: not starting with `(` (limit L5).
+    link_bindings: &'static [&'static str],
+    /// `LinkText::Static` expressions: starting with `(` (limit L5).
+    link_statics: &'static [&'static str],
 }
 
 const DOMAIN: Domain = Domain {
@@ -144,6 +176,12 @@ const DOMAIN: Domain = Domain {
         "#frag", "mailto:me@x.y", "../up/one.md", "/with space/and (parens)", "<", ">",
         "/?a=1&b=2", "/a&amp;b", "/a\\b", "/a\\*b", "/a\\", "/a b\\", "/x &#38; y",
     ],
+    link_paths: &["fragments/header", "a/b", "a b", "x&amp;y", "p\\", "(z)"],
+    link_sources: &["post", "feature", "author"],
+    link_fields: &["published", "category", "title"],
+    link_values: &["news", "/a/b", "self", "x&amp;y", "a\\b"],
+    link_bindings: &["posts", "hdr", "items", "x1", "latest"],
+    link_statics: &["(str title)", "(x)"],
 };
 
 // ── Generators ──────────────────────────────────────────────────────────────
@@ -209,8 +247,43 @@ fn gen_code(rng: &mut Rng) -> ContentElement {
     ContentElement::CodeBlock { language, code }
 }
 
+fn gen_link_op(rng: &mut Rng) -> LinkOp {
+    match rng.below(4) {
+        0 => LinkOp::SortBy {
+            field: rng.pick(DOMAIN.link_fields).to_string(),
+            descending: rng.chance(50),
+        },
+        1 => LinkOp::Take(rng.below(20)),
+        2 => LinkOp::Filter {
+            field: rng.pick(DOMAIN.link_fields).to_string(),
+            value: rng.pick(DOMAIN.link_values).to_string(),
+        },
+        _ => LinkOp::RefsTo(if rng.chance(50) {
+            RefsToTarget::SelfRef
+        } else {
+            RefsToTarget::Url(rng.pick(DOMAIN.link_values).to_string())
+        }),
+    }
+}
+
+fn gen_link_expression(rng: &mut Rng) -> ContentElement {
+    let text = match rng.below(3) {
+        0 => LinkText::Empty,
+        1 => LinkText::Static(rng.pick(DOMAIN.link_statics).to_string()),
+        _ => LinkText::Binding(rng.pick(DOMAIN.link_bindings).to_string()),
+    };
+    let target = if rng.chance(40) {
+        LinkTarget::PathRef(rng.pick(DOMAIN.link_paths).to_string())
+    } else {
+        let source = rng.pick(DOMAIN.link_sources).to_string();
+        let operations = (0..rng.below(5)).map(|_| gen_link_op(rng)).collect();
+        LinkTarget::ThreadExpr { source, operations }
+    };
+    ContentElement::LinkExpression { text, target }
+}
+
 fn gen_block(rng: &mut Rng) -> ContentElement {
-    match rng.below(8) {
+    match rng.below(9) {
         0 => gen_heading(rng),
         1 => ContentElement::Paragraph { text: gen_paragraph_line(rng) },
         7 => gen_multiline_paragraph(rng),
@@ -228,6 +301,7 @@ fn gen_block(rng: &mut Rng) -> ContentElement {
             alt: if rng.chance(30) { None } else { Some(gen_words(rng, 1, 3)) },
             path: rng.pick(DOMAIN.hrefs).to_string(),
         },
+        8 => gen_link_expression(rng),
         _ => ContentElement::Separator,
     }
 }
@@ -277,7 +351,8 @@ fn body_only(blocks: &[ContentElement]) -> Document {
 
 /// The block we expect to read back after serialize → parse.
 ///
-/// KNOWN GAP (reported to the architect): a text-only `Paragraph` stores its
+/// Tracked in ADR-057 open questions 5/6; paragraphs are source text until the
+/// inline-model cutover (staged plan: thin (ii) → ADR-058 Inlines): a text-only `Paragraph` stores its
 /// raw markdown SOURCE span, not literal text (parser.rs, `End(Paragraph)`).
 /// So the backslash the serializer adds to keep `# x` a paragraph reads back
 /// as part of the text (`\# x`). The block kind is preserved and the result is
@@ -356,6 +431,7 @@ fn generator_exercises_every_block_kind_and_opener() {
     let mut multiline = 0;
     let mut escaped_later_lines = 0;
     let mut escaped_tables = 0;
+    let mut escaped_later_tables = 0;
     let mut escaped_definitions = 0;
     for seed in SEEDS {
         for block in flatten(&gen_document(seed)) {
@@ -378,6 +454,18 @@ fn generator_exercises_every_block_kind_and_opener() {
                     {
                         escaped_tables += 1;
                     }
+                    // Delimiter rows on line 3 or later, under a `|` header
+                    // line that interrupts the paragraph.
+                    let lines: Vec<&str> = out.lines().collect();
+                    for pair in lines.windows(2).skip(1) {
+                        let (prev, line) = (pair[0], pair[1]);
+                        let escaped_hyphen = line
+                            .find('-')
+                            .is_some_and(|at| line[..at].ends_with('\\'));
+                        if escaped_hyphen && prev.trim_start().starts_with('|') {
+                            escaped_later_tables += 1;
+                        }
+                    }
                 }
                 if out.starts_with("\\[") {
                     escaped_definitions += 1;
@@ -386,11 +474,15 @@ fn generator_exercises_every_block_kind_and_opener() {
             kinds.insert(std::mem::discriminant(&block));
         }
     }
-    assert_eq!(kinds.len(), 7, "expected 7 block kinds in the generated domain");
+    assert_eq!(kinds.len(), 8, "expected 8 block kinds in the generated domain");
     assert!(escaped_paragraphs > 50, "too few paragraphs needed escaping: {escaped_paragraphs}");
     assert!(multiline > 100, "too few multi-line paragraphs: {multiline}");
     assert!(escaped_later_lines > 30, "too few later lines escaped: {escaped_later_lines}");
     assert!(escaped_tables > 5, "too few table delimiter rows escaped: {escaped_tables}");
+    assert!(
+        escaped_later_tables > 0,
+        "no table delimiter row escaped on line 3 or later: {escaped_later_tables}"
+    );
     assert!(escaped_definitions > 20, "too few definitions escaped: {escaped_definitions}");
 }
 
@@ -435,6 +527,9 @@ fn from_disk_corpus_is_written_unchanged() {
         "[t](/a\\b)",
         "```a&b\nx\n```",
         "```a\\b\nx\n```",
+        // A link expression in canonical form. Inside `<…>` the `>` of `->>`
+        // must be escaped, or the line is not a link at all.
+        "[posts](<(-\\>\\> :post (take 4))>)",
     ];
     let mut failures = Vec::new();
     for md in corpus {

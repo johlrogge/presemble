@@ -86,40 +86,74 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
         ContentElement::List { source } => source.clone(),
         ContentElement::LinkExpression { text, target } => {
             let text_part = match text {
-                LinkText::Empty => String::new(),
-                LinkText::Static(s) => s.clone(),
-                LinkText::Binding(b) => b.clone(),
+                LinkText::Empty => "",
+                LinkText::Static(s) => s.as_str(),
+                LinkText::Binding(b) => b.as_str(),
             };
-            let target_part = match target {
-                LinkTarget::PathRef(path) => path.clone(),
-                LinkTarget::ThreadExpr { source, operations } => {
-                    let ops: Vec<String> = operations
-                        .iter()
-                        .map(|op| match op {
-                            LinkOp::SortBy { field, descending } => {
-                                let dir = if *descending { ":desc" } else { ":asc" };
-                                format!("(sort-by :{field} {dir})")
-                            }
-                            LinkOp::Take(n) => format!("(take {n})"),
-                            LinkOp::Filter { field, value } => {
-                                format!("(filter :{field} \"{value}\")")
-                            }
-                            LinkOp::RefsTo(target) => match target {
-                                RefsToTarget::SelfRef => "(refs-to self)".to_string(),
-                                RefsToTarget::Url(u) => format!("(refs-to \"{u}\")"),
-                            },
-                        })
-                        .collect();
-                    let ops_str = ops.join(" ");
-                    if ops_str.is_empty() {
-                        format!("(->> {source})")
-                    } else {
-                        format!("(->> {source} {ops_str})")
-                    }
-                }
-            };
-            format!("[{text_part}]({target_part})")
+            format!("[{text_part}]({})", destination(&link_expression_target(target)))
         }
+    }
+}
+
+/// The destination text of a link expression, before destination escaping.
+///
+/// `PathRef(p)` is written `:p`; a thread expression is written
+/// `(->> :source op...)` with every op in canonical form (`sort-by` always
+/// names its direction). The result goes through [`destination`], which picks
+/// the `<…>` form (thread expressions always contain spaces and parentheses)
+/// and escapes `<`, `>`, a `\` before punctuation and an `&` that starts an
+/// entity, so `->>` is written `-\>\>` inside the angle brackets.
+///
+/// Known limits: values the types allow but the parser cannot read back. They
+/// are not fixed here (the parser is out of scope); each is pinned by
+/// `link_expression_limits_are_pinned` or excluded from the property domain.
+///
+/// - L1: `(-> …)` on disk is written back as `(->> …)`: the parser does not
+///   distinguish them (`parse_link_target`, parser.rs L469-478).
+/// - L2: `%20` in a destination is decoded and written back as a literal space
+///   in angle form (`parse_link_target` always decodes `%20`, parser.rs L456).
+/// - L3: a `Filter` value or `RefsTo` URL containing whitespace, `"` or
+///   unbalanced parentheses does not round-trip (`split_whitespace` at parser.rs
+///   L550, `trim_matches('"')` at L585/L596, the paren tokenizer
+///   `split_expression_tokens` at L502).
+/// - L4: a source or field containing whitespace or parentheses, or starting
+///   with `:`, does not round-trip (same tokenizer, and `trim_start_matches(':')`
+///   at parser.rs L490/L560/L580).
+/// - L5: `Static("")` and `Binding("")` read back as `Empty`; `Binding` text
+///   starting with `(` reads back as `Static`; `Static` text not starting with
+///   `(` reads back as `Binding` (`parse_link_text`, parser.rs L435).
+/// - L6: link text containing inline markup is out of scope (no escaping inside
+///   `[...]`).
+/// - L7: a plain `Link` whose href starts with `:` or `(->` reads back as a
+///   `LinkExpression` (`is_link_expression`, parser.rs L426).
+///
+/// L5 and L7 are illegal states the types currently allow; they are input for
+/// ADR-058.
+fn link_expression_target(target: &LinkTarget) -> String {
+    match target {
+        LinkTarget::PathRef(path) => format!(":{path}"),
+        LinkTarget::ThreadExpr { source, operations } => {
+            let ops: Vec<String> = operations.iter().map(link_op).collect();
+            if ops.is_empty() {
+                format!("(->> :{source})")
+            } else {
+                format!("(->> :{source} {})", ops.join(" "))
+            }
+        }
+    }
+}
+
+/// One operation of a thread expression in canonical form.
+fn link_op(op: &LinkOp) -> String {
+    match op {
+        LinkOp::SortBy { field, descending } => {
+            let dir = if *descending { ":desc" } else { ":asc" };
+            format!("(sort-by :{field} {dir})")
+        }
+        LinkOp::Take(n) => format!("(take {n})"),
+        LinkOp::Filter { field, value } => format!("(filter :{field} \"{value}\")"),
+        LinkOp::RefsTo(RefsToTarget::SelfRef) => "(refs-to self)".to_string(),
+        LinkOp::RefsTo(RefsToTarget::Url(u)) => format!("(refs-to \"{u}\")"),
     }
 }
 
@@ -1252,6 +1286,160 @@ headings
         let out = serialize_element(&img);
         assert_eq!(out, "![A cat](<my (cat).png>)");
         assert_eq!(reparse_one(&out), img);
+    }
+
+    // ── Link expressions (C1-link) ───────────────────────────────────────────
+
+    fn link_expr(text: LinkText, target: LinkTarget) -> ContentElement {
+        ContentElement::LinkExpression { text, target }
+    }
+
+    fn thread(source: &str, operations: Vec<LinkOp>) -> LinkTarget {
+        LinkTarget::ThreadExpr { source: source.to_string(), operations }
+    }
+
+    fn binding(b: &str) -> LinkText {
+        LinkText::Binding(b.to_string())
+    }
+
+    fn sort_by(field: &str, descending: bool) -> LinkOp {
+        LinkOp::SortBy { field: field.to_string(), descending }
+    }
+
+    fn filter(field: &str, value: &str) -> LinkOp {
+        LinkOp::Filter { field: field.to_string(), value: value.to_string() }
+    }
+
+    /// Assert `el` serializes to exactly `expected` and reads back as `el`.
+    fn assert_link_round_trip(el: &ContentElement, expected: &str) {
+        assert_eq!(serialize_element(el), expected, "{el:?}");
+        assert_eq!(&reparse_one(expected), el, "{expected:?}");
+    }
+
+    #[test]
+    fn link_expression_path_ref_round_trips() {
+        let path = |p: &str| LinkTarget::PathRef(p.to_string());
+        let cases = [
+            (link_expr(LinkText::Empty, path("fragments/header")), "[](:fragments/header)"),
+            (link_expr(binding("hdr"), path("fragments/header")), "[hdr](:fragments/header)"),
+            (
+                link_expr(LinkText::Static("(str title)".to_string()), path("fragments/header")),
+                "[(str title)](:fragments/header)",
+            ),
+            (link_expr(binding("x"), path("a b")), "[x](<:a b>)"),
+            (link_expr(binding("x"), path("a&amp;b")), "[x](:a\\&amp;b)"),
+            (link_expr(binding("x"), path("a\\")), "[x](:a\\\\)"),
+        ];
+        for (el, expected) in cases {
+            assert_link_round_trip(&el, expected);
+        }
+    }
+
+    #[test]
+    fn link_expression_ops_round_trip() {
+        let posts = |ops: Vec<LinkOp>| link_expr(binding("posts"), thread("post", ops));
+        let cases = [
+            (posts(vec![]), "[posts](<(-\\>\\> :post)>)"),
+            (
+                posts(vec![sort_by("published", true)]),
+                "[posts](<(-\\>\\> :post (sort-by :published :desc))>)",
+            ),
+            (
+                posts(vec![sort_by("published", false)]),
+                "[posts](<(-\\>\\> :post (sort-by :published :asc))>)",
+            ),
+            (posts(vec![LinkOp::Take(4)]), "[posts](<(-\\>\\> :post (take 4))>)"),
+            (
+                posts(vec![filter("category", "news")]),
+                "[posts](<(-\\>\\> :post (filter :category \"news\"))>)",
+            ),
+            (
+                posts(vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]),
+                "[posts](<(-\\>\\> :post (refs-to self))>)",
+            ),
+            (
+                posts(vec![LinkOp::RefsTo(RefsToTarget::Url("/a/b".to_string()))]),
+                "[posts](<(-\\>\\> :post (refs-to \"/a/b\"))>)",
+            ),
+            // A quoted "self" is a URL, not the page itself.
+            (
+                posts(vec![LinkOp::RefsTo(RefsToTarget::Url("self".to_string()))]),
+                "[posts](<(-\\>\\> :post (refs-to \"self\"))>)",
+            ),
+            // Order is preserved.
+            (
+                posts(vec![
+                    filter("category", "news"),
+                    LinkOp::RefsTo(RefsToTarget::SelfRef),
+                    sort_by("published", true),
+                    LinkOp::Take(4),
+                ]),
+                "[posts](<(-\\>\\> :post (filter :category \"news\") (refs-to self) (sort-by :published :desc) (take 4))>)",
+            ),
+        ];
+        for (el, expected) in cases {
+            assert_link_round_trip(&el, expected);
+        }
+    }
+
+    #[test]
+    fn link_expression_text_variants_round_trip_with_thread_expr() {
+        let ops = || vec![sort_by("published", true), LinkOp::Take(3)];
+        let cases = [
+            (LinkText::Empty, "[](<(-\\>\\> :post (sort-by :published :desc) (take 3))>)"),
+            (
+                LinkText::Static("(str title)".to_string()),
+                "[(str title)](<(-\\>\\> :post (sort-by :published :desc) (take 3))>)",
+            ),
+            (binding("posts"), "[posts](<(-\\>\\> :post (sort-by :published :desc) (take 3))>)"),
+        ];
+        for (text, expected) in cases {
+            assert_link_round_trip(&link_expr(text, thread("post", ops())), expected);
+        }
+    }
+
+    #[test]
+    fn pulldown_angle_destination_needs_escaped_arrow() {
+        // An unescaped `>` ends an angle-bracket destination, so
+        // `<(->> …)>` is not a link at all: the line reads back as a
+        // paragraph. `destination()` therefore writes `-\>\>`.
+        assert_eq!(
+            blocks("[posts](<(->> :post (take 4))>)"),
+            vec![para("[posts](<(->> :post (take 4))>)")]
+        );
+        assert_eq!(
+            blocks("[posts](<(-\\>\\> :post (take 4))>)"),
+            vec![link_expr(binding("posts"), thread("post", vec![LinkOp::Take(4)]))]
+        );
+    }
+
+    #[test]
+    fn link_expression_limits_are_pinned() {
+        let write_back = |md: &str| serialize_element(&reparse_one(md));
+
+        // L1: `(->` is read as a thread expression and written as `(->>`.
+        assert_eq!(write_back("[p](<(-\\> :post (take 1))>)"), "[p](<(-\\>\\> :post (take 1))>)");
+
+        // L2: `%20` is decoded and written back as a literal space.
+        assert_eq!(write_back("[p](:a%20b)"), "[p](<:a b>)");
+
+        // L3: a filter value with whitespace does not round-trip.
+        let el = link_expr(binding("p"), thread("post", vec![filter("f", "a b")]));
+        assert_ne!(reparse_one(&serialize_element(&el)), el);
+
+        // L5: `Static` text not starting with `(` reads back as `Binding`.
+        let el = link_expr(LinkText::Static("x".to_string()), LinkTarget::PathRef("p".to_string()));
+        assert_eq!(
+            reparse_one(&serialize_element(&el)),
+            link_expr(binding("x"), LinkTarget::PathRef("p".to_string()))
+        );
+
+        // L7: a plain link whose href starts with `:` reads back as a link expression.
+        let el = ContentElement::Link { text: "t".to_string(), href: ":x".to_string() };
+        assert!(matches!(
+            reparse_one(&serialize_element(&el)),
+            ContentElement::LinkExpression { .. }
+        ));
     }
 
     #[test]
