@@ -74,6 +74,11 @@ function bodySiblingsForFile(file) {
 // or null when targetEl has no preceding heading. anchorPos/targetPos are
 // indices into sibs. Text is whitespace-normalised to match
 // ned/heading-with-text's exact-equality semantics.
+// Single source of truth for the heading text used in structural anchors.
+// Used both when building selectors and when resolving anchors in the DOM.
+function _headingAnchorText(el) {
+  return el.innerText.trim().replace(/\s+/g, ' ');
+}
 function findPreviousHeadingForElement(sibs, targetEl) {
   var targetPos = sibs.indexOf(targetEl);
   if (targetPos < 0) return null;
@@ -81,7 +86,7 @@ function findPreviousHeadingForElement(sibs, targetEl) {
     if (/^H[1-6]$/.test(sibs[i].tagName)) {
       return {
         el: sibs[i],
-        text: sibs[i].innerText.trim().replace(/\s+/g, ' '),
+        text: _headingAnchorText(sibs[i]),
         anchorPos: i,
         targetPos: targetPos
       };
@@ -207,15 +212,68 @@ async function fetchGrammar(stem) {
   return src;
 }
 
+// Fetch a URL and parse the response body as JSON.
+// Throws when the body is not JSON, or when the status is not 2xx (using the
+// server's `error` field when present). Callers still check `data.ok` for
+// endpoints that report logical failure with a 200.
+async function fetchJson(url, opts) {
+  var r = await fetch(url, opts);
+  var text = await r.text();
+  var data;
+  try {
+    data = JSON.parse(text);
+  } catch (_e) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    throw new Error('Expected JSON from ' + url + ' (HTTP ' + r.status + ')');
+  }
+  if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+  return data;
+}
+
 async function applyNed(program) {
-  var resp = await fetch('/_presemble/apply', {
+  var data = await fetchJson('/_presemble/apply', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({program: program}),
   });
-  var data = await resp.json();
-  if (!data.ok) throw new Error(data.error || 'apply failed');
+  if (!data || !data.ok) throw new Error((data && data.error) || 'apply failed');
   return data;
+}
+
+// Single, reusable fixed-position notice for errors that have no natural
+// element to anchor to. `sticky` keeps it visible until replaced.
+var _toastEl = null;
+var _toastTimer = null;
+function _toast(msg, sticky) {
+  if (!_toastEl) {
+    _toastEl = document.createElement('div');
+    _toastEl.className = 'presemble-toast';
+    _toastEl.setAttribute('role', 'status');
+    _toastEl.setAttribute('aria-live', 'polite');
+  }
+  if (!_toastEl.isConnected) document.body.appendChild(_toastEl);
+  _toastEl.textContent = String(msg);
+  _toastEl.style.display = 'block';
+  clearTimeout(_toastTimer);
+  if (!sticky) {
+    _toastTimer = setTimeout(function() { _toastEl.style.display = 'none'; }, 6000);
+  }
+}
+
+// Editor-session helpers shared by the four inline editors.
+function _setToolbarBusy(toolbar, busy) {
+  toolbar.querySelectorAll('button').forEach(function(b) { b.disabled = busy; });
+  toolbar.classList.toggle('presemble-busy', busy);
+}
+// Replace `prev` (may be null) with a fresh error element after `afterEl`.
+function _showEditError(afterEl, prev, msg) {
+  if (prev) prev.remove();
+  var d = document.createElement('div');
+  d.className = 'presemble-edit-error';
+  d.setAttribute('role', 'alert');
+  d.textContent = msg;
+  afterEl.after(d);
+  return d;
 }
 
 function stemFromFile(file) {
@@ -246,11 +304,48 @@ function parsePresembleHash(hash) {
 
 // --- end Phase D helpers (setPresembleMode is defined inside the mode-management IIFE below) ---
 
-var ws=new WebSocket('ws://'+location.host+'/_presemble/ws');
+// --- Live-reload socket + reload deferral while an editor is open ---
+var _wsAttempts=0;var _wsLost=false;var _pendingReload=false;
+function _editorOpen(){return !!document.querySelector('.presemble-editing,.presemble-body-editor');}
+// A reload concerns this page when: it is a resync (lagged socket or reconnect
+// after loss), `pages` is missing/empty (full rebuild → reload in place), or
+// this page is listed in `pages`.
+function _reloadConcernsThisPage(m){return !!m.resync||!m.pages||!m.pages.length||m.pages.indexOf(location.pathname)!==-1;}
+function _requestReload(m){
+if(_editorOpen()){
+// Never navigate away from an open editor; defer a same-page reload until it closes.
+if(_reloadConcernsThisPage(m)){
+_pendingReload=true;
+_toast('Page updated — will refresh when you finish editing',true);
+}
+return;
+}
+if(_reloadConcernsThisPage(m)){location.reload();}
+else if(m.primary){location.href=m.primary;}
+}
+// Call at the end of every editor cleanup.
+function _onEditorClosed(){if(_pendingReload&&!_editorOpen()){location.reload();}}
+function _wsConnect(){
+var sock=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/_presemble/ws');
+sock.onopen=function(){
+var recovered=_wsLost;
+_wsAttempts=0;_wsLost=false;
+// Messages may have been missed while disconnected: treat as a same-page reload.
+if(recovered){_requestReload({resync:true});}
+};
+sock.onmessage=_wsOnMessage;
+sock.onclose=function(){
+_wsLost=true;
+var base=Math.min(30000,500*Math.pow(2,Math.min(_wsAttempts,16)));
+_wsAttempts++;
+setTimeout(_wsConnect,base+Math.floor(Math.random()*base*0.25));
+};
+}
 var _userScrolled=false;var _scrollTimer=null;var _presembleScrolling=false;
 window.addEventListener('scroll',function(){if(_presembleScrolling){return;}_userScrolled=true;clearTimeout(_scrollTimer);_scrollTimer=setTimeout(function(){_userScrolled=false;},3000);},true);
-ws.onmessage=function(e){
-var m=JSON.parse(e.data);
+function _wsOnMessage(e){
+var m;
+try{m=JSON.parse(e.data);}catch(err){console.warn('presemble: bad ws message',err);return;}
 if(m.type==='scroll'){
 if(m.anchor&&typeof m.anchor==='object'){
 var el=_findByStructuralAnchor(m.anchor);
@@ -267,17 +362,19 @@ console.warn('presemble: legacy string anchor ignored');
 }
 return;
 }
+if(m.type==='resync'){
+_requestReload({resync:true});
+return;
+}
 if(m.type==='suggestion-list-changed'){
 if(window._fetchSuggestionFiles){window._fetchSuggestionFiles();}
 if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
 return;
 }
 if(m.anchor){sessionStorage.setItem('presemble-anchor',JSON.stringify(m.anchor));}
-if(document.querySelector('.presemble-editing,.presemble-body-editor')){return;}
-if(!m.pages||!m.pages.length||m.pages.indexOf(location.pathname)!==-1){location.reload();}
-else{location.href=m.primary;}
-};
-ws.onclose=function(){setTimeout(function(){location.reload();},1000);};
+_requestReload(m);
+}
+_wsConnect();
 (function(){
 var anchorRaw=sessionStorage.getItem('presemble-anchor');
 if(!anchorRaw){return;}
@@ -326,7 +423,7 @@ if(heading){
 var anchorIdx=-1;
 for(var i=0;i<arr.length;i++){
 var el=arr[i];
-if(/^H[1-6]$/.test(el.tagName)&&el.innerText.trim().replace(/\s+/g, ' ')===heading){anchorIdx=i;break;}
+if(/^H[1-6]$/.test(el.tagName)&&_headingAnchorText(el)===heading){anchorIdx=i;break;}
 }
 if(anchorIdx<0)return null;
 var count=0;
@@ -400,7 +497,7 @@ update();
 icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};
 document.addEventListener('click',function(){menu.classList.remove('open');});
 menu.onclick=function(e){e.stopPropagation();};
-function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});}
+function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});_onEditorClosed();}
 var _editToolbar=null;
 function _editEnter(){
 if(_editToolbar){return;}
@@ -411,12 +508,12 @@ _editToolbar.innerHTML='<button class="presemble-edit-save" style="display:none"
 document.body.appendChild(_editToolbar);
 _editToolbar.querySelector('.presemble-edit-new').onclick=function(){_openCreateDialog();};
 _editToolbar.querySelector('.presemble-edit-save').onclick=function(){
-fetch('/_presemble/save-all',{method:'POST'})
-.then(function(r){return r.json();})
+fetchJson('/_presemble/save-all',{method:'POST'})
 .then(function(data){
 if(data.ok){_fetchDirtyCount();}
 else{alert(data.error||'Save failed');}
-});
+})
+.catch(function(err){_toast('Save failed: '+err.message);});
 };
 _foldSetup();
 _fetchSuggestionCount();
@@ -467,7 +564,10 @@ _sectionMap.forEach(function(info,headingId){
 var headingEl=info.heading;
 var btn=document.createElement('button');
 btn.className='presemble-fold-toggle';
-btn.textContent='\u25BC';
+btn.type='button';
+// Glyph is drawn in CSS so it never leaks into the heading's innerText
+// (which structural anchors match on).
+btn.setAttribute('aria-label','Fold section');
 btn.onclick=function(e){e.stopPropagation();_foldToggle(headingEl);};
 headingEl.insertBefore(btn,headingEl.firstChild);
 });
@@ -503,12 +603,10 @@ var headingIdx=_foldIndexOf(headingEl);
 var info=_sectionMap.get(headingIdx);
 if(!info){return;}
 var isFolded=headingEl.classList.contains('presemble-heading-folded');
-var btn=headingEl.querySelector('.presemble-fold-toggle');
 if(isFolded){
 info.elements.forEach(function(el){el.classList.remove('presemble-folded-content');});
 var summary=_foldSummaries[headingIdx];
 if(summary){summary.remove();delete _foldSummaries[headingIdx];}
-if(btn){btn.textContent='\u25BC';}
 headingEl.classList.remove('presemble-heading-folded');
 // Re-apply folds for nested headings that were independently folded
 info.elements.forEach(function(el){
@@ -533,7 +631,6 @@ foldSummary.textContent='\u2026 '+info.elements.length+' element'+(info.elements
 foldSummary.onclick=function(){_foldToggle(headingEl);};
 headingEl.after(foldSummary);
 _foldSummaries[headingIdx]=foldSummary;
-if(btn){btn.textContent='\u25B6';}
 headingEl.classList.add('presemble-heading-folded');
 }
 }
@@ -548,7 +645,7 @@ if(!_sectionMap){return;}
 _sectionMap.forEach(function(info,id){if(info.heading.classList.contains('presemble-heading-folded')){_foldToggle(info.heading);}});
 }
 function _openCreateDialog(){
-fetch('/_presemble/schemas').then(function(r){return r.json();}).then(function(schemas){
+fetchJson('/_presemble/schemas').then(function(schemas){
 if(!Array.isArray(schemas)||schemas.length===0){alert('No content schemas found.');return;}
 var overlay=document.createElement('div');
 overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:10001;display:flex;align-items:center;justify-content:center;';
@@ -580,16 +677,15 @@ submitBtn.onclick=function(){
 var stem=typeSelect.value;var slug=slugInput.value.trim();
 if(!slug){errDiv.textContent='Slug is required.';errDiv.style.display='block';return;}
 submitBtn.disabled=true;
-fetch('/_presemble/create-content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stem:stem,slug:slug})})
-.then(function(r){return r.json();})
+fetchJson('/_presemble/create-content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stem:stem,slug:slug})})
 .then(function(data){
 if(data.ok){overlay.remove();}
 else{errDiv.textContent=data.error||'Create failed';errDiv.style.display='block';submitBtn.disabled=false;}
 })
-.catch(function(err){errDiv.textContent='Network error: '+err.message;errDiv.style.display='block';submitBtn.disabled=false;});
+.catch(function(err){errDiv.textContent='Create failed: '+err.message;errDiv.style.display='block';submitBtn.disabled=false;});
 };
 slugInput.addEventListener('keydown',function(e){if(e.key==='Enter'){submitBtn.click();}if(e.key==='Escape'){overlay.remove();}});
-});
+}).catch(function(err){_toast('Could not load content types: '+err.message);});
 }
 var _suggestions=[];var _suggestIdx=0;var _suggestPreviewState=null;var _suggestActiveEl=null;
 var _suggestToolbar=null;
@@ -652,6 +748,9 @@ var reasonText=sug.reason||'';
 var isStale=sug._source==='ned'&&sug.status&&typeof sug.status==='object'&&sug.status.Stale;
 if(isStale){reasonText='[STALE: '+(sug.status.Stale.reason||'')+']: '+reasonText;}
 _suggestToolbar.querySelector('.presemble-suggest-reason').textContent=reasonText;
+var acceptBtn=_suggestToolbar.querySelector('.presemble-suggest-accept');
+acceptBtn.disabled=!!isStale;
+acceptBtn.title=isStale?'Stale suggestion — cannot be accepted':'Accept';
 var targetText='';
 if(sug._source==='ned'&&sug.anchor){
 if(sug.anchor.kind==='slot'){targetText=sug.anchor.slot;}
@@ -688,30 +787,51 @@ el.classList.remove('presemble-suggest-stale');
 }
 el.scrollIntoView({behavior:'smooth',block:'center'});
 el.setAttribute('data-presemble-original-html',el.innerHTML);
-// NED suggestions: render diff from SearchReplace mutation
+// NED suggestions: render diff from SearchReplace mutation.
+// Built from DOM nodes with textContent only — suggestion text is untrusted.
 if(sug._source==='ned'&&sug.mutation&&sug.mutation.SearchReplace){
 var sr=sug.mutation.SearchReplace;
-var html=el.innerHTML;
-var searchEsc=sr.search.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
-var replaceEsc=(sr.replace||'').replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
-var idx=html.indexOf(searchEsc);
-if(idx!==-1){
-el.innerHTML=html.slice(0,idx)+'<del class="presemble-diff-del">'+searchEsc+'</del><ins class="presemble-diff-ins">'+replaceEsc+'</ins>'+html.slice(idx+searchEsc.length);
-}else{
-var txt=el.textContent;
-var tidx=txt.indexOf(sr.search);
-if(tidx!==-1){
-var before=txt.slice(0,tidx).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
-var after=txt.slice(tidx+sr.search.length).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
-var needleEsc=sr.search.replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});
-el.innerHTML=before+'<del class="presemble-diff-del">'+needleEsc+'</del><ins class="presemble-diff-ins">'+replaceEsc+'</ins>'+after;
-}
-}
+_renderSearchReplaceDiff(el,String(sr.search||''),String(sr.replace||''));
 }else if(sug._source==='ned'&&sug.mutation&&sug.mutation.SetText){
-el.innerHTML='<del class="presemble-diff-del">'+el.textContent+'</del> <ins class="presemble-diff-ins">'+sug.mutation.SetText+'</ins>';
+var oldText=el.textContent;
+el.textContent='';
+el.appendChild(_diffNode('del',oldText));
+el.appendChild(document.createTextNode(' '));
+el.appendChild(_diffNode('ins',String(sug.mutation.SetText)));
 }
 }
 _suggestRenderToolbar();
+}
+function _diffNode(tag,text){
+var n=document.createElement(tag);
+n.className=tag==='del'?'presemble-diff-del':'presemble-diff-ins';
+n.textContent=text;
+return n;
+}
+// Prefer an in-place split of the single text node containing `search`
+// (preserves surrounding markup); otherwise fall back to a flat text rendering.
+function _renderSearchReplaceDiff(el,search,replace){
+var walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT);
+for(var node=walker.nextNode();node;node=walker.nextNode()){
+var i=node.nodeValue.indexOf(search);
+if(i!==-1){
+var match=node.splitText(i);
+var rest=match.splitText(search.length);
+var parent=match.parentNode;
+parent.insertBefore(_diffNode('del',search),match);
+parent.insertBefore(_diffNode('ins',replace),rest);
+parent.removeChild(match);
+return;
+}
+}
+var txt=el.textContent;
+var tidx=txt.indexOf(search);
+if(tidx===-1){return;}
+el.textContent='';
+el.appendChild(document.createTextNode(txt.slice(0,tidx)));
+el.appendChild(_diffNode('del',search));
+el.appendChild(_diffNode('ins',replace));
+el.appendChild(document.createTextNode(txt.slice(tidx+search.length)));
 }
 function _suggestNavigate(dir){
 if(_suggestions.length===0){return;}
@@ -741,13 +861,16 @@ if(previewBtn){previewBtn.classList.add('active');}
 function _suggestAccept(){
 if(_suggestions.length===0){return;}
 var sug=_suggestions[_suggestIdx];
+if(sug._source==='ned'&&sug.status&&typeof sug.status==='object'&&sug.status.Stale){return;}
 if(_suggestPreviewState){_suggestTogglePreview();}
-fetch('/_presemble/ned-suggestions/accept',{method:'POST',headers:{'Content-Type':'application/json'},
+fetchJson('/_presemble/ned-suggestions/accept',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({id:sug.id})
-}).then(function(r){return r.json();}).then(function(data){
+}).then(function(data){
 if(data&&!data.ok){alert(data.error||'Accept failed');}
+// Refresh so suggestions that just became stale show their [STALE: …] reason.
+else{_suggestEnter(sug.id);}
 if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
-});
+}).catch(function(err){_toast('Accept failed: '+err.message);});
 }
 function _suggestReject(){
 if(_suggestions.length===0){return;}
@@ -755,9 +878,10 @@ var sug=_suggestions[_suggestIdx];
 if(_suggestPreviewState){_suggestTogglePreview();}
 var el=_suggestFindTarget(sug);
 if(el){el.classList.remove('presemble-suggest-indicator','presemble-suggest-active','presemble-suggest-stale');}
-fetch('/_presemble/ned-suggestions/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})
-.then(function(r){return r.json();})
-.then(function(data){if(!data.ok){alert(data.error||'Reject failed');}});
+fetchJson('/_presemble/ned-suggestions/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:sug.id})})
+// On failure, re-fetch the list so the optimistic removal below is undone.
+.then(function(data){if(!data.ok){alert(data.error||'Reject failed');_suggestEnter();}})
+.catch(function(err){_toast('Reject failed: '+err.message);_suggestEnter();});
 _suggestions.splice(_suggestIdx,1);
 if(_suggestIdx>=_suggestions.length&&_suggestions.length>0){_suggestIdx=_suggestions.length-1;}
 _suggestHighlight();
@@ -768,7 +892,7 @@ if(!fileEl){return;}
 var file=fileEl.getAttribute('data-presemble-file');
 if(!file){return;}
 var enc=encodeURIComponent(file);
-fetch('/_presemble/ned-suggestions?file='+enc).then(function(r){return r.json();}).catch(function(){return[];})
+fetchJson('/_presemble/ned-suggestions?file='+enc).catch(function(err){console.warn('presemble: suggestion count fetch failed',err);return[];})
 .then(function(ned){
 var nedFiltered=(Array.isArray(ned)?ned:[]).filter(function(s){return s.status==='Pending'||(s.status&&typeof s.status==='object'&&s.status.Stale);});
 var nedTagged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});
@@ -777,11 +901,11 @@ _editorialSuggestCount=cnt;
 if(cnt>0){suggestBadge.textContent=cnt;suggestBadge.style.display='flex';}else{suggestBadge.style.display='none';}
 update();
 if(mode==='edit'){_editMarkSuggestions(nedTagged);}
-});
+})
+.catch(function(err){console.warn('presemble: suggestion count update failed',err);});
 }
 function _fetchDirtyCount(){
-fetch('/_presemble/dirty-buffers')
-.then(function(r){return r.json();})
+fetchJson('/_presemble/dirty-buffers')
 .then(function(paths){
 if(!Array.isArray(paths)){return;}
 _dirtyPaths=paths;
@@ -796,16 +920,17 @@ saveBtn.textContent='\u{1F4BE} Save ('+_dirtyCount+')';
 }
 _renderBufferLists();
 })
-.catch(function(){});
+.catch(function(err){console.warn('presemble: dirty-buffers poll failed',err);});
 }
 function _fetchSuggestionFiles(){
-fetch('/_presemble/ned-suggestion-files').then(function(r){return r.json();}).catch(function(){return[];})
+fetchJson('/_presemble/ned-suggestion-files').catch(function(err){console.warn('presemble: suggestion-files poll failed',err);return[];})
 .then(function(ned){
 var paths=Array.isArray(ned)?ned:[];
 paths.sort();
 _suggestionFilePaths=paths;
 _renderBufferLists();
-});
+})
+.catch(function(err){console.warn('presemble: suggestion-files render failed',err);});
 }
 function _renderBufferLists(){
 var menu=document.querySelector('.presemble-mascot-menu');
@@ -816,25 +941,28 @@ container=document.createElement('div');
 container.className='presemble-buffer-lists';
 menu.appendChild(container);
 }
-var html='';
-if(_dirtyPaths.length>0){
-html+='<div class="presemble-buffer-section-title">Unsaved ('+_dirtyPaths.length+')</div>';
-_dirtyPaths.forEach(function(p){
-var url=_contentPathToUrl(p);
-var current=(window.location.pathname===url||window.location.pathname===url+'/')?'  current':'';
-html+='<a class="presemble-buffer-link'+current+'" href="'+url+'">'+url+'</a>';
+// Paths come from the server and may contain markup characters: build DOM
+// nodes with textContent/href rather than HTML strings.
+container.textContent='';
+function addSection(title,paths){
+if(paths.length===0){return;}
+var t=document.createElement('div');
+t.className='presemble-buffer-section-title';
+t.textContent=title+' ('+paths.length+')';
+container.appendChild(t);
+paths.forEach(function(p){
+var url=_contentPathToUrl(String(p));
+var a=document.createElement('a');
+a.className='presemble-buffer-link';
+if(window.location.pathname===url||window.location.pathname===url+'/'){a.classList.add('current');}
+a.href=url;
+a.textContent=url;
+container.appendChild(a);
 });
 }
-if(_suggestionFilePaths.length>0){
-html+='<div class="presemble-buffer-section-title">Suggestions ('+_suggestionFilePaths.length+')</div>';
-_suggestionFilePaths.forEach(function(p){
-var url=_contentPathToUrl(p);
-var current=(window.location.pathname===url||window.location.pathname===url+'/')?'  current':'';
-html+='<a class="presemble-buffer-link'+current+'" href="'+url+'">'+url+'</a>';
-});
-}
-container.innerHTML=html;
-container.style.display=(html==='')?'none':'block';
+addSection('Unsaved',_dirtyPaths);
+addSection('Suggestions',_suggestionFilePaths);
+container.style.display=container.childNodes.length===0?'none':'block';
 }
 setInterval(_fetchDirtyCount,2000);
 setInterval(_fetchSuggestionFiles,5000);
@@ -845,7 +973,7 @@ if(!fileEl){return;}
 var file=fileEl.getAttribute('data-presemble-file');
 if(!file){return;}
 var enc=encodeURIComponent(file);
-fetch('/_presemble/ned-suggestions?file='+enc).then(function(r){return r.json();}).catch(function(){return[];})
+fetchJson('/_presemble/ned-suggestions?file='+enc).catch(function(err){_toast('Could not load suggestions: '+err.message);return[];})
 .then(function(ned){
 var nedFiltered=(Array.isArray(ned)?ned:[]).filter(function(s){return s.status==='Pending'||(s.status&&typeof s.status==='object'&&s.status.Stale);});
 var merged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});
@@ -864,7 +992,8 @@ var el=_suggestFindTarget(sug);
 if(el){el.classList.add('presemble-suggest-indicator');}
 });
 _suggestHighlight();
-});
+})
+.catch(function(err){console.warn('presemble: suggest mode render failed',err);_toast('Could not show suggestions: '+err.message);});
 }
 function setMode(m){
 if(m!=='edit'){cleanupEditing();_editCleanup();}
@@ -908,6 +1037,7 @@ var schemaUrl=location.pathname;
 fetch('/_presemble/page-for?schema='+encodeURIComponent(schemaUrl))
 .then(function(r){
 if(r.status===404){location.href=_appendModeHash('/',targetMode);return null;}
+if(!r.ok){throw new Error('page-for failed: '+r.status);}
 return r.json();
 })
 .then(function(data){
@@ -991,6 +1121,7 @@ e.preventDefault();
 fetch('/_presemble/schema-for?page='+encodeURIComponent(href))
 .then(function(r){
 if(r.status===404){location.href=href;return null;}
+if(!r.ok){throw new Error('schema-for failed: '+r.status);}
 return r.json();
 })
 .then(function(data){
@@ -1088,16 +1219,23 @@ document.addEventListener('click',function(e){
 if(!document.body.classList.contains('presemble-edit-mode')){return;}
 var el=e.target.closest('[data-presemble-slot]');
 if(!el||el.classList.contains('presemble-editing')){return;}
+// An editor is already open: commit it and stop. The save is async and may
+// fail (the editor then stays open with the user's text), so never open a
+// second editor on top of it.
 var editing=document.querySelector('.presemble-editing');
-if(editing){
-var saveBtn=editing.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');
-if(saveBtn){saveBtn.click();}
-}
 var openTa=document.querySelector('.presemble-body-editor');
+if(editing||openTa){
+e.preventDefault();
+var pendingSave=null;
 if(openTa){
-var bSaveBtn=openTa.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');
-if(!bSaveBtn){bSaveBtn=openTa.nextElementSibling;if(bSaveBtn){bSaveBtn=bSaveBtn.querySelector('.presemble-save');}}
-if(bSaveBtn){bSaveBtn.click();}
+pendingSave=openTa.nextElementSibling&&openTa.nextElementSibling.querySelector('.presemble-save');
+if(!pendingSave){pendingSave=openTa.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');}
+}else{
+pendingSave=editing.nextElementSibling&&editing.nextElementSibling.querySelector('.presemble-save');
+if(!pendingSave){pendingSave=editing.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');}
+}
+if(pendingSave&&!pendingSave.disabled){pendingSave.click();}
+return;
 }
 if(el.getAttribute('data-presemble-slot')==='body'){
 if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(window._foldToggle){window._foldToggle(el);}return;}
@@ -1116,44 +1254,58 @@ btoolbar.className='presemble-edit-toolbar';
 btoolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
 ta.after(btoolbar);
 el.classList.add('presemble-editing');
+var bac=new AbortController();
+var bbusy=false;
+var berrEl=null;
 function bcleanup(){
+bac.abort();
 el.style.display='';
 el.classList.remove('presemble-editing');
 ta.remove();
 btoolbar.remove();
+if(berrEl){berrEl.remove();berrEl=null;}
 var berr=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
 if(berr){berr.remove();}
+_onEditorClosed();
 }
+// On failure the editor stays open with the user's text.
+var bfail=function(msg){
+bbusy=false;
+_setToolbarBusy(btoolbar,false);
+ta.readOnly=false;
+berrEl=_showEditError(btoolbar,berrEl,msg);
+ta.focus();
+};
 function bsave(){
+if(bbusy){return;}
 var bvalue=ta.value;
-bcleanup();
-if(bvalue===bmd){return;}
-if(!bvalue.trim()){return;}
-if(!bfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('bsave called without bfile',el);return;}
+if(bvalue===bmd||!bvalue.trim()){bcleanup();return;}
+if(!bfile){console.error('bsave called without bfile',el);bfail('Cannot save: missing file attribute on element. This is a bug — please report.');return;}
+bbusy=true;
+_setToolbarBusy(btoolbar,true);
+ta.readOnly=true;
 var bstem=stemFromFile(bfile);
 fetchGrammar(bstem).then(function(schemaSrc){
 var sel = buildStructuralSelection(el);
 if (sel === null) {
   console.error('buildStructuralSelection returned null for body element', el);
-  return;
+  throw new Error('Cannot save: could not locate this element in the document.');
 }
 var program = '(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    '+sel+'\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
 return applyNed(program);
 }).then(function(){
+bbusy=false;
+bcleanup();
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(err){
-var berr2=document.createElement('div');
-berr2.className='presemble-edit-error';
-berr2.textContent=err.message||'Edit failed';
-el.after(berr2);
-el.style.display='';
+bfail(err.message||'Edit failed');
 });
 }
 btoolbar.querySelector('.presemble-save').onclick=function(ev){ev.stopPropagation();bsave();};
 btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};
-ta.addEventListener('keydown',function bkeyHandler(ev){
-if(ev.key==='Escape'){bcleanup();ta.removeEventListener('keydown',bkeyHandler);}
-});
+ta.addEventListener('keydown',function(ev){
+if(ev.key==='Escape'&&!bbusy){bcleanup();}
+},{signal:bac.signal});
 return;
 }
 if(el.tagName==='IMG'){return;}
@@ -1163,9 +1315,10 @@ var afile=el.getAttribute('data-presemble-file');
 var aslot=el.getAttribute('data-presemble-slot');
 if(!afile||!aslot){return;}
 var astem=afile.split('/')[1];
-fetch('/_presemble/links?schema='+astem+'&slot='+aslot)
-.then(function(r){return r.json();})
+fetchJson('/_presemble/links?schema='+encodeURIComponent(astem)+'&slot='+encodeURIComponent(aslot))
 .then(function(options){
+if(!Array.isArray(options)){throw new Error('unexpected response');}
+var lac=new AbortController();
 var sel=document.createElement('select');
 sel.className='presemble-link-picker';
 var ph=document.createElement('option');
@@ -1182,22 +1335,25 @@ el.after(sel);
 sel.focus();
 // TODO(phase-c): route through /_presemble/apply once NED has link/image mutations
 sel.onchange=function(){
+lac.abort();
 if(sel.value){
-fetch('/_presemble/edit',{
+fetchJson('/_presemble/edit',{
 method:'POST',
 headers:{'Content-Type':'application/json'},
 body:JSON.stringify({file:afile,slot:aslot,value:sel.value})
-}).then(function(r){return r.json();}).then(function(data){
+}).then(function(data){
 sel.remove();
 if(data.ok){setTimeout(function(){location.reload();},500);}
-else{alert(data.error);}
+else{alert(data.error||'Link update failed');}
+}).catch(function(err){
+sel.remove();
+_toast('Link update failed: '+err.message);
 });
 }
 };
-sel.onblur=function(){setTimeout(function(){sel.remove();},200);};
-function onKey(e){if(e.key==='Escape'){sel.remove();document.removeEventListener('keydown',onKey);}}
-document.addEventListener('keydown',onKey);
-});
+sel.onblur=function(){lac.abort();setTimeout(function(){sel.remove();},200);};
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){lac.abort();sel.remove();}},{signal:lac.signal});
+}).catch(function(err){_toast('Could not load link options: '+err.message);});
 return;
 }
 e.preventDefault();
@@ -1214,41 +1370,55 @@ var toolbar=document.createElement('div');
 toolbar.className='presemble-edit-toolbar';
 toolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
 el.after(toolbar);
+var ac=new AbortController();
+var busy=false;
+var errEl=null;
 function cleanup(){
+ac.abort();
 el.contentEditable='false';
 el.classList.remove('presemble-editing');
 toolbar.remove();
-var err=el.parentNode.querySelector('.presemble-edit-error');
+if(errEl){errEl.remove();errEl=null;}
+var err=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
 if(err){err.remove();}
+_onEditorClosed();
+}
+// On failure the editor stays open with the user's text.
+function fail(msg){
+busy=false;
+_setToolbarBusy(toolbar,false);
+el.contentEditable='true';
+errEl=_showEditError(toolbar,errEl,msg);
+el.focus();
 }
 function save(){
+if(busy){return;}
 var value=el.innerText.trim();
-cleanup();
-if(value===original){return;}
-if(!value){return;}
-if(!pfile){alert('Cannot save: missing file attribute on element. This is a bug — please report.');console.error('save called without pfile',el);return;}
+if(value===original||!value){cleanup();return;}
+if(!pfile){console.error('save called without pfile',el);fail('Cannot save: missing file attribute on element. This is a bug — please report.');return;}
 var sel = buildStructuralSelection(el);
 if (sel === null) {
   var idx = slotChildIndex(el);
   sel = '(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')';
 }
 var program = '(ned/set-text (-> '+sel+' ned/descendants ned/texts) '+cljStr(value)+')';
+busy=true;
+_setToolbarBusy(toolbar,true);
+el.contentEditable='false';
 applyNed(program).then(function(){
+busy=false;
+cleanup();
 if(window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(e){
-var err=document.createElement('div');
-err.className='presemble-edit-error';
-err.textContent=e.message||'Edit failed';
-el.after(err);
-el.innerText=original;
+fail(e.message||'Edit failed');
 });
 }
 toolbar.querySelector('.presemble-save').onclick=function(e){e.stopPropagation();save();};
 toolbar.querySelector('.presemble-undo').onclick=function(e){e.stopPropagation();el.innerText=original;cleanup();};
-el.addEventListener('keydown',function handler(e){
-if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();el.removeEventListener('keydown',handler);}
-if(e.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('keydown',handler);}
-});
+el.addEventListener('keydown',function(e){
+if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();}
+if(e.key==='Escape'&&!busy){el.innerText=original;cleanup();}
+},{signal:ac.signal});
 });
 document.addEventListener('click',function(e){
 var suggestMode=document.body.classList.contains('presemble-suggest-mode');
@@ -1272,31 +1442,53 @@ var btoolbar=document.createElement('div');
 btoolbar.className='presemble-edit-toolbar';
 btoolbar.innerHTML='<button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Cancel">&#8630;</button>';
 ta.after(btoolbar);
-function bcleanup(){ta.remove();btoolbar.remove();el.style.display='';}
+var bac=new AbortController();
+var bbusy=false;
+var berrEl=null;
+function bcleanup(){
+bac.abort();
+ta.remove();btoolbar.remove();el.style.display='';
+if(berrEl){berrEl.remove();berrEl=null;}
+_onEditorClosed();
+}
+// On failure the editor stays open with the user's text.
+var bfail=function(msg){
+bbusy=false;
+_setToolbarBusy(btoolbar,false);
+ta.readOnly=false;
+berrEl=_showEditError(btoolbar,berrEl,msg);
+ta.focus();
+};
 function bsuggest(){
+if(bbusy){return;}
 var bvalue=ta.value;
-bcleanup();
 var diff=minimalDiff(bmd,bvalue);
-if(!diff){return;}
+if(!diff){bcleanup();return;}
 var sel = buildStructuralSelection(el);
 if (sel === null) {
   console.error('buildStructuralSelection returned null for body element', el);
+  bfail('Cannot suggest: could not locate this element in the document.');
   return;
 }
-fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
+bbusy=true;
+_setToolbarBusy(btoolbar,true);
+ta.readOnly=true;
+fetchJson('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({file:bfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
-}).then(function(r){return r.json();}).then(function(data){
-if(!data.ok){var berr=document.createElement('div');berr.className='presemble-edit-error';berr.textContent=data.error||'Suggest failed';el.after(berr);}
-if(data.ok&&data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
+}).then(function(data){
+if(!data.ok){throw new Error(data.error||'Suggest failed');}
+bbusy=false;
+bcleanup();
+if(data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
 window._suggestEnter(data.id);
 }else if(window._fetchSuggestionCount){
 window._fetchSuggestionCount();
 }
-}).catch(function(){});
+}).catch(function(err){bfail(err.message||'Suggest failed');});
 }
 btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
 btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};
-ta.addEventListener('keydown',function(ev){if(ev.key==='Escape'){bcleanup();}});
+ta.addEventListener('keydown',function(ev){if(ev.key==='Escape'&&!bbusy){bcleanup();}},{signal:bac.signal});
 return;
 }
 var pfile=el.getAttribute('data-presemble-file');
@@ -1312,46 +1504,63 @@ var toolbar=document.createElement('div');
 toolbar.className='presemble-edit-toolbar';
 toolbar.innerHTML='<button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Cancel">&#8630;</button>';
 el.after(toolbar);
+var ac=new AbortController();
+var busy=false;
+var errEl=null;
 function cleanup(){
+ac.abort();
 el.contentEditable='false';
 el.classList.remove('presemble-editing');
 toolbar.remove();
+if(errEl){errEl.remove();errEl=null;}
 var err=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
 if(err){err.remove();}
+_onEditorClosed();
+}
+// On failure the editor stays open with the user's text.
+function fail(msg){
+busy=false;
+_setToolbarBusy(toolbar,false);
+el.contentEditable='true';
+errEl=_showEditError(toolbar,errEl,msg);
+el.focus();
 }
 function suggest(){
+if(busy){return;}
 var value=el.innerText.trim().replace(/\u00a0/g,' ');
 var origText=original.replace(/\u00a0/g,' ');
-cleanup();
 var diff=minimalDiff(origText,value);
-if(!diff){return;}
+if(!diff){cleanup();return;}
 var sel = buildStructuralSelection(el);
 if (sel === null) {
   var idx = slotChildIndex(el);
   sel = '(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')';
 }
-fetch('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
+busy=true;
+_setToolbarBusy(toolbar,true);
+el.contentEditable='false';
+fetchJson('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({file:pfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
-}).then(function(r){return r.json();}).then(function(data){
-if(!data.ok){
-var err=document.createElement('div');err.className='presemble-edit-error';
-err.textContent=data.error||'Suggest failed';el.after(err);
-}
+}).then(function(data){
+if(!data.ok){throw new Error(data.error||'Suggest failed');}
+// A suggestion is not an edit: restore the original text before closing.
+busy=false;
 el.innerText=original;
-if(data.ok&&data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
+cleanup();
+if(data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
 window._suggestEnter(data.id);
 }else if(window._fetchSuggestionCount){
 window._fetchSuggestionCount();
 }
 }).catch(function(e){
-el.innerText=original;
+fail(e.message||'Suggest failed');
 });
 }
 toolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();suggest();};
 toolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();el.innerText=original;cleanup();};
-el.addEventListener('keydown',function handler(ev){
-if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();suggest();el.removeEventListener('keydown',handler);}
-if(ev.key==='Escape'){el.innerText=original;cleanup();el.removeEventListener('keydown',handler);}
-});
+el.addEventListener('keydown',function(ev){
+if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();suggest();}
+if(ev.key==='Escape'&&!busy){el.innerText=original;cleanup();}
+},{signal:ac.signal});
 });
 })();
