@@ -1,7 +1,12 @@
-// ws-smoke.ts — WebSocket smoke test for `/_presemble/ws`.
+// ws-smoke.ts — WebSocket smoke test for the two browser sockets:
+//
+//   /_presemble/ws            public, anonymous: reload (pages only) + resync
+//   /_presemble/editorial-ws  session cookie: reload with primary/anchor,
+//                             scroll, suggestion-list-changed, resync
 //
 // Covers what curl cannot: live-reload and suggestion-list broadcasts that the
-// serve process pushes over the browser socket after editorial HTTP actions.
+// serve process pushes over the browser sockets after editorial HTTP actions,
+// and that no editorial message leaks onto the public socket.
 //
 // Usage (run by tools/smoketest.sh after its earlier sections):
 //
@@ -28,8 +33,12 @@ type Anchor = Readonly<Record<string, unknown>>;
 interface Reload {
   readonly type: "reload";
   readonly pages: readonly string[];
-  /** `pages[0]`, or `""` when `pages` is empty. */
-  readonly primary: string;
+  /**
+   * Editorial socket: `pages[0]`, or `""` when `pages` is empty.
+   * Public socket: omitted on the wire; modelled as `null`.
+   */
+  readonly primary: string | null;
+  /** Omitted on the wire when there is no anchor; modelled as `null`. */
   readonly anchor: Anchor | null;
 }
 
@@ -71,9 +80,10 @@ function parseWsMessage(raw: string): WsMessage | null {
   switch (parsed.type) {
     case "reload": {
       const { pages, primary, anchor } = parsed;
-      if (!isStringArray(pages) || typeof primary !== "string") return null;
+      if (!isStringArray(pages)) return null;
+      if (primary !== undefined && typeof primary !== "string") return null;
       if (anchor !== undefined && !isRecord(anchor)) return null;
-      return { type: "reload", pages, primary, anchor: anchor ?? null };
+      return { type: "reload", pages, primary: primary ?? null, anchor: anchor ?? null };
     }
     case "suggestion-list-changed": {
       const { file } = parsed;
@@ -132,6 +142,10 @@ class Inbox {
   private waiters: Array<() => void> = [];
   private lastActivity = Date.now();
   private closedReason: string | null = null;
+  private violation: string | null = null;
+
+  /** `name` labels diagnostics and failures ("public" / "editorial"). */
+  constructor(readonly name: string) {}
 
   push(m: WsMessage): void {
     this.buf.push(m);
@@ -142,6 +156,26 @@ class Inbox {
   close(reason: string): void {
     if (this.closedReason === null) this.closedReason = reason;
     this.wake();
+  }
+
+  /**
+   * Record a frame this socket must never carry. The next `quiesce`/`expect`
+   * (and `assertNoViolation`) fails with it.
+   */
+  protocolViolation(detail: string): void {
+    if (this.violation === null) this.violation = detail;
+    this.wake();
+  }
+
+  /** Every message received so far, including ones already consumed or drained. */
+  seen(): readonly WsMessage[] {
+    return this.buf;
+  }
+
+  assertNoViolation(desc: string): void {
+    if (this.violation !== null) {
+      throw new StepFailure(desc, `${this.name} socket: ${this.violation}`);
+    }
   }
 
   private wake(): void {
@@ -175,14 +209,15 @@ class Inbox {
       if (quietFor >= silenceMs) break;
       const elapsed = now - start;
       if (elapsed >= capMs) {
-        diag(`quiesce: cap of ${capMs}ms reached without ${silenceMs}ms of silence`);
+        diag(`quiesce (${this.name}): cap of ${capMs}ms reached without ${silenceMs}ms of silence`);
         break;
       }
       await this.waitForEvent(Math.min(silenceMs - quietFor, capMs - elapsed));
     }
     for (; this.cursor < this.buf.length; this.cursor++) {
-      diag(`quiesce: drained ${JSON.stringify(this.buf[this.cursor])}`);
+      diag(`quiesce (${this.name}): drained ${JSON.stringify(this.buf[this.cursor])}`);
     }
+    this.assertNoViolation(`ws: ${this.name} socket sent only recognised frames`);
   }
 
   /**
@@ -197,20 +232,21 @@ class Inbox {
   ): Promise<T> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
+      this.assertNoViolation(desc);
       while (this.cursor < this.buf.length) {
         const m = this.buf[this.cursor++];
         if (predicate(m)) {
           pass(desc);
           return m;
         }
-        diag(`skipped while waiting for "${desc}": ${JSON.stringify(m)}`);
+        diag(`(${this.name}) skipped while waiting for "${desc}": ${JSON.stringify(m)}`);
       }
       if (this.closedReason !== null) {
-        throw new StepFailure(desc, `socket closed (${this.closedReason})`);
+        throw new StepFailure(desc, `${this.name} socket closed (${this.closedReason})`);
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        throw new StepFailure(desc, `no matching message within ${timeoutMs}ms`);
+        throw new StepFailure(desc, `no matching message on ${this.name} socket within ${timeoutMs}ms`);
       }
       await this.waitForEvent(remaining);
     }
@@ -223,6 +259,24 @@ function reloadIncluding(page: string): (m: WsMessage) => m is Reload {
   return (m: WsMessage): m is Reload => m.type === "reload" && m.pages.includes(page);
 }
 
+function anchoredReloadIncluding(page: string): (m: WsMessage) => m is Reload {
+  return (m: WsMessage): m is Reload =>
+    m.type === "reload" && m.pages.includes(page) && m.anchor !== null;
+}
+
+/** A message that must never appear on the public socket (ADR-054). */
+function isEditorialOnly(m: WsMessage): boolean {
+  switch (m.type) {
+    case "scroll":
+    case "suggestion-list-changed":
+      return true;
+    case "reload":
+      return m.anchor !== null || m.primary !== null;
+    case "resync":
+      return false;
+  }
+}
+
 function suggestionListChangedFor(file: string): (m: WsMessage) => m is SuggestionListChanged {
   return (m: WsMessage): m is SuggestionListChanged =>
     m.type === "suggestion-list-changed" && m.file === file;
@@ -231,23 +285,55 @@ function suggestionListChangedFor(file: string): (m: WsMessage) => m is Suggesti
 // ── Socket ──────────────────────────────────────────────────────────────────
 
 /**
- * Open the browser socket. `auth` is `null` today: `/_presemble/ws` is public
- * (ADR-054). It exists so the planned split into a public live-reload socket
- * and a session-gated editorial socket only has to fill in the auth branch.
+ * Open a browser socket. `auth: null` connects anonymously (the public
+ * `/_presemble/ws`, ADR-054); otherwise the session cookie is sent on the
+ * upgrade request (`/_presemble/editorial-ws`). The `{ headers }` options form
+ * is Deno's non-standard WebSocket constructor overload.
  */
 function openSocket(url: string, auth: { cookie: string } | null): WebSocket {
   if (auth !== null) {
-    // TODO(ws split): send `cookie: presemble_session=<auth.cookie>` on the
-    // upgrade request. The standard WebSocket constructor cannot set headers.
-    // Deno offers non-standard routes: `new WebSocket(url, { headers })` and
-    // `WebSocketStream` (`new WebSocketStream(url, { headers })`). Whoever does
-    // the split must verify which form exists and type-checks under the deno
-    // version pinned in devenv before relying on it.
-    throw new Error(
-      "openSocket: authenticated sockets are not implemented yet (see TODO in tools/ws-smoke.ts)",
-    );
+    return new WebSocket(url, { headers: { cookie: `presemble_session=${auth.cookie}` } });
   }
   return new WebSocket(url);
+}
+
+/**
+ * Open a socket feeding `inbox`. With `strict`, an unrecognised or non-text
+ * frame is recorded as a protocol violation instead of being ignored.
+ */
+function connect(
+  url: string,
+  auth: { cookie: string } | null,
+  inbox: Inbox,
+  strict: boolean,
+): WebSocket {
+  const ws = openSocket(url, auth);
+  ws.onmessage = (ev: MessageEvent) => {
+    const data: unknown = ev.data;
+    if (typeof data !== "string") {
+      if (strict) inbox.protocolViolation("non-text frame");
+      else diag(`(${inbox.name}) ignoring non-text frame`);
+      return;
+    }
+    const m = parseWsMessage(data);
+    if (m === null) {
+      if (strict) inbox.protocolViolation(`unrecognised frame: ${data}`);
+      else diag(`(${inbox.name}) unrecognised frame: ${data}`);
+      return;
+    }
+    inbox.push(m);
+  };
+  ws.addEventListener("close", (ev: CloseEvent) => inbox.close(`code ${ev.code}`));
+  return ws;
+}
+
+/** PASS `desc` if the open settled successfully, StepFailure otherwise. */
+function reportOpen(desc: string, r: PromiseSettledResult<void>): void {
+  if (r.status === "rejected") {
+    const e: unknown = r.reason;
+    throw new StepFailure(desc, e instanceof Error ? e.message : String(e));
+  }
+  pass(desc);
 }
 
 function waitOpen(ws: WebSocket, timeoutMs: number): Promise<void> {
@@ -340,43 +426,43 @@ const TITLE_SELECTION =
   `(ned/text-in (ned/children (ned/slot (ned/doc-by-path "${FILE}") "title")))`;
 const BODY_PARA_SELECTION =
   `(ned/text-containing (ned/body (ned/doc-by-path "${FILE}")) "Smoke body edit via bsave")`;
+/** Zero-based body index of a paragraph in FILE; see step 7 in `run`. */
+const EDIT_BODY_IDX = 3;
 
 async function run(baseUrl: string, cookie: string): Promise<void> {
   const http = new Http(baseUrl, cookie);
-  const wsUrl = `${baseUrl.replace(/^http/, "ws")}/_presemble/ws`;
-  const inbox = new Inbox();
+  const wsBase = baseUrl.replace(/^http/, "ws");
+  const publicInbox = new Inbox("public");
+  const editorialInbox = new Inbox("editorial");
 
-  // 1. Anonymous connection to the public live-reload socket.
-  const openDesc = "ws: public live-reload socket accepts anonymous connection (ADR-054)";
-  let ws: WebSocket;
+  // 1. Anonymous public live-reload socket + cookie-authenticated editorial
+  //    socket. Both opens are awaited together so neither "open" event can
+  //    fire before its listener is attached.
+  const publicDesc = "ws: public live-reload socket accepts anonymous connection (ADR-054)";
+  const editorialDesc = "ws: editorial socket accepts session cookie";
+  let publicWs: WebSocket;
   try {
-    ws = openSocket(wsUrl, null);
+    publicWs = connect(`${wsBase}/_presemble/ws`, null, publicInbox, true);
   } catch (e) {
-    throw new StepFailure(openDesc, String(e));
+    throw new StepFailure(publicDesc, String(e));
   }
-  ws.onmessage = (ev: MessageEvent) => {
-    const data: unknown = ev.data;
-    if (typeof data !== "string") {
-      diag(`ignoring non-text frame`);
-      return;
-    }
-    const m = parseWsMessage(data);
-    if (m === null) {
-      diag(`unrecognised frame: ${data}`);
-      return;
-    }
-    inbox.push(m);
-  };
-  ws.addEventListener("close", (ev: CloseEvent) => inbox.close(`code ${ev.code}`));
+  let editorialWs: WebSocket;
   try {
-    await waitOpen(ws, 5000);
+    editorialWs = connect(`${wsBase}/_presemble/editorial-ws`, { cookie }, editorialInbox, false);
   } catch (e) {
-    throw new StepFailure(openDesc, e instanceof Error ? e.message : String(e));
+    publicWs.close();
+    throw new StepFailure(editorialDesc, String(e));
   }
-  pass(openDesc);
 
   try {
-    await inbox.quiesce();
+    const [publicOpen, editorialOpen] = await Promise.allSettled([
+      waitOpen(publicWs, 5000),
+      waitOpen(editorialWs, 5000),
+    ]);
+    reportOpen(publicDesc, publicOpen);
+    reportOpen(editorialDesc, editorialOpen);
+
+    await Promise.all([publicInbox.quiesce(), editorialInbox.quiesce()]);
 
     // 2. /edit → reload of the post page.
     {
@@ -386,11 +472,18 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
         value: "WS Edit Title",
       });
       expectOk("ws: /edit returns ok", r);
-      const m = await inbox.expect(`ws: /edit broadcasts reload including ${PAGE}`, reloadIncluding(PAGE));
+      const m = await editorialInbox.expect(
+        `ws: /edit broadcasts editorial reload including ${PAGE}`,
+        reloadIncluding(PAGE),
+      );
       check(
-        "ws: /edit reload primary is pages[0]",
+        "ws: /edit editorial reload primary is pages[0]",
         m.primary === m.pages[0],
         `primary=${JSON.stringify(m.primary)} pages=${JSON.stringify(m.pages)}`,
+      );
+      await publicInbox.expect(
+        `ws: /edit broadcasts public reload including ${PAGE}`,
+        reloadIncluding(PAGE),
       );
     }
 
@@ -403,7 +496,14 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
       expectOk("ws: /apply returns ok", r);
       const dirty = isRecord(r.json) ? r.json.dirtyPaths : undefined;
       check("ws: /apply dirties one doc", dirty === 1, `dirtyPaths=${JSON.stringify(dirty)}: ${r.text}`);
-      await inbox.expect(`ws: /apply broadcasts reload including ${PAGE}`, reloadIncluding(PAGE));
+      await editorialInbox.expect(
+        `ws: /apply broadcasts editorial reload including ${PAGE}`,
+        reloadIncluding(PAGE),
+      );
+      await publicInbox.expect(
+        `ws: /apply broadcasts public reload including ${PAGE}`,
+        reloadIncluding(PAGE),
+      );
     }
 
     // 4. Create + accept (re-renders) → suggestion-list-changed, then reload.
@@ -414,17 +514,21 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
         mutation: { SetText: "WS Accepted Title" },
         reason: "ws smoke accept",
       });
-      await inbox.expect(
+      await editorialInbox.expect(
         "ws: create broadcasts suggestion-list-changed for file",
         suggestionListChangedFor(FILE),
       );
       const r = await http.post("/_presemble/ned-suggestions/accept", { id });
       expectOk("ws: accept returns ok", r);
-      const m = await inbox.expect(
-        `ws: accept broadcasts reload including ${PAGE}`,
+      const m = await editorialInbox.expect(
+        `ws: accept broadcasts editorial reload including ${PAGE}`,
         reloadIncluding(PAGE),
       );
       check("ws: accept reload has non-empty pages", m.pages.length > 0, JSON.stringify(m));
+      await publicInbox.expect(
+        `ws: accept broadcasts public reload including ${PAGE}`,
+        reloadIncluding(PAGE),
+      );
     }
 
     // 5. Create + reject → suggestion-list-changed twice.
@@ -435,13 +539,13 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
         mutation: { SetText: "WS Rejected Title" },
         reason: "ws smoke reject",
       });
-      await inbox.expect(
+      await editorialInbox.expect(
         "ws: create (reject case) broadcasts suggestion-list-changed for file",
         suggestionListChangedFor(FILE),
       );
       const r = await http.post("/_presemble/ned-suggestions/reject", { id });
       expectOk("ws: reject returns ok", r);
-      await inbox.expect(
+      await editorialInbox.expect(
         "ws: reject broadcasts suggestion-list-changed for file",
         suggestionListChangedFor(FILE),
       );
@@ -456,7 +560,7 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
         mutation: { SearchReplace: { search: "Smoke", replace: "Stale" } },
         reason: "ws smoke stale S",
       });
-      await inbox.expect(
+      await editorialInbox.expect(
         "ws: create S broadcasts suggestion-list-changed for file",
         suggestionListChangedFor(FILE),
       );
@@ -471,18 +575,25 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
         },
         reason: "ws smoke stale T",
       });
-      await inbox.expect(
+      await editorialInbox.expect(
         "ws: create T broadcasts suggestion-list-changed for file",
         suggestionListChangedFor(FILE),
       );
 
       const rt = await http.post("/_presemble/ned-suggestions/accept", { id: tId });
       expectOk("ws: accept T returns ok", rt);
-      await inbox.expect(`ws: accept T broadcasts reload including ${PAGE}`, reloadIncluding(PAGE));
+      await editorialInbox.expect(
+        `ws: accept T broadcasts editorial reload including ${PAGE}`,
+        reloadIncluding(PAGE),
+      );
+      await publicInbox.expect(
+        `ws: accept T broadcasts public reload including ${PAGE}`,
+        reloadIncluding(PAGE),
+      );
 
       const rs = await http.post("/_presemble/ned-suggestions/accept", { id: sId });
       expectOk("ws: accept S (goes stale) still returns ok", rs);
-      await inbox.expect(
+      await editorialInbox.expect(
         "ws: stale accept broadcasts suggestion-list-changed for file",
         suggestionListChangedFor(FILE),
       );
@@ -500,8 +611,54 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
         `entry for ${sId}: ${JSON.stringify(entry)} (HTTP ${rl.status})`,
       );
     }
+
+    // 7. /edit-body → anchored editorial reload + plain public reload.
+    //    Last on purpose: it replaces a body element, which must not disturb
+    //    the selections the steps above rely on.
+    //    Body of the scaffolded hello-world.md (example-sites/blog), after the
+    //    `----` separator, zero-based:
+    //      0 "## Getting Started"   1 paragraph "Open the ..."
+    //      2 "## What to Edit"      3 paragraph (bsave'd by smoketest.sh D,
+    //                                  rewritten by T in step 6 above)
+    //    None of the earlier edits change the body's structure, so index 3 is
+    //    still a paragraph.
+    {
+      const r = await http.post("/_presemble/edit-body", {
+        file: FILE,
+        body_idx: EDIT_BODY_IDX,
+        content: "WS edit-body paragraph.",
+      });
+      expectOk("ws: /edit-body returns ok", r);
+      const m = await editorialInbox.expect(
+        `ws: /edit-body broadcasts anchored editorial reload including ${PAGE}`,
+        anchoredReloadIncluding(PAGE),
+      );
+      const nodeKind = m.anchor === null ? undefined : m.anchor["node-kind"];
+      check(
+        "ws: /edit-body anchor targets a paragraph",
+        nodeKind === "paragraph",
+        `anchor=${JSON.stringify(m.anchor)}`,
+      );
+      await publicInbox.expect(
+        `ws: /edit-body broadcasts public reload including ${PAGE}`,
+        reloadIncluding(PAGE),
+      );
+    }
+
+    // 8. Leak check (ADR-054): nothing editorial ever reached the public
+    //    socket. Settle briefly so stragglers are counted too.
+    await publicInbox.quiesce(300, 1500);
+    {
+      const leaked = publicInbox.seen().filter(isEditorialOnly);
+      check(
+        "ws: public socket carried no editorial messages",
+        leaked.length === 0,
+        `${leaked.length} editorial message(s): ${JSON.stringify(leaked)}`,
+      );
+    }
   } finally {
-    ws.close();
+    publicWs.close();
+    editorialWs.close();
   }
 }
 

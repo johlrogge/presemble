@@ -64,6 +64,7 @@ fi
 
 BROWSER_JS_FILES=(
     "resources/serve/inject.js"
+    "resources/serve/reload.js"
 )
 
 log "Static-checking browser JS resources..."
@@ -182,6 +183,25 @@ assert_not_contains() {   # desc response unexpected
 }
 post_json() { acurl -X POST "http://127.0.0.1:$PORT$1" -H 'Content-Type: application/json' -d "$2" 2>&1; }
 
+# Raw WebSocket upgrade request. On a 101 the server keeps the socket open, so
+# curl hits --max-time and exits 28; `|| true` keeps `set -e` from aborting.
+# Pass -o/-w/-b and the URL as extra args.
+ws_upgrade() { curl -s --http1.1 --max-time 3 -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$@" || true; }
+
+# Assert the HTTP status of a WebSocket upgrade. Extra curl args (e.g. -b jar)
+# go after the URL.
+assert_ws_status() {   # desc path expected [curl args...]
+    local desc="$1" path="$2" expected="$3"
+    shift 3
+    local status
+    status=$(ws_upgrade "$@" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT$path")
+    if [ "$status" = "$expected" ]; then
+        pass "$desc"
+    else
+        fail "$desc (expected HTTP $expected, got $status)"
+    fi
+}
+
 # Build the /apply JSON body exactly as inject.js bsave does (cljStr + program
 # shape), so this exercises the browser's body-edit wire format.
 # deno eval runs with all permissions implicitly, so no --allow-env is needed.
@@ -283,7 +303,7 @@ done
 LOGIN_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_JAR" "$LOGIN_URL")
 [ "$LOGIN_STATUS" = "302" ] || login_fail "GET /_presemble/login returned $LOGIN_STATUS (expected 302)"
 grep -qF presemble_session "$COOKIE_JAR" || login_fail "no presemble_session cookie in jar"
-PROBE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/_presemble/dirty-buffers")
+PROBE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/_presemble/session")
 [ "$PROBE" = "200" ] || login_fail "authenticated probe returned $PROBE"
 log "Logged in (dev session)"
 
@@ -300,6 +320,17 @@ assert_not_contains "anonymous 401 (dev session on) does not suggest --dev-sessi
 assert_status_anon "schema URL without session is 401" GET "/_schema/index" "401"
 assert_status_anon "login with bogus token is 401" GET "/_presemble/login?token=bogus.token" "401"
 assert_status_anon "published page without session is 200" GET "/" "200"
+assert_status_anon "session probe without session is 401" GET "/_presemble/session" "401"
+
+# WebSocket split (ADR-054): public live-reload socket vs session-gated
+# editorial socket. The 101 assertions rely on curl's -w '%{http_code}'
+# reporting 101 even though the transfer then times out (exit 28) — if that
+# does not hold for the curl in devenv, fall back to ws-smoke.ts coverage.
+assert_ws_status "anonymous editorial-ws upgrade is 401" "/_presemble/editorial-ws" "401"
+WS_ANON_BODY=$(ws_upgrade "http://127.0.0.1:$PORT/_presemble/editorial-ws")
+assert_contains "anonymous editorial-ws 401 explains not logged in" "$WS_ANON_BODY" "Not logged in"
+assert_ws_status "anonymous public ws upgrade is 101" "/_presemble/ws" "101"   # 101-on-timeout assumption
+assert_ws_status "editorial-ws upgrade with session is 101" "/_presemble/editorial-ws" "101" -b "$COOKIE_JAR"   # 101-on-timeout assumption
 
 # ── Test: Welcome page ─────────────────────────────────────────────────────
 
@@ -340,6 +371,17 @@ assert_curl "index page has data-presemble-file attr" "/" GET "" 'data-presemble
 assert_curl "collection page has index data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/index.md"'
 assert_curl "collection page has item data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/hello-world.md"'
 assert_curl "leaf page has data-presemble-file attr" "/post/hello-world" GET "" 'data-presemble-file="content/post/hello-world.md"'
+
+# ── Test: Reader vs editor injection (ADR-054) ────────────────────────────
+# Lives here, not in the auth-boundary section: /post/hello-world only exists
+# after the scaffold.
+
+log "Testing reader vs editor script injection..."
+READER_PAGE=$(curl -s "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
+assert_contains "anonymous page gets public live-reload socket" "$READER_PAGE" "/_presemble/ws"
+assert_not_contains "anonymous page has no editorial socket" "$READER_PAGE" "editorial-ws"
+EDITOR_PAGE=$(acurl "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
+assert_contains "logged-in page gets editorial socket" "$EDITOR_PAGE" "editorial-ws"
 
 # ── Test: Edit index tagline ───────────────────────────────────────────────
 
@@ -518,7 +560,11 @@ assert_curl_not_contains "legacy title not applied" "/post/hello-world" "Legacy 
 
 # ── Test: WebSocket broadcasts (tools/ws-smoke.ts) ────────────────────────
 # Runs after E: ws-smoke.ts targets the "Smoke body edit via bsave." paragraph
-# written in D. It prints PASS/FAIL lines and a final DONE on stdout.
+# written in D, and finally replaces body element 3 of hello-world.md via
+# /_presemble/edit-body. It opens the public /_presemble/ws anonymously and
+# /_presemble/editorial-ws with the session cookie, and checks no editorial
+# message leaks onto the public socket. It prints PASS/FAIL lines and a final
+# DONE on stdout.
 
 log "Testing WebSocket broadcasts..."
 # curl writes HttpOnly cookies as "#HttpOnly_<domain>", so '#' lines must NOT
@@ -711,6 +757,18 @@ else
         else
             pass "closed: login sets no cookie"
         fi
+
+        # WebSocket split with editing disabled: editorial socket refused,
+        # public live-reload socket still open, readers get no editor script.
+        assert_ws_status "closed: anonymous editorial-ws upgrade is 401" "/_presemble/editorial-ws" "401"
+        B=$(ws_upgrade "http://127.0.0.1:$PORT/_presemble/editorial-ws")
+        assert_contains "closed: anonymous editorial-ws says editing is disabled" "$B" "Editing is disabled"
+        assert_ws_status "closed: old dev cookie editorial-ws upgrade is 401" "/_presemble/editorial-ws" "401" -b "$COOKIE_JAR"
+        B=$(ws_upgrade -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/_presemble/editorial-ws")
+        assert_contains "closed: old dev cookie editorial-ws says editing is disabled" "$B" "Editing is disabled"
+        assert_ws_status "closed: anonymous public ws upgrade is 101" "/_presemble/ws" "101"   # 101-on-timeout assumption
+        B=$(curl -s "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
+        assert_not_contains "closed: anonymous page has no editorial socket" "$B" "editorial-ws"
     fi
 fi
 
