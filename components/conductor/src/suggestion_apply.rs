@@ -818,7 +818,7 @@ mod tests {
             .find(|(n, _)| f.store.resolve_name(*n) == "level")
             .and_then(|(_, v)| f.store.get(v).cloned());
         assert!(matches!(level, Some(Node::Integer(2))), "level: {level:?}");
-        let md = node_store_bridge::serialize_from_store(&f.store, f.doc);
+        let md = node_store_bridge::serialize_from_store(&f.store, f.doc).expect("serialize");
         assert!(md.contains("## Section"), "markdown: {md}");
     }
 

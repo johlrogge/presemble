@@ -137,7 +137,16 @@ fn check_fixed_point(
     };
     let mut store1 = NodeStore::new();
     let root1 = document_to_store(&doc1, &mut store1, None);
-    let first = serialize_from_store(&store1, root1);
+    let first = match serialize_from_store(&store1, root1) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(FixedPointFailure {
+                path: content_path.to_path_buf(),
+                first: format!("[decode error on first pass: {e}]"),
+                second: String::new(),
+            });
+        }
+    };
 
     // --- Second pass: first → document → store → serialize ---
     let doc2 = match parse_and_assign(&first, &grammar) {
@@ -152,7 +161,16 @@ fn check_fixed_point(
     };
     let mut store2 = NodeStore::new();
     let root2 = document_to_store(&doc2, &mut store2, None);
-    let second = serialize_from_store(&store2, root2);
+    let second = match serialize_from_store(&store2, root2) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(FixedPointFailure {
+                path: content_path.to_path_buf(),
+                first,
+                second: format!("[decode error on second pass: {e}]"),
+            });
+        }
+    };
 
     if first == second {
         Ok(())

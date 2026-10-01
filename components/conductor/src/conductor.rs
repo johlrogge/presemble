@@ -736,7 +736,13 @@ impl Conductor {
             node_store_bridge::content_bridge::presemble_file_for_root(&store, doc_root);
 
         // Reconstruct the Document from the NodeStore
-        let doc = node_store_bridge::content_bridge::store_to_document(&store, doc_root);
+        let doc = match node_store_bridge::content_bridge::store_to_document(&store, doc_root) {
+            Ok(doc) => doc,
+            Err(e) => {
+                eprintln!("conductor: cannot decode document {url}: {e}");
+                return None;
+            }
+        };
         drop(store);
 
         // Find the grammar
@@ -2712,7 +2718,14 @@ impl Conductor {
                     let text = match self.doc_root_for_path(&rel_path) {
                         Some(root) => {
                             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                            node_store_bridge::serialize_from_store(&store, root)
+                            match node_store_bridge::serialize_from_store(&store, root) {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    return CommandResult::error(format!(
+                                        "cannot save {path}: {e}"
+                                    ));
+                                }
+                            }
                         }
                         None => return CommandResult::error(format!("document not in store: {path}")),
                     };
@@ -2748,15 +2761,38 @@ impl Conductor {
             Command::SaveAllBuffers => {
                 // Save NED-dirty documents (NodeStore → disk)
                 let ned_paths = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).take();
+                // Documents that fail to decode or write stay dirty and are
+                // reported after the remaining buffers have been saved.
+                let mut failures: Vec<String> = Vec::new();
                 for rel_path in &ned_paths {
                     let abs_path = self.site_dir.join(rel_path);
                     let text = match self.doc_root_for_path(rel_path) {
                         Some(root) => {
                             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                            node_store_bridge::serialize_from_store(&store, root)
+                            match node_store_bridge::serialize_from_store(&store, root) {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    drop(store);
+                                    self.dirty_docs
+                                        .write()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .mark(rel_path.clone());
+                                    failures
+                                        .push(format!("cannot save {}: {e}", rel_path.display()));
+                                    continue;
+                                }
+                            }
                         }
                         None => {
                             eprintln!("conductor: SaveAllBuffers: no store root for {}", rel_path.display());
+                            self.dirty_docs
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .mark(rel_path.clone());
+                            failures.push(format!(
+                                "cannot save {}: document not in store",
+                                rel_path.display()
+                            ));
                             continue;
                         }
                     };
@@ -2765,7 +2801,12 @@ impl Conductor {
                         text.as_bytes(),
                         &self.self_write_tracker,
                     ) {
-                        return CommandResult::error(format!("write error for {}: {e}", abs_path.display()));
+                        self.dirty_docs
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .mark(rel_path.clone());
+                        failures.push(format!("write error for {}: {e}", abs_path.display()));
+                        continue;
                     }
                 }
 
@@ -2775,20 +2816,28 @@ impl Conductor {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 drop(sources);
-                for (path, text) in &buffers {
-                    if let Err(e) = crate::self_write_tracker::write_source_file(
-                        path,
+                let mut written: Vec<PathBuf> = Vec::new();
+                for (path, text) in buffers {
+                    match crate::self_write_tracker::write_source_file(
+                        &path,
                         text.as_bytes(),
                         &self.self_write_tracker,
                     ) {
-                        return CommandResult::error(format!("write error for {}: {e}", path.display()));
+                        Ok(_) => written.push(path),
+                        Err(e) => {
+                            failures.push(format!("write error for {}: {e}", path.display()));
+                        }
                     }
                 }
                 let mut sources = self.doc_sources.write().unwrap_or_else(|e| e.into_inner());
-                for (path, _) in buffers {
+                for path in written {
                     sources.remove(&path);
                 }
+                drop(sources);
 
+                if !failures.is_empty() {
+                    return CommandResult::error(failures.join("; "));
+                }
                 CommandResult::ok()
             }
             Command::GetNedSuggestionFiles => {
@@ -6120,7 +6169,7 @@ mod suggestion_accept_tests {
         let serialize = |c: &Conductor| {
             let root = live_root(c);
             let store = c.node_store.read().unwrap();
-            node_store_bridge::serialize_from_store(&store, root)
+            node_store_bridge::serialize_from_store(&store, root).expect("serialize")
         };
         let first = serialize(&conductor);
         assert!(first.contains("let y = 2;"), "markdown: {first}");
@@ -6356,7 +6405,7 @@ mod body_structural_bsave_tests {
 
     fn body_texts(conductor: &Conductor, doc_root: node_store::NodeId) -> Vec<(String, String)> {
         let store = conductor.node_store.read().unwrap();
-        let doc = store_to_document(&store, doc_root);
+        let doc = store_to_document(&store, doc_root).expect("store_to_document");
         doc.body
             .iter()
             .map(|el| match &el.node {
@@ -6430,6 +6479,175 @@ mod body_structural_bsave_tests {
         assert_eq!(body[3], ("heading".to_string(), "Why \"Presemble\" rocks".to_string()));
         assert_eq!(body[4], ("paragraph".to_string(), "Why para".to_string()));
         assert_eq!(dirty_buffers(&conductor), vec![FILE.to_string()]);
+    }
+
+    /// Register `doc_root` under `path` for save routing and mark it dirty.
+    fn register_dirty(conductor: &Conductor, path: &str, doc_root: node_store::NodeId) {
+        conductor
+            .path_to_doc_root
+            .write()
+            .unwrap()
+            .insert(PathBuf::from(path), doc_root);
+        conductor.dirty_docs.write().unwrap().mark(PathBuf::from(path));
+    }
+
+    /// Register the doc for save routing, mark it dirty, and delete its body.
+    /// Schema-invalid, but still well-formed — it must save (ADR-057 §4).
+    fn dirty_doc_without_body(conductor: &Conductor, doc_root: node_store::NodeId) {
+        register_dirty(conductor, FILE, doc_root);
+        let mut store = conductor.node_store.write().unwrap();
+        let body =
+            node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body")
+                .unwrap();
+        store.remove_child_edge(doc_root, body);
+    }
+
+    /// Register the doc for save routing, mark it dirty, and add a malformed
+    /// block (unknown element kind `wibble`) under its body.
+    fn dirty_doc_with_malformed_block(conductor: &Conductor, doc_root: node_store::NodeId) {
+        register_dirty(conductor, FILE, doc_root);
+        let mut store = conductor.node_store.write().unwrap();
+        let body =
+            node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body")
+                .unwrap();
+        let name = store.intern("wibble");
+        let wibble = store.add_node(node_store::Node::Element(name));
+        store.add_edge(body, node_store::Edge::Child(wibble));
+    }
+
+    /// Register a second, well-formed dirty document at `path`.
+    fn add_good_dirty_doc(conductor: &Conductor, path: &str, url: &str) {
+        let good_doc = Document {
+            preamble: im::vector![DocumentSlot {
+                name: SlotName::new("title"),
+                elements: im::vector![spanned(ContentElement::Heading {
+                    level: HeadingLevel::new(1).unwrap(),
+                    text: "Other Title".to_string(),
+                })],
+            }],
+            body: im::vector![p("Other para")],
+            has_separator: true,
+            separator_span: None,
+        };
+        let good_meta = DocumentMeta {
+            url: url.to_string(),
+            stem: "test".to_string(),
+            file: path.to_string(),
+            page_kind: "item".to_string(),
+        };
+        let good_root = {
+            let mut store = conductor.node_store.write().unwrap();
+            document_to_store(&good_doc, &mut store, Some(&good_meta))
+        };
+        register_dirty(conductor, path, good_root);
+    }
+
+    #[test]
+    fn save_buffer_with_deleted_body_saves_preamble_only() {
+        let (conductor, tmp, doc_root) = make_conductor_with_doc();
+        dirty_doc_without_body(&conductor, doc_root);
+
+        let response = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string() })
+            .response;
+        assert!(
+            !matches!(response, Response::Error(_)),
+            "schema-invalid doc must save: {response:?}"
+        );
+        let written = std::fs::read_to_string(tmp.path().join(FILE)).expect("doc written");
+        assert!(written.contains("Test Title"), "written: {written}");
+        assert!(!written.contains("Intro para one"), "written: {written}");
+        assert!(dirty_buffers(&conductor).is_empty(), "doc is clean after save");
+    }
+
+    #[test]
+    fn save_all_buffers_with_deleted_body_saves_preamble_only() {
+        let (conductor, tmp, doc_root) = make_conductor_with_doc();
+        dirty_doc_without_body(&conductor, doc_root);
+
+        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        assert!(
+            !matches!(response, Response::Error(_)),
+            "schema-invalid doc must save: {response:?}"
+        );
+        let written = std::fs::read_to_string(tmp.path().join(FILE)).expect("doc written");
+        assert!(written.contains("Test Title"), "written: {written}");
+        assert!(!written.contains("Intro para one"), "written: {written}");
+        assert!(dirty_buffers(&conductor).is_empty(), "doc is clean after save");
+    }
+
+    #[test]
+    fn save_all_buffers_saves_good_doc_and_keeps_broken_doc_dirty() {
+        // Sorts after FILE so the broken doc is visited first.
+        const GOOD: &str = "content/test/other.md";
+
+        let (conductor, tmp, broken_root) = make_conductor_with_doc();
+        dirty_doc_with_malformed_block(&conductor, broken_root);
+        add_good_dirty_doc(&conductor, GOOD, "/test/other");
+
+        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        match response {
+            Response::Error(e) => {
+                assert!(e.contains(FILE), "error must name the broken doc: {e}");
+                assert!(e.contains("wibble"), "error must name the malformed block: {e}");
+                assert!(!e.contains(GOOD), "error must not name the good doc: {e}");
+            }
+            other => panic!("expected Response::Error, got: {other:?}"),
+        }
+
+        let written = std::fs::read_to_string(tmp.path().join(GOOD)).expect("good doc written");
+        assert!(written.contains("Other para"), "written: {written}");
+        assert!(!tmp.path().join(FILE).exists(), "broken doc must not be written");
+        assert_eq!(
+            dirty_buffers(&conductor),
+            vec![FILE.to_string()],
+            "only the broken doc stays dirty"
+        );
+    }
+
+    #[test]
+    fn save_all_buffers_write_failure_keeps_doc_dirty_and_saves_the_rest() {
+        // Sorts after FILE so the failing doc is visited first.
+        const GOOD: &str = "content/test/other.md";
+
+        let (conductor, tmp, doc_root) = make_conductor_with_doc();
+        register_dirty(&conductor, FILE, doc_root);
+        add_good_dirty_doc(&conductor, GOOD, "/test/other");
+        // A directory at the target path makes the write fail.
+        std::fs::create_dir_all(tmp.path().join(FILE)).expect("blocking dir");
+
+        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        match response {
+            Response::Error(e) => {
+                assert!(e.contains(FILE), "error must name the failed doc: {e}");
+                assert!(!e.contains(GOOD), "error must not name the good doc: {e}");
+            }
+            other => panic!("expected Response::Error, got: {other:?}"),
+        }
+
+        let written = std::fs::read_to_string(tmp.path().join(GOOD)).expect("good doc written");
+        assert!(written.contains("Other para"), "written: {written}");
+        assert!(tmp.path().join(FILE).is_dir(), "blocking dir untouched");
+        assert_eq!(
+            dirty_buffers(&conductor),
+            vec![FILE.to_string()],
+            "only the failed doc stays dirty"
+        );
+    }
+
+    #[test]
+    fn save_all_buffers_reports_dirty_doc_missing_from_store() {
+        let (conductor, tmp, _doc_root) = make_conductor_with_doc();
+        // Dirty, but never registered in path_to_doc_root.
+        conductor.dirty_docs.write().unwrap().mark(PathBuf::from(FILE));
+
+        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        match response {
+            Response::Error(e) => assert!(e.contains(FILE), "error must name the doc: {e}"),
+            other => panic!("expected Response::Error, got: {other:?}"),
+        }
+        assert!(!tmp.path().join(FILE).exists(), "nothing must be written");
+        assert_eq!(dirty_buffers(&conductor), vec![FILE.to_string()], "doc stays dirty");
     }
 }
 

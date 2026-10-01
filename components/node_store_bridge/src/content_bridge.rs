@@ -100,11 +100,6 @@ pub fn children_by_name(
         .collect()
 }
 
-fn require_attr_text(store: &NodeStore, node: NodeId, attr_name: &str) -> String {
-    find_attr_text(store, node, attr_name)
-        .unwrap_or_else(|| panic!("Missing required text attribute '{attr_name}' on node {node:?}"))
-}
-
 // ── helpers for adding attributes ────────────────────────────────────────────
 
 pub(crate) fn add_text_attr(store: &mut NodeStore, node: NodeId, attr_name: &str, value: &str) {
@@ -644,16 +639,6 @@ pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecode
     block_from_node(&scratch, root)
 }
 
-/// Legacy decoder for document reconstruction: `None` for non-element nodes,
-/// panics on malformed blocks (panics removed in Wave 1).
-fn content_element_from_node(store: &NodeStore, node: NodeId) -> Option<ContentElement> {
-    element_name_of(store, node)?;
-    match block_from_node(store, node) {
-        Ok(el) => Some(el),
-        Err(e) => panic!("{e}"),
-    }
-}
-
 fn link_text_from_node(store: &NodeStore, node: NodeId) -> Result<LinkText, BlockDecodeError> {
     const KIND: &str = "link-text";
     let kind = try_attr_text(store, node, KIND, "kind")?;
@@ -986,57 +971,154 @@ fn spanned<T>(node: T) -> Spanned<T> {
     Spanned { node, span: zero_span() }
 }
 
+/// Why a document subtree could not be reconstructed into a [`Document`].
+///
+/// The document frame (preamble, body, slots) is decoded totally, so the only
+/// failure is a malformed block — a well-formedness violation (ADR-057 §4).
+/// Schema-invalid content is never a decode error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentDecodeError {
+    /// The block node that failed to decode.
+    pub block: NodeId,
+    /// Why the block failed to decode.
+    pub error: BlockDecodeError,
+}
+
+impl std::fmt::Display for DocumentDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid block {:?}: {}", self.block, self.error)
+    }
+}
+
+impl std::error::Error for DocumentDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Decode the element children of a container (`slot` or `body`) as blocks.
+///
+/// Non-element children are skipped; a malformed block is an error naming the
+/// offending block node.
+fn decode_blocks(
+    store: &NodeStore,
+    container: NodeId,
+) -> Result<im::Vector<Spanned<ContentElement>>, DocumentDecodeError> {
+    store
+        .children(container)
+        .into_iter()
+        .filter(|&id| matches!(store.get(id), Some(Node::Element(_))))
+        .map(|id| {
+            block_from_node(store, id)
+                .map(spanned)
+                .map_err(|error| DocumentDecodeError { block: id, error })
+        })
+        .collect()
+}
+
 /// Reconstruct a [`Document`] from the node store given its root node ID.
-pub fn store_to_document(store: &NodeStore, root: NodeId) -> Document {
+///
+/// Total for well-formed documents (ADR-057 §4). The document frame is
+/// decoded leniently: a missing `preamble` or `body` becomes an empty one and
+/// an unnamed slot gets an empty name (its blocks are still kept). Only a
+/// malformed block — a well-formedness violation — yields a
+/// [`DocumentDecodeError`]. Never panics.
+pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, DocumentDecodeError> {
     let has_separator = find_attr_bool(store, root, "has-separator").unwrap_or(false);
 
     // preamble
-    let preamble_node = find_child_by_name(store, root, "preamble")
-        .unwrap_or_else(|| panic!("document root missing 'preamble' child"));
-    let preamble: im::Vector<DocumentSlot> = children_by_name(store, preamble_node, "slot")
-        .iter()
-        .map(|&slot_id| {
-            let name_str = require_attr_text(store, slot_id, "name");
-            let elements: im::Vector<Spanned<ContentElement>> = store
-                .children(slot_id)
-                .iter()
-                .filter_map(|&elem_id| {
-                    content_element_from_node(store, elem_id).map(spanned)
+    let preamble = match find_child_by_name(store, root, "preamble") {
+        Some(preamble_node) => children_by_name(store, preamble_node, "slot")
+            .into_iter()
+            .map(|slot_id| {
+                let name_str = find_attr_text(store, slot_id, "name").unwrap_or_default();
+                Ok(DocumentSlot {
+                    name: SlotName::new(name_str),
+                    elements: decode_blocks(store, slot_id)?,
                 })
-                .collect();
-            DocumentSlot {
-                name: SlotName::new(name_str),
-                elements,
-            }
-        })
-        .collect();
+            })
+            .collect::<Result<im::Vector<DocumentSlot>, DocumentDecodeError>>()?,
+        None => im::Vector::new(),
+    };
 
     // body
-    let body_node = find_child_by_name(store, root, "body")
-        .unwrap_or_else(|| panic!("document root missing 'body' child"));
-    let body: im::Vector<Spanned<ContentElement>> = store
-        .children(body_node)
-        .iter()
-        .filter_map(|&elem_id| content_element_from_node(store, elem_id).map(spanned))
-        .collect();
+    let body = match find_child_by_name(store, root, "body") {
+        Some(body_node) => decode_blocks(store, body_node)?,
+        None => im::Vector::new(),
+    };
 
-    Document {
+    Ok(Document {
         preamble,
         body,
         has_separator,
         separator_span: None,
-    }
+    })
 }
 
 // ── serialize_from_store ──────────────────────────────────────────────────────
 
 /// Serialise a document subtree in the NodeStore back to markdown.
 ///
+/// Total for well-formed documents (ADR-057 §4): schema-invalid content
+/// (missing body, missing preamble, unnamed slots) still serialises; only a
+/// malformed block yields a [`DocumentDecodeError`].
+///
 /// Fixed-point under parse ∘ serialise — first save after edits may show a
 /// normalisation diff (whitespace/blank lines/comments), subsequent saves are
 /// stable.
-pub fn serialize_from_store(store: &NodeStore, root: NodeId) -> String {
-    content::serialize_document(&store_to_document(store, root))
+pub fn serialize_from_store(store: &NodeStore, root: NodeId) -> Result<String, DocumentDecodeError> {
+    store_to_document(store, root).map(|doc| content::serialize_document(&doc))
+}
+
+// ── ownership ─────────────────────────────────────────────────────────────────
+
+/// Structural owners of `id`: the sources of `Child` and `Attribute` edges
+/// targeting it, excluding semantic `Collection` lists.
+fn structural_owners(store: &NodeStore, id: NodeId) -> Vec<NodeId> {
+    store
+        .owners(id)
+        .into_iter()
+        .filter(|p| !matches!(store.get(*p), Some(Node::Collection)))
+        .collect()
+}
+
+/// Breadth-first walk over `id` and its structural ancestors, returning the
+/// first node satisfying `pred`.
+fn find_ancestor_or_self(
+    store: &NodeStore,
+    id: NodeId,
+    mut pred: impl FnMut(NodeId) -> bool,
+) -> Option<NodeId> {
+    let mut visited = std::collections::BTreeSet::new();
+    let mut queue = std::collections::VecDeque::from([id]);
+    while let Some(n) = queue.pop_front() {
+        if !visited.insert(n) {
+            continue;
+        }
+        if pred(n) {
+            return Some(n);
+        }
+        queue.extend(structural_owners(store, n));
+    }
+    None
+}
+
+/// The `document` element that owns `id`, walking reverse `Child` and
+/// `Attribute` edges. Returns `id` itself when it is a document root.
+pub fn owning_document(store: &NodeStore, id: NodeId) -> Option<NodeId> {
+    find_ancestor_or_self(store, id, |n| {
+        element_name_of(store, n).as_deref() == Some("document")
+    })
+}
+
+/// The block that owns `id`: the ancestor (or `id` itself) that is a direct
+/// child of a `body` or `slot` element.
+pub fn owning_block(store: &NodeStore, id: NodeId) -> Option<NodeId> {
+    find_ancestor_or_self(store, id, |n| {
+        store.parents(n).into_iter().any(|p| {
+            matches!(element_name_of(store, p).as_deref(), Some("body") | Some("slot"))
+        })
+    })
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -1062,7 +1144,7 @@ mod tests {
     fn round_trip(doc: &Document) -> Document {
         let mut store = NodeStore::new();
         let root = document_to_store(doc, &mut store, None);
-        store_to_document(&store, root)
+        store_to_document(&store, root).expect("store_to_document")
     }
 
     fn compare_elements(
@@ -1319,7 +1401,7 @@ mod tests {
         assert_eq!(find_attr_text(&store, root, "page-kind"), Some("item".to_string()));
 
         // Round-trip still works (meta attrs are ignored during reconstruction)
-        let recovered = store_to_document(&store, root);
+        let recovered = store_to_document(&store, root).unwrap();
         compare_documents(&doc, &recovered);
     }
 
@@ -1605,15 +1687,200 @@ mod tests {
         assert_eq!(doc_text_node, sem_text_node, "Expected title text to be the same NodeId in both doc and semantic-content");
     }
 
-    // ── guard: unknown element tag panics ────────────────────────────────────
+    // ── store_to_document decode errors ──────────────────────────────────────
+
+    fn stored_title_doc() -> (NodeStore, NodeId) {
+        let doc = make_doc_with_title_and_summary();
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        (store, root)
+    }
 
     #[test]
-    #[should_panic(expected = "unknown element tag")]
-    fn content_element_from_node_panics_on_unknown_tag() {
+    fn store_to_document_missing_body_serializes_preamble_only() {
+        let (mut store, root) = stored_title_doc();
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        store.remove_child_edge(root, body);
+
+        let doc = store_to_document(&store, root).expect("missing body must decode");
+        assert!(doc.body.is_empty());
+        assert_eq!(doc.preamble.len(), 2);
+
+        let mut expected = make_doc_with_title_and_summary();
+        expected.body = im::Vector::new();
+        let out = serialize_from_store(&store, root).expect("missing body must serialize");
+        assert_eq!(out, content::serialize_document(&expected));
+        assert!(out.contains("My Article"));
+        assert!(out.contains("A short summary."));
+        assert!(!out.contains("Body text goes here."));
+    }
+
+    #[test]
+    fn store_to_document_missing_preamble_serializes_body_only() {
+        let (mut store, root) = stored_title_doc();
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        store.remove_child_edge(root, preamble);
+
+        let doc = store_to_document(&store, root).expect("missing preamble must decode");
+        assert!(doc.preamble.is_empty());
+        assert_eq!(doc.body.len(), 1);
+
+        let mut expected = make_doc_with_title_and_summary();
+        expected.preamble = im::Vector::new();
+        let out = serialize_from_store(&store, root).expect("missing preamble must serialize");
+        assert_eq!(out, content::serialize_document(&expected));
+        assert!(out.contains("Body text goes here."));
+        assert!(!out.contains("My Article"));
+        assert!(!out.contains("A short summary."));
+    }
+
+    #[test]
+    fn store_to_document_non_numeric_heading_level_is_error() {
+        let (mut store, root) = stored_title_doc();
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        let slot = store.children(preamble)[0];
+        let heading = store.children(slot)[0];
+        let (_, level_value) = store
+            .attributes(heading)
+            .into_iter()
+            .find(|(n, _)| store.resolve_name(*n) == "level")
+            .unwrap();
+        store.replace_node(level_value, Node::Text("big".to_string()));
+        let err = store_to_document(&store, root).unwrap_err();
+        assert_eq!(err.block, heading);
+        assert!(matches!(err.error, BlockDecodeError::InvalidHeadingLevel(_)));
+    }
+
+    #[test]
+    fn store_to_document_unknown_tag_is_error() {
+        let (mut store, root) = stored_title_doc();
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let wibble = add_child_element(&mut store, body, "wibble");
+        let err = store_to_document(&store, root).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentDecodeError {
+                block: wibble,
+                error: BlockDecodeError::UnknownKind("wibble".to_string()),
+            }
+        );
+        assert_eq!(err.block, wibble);
+        assert!(err.to_string().contains("unknown element tag"));
+        assert!(std::error::Error::source(&err).is_some());
+        assert_eq!(serialize_from_store(&store, root), Err(err));
+    }
+
+    #[test]
+    fn store_to_document_unnamed_slot_still_serializes_its_blocks() {
+        let (mut store, root) = stored_title_doc();
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        let slot = add_child_element(&mut store, preamble, "slot");
+        let para = add_child_element(&mut store, slot, "paragraph");
+        add_child_text(&mut store, para, "Nameless slot text.");
+
+        let doc = store_to_document(&store, root).expect("unnamed slot must decode");
+        assert_eq!(doc.preamble.len(), 3);
+        let unnamed = &doc.preamble[2];
+        assert_eq!(unnamed.name.as_str(), "");
+        assert_eq!(unnamed.elements.len(), 1);
+
+        let out = serialize_from_store(&store, root).expect("unnamed slot must serialize");
+        assert!(out.contains("Nameless slot text."), "got: {out}");
+    }
+
+    #[test]
+    fn store_to_document_skips_non_element_children() {
+        let (mut store, root) = stored_title_doc();
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        add_child_text(&mut store, body, "stray text");
+        let doc = store_to_document(&store, root).unwrap();
+        assert_eq!(doc.body.len(), 1);
+    }
+
+    // ── ownership helpers ────────────────────────────────────────────────────
+
+    #[test]
+    fn owning_document_of_heading_level_value_is_document_root() {
+        let (store, root) = stored_title_doc();
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        let slot = store.children(preamble)[0];
+        let heading = store.children(slot)[0];
+        let (_, level_value) = store
+            .attributes(heading)
+            .into_iter()
+            .find(|(n, _)| store.resolve_name(*n) == "level")
+            .unwrap();
+        assert_eq!(owning_document(&store, level_value), Some(root));
+        assert_eq!(owning_document(&store, root), Some(root));
+        assert_eq!(owning_block(&store, level_value), Some(heading));
+    }
+
+    #[test]
+    fn owning_block_of_paragraph_text_is_paragraph() {
+        let (store, root) = stored_title_doc();
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let paragraph = store.children(body)[0];
+        let text = store.children(paragraph)[0];
+        assert_eq!(owning_block(&store, text), Some(paragraph));
+        assert_eq!(owning_block(&store, paragraph), Some(paragraph));
+        assert_eq!(owning_document(&store, text), Some(root));
+    }
+
+    #[test]
+    fn owning_helpers_ignore_semantic_collections() {
+        // Multi-value slot children also have a Collection parent on the
+        // semantic-content node; the walk must still reach the document.
+        let doc = Document {
+            preamble: im::vector![slot(
+                "summary",
+                vec![
+                    ContentElement::Paragraph { text: "One".to_string() },
+                    ContentElement::Paragraph { text: "Two".to_string() },
+                ]
+            )],
+            body: im::vector![],
+            has_separator: false,
+            separator_span: None,
+        };
+        let grammar = {
+            use schema::{BodyRules, Constraint, CountRange, Element as SchemaElement, Slot};
+            schema::Grammar {
+                preamble: vec![Slot {
+                    name: SlotName::new("summary"),
+                    element: SchemaElement::Paragraph,
+                    constraints: vec![Constraint::Occurs(CountRange::AtLeast(1))],
+                    hint_text: None,
+                    span: schema::Span { start: 0, end: 0 },
+                }],
+                body: Some(BodyRules { heading_range: None }),
+            }
+        };
+        let meta = DocumentMeta {
+            url: "/post/x".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/x.md".to_string(),
+            page_kind: "item".to_string(),
+        };
         let mut store = NodeStore::new();
-        let unknown_name = store.intern("wibble");
-        let node = store.add_node(Node::Element(unknown_name));
-        content_element_from_node(&store, node);
+        let root = document_to_store(&doc, &mut store, Some(&meta));
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        create_semantic_content(&mut store, root, &grammar, &meta, &empty_stems, &empty_urls, None);
+
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        let slot_id = store.children(preamble)[0];
+        let second = store.children(slot_id)[1];
+        let text = store.children(second)[0];
+        assert_eq!(owning_block(&store, text), Some(second));
+        assert_eq!(owning_document(&store, text), Some(root));
+    }
+
+    #[test]
+    fn owning_helpers_return_none_for_detached_node() {
+        let mut store = NodeStore::new();
+        let loose = store.add_node(Node::Text("loose".to_string()));
+        assert_eq!(owning_document(&store, loose), None);
+        assert_eq!(owning_block(&store, loose), None);
     }
 
     // ── block_from_node / tree_to_block / block_to_store ─────────────────────
@@ -1904,7 +2171,7 @@ mod tests {
         };
         let mut store = NodeStore::new();
         let root = document_to_store(&doc, &mut store, None);
-        let result = serialize_from_store(&store, root);
+        let result = serialize_from_store(&store, root).unwrap();
         assert!(!result.is_empty(), "expected non-empty output");
         assert!(result.contains("Hello"), "expected 'Hello' in serialized output: {result:?}");
     }
@@ -1925,12 +2192,12 @@ mod tests {
         let root = document_to_store(&doc, &mut store, None);
 
         // serialize_from_store produces the markdown
-        let serialized = serialize_from_store(&store, root);
+        let serialized = serialize_from_store(&store, root).unwrap();
         assert!(serialized.contains("Hello"), "serialized output should contain 'Hello'");
 
         // Re-parse by going through store_to_document (which is what serialize_from_store calls)
         // and check the reconstructed Document matches the original.
-        let reconstructed = store_to_document(&store, root);
+        let reconstructed = store_to_document(&store, root).unwrap();
         compare_documents(&doc, &reconstructed);
 
         // Additionally confirm the serialized text equals direct serialize_document output
@@ -1967,13 +2234,13 @@ mod tests {
         // First serialization: document → store → serialize
         let mut store = NodeStore::new();
         let root = document_to_store(&doc, &mut store, None);
-        let first = serialize_from_store(&store, root);
+        let first = serialize_from_store(&store, root).unwrap();
 
         // Second serialization: round-trip the doc through the store again (fixed-point check)
         let doc2 = round_trip(&doc);
         let mut store2 = NodeStore::new();
         let root2 = document_to_store(&doc2, &mut store2, None);
-        let second = serialize_from_store(&store2, root2);
+        let second = serialize_from_store(&store2, root2).unwrap();
 
         assert_eq!(first, second, "serialize_from_store should be fixed-point: first={first:?}, second={second:?}");
     }

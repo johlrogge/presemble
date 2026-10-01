@@ -257,7 +257,17 @@ fn round_trip_content(
     let body_elements = doc.body.len();
 
     let root = document_to_store(&doc, store, meta);
-    let reconstructed = store_to_document(store, root);
+    let reconstructed = match store_to_document(store, root) {
+        Ok(d) => d,
+        Err(e) => {
+            return ContentResult {
+                path: display,
+                preamble_slots,
+                body_elements,
+                diffs: vec![format!("decode error: {e}")],
+            };
+        }
+    };
 
     // Re-serialize both and compare text
     let original_serialized = serialize_document(&doc);
