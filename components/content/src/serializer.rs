@@ -245,6 +245,20 @@ headings
     }
 
     #[test]
+    fn parsed_code_block_serializes_back_to_source() {
+        let src = "```rust\nfn main() {}\n```\n";
+        let expected = src.strip_suffix('\n').unwrap();
+        let first = serialize_elements(
+            &crate::parser::parse_document(src).expect("parse failed").elements,
+        );
+        assert_eq!(first, expected);
+        let second = serialize_elements(
+            &crate::parser::parse_document(&first).expect("reparse failed").elements,
+        );
+        assert_eq!(second, first);
+    }
+
+    #[test]
     fn serialize_elements_separated_by_blank_lines() {
         let grammar = simple_grammar();
         let src = "# Title\n\nPara.\n\n----\n\n### Body\n";

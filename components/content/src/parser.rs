@@ -296,7 +296,14 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 state = State::CodeBlock { language, code: String::new(), byte_range: range };
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let State::CodeBlock { language, code, byte_range } = state {
+                if let State::CodeBlock { language, mut code, byte_range } = state {
+                    // Canonical `code` excludes the line terminator before the
+                    // closing fence; `serialize_element` re-adds it.
+                    if code.ends_with("\r\n") {
+                        code.truncate(code.len() - 2);
+                    } else if code.ends_with('\n') {
+                        code.truncate(code.len() - 1);
+                    }
                     elements.push_back(Spanned {
                         node: ContentElement::CodeBlock { language, code },
                         span: Span::from(byte_range),
@@ -874,6 +881,30 @@ Body paragraph."#;
         } else {
             panic!("expected CodeBlock");
         }
+    }
+
+    fn parse_single_code(content: &str) -> String {
+        let doc = super::parse_document(content).expect("parses");
+        assert_element_count(&doc, 1);
+        match &doc.elements[0].node {
+            ContentElement::CodeBlock { code, .. } => code.clone(),
+            other => panic!("expected CodeBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn code_block_excludes_line_terminator_before_closing_fence() {
+        assert_eq!(parse_single_code("```rust\nfn main() {}\n```\n"), "fn main() {}");
+    }
+
+    #[test]
+    fn code_block_keeps_inner_blank_line() {
+        assert_eq!(parse_single_code("```\na\n\n```\n"), "a\n");
+    }
+
+    #[test]
+    fn empty_code_block_has_empty_code() {
+        assert_eq!(parse_single_code("```\n```\n"), "");
     }
 
     #[test]
