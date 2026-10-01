@@ -2,6 +2,7 @@ use im::{HashMap, Vector};
 
 use crate::edge::Edge;
 use crate::interner::NameInterner;
+use crate::journal::TouchLog;
 use crate::node::{Name, Node, NodeId};
 
 /// An edge stored in the reverse index, paired with its source node.
@@ -19,11 +20,71 @@ pub struct NodeStore {
     edges_to: HashMap<NodeId, Vector<ReverseEdge>>,
     names: NameInterner,
     next_id: u64,
+    journal: Option<TouchLog>,
 }
 
 impl NodeStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    // --- Mutation journal ---
+
+    /// Start (or restart) recording mutations into a fresh [`TouchLog`].
+    pub fn start_journal(&mut self) {
+        self.journal = Some(TouchLog::default());
+    }
+
+    /// Stop recording and return the journal, or `None` if none was started.
+    pub fn take_journal(&mut self) -> Option<TouchLog> {
+        self.journal.take()
+    }
+
+    fn record_created(&mut self, id: NodeId) {
+        if let Some(j) = &mut self.journal {
+            j.created.insert(id);
+        }
+    }
+
+    /// Record `id` as touched unless it is already recorded as created or
+    /// removed (keeps the [`TouchLog`] sets disjoint).
+    fn record_touched(&mut self, id: NodeId) {
+        if let Some(j) = &mut self.journal
+            && !j.created.contains(&id)
+            && !j.removed.contains(&id)
+        {
+            j.touched.insert(id);
+        }
+    }
+
+    /// Record `id` as removed. A touched id moves to `removed`; an id created
+    /// within this journal drops out of the log entirely (net no change).
+    fn record_removed(&mut self, id: NodeId) {
+        if let Some(j) = &mut self.journal {
+            j.touched.remove(&id);
+            if j.created.remove(&id).is_none() {
+                j.removed.insert(id);
+            }
+        }
+    }
+
+    // --- Id allocation ---
+
+    /// The id the next `add_node` will allocate.
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Ensure ids allocated from now on are `>= floor`. Never lowers the counter.
+    pub fn set_id_floor(&mut self, floor: u64) {
+        self.next_id = self.next_id.max(floor);
+    }
+
+    /// Builder form of [`NodeStore::set_id_floor`], so a freshly loaded store
+    /// can continue numbering from a previous one.
+    pub fn with_id_floor(mut self, floor: u64) -> Self {
+        self.set_id_floor(floor);
+        self
     }
 
     // --- Name interning (delegate to interner) ---
@@ -42,6 +103,7 @@ impl NodeStore {
         let id = NodeId(self.next_id);
         self.next_id += 1;
         self.nodes.insert(id, node);
+        self.record_created(id);
         id
     }
 
@@ -49,8 +111,12 @@ impl NodeStore {
         self.nodes.get(&id)
     }
 
+    /// Remove `id` and every edge into or out of it.
+    /// With an active journal, every source of an edge into `id` (any edge
+    /// kind) is recorded as touched, since its outgoing edges change, and
+    /// `id` is recorded as removed if it existed.
     pub fn remove_node(&mut self, id: NodeId) {
-        self.nodes.remove(&id);
+        let existed = self.nodes.remove(&id).is_some();
 
         // Gather targets of forward edges so we can clean up reverse index entries.
         let targets: Vec<NodeId> = self
@@ -68,6 +134,7 @@ impl NodeStore {
                 if let Some(fwd) = self.edges_from.get_mut(&re.source) {
                     fwd.retain(|e| e.target() != id);
                 }
+                self.record_touched(re.source);
             }
         }
 
@@ -76,6 +143,11 @@ impl NodeStore {
             if let Some(rev) = self.edges_to.get_mut(&target) {
                 rev.retain(|re| re.source != id);
             }
+        }
+
+        // Recorded last so a self-edge's touched entry is superseded.
+        if existed {
+            self.record_removed(id);
         }
     }
 
@@ -93,11 +165,13 @@ impl NodeStore {
 
         // Forward index
         self.edges_from.entry(from).or_default().push_back(edge);
+        self.record_touched(from);
     }
 
     /// Replace all Reference edge targets matching `old_target` with `new_target`
     /// on edges FROM the given node.
     pub fn replace_reference_target(&mut self, from: NodeId, old_target: NodeId, new_target: NodeId) {
+        self.record_touched(from);
         if let Some(edges) = self.edges_from.get_mut(&from) {
             let mut new_edges = Vector::new();
             for edge in edges.iter() {
@@ -126,6 +200,7 @@ impl NodeStore {
     /// Replace all Child edge targets matching `old_target` with `new_target`
     /// on edges FROM the given node.
     pub fn replace_child_target(&mut self, from: NodeId, old_target: NodeId, new_target: NodeId) {
+        self.record_touched(from);
         if let Some(edges) = self.edges_from.get_mut(&from) {
             let mut new_edges = Vector::new();
             for edge in edges.iter() {
@@ -264,17 +339,44 @@ impl NodeStore {
             .unwrap_or_default()
     }
 
+    /// Nodes that own `id` structurally: sources of Child or Attribute edges
+    /// targeting it. Reference/ConsistsOf/Derived sources are not owners.
+    /// (Journal bookkeeping in [`NodeStore::remove_node`] does not use this:
+    /// it touches the sources of all incoming edges, owners or not.)
+    pub fn owners(&self, id: NodeId) -> Vec<NodeId> {
+        self.edges_to
+            .get(&id)
+            .map(|rev| {
+                rev.iter()
+                    .filter(|re| matches!(re.edge, Edge::Child(_) | Edge::Attribute { .. }))
+                    .map(|re| re.source)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     // --- Mutation helpers ---
 
     /// Replace the node value at `id`, preserving all edges.
     /// Returns the old node, or None if `id` doesn't exist.
+    /// With an active journal, an existing id is recorded as touched; an
+    /// absent id (which this call inserts) is recorded as created.
     pub fn replace_node(&mut self, id: NodeId, node: Node) -> Option<Node> {
-        self.nodes.insert(id, node)
+        let old = self.nodes.insert(id, node);
+        if old.is_some() {
+            self.record_touched(id);
+        } else {
+            // Keep add_node from ever re-issuing an id inserted here.
+            self.next_id = self.next_id.max(id.0 + 1);
+            self.record_created(id);
+        }
+        old
     }
 
     /// Remove the Child edge from `parent` to `child`.
     /// Updates both forward and reverse indexes.
     pub fn remove_child_edge(&mut self, parent: NodeId, child: NodeId) {
+        self.record_touched(parent);
         if let Some(fwd) = self.edges_from.get_mut(&parent)
             && let Some(pos) = fwd
                 .iter()
@@ -294,6 +396,7 @@ impl NodeStore {
     /// Insert a Child edge at `index` among the Child edges of `parent`.
     /// If index >= number of existing child edges, appends.
     pub fn insert_child_at(&mut self, parent: NodeId, index: usize, child: NodeId) {
+        self.record_touched(parent);
         let edge = Edge::Child(child);
         let rev = ReverseEdge {
             source: parent,
@@ -322,13 +425,56 @@ impl NodeStore {
         self.edges_to.entry(child).or_default().push_back(rev);
     }
 
-    /// Clear all nodes and edges, resetting the ID counter.
-    /// Preserves the name interner (interned names survive across rebuilds).
+    /// Clear all nodes and edges.
+    /// Preserves the name interner (interned names survive across rebuilds)
+    /// and the ID counter: ids are never reused, so ids allocated after a
+    /// clear are always greater than any id allocated before it.
+    /// With an active journal, every cleared node is recorded as removed
+    /// (nodes created within the journal drop out of the log instead).
     pub fn clear(&mut self) {
+        if self.journal.is_some() {
+            let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+            for id in ids {
+                self.record_removed(id);
+            }
+        }
         self.nodes = HashMap::new();
         self.edges_from = HashMap::new();
         self.edges_to = HashMap::new();
-        self.next_id = 0;
+    }
+
+    /// Remove every node not reachable from `roots` along any forward edge
+    /// (Child, Attribute, Reference, ConsistsOf, Derived).
+    /// Returns the number of nodes removed. Removal goes through
+    /// [`NodeStore::remove_node`], keeping both edge indexes consistent and
+    /// recording removals in an active journal.
+    pub fn sweep(&mut self, roots: impl IntoIterator<Item = NodeId>) -> usize {
+        let mut marked: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut stack: Vec<NodeId> = roots.into_iter().collect();
+        while let Some(id) = stack.pop() {
+            if !marked.insert(id) {
+                continue;
+            }
+            if let Some(edges) = self.edges_from.get(&id) {
+                stack.extend(
+                    edges
+                        .iter()
+                        .map(Edge::target)
+                        .filter(|t| !marked.contains(t)),
+                );
+            }
+        }
+
+        let unmarked: Vec<NodeId> = self
+            .nodes
+            .keys()
+            .copied()
+            .filter(|id| !marked.contains(id))
+            .collect();
+        for &id in &unmarked {
+            self.remove_node(id);
+        }
+        unmarked.len()
     }
 
     // --- Stats ---
@@ -379,6 +525,7 @@ impl NodeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::TouchLog;
     use crate::node::Node;
 
     #[test]
@@ -558,5 +705,392 @@ mod tests {
         store.insert_child_at(parent, 0, a);
 
         assert_eq!(store.children(parent), vec![a, b]);
+    }
+
+    // --- Journal ---
+
+    fn ids(set: &im::OrdSet<NodeId>) -> Vec<NodeId> {
+        set.iter().copied().collect()
+    }
+
+    #[test]
+    fn take_journal_is_none_without_start() {
+        let mut store = NodeStore::new();
+        let _ = store.add_node(Node::Text("x".to_string()));
+        assert_eq!(store.take_journal(), None);
+    }
+
+    #[test]
+    fn take_journal_ends_the_journal() {
+        let mut store = NodeStore::new();
+        store.start_journal();
+        assert_eq!(store.take_journal(), Some(TouchLog::default()));
+        assert_eq!(store.take_journal(), None);
+    }
+
+    #[test]
+    fn journal_add_node_records_created() {
+        let mut store = NodeStore::new();
+        store.start_journal();
+        let id = store.add_node(Node::Text("x".to_string()));
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.created), vec![id]);
+        assert!(log.touched.is_empty());
+        assert!(log.removed.is_empty());
+    }
+
+    #[test]
+    fn journal_remove_node_records_removed() {
+        let mut store = NodeStore::new();
+        let id = store.add_node(Node::Text("x".to_string()));
+        store.start_journal();
+        store.remove_node(id);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.removed), vec![id]);
+        assert!(log.created.is_empty());
+        assert!(log.touched.is_empty());
+    }
+
+    #[test]
+    fn journal_remove_node_records_parent_as_touched() {
+        let mut store = NodeStore::new();
+        let pn = store.intern("div");
+        let parent = store.add_node(Node::Element(pn));
+        let child = store.add_node(Node::Text("c".to_string()));
+        store.add_edge(parent, Edge::Child(child));
+        store.start_journal();
+        store.remove_node(child);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![parent]);
+    }
+
+    #[test]
+    fn journal_remove_node_records_attribute_owner_as_touched() {
+        let mut store = NodeStore::new();
+        let tag = store.intern("a");
+        let href = store.intern("href");
+        let owner = store.add_node(Node::Element(tag));
+        let value = store.add_node(Node::Text("/x".to_string()));
+        store.add_edge(owner, Edge::Attribute { name: href, value });
+        store.start_journal();
+        store.remove_node(value);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![owner]);
+    }
+
+    #[test]
+    fn journal_add_edge_records_source_touched() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        store.start_journal();
+        store.add_edge(a, Edge::Child(b));
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![a]);
+        assert!(log.created.is_empty());
+        assert!(log.removed.is_empty());
+    }
+
+    #[test]
+    fn journal_remove_child_edge_records_parent_touched() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        store.add_edge(a, Edge::Child(b));
+        store.start_journal();
+        store.remove_child_edge(a, b);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![a]);
+    }
+
+    #[test]
+    fn journal_insert_child_at_records_parent_touched() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        store.start_journal();
+        store.insert_child_at(a, 0, b);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![a]);
+    }
+
+    #[test]
+    fn journal_replace_reference_target_records_source_touched() {
+        let mut store = NodeStore::new();
+        let link = store.intern("link");
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        let c = store.add_node(Node::Text("c".to_string()));
+        store.add_edge(a, Edge::Reference { name: link, target: b });
+        store.start_journal();
+        store.replace_reference_target(a, b, c);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![a]);
+    }
+
+    #[test]
+    fn journal_replace_child_target_records_source_touched() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        let c = store.add_node(Node::Text("c".to_string()));
+        store.add_edge(a, Edge::Child(b));
+        store.start_journal();
+        store.replace_child_target(a, b, c);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![a]);
+    }
+
+    #[test]
+    fn journal_replace_node_records_touched() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        store.start_journal();
+        store.replace_node(a, Node::Text("A".to_string()));
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![a]);
+    }
+
+    #[test]
+    fn journal_clear_records_all_nodes_removed() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        store.start_journal();
+        store.clear();
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.removed), vec![a, b]);
+    }
+
+    #[test]
+    fn journal_remove_node_records_reference_source_as_touched() {
+        let mut store = NodeStore::new();
+        let link = store.intern("link");
+        let referrer = store.add_node(Node::Text("r".to_string()));
+        let target = store.add_node(Node::Text("t".to_string()));
+        store.add_edge(referrer, Edge::Reference { name: link, target });
+        store.start_journal();
+        store.remove_node(target);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![referrer]);
+        assert_eq!(ids(&log.removed), vec![target]);
+        assert_eq!(store.references(referrer), vec![]);
+    }
+
+    #[test]
+    fn journal_remove_absent_node_records_nothing() {
+        let mut store = NodeStore::new();
+        store.start_journal();
+        store.remove_node(NodeId(42));
+        let log = store.take_journal().unwrap();
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn journal_created_then_removed_is_in_no_set() {
+        let mut store = NodeStore::new();
+        store.start_journal();
+        let id = store.add_node(Node::Text("x".to_string()));
+        store.remove_node(id);
+        let log = store.take_journal().unwrap();
+        assert!(log.is_empty(), "expected empty log, got {log:?}");
+    }
+
+    #[test]
+    fn journal_created_then_edge_added_is_only_created() {
+        let mut store = NodeStore::new();
+        let b = store.add_node(Node::Text("b".to_string()));
+        store.start_journal();
+        let a = store.add_node(Node::Text("a".to_string()));
+        store.add_edge(a, Edge::Child(b));
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.created), vec![a]);
+        assert!(log.touched.is_empty());
+        assert!(log.removed.is_empty());
+    }
+
+    #[test]
+    fn journal_touched_then_removed_is_only_removed() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        store.start_journal();
+        store.replace_node(a, Node::Text("A".to_string()));
+        store.remove_node(a);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.removed), vec![a]);
+        assert!(log.touched.is_empty());
+        assert!(log.created.is_empty());
+    }
+
+    #[test]
+    fn journal_add_node_then_clear_is_in_no_set() {
+        let mut store = NodeStore::new();
+        store.start_journal();
+        let _id = store.add_node(Node::Text("x".to_string()));
+        store.clear();
+        let log = store.take_journal().unwrap();
+        assert!(log.is_empty(), "expected empty log, got {log:?}");
+    }
+
+    #[test]
+    fn journal_replace_node_on_absent_id_records_created() {
+        let mut store = NodeStore::new();
+        store.start_journal();
+        let id = NodeId(7);
+        let old = store.replace_node(id, Node::Text("new".to_string()));
+        assert_eq!(old, None);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.created), vec![id]);
+        assert!(log.touched.is_empty());
+        assert!(log.removed.is_empty());
+    }
+
+    #[test]
+    fn journal_on_clone_leaves_original_untouched() {
+        let mut store = NodeStore::new();
+        let a = store.add_node(Node::Text("a".to_string()));
+        store.start_journal();
+        let b = store.add_node(Node::Text("b".to_string()));
+
+        let mut clone = store.clone();
+        let c = clone.add_node(Node::Text("c".to_string()));
+        clone.replace_node(a, Node::Text("A".to_string()));
+
+        assert_eq!(store.node_count(), 2);
+        assert_eq!(store.get(a), Some(&Node::Text("a".to_string())));
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.created), vec![b]);
+        assert!(log.touched.is_empty());
+
+        let clone_log = clone.take_journal().unwrap();
+        assert_eq!(ids(&clone_log.created), vec![b, c]);
+        assert_eq!(ids(&clone_log.touched), vec![a]);
+    }
+
+    // --- Owners ---
+
+    #[test]
+    fn owners_lists_child_and_attribute_sources_only() {
+        let mut store = NodeStore::new();
+        let attr = store.intern("title");
+        let link = store.intern("link");
+        let parent = store.add_node(Node::Text("p".to_string()));
+        let attr_owner = store.add_node(Node::Text("o".to_string()));
+        let referrer = store.add_node(Node::Text("r".to_string()));
+        let target = store.add_node(Node::Text("t".to_string()));
+        store.add_edge(parent, Edge::Child(target));
+        store.add_edge(attr_owner, Edge::Attribute { name: attr, value: target });
+        store.add_edge(referrer, Edge::Reference { name: link, target });
+        let mut owners = store.owners(target);
+        owners.sort();
+        assert_eq!(owners, vec![parent, attr_owner]);
+    }
+
+    // --- Id allocation ---
+
+    #[test]
+    fn clear_does_not_reuse_ids() {
+        let mut store = NodeStore::new();
+        let first = store.add_node(Node::Text("a".to_string()));
+        store.clear();
+        let second = store.add_node(Node::Text("b".to_string()));
+        assert!(second > first);
+    }
+
+    #[test]
+    fn with_id_floor_is_respected() {
+        let mut store = NodeStore::new().with_id_floor(100);
+        assert_eq!(store.next_id(), 100);
+        let id = store.add_node(Node::Text("a".to_string()));
+        assert_eq!(id, NodeId(100));
+        assert_eq!(store.next_id(), 101);
+    }
+
+    #[test]
+    fn with_id_floor_never_lowers_next_id() {
+        let mut store = NodeStore::new();
+        for _ in 0..5 {
+            store.add_node(Node::Text("x".to_string()));
+        }
+        let store = store.with_id_floor(2);
+        assert_eq!(store.next_id(), 5);
+    }
+
+    #[test]
+    fn replace_node_on_absent_id_raises_next_id() {
+        let mut store = NodeStore::new();
+        let replaced = NodeId(store.next_id() + 10);
+        let old = store.replace_node(replaced, Node::Text("replaced".to_string()));
+        assert_eq!(old, None);
+
+        // Walk add_node past the replaced id; none may collide with it.
+        for _ in 0..=10 {
+            let added = store.add_node(Node::Text("added".to_string()));
+            assert_ne!(added, replaced);
+        }
+        assert_eq!(
+            store.get(replaced),
+            Some(&Node::Text("replaced".to_string()))
+        );
+    }
+
+    // --- Sweep ---
+
+    #[test]
+    fn sweep_keeps_reference_reachable_and_removes_orphans() {
+        let mut store = NodeStore::new();
+        let link = store.intern("link");
+        let root = store.add_node(Node::Text("root".to_string()));
+        let referenced = store.add_node(Node::Text("ref".to_string()));
+        let orphan = store.add_node(Node::Text("orphan".to_string()));
+        store.add_edge(root, Edge::Reference { name: link, target: referenced });
+
+        store.sweep([root]);
+
+        assert!(store.get(root).is_some());
+        assert!(store.get(referenced).is_some());
+        assert!(store.get(orphan).is_none());
+    }
+
+    #[test]
+    fn sweep_follows_all_edge_kinds() {
+        let mut store = NodeStore::new();
+        let n = store.intern("n");
+        let root = store.add_node(Node::Text("root".to_string()));
+        let child = store.add_node(Node::Text("child".to_string()));
+        let attr = store.add_node(Node::Text("attr".to_string()));
+        let part = store.add_node(Node::Text("part".to_string()));
+        let derived = store.add_node(Node::Text("derived".to_string()));
+        store.add_edge(root, Edge::Child(child));
+        store.add_edge(child, Edge::Attribute { name: n, value: attr });
+        store.add_edge(attr, Edge::ConsistsOf { name: n, part });
+        store.add_edge(part, Edge::Derived { name: n, target: derived });
+
+        let removed = store.sweep([root]);
+
+        assert_eq!(removed, 0);
+        assert_eq!(store.node_count(), 5);
+    }
+
+    #[test]
+    fn sweep_returns_count_and_keeps_reverse_index_consistent() {
+        let mut store = NodeStore::new();
+        let root = store.add_node(Node::Text("root".to_string()));
+        let kept = store.add_node(Node::Text("kept".to_string()));
+        let orphan_parent = store.add_node(Node::Text("op".to_string()));
+        let orphan_child = store.add_node(Node::Text("oc".to_string()));
+        store.add_edge(root, Edge::Child(kept));
+        // An unreachable node that also owns the kept node.
+        store.add_edge(orphan_parent, Edge::Child(kept));
+        store.add_edge(orphan_parent, Edge::Child(orphan_child));
+
+        let removed = store.sweep([root]);
+
+        assert_eq!(removed, 2);
+        assert_eq!(store.node_count(), 2);
+        assert_eq!(store.owners(kept), vec![root]);
+        assert_eq!(store.parents(kept), vec![root]);
+        assert_eq!(store.children(root), vec![kept]);
+        assert_eq!(store.edge_count(), 1);
     }
 }
