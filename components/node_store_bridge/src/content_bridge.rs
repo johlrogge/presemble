@@ -136,11 +136,6 @@ fn child_text(store: &NodeStore, parent: NodeId) -> Option<String> {
     })
 }
 
-fn require_child_text(store: &NodeStore, parent: NodeId, context: &str) -> String {
-    child_text(store, parent)
-        .unwrap_or_else(|| panic!("Missing child text node on {context}"))
-}
-
 fn add_child_element(store: &mut NodeStore, parent: NodeId, element_name: &str) -> NodeId {
     let name = store.intern(element_name);
     let child = store.add_node(Node::Element(name));
@@ -362,167 +357,387 @@ fn element_name_of(store: &NodeStore, id: NodeId) -> Option<String> {
     }
 }
 
-fn content_element_from_node(store: &NodeStore, node: NodeId) -> Option<ContentElement> {
-    let tag = element_name_of(store, node)?;
-    match tag.as_str() {
+/// Element names of single-text blocks: exactly one `Text` child carries the
+/// block's text (see `ContentElement::text`).
+pub const TEXT_BLOCK_KINDS: &[&str] = &[
+    "heading",
+    "paragraph",
+    "link",
+    "blockquote",
+    "list",
+    "code-block",
+    "raw-html",
+];
+
+/// Every block element name emitted by [`block_to_store`].
+pub const BLOCK_KINDS: &[&str] = &[
+    "heading",
+    "paragraph",
+    "image",
+    "link",
+    "separator",
+    "code-block",
+    "table",
+    "raw-html",
+    "blockquote",
+    "list",
+    "link-expression",
+];
+
+/// Block kinds accepted as a suggestion tree payload root:
+/// [`TEXT_BLOCK_KINDS`] plus `"image"`.
+pub const PAYLOAD_BLOCK_KINDS: &[&str] = &[
+    "heading",
+    "paragraph",
+    "link",
+    "blockquote",
+    "list",
+    "code-block",
+    "raw-html",
+    "image",
+];
+
+/// Why a node (or tree) could not be decoded into a [`ContentElement`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockDecodeError {
+    /// The node is missing or is not an `Element`.
+    NotAnElement,
+    /// The element name is not a known block kind.
+    UnknownKind(String),
+    /// A required attribute is absent or has the wrong node type.
+    MissingAttribute { kind: String, attr: String },
+    /// The heading `level` attribute is not an integer (or integer text) in 1..=6.
+    InvalidHeadingLevel(String),
+    /// A single-text block has no `Text` child.
+    MissingTextChild { kind: String },
+    /// A required structural child element is absent.
+    MissingChild { kind: String, child: String },
+    /// A child that must be `Text` is something else.
+    NonTextChild { kind: String },
+    /// An attribute holds an unrecognised value.
+    InvalidAttribute { kind: String, attr: String, value: String },
+    /// A tree payload contains `NodeTree::Existing`.
+    ExistingNode,
+    /// A tree payload root is not a payload block kind.
+    NotPayloadKind(String),
+    /// A single-text tree payload does not have exactly one `Text` child.
+    TextChildCount { kind: String, found: usize },
+}
+
+impl std::fmt::Display for BlockDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlockDecodeError::NotAnElement => write!(f, "block node is not an element"),
+            BlockDecodeError::UnknownKind(tag) => write!(
+                f,
+                "unknown element tag '{tag}' — was a ContentElement variant added \
+                 without updating the decoder?"
+            ),
+            BlockDecodeError::MissingAttribute { kind, attr } => {
+                write!(f, "{kind} missing required attribute '{attr}'")
+            }
+            BlockDecodeError::InvalidHeadingLevel(v) => {
+                write!(f, "invalid heading level {v} (expected 1..=6)")
+            }
+            BlockDecodeError::MissingTextChild { kind } => {
+                write!(f, "missing child text node on {kind}")
+            }
+            BlockDecodeError::MissingChild { kind, child } => {
+                write!(f, "{kind} missing '{child}' child")
+            }
+            BlockDecodeError::NonTextChild { kind } => {
+                write!(f, "{kind} child is not a Text node")
+            }
+            BlockDecodeError::InvalidAttribute { kind, attr, value } => {
+                write!(f, "{kind} has invalid '{attr}' value: {value}")
+            }
+            BlockDecodeError::ExistingNode => {
+                write!(f, "tree payload must not reference existing nodes")
+            }
+            BlockDecodeError::NotPayloadKind(name) => {
+                write!(f, "'{name}' is not an insertable block kind")
+            }
+            BlockDecodeError::TextChildCount { kind, found } => write!(
+                f,
+                "{kind} must have exactly one Text child, found {found} child(ren)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BlockDecodeError {}
+
+fn find_attr_node<'a>(store: &'a NodeStore, node: NodeId, attr_name: &str) -> Option<&'a Node> {
+    store
+        .attributes(node)
+        .into_iter()
+        .find(|(name, _)| store.resolve_name(*name) == attr_name)
+        .and_then(|(_, value_id)| store.get(value_id))
+}
+
+fn try_attr_text(
+    store: &NodeStore,
+    node: NodeId,
+    kind: &str,
+    attr: &str,
+) -> Result<String, BlockDecodeError> {
+    find_attr_text(store, node, attr).ok_or_else(|| BlockDecodeError::MissingAttribute {
+        kind: kind.to_string(),
+        attr: attr.to_string(),
+    })
+}
+
+fn try_child_text(store: &NodeStore, node: NodeId, kind: &str) -> Result<String, BlockDecodeError> {
+    child_text(store, node).ok_or_else(|| BlockDecodeError::MissingTextChild {
+        kind: kind.to_string(),
+    })
+}
+
+fn try_child_by_name(
+    store: &NodeStore,
+    node: NodeId,
+    kind: &str,
+    child: &str,
+) -> Result<NodeId, BlockDecodeError> {
+    find_child_by_name(store, node, child).ok_or_else(|| BlockDecodeError::MissingChild {
+        kind: kind.to_string(),
+        child: child.to_string(),
+    })
+}
+
+fn text_children(store: &NodeStore, node: NodeId, kind: &str) -> Result<Vec<String>, BlockDecodeError> {
+    store
+        .children(node)
+        .iter()
+        .map(|&cid| match store.get(cid) {
+            Some(Node::Text(s)) => Ok(s.clone()),
+            _ => Err(BlockDecodeError::NonTextChild { kind: kind.to_string() }),
+        })
+        .collect()
+}
+
+/// Heading `level`: `Node::Integer` or `Node::Text` parsing to 1..=6.
+fn heading_level(store: &NodeStore, node: NodeId) -> Result<HeadingLevel, BlockDecodeError> {
+    let raw: i64 = match find_attr_node(store, node, "level") {
+        Some(Node::Integer(n)) => *n,
+        Some(Node::Text(s)) => s
+            .parse()
+            .map_err(|_| BlockDecodeError::InvalidHeadingLevel(format!("{s:?}")))?,
+        Some(other) => {
+            return Err(BlockDecodeError::InvalidHeadingLevel(format!("{other:?}")));
+        }
+        None => {
+            return Err(BlockDecodeError::MissingAttribute {
+                kind: "heading".to_string(),
+                attr: "level".to_string(),
+            });
+        }
+    };
+    u8::try_from(raw)
+        .ok()
+        .and_then(HeadingLevel::new)
+        .ok_or_else(|| BlockDecodeError::InvalidHeadingLevel(raw.to_string()))
+}
+
+/// Decode a block element node into a [`ContentElement`].
+///
+/// Accepts every kind in [`BLOCK_KINDS`]; never panics on malformed input.
+pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, BlockDecodeError> {
+    let tag = element_name_of(store, id).ok_or(BlockDecodeError::NotAnElement)?;
+    let kind = tag.as_str();
+    match kind {
         "heading" => {
-            let level_int = find_attr_int(store, node, "level")
-                .unwrap_or_else(|| panic!("heading missing 'level' attribute"));
-            let level = HeadingLevel::new(level_int as u8)
-                .unwrap_or_else(|| panic!("invalid heading level {level_int}"));
-            let text = require_child_text(store, node, "heading");
-            Some(ContentElement::Heading { level, text })
+            let level = heading_level(store, id)?;
+            let text = try_child_text(store, id, kind)?;
+            Ok(ContentElement::Heading { level, text })
         }
-        "paragraph" => {
-            let text = require_child_text(store, node, "paragraph");
-            Some(ContentElement::Paragraph { text })
-        }
+        "paragraph" => Ok(ContentElement::Paragraph {
+            text: try_child_text(store, id, kind)?,
+        }),
         "image" => {
-            let path = require_attr_text(store, node, "path");
-            let alt = find_attr_text(store, node, "alt");
-            Some(ContentElement::Image { alt, path })
+            let path = try_attr_text(store, id, kind, "path")?;
+            let alt = find_attr_text(store, id, "alt");
+            Ok(ContentElement::Image { alt, path })
         }
         "link" => {
-            let text = require_child_text(store, node, "link");
-            let href = require_attr_text(store, node, "href");
-            Some(ContentElement::Link { text, href })
+            let text = try_child_text(store, id, kind)?;
+            let href = try_attr_text(store, id, kind, "href")?;
+            Ok(ContentElement::Link { text, href })
         }
-        "separator" => Some(ContentElement::Separator),
+        "separator" => Ok(ContentElement::Separator),
         "code-block" => {
-            let code = require_child_text(store, node, "code-block");
-            let language = find_attr_text(store, node, "language");
-            Some(ContentElement::CodeBlock { language, code })
+            let code = try_child_text(store, id, kind)?;
+            let language = find_attr_text(store, id, "language");
+            Ok(ContentElement::CodeBlock { language, code })
         }
         "table" => {
-            let headers_node = find_child_by_name(store, node, "headers")
-                .unwrap_or_else(|| panic!("table missing 'headers' child"));
-            let headers: Vec<String> = store
-                .children(headers_node)
+            let headers_node = try_child_by_name(store, id, kind, "headers")?;
+            let headers = text_children(store, headers_node, "table header")?;
+            let rows_node = try_child_by_name(store, id, kind, "rows")?;
+            let rows = children_by_name(store, rows_node, "row")
                 .iter()
-                .map(|&cid| {
-                    if let Some(Node::Text(s)) = store.get(cid) {
-                        s.clone()
-                    } else {
-                        panic!("table header child is not a Text node")
-                    }
-                })
-                .collect();
-
-            let rows_node = find_child_by_name(store, node, "rows")
-                .unwrap_or_else(|| panic!("table missing 'rows' child"));
-            let rows: Vec<Vec<String>> = children_by_name(store, rows_node, "row")
-                .iter()
-                .map(|&row_id| {
-                    store
-                        .children(row_id)
-                        .iter()
-                        .map(|&cid| {
-                            if let Some(Node::Text(s)) = store.get(cid) {
-                                s.clone()
-                            } else {
-                                panic!("table row cell is not a Text node")
-                            }
-                        })
-                        .collect()
-                })
-                .collect();
-
-            Some(ContentElement::Table { headers, rows })
+                .map(|&row_id| text_children(store, row_id, "table row"))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ContentElement::Table { headers, rows })
         }
-        "raw-html" => {
-            let html = require_child_text(store, node, "raw-html");
-            Some(ContentElement::RawHtml { html })
-        }
-        "blockquote" => {
-            let text = require_child_text(store, node, "blockquote");
-            Some(ContentElement::Blockquote { text })
-        }
-        "list" => {
-            let source = require_child_text(store, node, "list");
-            Some(ContentElement::List { source })
-        }
+        "raw-html" => Ok(ContentElement::RawHtml {
+            html: try_child_text(store, id, kind)?,
+        }),
+        "blockquote" => Ok(ContentElement::Blockquote {
+            text: try_child_text(store, id, kind)?,
+        }),
+        "list" => Ok(ContentElement::List {
+            source: try_child_text(store, id, kind)?,
+        }),
         "link-expression" => {
-            let text_node = find_child_by_name(store, node, "link-text")
-                .unwrap_or_else(|| panic!("link-expression missing 'link-text' child"));
-            let target_node = find_child_by_name(store, node, "link-target")
-                .unwrap_or_else(|| panic!("link-expression missing 'link-target' child"));
-
-            let text = link_text_from_node(store, text_node);
-            let target = link_target_from_node(store, target_node);
-            Some(ContentElement::LinkExpression { text, target })
+            let text_node = try_child_by_name(store, id, kind, "link-text")?;
+            let target_node = try_child_by_name(store, id, kind, "link-target")?;
+            let text = link_text_from_node(store, text_node)?;
+            let target = link_target_from_node(store, target_node)?;
+            Ok(ContentElement::LinkExpression { text, target })
         }
-        _ => panic!(
-            "content_element_from_node: unknown element tag '{tag}' — \
-             was a ContentElement variant added without updating the decoder?"
-        ),
+        _ => Err(BlockDecodeError::UnknownKind(tag)),
     }
 }
 
-fn link_text_from_node(store: &NodeStore, node: NodeId) -> LinkText {
-    let kind = require_attr_text(store, node, "kind");
-    match kind.as_str() {
-        "empty" => LinkText::Empty,
-        "static" => {
-            let value = require_attr_text(store, node, "value");
-            LinkText::Static(value)
-        }
-        "binding" => {
-            let value = require_attr_text(store, node, "value");
-            LinkText::Binding(value)
-        }
-        other => panic!("Unknown link-text kind: {other}"),
+/// Encode a [`ContentElement`] into `store` using the canonical block encoding.
+///
+/// The returned node is not linked to any parent.
+pub fn block_to_store(el: &ContentElement, store: &mut NodeStore) -> NodeId {
+    content_element_to_store(el, store)
+}
+
+fn tree_contains_existing(tree: &ned::NodeTree) -> bool {
+    match tree {
+        ned::NodeTree::Existing(_) => true,
+        ned::NodeTree::Text(_) => false,
+        ned::NodeTree::Element { children, .. } => children.iter().any(tree_contains_existing),
     }
 }
 
-fn link_target_from_node(store: &NodeStore, node: NodeId) -> LinkTarget {
-    let kind = require_attr_text(store, node, "kind");
+/// Decode a suggestion tree payload into a canonical block.
+///
+/// Rejects `NodeTree::Existing` anywhere in the tree, roots that are not
+/// [`PAYLOAD_BLOCK_KINDS`], and single-text kinds without exactly one `Text`
+/// child. The tree is materialised into a scratch store and decoded with
+/// [`block_from_node`].
+pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecodeError> {
+    if tree_contains_existing(tree) {
+        return Err(BlockDecodeError::ExistingNode);
+    }
+    let ned::NodeTree::Element { name, children, .. } = tree else {
+        return Err(BlockDecodeError::NotAnElement);
+    };
+    if !PAYLOAD_BLOCK_KINDS.contains(&name.as_str()) {
+        return Err(BlockDecodeError::NotPayloadKind(name.clone()));
+    }
+    if TEXT_BLOCK_KINDS.contains(&name.as_str())
+        && !matches!(children.as_slice(), [ned::NodeTree::Text(_)])
+    {
+        return Err(BlockDecodeError::TextChildCount {
+            kind: name.clone(),
+            found: children.len(),
+        });
+    }
+    let mut scratch = NodeStore::new();
+    let root = tree.clone().materialize(&mut scratch);
+    block_from_node(&scratch, root)
+}
+
+/// Legacy decoder for document reconstruction: `None` for non-element nodes,
+/// panics on malformed blocks (panics removed in Wave 1).
+fn content_element_from_node(store: &NodeStore, node: NodeId) -> Option<ContentElement> {
+    element_name_of(store, node)?;
+    match block_from_node(store, node) {
+        Ok(el) => Some(el),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+fn link_text_from_node(store: &NodeStore, node: NodeId) -> Result<LinkText, BlockDecodeError> {
+    const KIND: &str = "link-text";
+    let kind = try_attr_text(store, node, KIND, "kind")?;
     match kind.as_str() {
-        "path-ref" => {
-            let value = require_attr_text(store, node, "value");
-            LinkTarget::PathRef(value)
-        }
+        "empty" => Ok(LinkText::Empty),
+        "static" => Ok(LinkText::Static(try_attr_text(store, node, KIND, "value")?)),
+        "binding" => Ok(LinkText::Binding(try_attr_text(store, node, KIND, "value")?)),
+        other => Err(BlockDecodeError::InvalidAttribute {
+            kind: KIND.to_string(),
+            attr: "kind".to_string(),
+            value: other.to_string(),
+        }),
+    }
+}
+
+fn link_target_from_node(store: &NodeStore, node: NodeId) -> Result<LinkTarget, BlockDecodeError> {
+    const KIND: &str = "link-target";
+    let kind = try_attr_text(store, node, KIND, "kind")?;
+    match kind.as_str() {
+        "path-ref" => Ok(LinkTarget::PathRef(try_attr_text(store, node, KIND, "value")?)),
         "thread-expr" => {
-            let source = require_attr_text(store, node, "source");
-            let operations: Vec<LinkOp> = store
-                .children(node)
-                .iter()
-                .filter_map(|&child_id| link_op_from_node(store, child_id))
-                .collect();
-            LinkTarget::ThreadExpr { source, operations }
+            let source = try_attr_text(store, node, KIND, "source")?;
+            let mut operations: Vec<LinkOp> = Vec::new();
+            for child_id in store.children(node) {
+                if let Some(op) = link_op_from_node(store, child_id)? {
+                    operations.push(op);
+                }
+            }
+            Ok(LinkTarget::ThreadExpr { source, operations })
         }
-        other => panic!("Unknown link-target kind: {other}"),
+        other => Err(BlockDecodeError::InvalidAttribute {
+            kind: KIND.to_string(),
+            attr: "kind".to_string(),
+            value: other.to_string(),
+        }),
     }
 }
 
-fn link_op_from_node(store: &NodeStore, node: NodeId) -> Option<LinkOp> {
-    let tag = element_name_of(store, node)?;
-    match tag.as_str() {
+fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Option<LinkOp>, BlockDecodeError> {
+    let Some(tag) = element_name_of(store, node) else {
+        return Ok(None);
+    };
+    let kind = tag.as_str();
+    let op = match kind {
         "sort-by" => {
-            let field = require_attr_text(store, node, "field");
-            let descending = find_attr_bool(store, node, "descending")
-                .unwrap_or_else(|| panic!("sort-by missing 'descending' attribute"));
-            Some(LinkOp::SortBy { field, descending })
+            let field = try_attr_text(store, node, kind, "field")?;
+            let descending = find_attr_bool(store, node, "descending").ok_or_else(|| {
+                BlockDecodeError::MissingAttribute {
+                    kind: kind.to_string(),
+                    attr: "descending".to_string(),
+                }
+            })?;
+            LinkOp::SortBy { field, descending }
         }
         "take" => {
-            let value = find_attr_int(store, node, "value")
-                .unwrap_or_else(|| panic!("take missing 'value' attribute"));
-            Some(LinkOp::Take(value as usize))
+            let value = find_attr_int(store, node, "value").ok_or_else(|| {
+                BlockDecodeError::MissingAttribute {
+                    kind: kind.to_string(),
+                    attr: "value".to_string(),
+                }
+            })?;
+            let n = usize::try_from(value).map_err(|_| BlockDecodeError::InvalidAttribute {
+                kind: kind.to_string(),
+                attr: "value".to_string(),
+                value: value.to_string(),
+            })?;
+            LinkOp::Take(n)
         }
         "filter" => {
-            let field = require_attr_text(store, node, "field");
-            let value = require_attr_text(store, node, "value");
-            Some(LinkOp::Filter { field, value })
+            let field = try_attr_text(store, node, kind, "field")?;
+            let value = try_attr_text(store, node, kind, "value")?;
+            LinkOp::Filter { field, value }
         }
         "refs-to" => {
-            let target = require_attr_text(store, node, "target");
+            let target = try_attr_text(store, node, kind, "target")?;
             if target == "self" {
-                Some(LinkOp::RefsTo(RefsToTarget::SelfRef))
+                LinkOp::RefsTo(RefsToTarget::SelfRef)
             } else {
-                Some(LinkOp::RefsTo(RefsToTarget::Url(target)))
+                LinkOp::RefsTo(RefsToTarget::Url(target))
             }
         }
-        _ => None,
-    }
+        _ => return Ok(None),
+    };
+    Ok(Some(op))
 }
 
 // ── semantic content ─────────────────────────────────────────────────────────
@@ -1399,6 +1614,280 @@ mod tests {
         let unknown_name = store.intern("wibble");
         let node = store.add_node(Node::Element(unknown_name));
         content_element_from_node(&store, node);
+    }
+
+    // ── block_from_node / tree_to_block / block_to_store ─────────────────────
+
+    fn heading_node(store: &mut NodeStore, level: Option<Node>, text: Option<&str>) -> NodeId {
+        let node = make_element(store, "heading");
+        if let Some(level) = level {
+            let name = store.intern("level");
+            let value = store.add_node(level);
+            store.add_edge(node, Edge::Attribute { name, value });
+        }
+        if let Some(text) = text {
+            add_child_text(store, node, text);
+        }
+        node
+    }
+
+    fn h(level: u8, text: &str) -> ContentElement {
+        ContentElement::Heading {
+            level: HeadingLevel::new(level).unwrap(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn heading_level_integer_decodes() {
+        let mut store = NodeStore::new();
+        let id = heading_node(&mut store, Some(Node::Integer(2)), Some("Hi"));
+        assert_eq!(block_from_node(&store, id), Ok(h(2, "Hi")));
+    }
+
+    #[test]
+    fn heading_level_text_decodes() {
+        let mut store = NodeStore::new();
+        let id = heading_node(&mut store, Some(Node::Text("3".to_string())), Some("Hi"));
+        assert_eq!(block_from_node(&store, id), Ok(h(3, "Hi")));
+    }
+
+    #[test]
+    fn heading_level_text_nine_is_error() {
+        let mut store = NodeStore::new();
+        let id = heading_node(&mut store, Some(Node::Text("9".to_string())), Some("Hi"));
+        assert!(matches!(
+            block_from_node(&store, id),
+            Err(BlockDecodeError::InvalidHeadingLevel(_))
+        ));
+    }
+
+    #[test]
+    fn heading_level_integer_out_of_range_is_error() {
+        let mut store = NodeStore::new();
+        // 257 would wrap to 1 under a naive `as u8` cast.
+        let id = heading_node(&mut store, Some(Node::Integer(257)), Some("Hi"));
+        assert!(matches!(
+            block_from_node(&store, id),
+            Err(BlockDecodeError::InvalidHeadingLevel(_))
+        ));
+    }
+
+    #[test]
+    fn heading_level_text_non_numeric_is_error() {
+        let mut store = NodeStore::new();
+        let id = heading_node(&mut store, Some(Node::Text("x".to_string())), Some("Hi"));
+        assert!(matches!(
+            block_from_node(&store, id),
+            Err(BlockDecodeError::InvalidHeadingLevel(_))
+        ));
+    }
+
+    #[test]
+    fn heading_level_missing_is_error() {
+        let mut store = NodeStore::new();
+        let id = heading_node(&mut store, None, Some("Hi"));
+        let err = block_from_node(&store, id).unwrap_err();
+        assert_eq!(
+            err,
+            BlockDecodeError::MissingAttribute {
+                kind: "heading".to_string(),
+                attr: "level".to_string()
+            }
+        );
+        assert!(err.to_string().contains("level"));
+    }
+
+    #[test]
+    fn unknown_kind_is_error() {
+        let mut store = NodeStore::new();
+        let id = make_element(&mut store, "wibble");
+        let err = block_from_node(&store, id).unwrap_err();
+        assert_eq!(err, BlockDecodeError::UnknownKind("wibble".to_string()));
+        assert!(err.to_string().contains("unknown element tag"));
+    }
+
+    #[test]
+    fn non_element_is_error() {
+        let mut store = NodeStore::new();
+        let id = store.add_node(Node::Text("loose".to_string()));
+        assert_eq!(block_from_node(&store, id), Err(BlockDecodeError::NotAnElement));
+    }
+
+    #[test]
+    fn missing_text_child_is_error() {
+        let mut store = NodeStore::new();
+        let id = make_element(&mut store, "paragraph");
+        assert_eq!(
+            block_from_node(&store, id),
+            Err(BlockDecodeError::MissingTextChild {
+                kind: "paragraph".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn tree_to_block_decodes_heading_with_text_level() {
+        let tree = ned::NodeTree::element("heading")
+            .with_attr("level", "2")
+            .with_child(ned::NodeTree::text("Title"));
+        assert_eq!(tree_to_block(&tree), Ok(h(2, "Title")));
+    }
+
+    #[test]
+    fn tree_to_block_decodes_image() {
+        let tree = ned::NodeTree::element("image")
+            .with_attr("path", "/img/a.jpg")
+            .with_attr("alt", "A");
+        assert_eq!(
+            tree_to_block(&tree),
+            Ok(ContentElement::Image {
+                alt: Some("A".to_string()),
+                path: "/img/a.jpg".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn tree_to_block_rejects_existing() {
+        let mut store = NodeStore::new();
+        let existing = store.add_node(Node::Text("x".to_string()));
+        let root = ned::NodeTree::Existing(existing);
+        assert_eq!(tree_to_block(&root), Err(BlockDecodeError::ExistingNode));
+        let nested =
+            ned::NodeTree::element("paragraph").with_child(ned::NodeTree::Existing(existing));
+        assert_eq!(tree_to_block(&nested), Err(BlockDecodeError::ExistingNode));
+    }
+
+    #[test]
+    fn tree_to_block_rejects_separator() {
+        let tree = ned::NodeTree::element("separator");
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind("separator".to_string()))
+        );
+    }
+
+    #[test]
+    fn tree_to_block_rejects_table() {
+        let tree = ned::NodeTree::element("table")
+            .with_child(ned::NodeTree::element("headers"))
+            .with_child(ned::NodeTree::element("rows"));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind("table".to_string()))
+        );
+    }
+
+    #[test]
+    fn tree_to_block_rejects_text_kind_with_two_children() {
+        let tree = ned::NodeTree::element("paragraph")
+            .with_child(ned::NodeTree::text("a"))
+            .with_child(ned::NodeTree::text("b"));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::TextChildCount {
+                kind: "paragraph".to_string(),
+                found: 2
+            })
+        );
+    }
+
+    #[test]
+    fn tree_to_block_rejects_text_kind_with_element_child() {
+        let tree = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::element("span"));
+        assert!(matches!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::TextChildCount { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_encode_decode_is_stable() {
+        let elements = vec![
+            h(2, "Section"),
+            ContentElement::Paragraph { text: "Para".to_string() },
+            ContentElement::Image { alt: None, path: "/i.jpg".to_string() },
+            ContentElement::Link { text: "L".to_string(), href: "/l".to_string() },
+            ContentElement::Separator,
+            ContentElement::CodeBlock { language: Some("rust".to_string()), code: "x()".to_string() },
+            ContentElement::Table {
+                headers: vec!["A".to_string()],
+                rows: vec![vec!["1".to_string()]],
+            },
+            ContentElement::RawHtml { html: "<b>x</b>".to_string() },
+            ContentElement::Blockquote { text: "Q".to_string() },
+            ContentElement::List { source: "- a".to_string() },
+            ContentElement::LinkExpression {
+                text: LinkText::Binding("posts".to_string()),
+                target: LinkTarget::ThreadExpr {
+                    source: "post".to_string(),
+                    operations: vec![LinkOp::Take(3)],
+                },
+            },
+        ];
+        for el in elements {
+            let mut store = NodeStore::new();
+            let first_id = block_to_store(&el, &mut store);
+            let first = block_from_node(&store, first_id).expect("first decode");
+            let second_id = block_to_store(&first, &mut store);
+            let second = block_from_node(&store, second_id).expect("second decode");
+            assert_eq!(first, el);
+            assert_eq!(second, first);
+        }
+
+        // Also from a text-level heading tree (non-canonical level encoding).
+        let tree = ned::NodeTree::element("heading")
+            .with_attr("level", "4")
+            .with_child(ned::NodeTree::text("T"));
+        let decoded = tree_to_block(&tree).unwrap();
+        let mut store = NodeStore::new();
+        let id = block_to_store(&decoded, &mut store);
+        assert_eq!(block_from_node(&store, id), Ok(decoded));
+    }
+
+    #[test]
+    fn block_kinds_match_encoder_output() {
+        let samples = [
+            h(1, "x"),
+            ContentElement::Paragraph { text: "x".to_string() },
+            ContentElement::Image { alt: None, path: "p".to_string() },
+            ContentElement::Link { text: "x".to_string(), href: "h".to_string() },
+            ContentElement::Separator,
+            ContentElement::CodeBlock { language: None, code: "c".to_string() },
+            ContentElement::Table { headers: vec![], rows: vec![] },
+            ContentElement::RawHtml { html: "h".to_string() },
+            ContentElement::Blockquote { text: "q".to_string() },
+            ContentElement::List { source: "- a".to_string() },
+            ContentElement::LinkExpression {
+                text: LinkText::Empty,
+                target: LinkTarget::PathRef("p".to_string()),
+            },
+        ];
+        let mut store = NodeStore::new();
+        let emitted: Vec<String> = samples
+            .iter()
+            .map(|el| {
+                let id = block_to_store(el, &mut store);
+                element_name_of(&store, id).unwrap()
+            })
+            .collect();
+        assert_eq!(emitted, BLOCK_KINDS);
+
+        let mut text_kinds: Vec<&str> = samples
+            .iter()
+            .zip(&emitted)
+            .filter(|(el, _)| el.text().is_some())
+            .map(|(_, name)| name.as_str())
+            .collect();
+        let mut expected_text = TEXT_BLOCK_KINDS.to_vec();
+        text_kinds.sort_unstable();
+        expected_text.sort_unstable();
+        assert_eq!(text_kinds, expected_text);
+
+        let mut payload = TEXT_BLOCK_KINDS.to_vec();
+        payload.push("image");
+        assert_eq!(payload, PAYLOAD_BLOCK_KINDS);
     }
 
     // ── serialize_from_store tests ───────────────────────────────────────────

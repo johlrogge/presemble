@@ -11,7 +11,11 @@ pub mod slot_edit;
 
 pub use body_fragment::ingest_body_fragment;
 pub use schema_document::synthesize_schema_document;
-pub use content_bridge::{DocumentMeta, presemble_file_for_root, serialize_from_store};
+pub use content_bridge::{
+    BLOCK_KINDS, BlockDecodeError, DocumentMeta, PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS,
+    block_from_node, block_to_store, presemble_file_for_root, serialize_from_store,
+    tree_to_block,
+};
 pub use value_bridge::{node_to_value, value_to_node};
 pub use graph_view_impl::{LayeredGraphView, MultiRootView, NodeStoreView, PrefixedGraphView};
 pub use slot_edit::modify_slot_in_store;

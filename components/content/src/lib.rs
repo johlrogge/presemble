@@ -1,4 +1,5 @@
 mod adapters;
+mod block;
 mod diff;
 mod document;
 mod error;
@@ -13,6 +14,7 @@ pub use adapters::{
     diff_to_dom_patches, diff_to_source_edits, DomPatch, FileWriter, FullDocumentWriter,
     SourceEdit,
 };
+pub use block::{check_block_round_trip, RoundTripError};
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{ContentElement, Document, DocumentSlot, FlatDocument, LinkOp, LinkTarget, LinkText, RefsToTarget};
 pub use error::ContentError;

@@ -1636,6 +1636,7 @@ version = "0.35.0"
 dependencies = [
  "content",
  "im",
+ "ned",
  "node_store",
  "schema",
  "template",
