@@ -9,6 +9,7 @@ PROFILE="${1:-dev}"
 PORT=3000
 SITE_DIR=""
 COOKIE_JAR=""
+WS_ERR=""
 PID=""
 PASS=0
 FAIL=0
@@ -32,6 +33,7 @@ cleanup() {
         rm -rf "$SITE_DIR"
     fi
     [ -n "$COOKIE_JAR" ] && rm -f "$COOKIE_JAR"
+    [ -n "$WS_ERR" ] && rm -f "$WS_ERR"
     # Clean up nrepl port file
     rm -f "$(dirname "${SITE_DIR:-/tmp/x}")/.nrepl-port" 2>/dev/null || true
 }
@@ -80,6 +82,22 @@ for js_file in "${BROWSER_JS_FILES[@]}"; do
         JS_CHECK_FAILED=1
     else
         pass "deno check $js_file"
+    fi
+done
+
+# Deno smoke tools (run later against the live server) — kept apart from the
+# browser resources above.
+DENO_TOOL_FILES=(
+    "tools/ws-smoke.ts"
+)
+
+for ts_file in "${DENO_TOOL_FILES[@]}"; do
+    if deno check "$ts_file" 2>&1 | tee /tmp/presemble-deno-check.log | grep -qE '^(error|TS[0-9]+)'; then
+        fail "deno check $ts_file"
+        cat /tmp/presemble-deno-check.log
+        JS_CHECK_FAILED=1
+    else
+        pass "deno check $ts_file"
     fi
 done
 
@@ -257,6 +275,10 @@ log "Logged in (dev session)"
 log "Testing auth boundary..."
 assert_status_anon "editorial POST without session is 401" POST "/_presemble/edit" "401" \
     '{"file":"content/index.md","slot":"tagline","value":"x"}'
+ANON_BODY=$(curl -s -X POST "http://127.0.0.1:$PORT/_presemble/edit" -H 'Content-Type: application/json' \
+    -d '{"file":"content/index.md","slot":"tagline","value":"x"}' 2>&1 || true)
+assert_contains "anonymous 401 explains not logged in" "$ANON_BODY" "Not logged in"
+assert_not_contains "anonymous 401 (dev session on) does not suggest --dev-session" "$ANON_BODY" "--dev-session"
 assert_status_anon "schema URL without session is 401" GET "/_schema/index" "401"
 assert_status_anon "login with bogus token is 401" GET "/_presemble/login?token=bogus.token" "401"
 assert_status_anon "published page without session is 200" GET "/" "200"
@@ -476,6 +498,34 @@ assert_contains "legacy accept WrongKind expects Text" "$LIST" '"expected":"Text
 assert_curl "legacy accept did not change title" "/post/hello-world" GET "" "Accepted Smoke Title"
 assert_curl_not_contains "legacy title not applied" "/post/hello-world" "Legacy Title"
 
+# ── Test: WebSocket broadcasts (tools/ws-smoke.ts) ────────────────────────
+# Runs after E: ws-smoke.ts targets the "Smoke body edit via bsave." paragraph
+# written in D. It prints PASS/FAIL lines and a final DONE on stdout.
+
+log "Testing WebSocket broadcasts..."
+# curl writes HttpOnly cookies as "#HttpOnly_<domain>", so '#' lines must NOT
+# be filtered out here.
+C=$(awk '$6=="presemble_session"{print $7}' "$COOKIE_JAR")
+WS_ERR=$(mktemp /tmp/presemble-smoke-wserr-XXXXXX)
+WS_RC=0
+WS_OUT=$(PRESEMBLE_SMOKE_BASE="http://127.0.0.1:$PORT" PRESEMBLE_SMOKE_COOKIE="$C" deno run --no-prompt --allow-net=127.0.0.1:$PORT --allow-env=PRESEMBLE_SMOKE_BASE,PRESEMBLE_SMOKE_COOKIE tools/ws-smoke.ts 2>"$WS_ERR") || WS_RC=$?
+WS_DONE=0
+WS_FAILS=0
+while IFS= read -r line; do
+    case "$line" in
+        "PASS "*) pass "${line#PASS }" ;;
+        "FAIL "*) fail "${line#FAIL }"; WS_FAILS=$((WS_FAILS + 1)) ;;
+        DONE) WS_DONE=1 ;;
+    esac
+done <<< "$WS_OUT"
+if [ "$WS_DONE" -eq 0 ]; then
+    fail "ws-smoke.ts did not print DONE (exit $WS_RC)"
+    cat "$WS_ERR"
+elif [ "$WS_RC" -ne 0 ] && [ "$WS_FAILS" -eq 0 ]; then
+    fail "ws-smoke.ts exited $WS_RC without reporting a FAIL"
+    cat "$WS_ERR"
+fi
+
 # ── Test: Structure mode rendering via render endpoint ────────────────────
 
 log "Testing schema render endpoint..."
@@ -578,6 +628,73 @@ fi
 log "Testing duplicate prevention..."
 assert_curl "duplicate author rejected" "/_presemble/create-content" POST '{"stem":"author","slug":"alice"}' "already exists"
 assert_curl "duplicate post rejected" "/_presemble/create-content" POST '{"stem":"post","slug":"first-post"}' "already exists"
+
+# ── Test: Closed editorial plane ──────────────────────────────────────────
+# MUST stay the last section: it restarts serve on the same port with no
+# --dev-session and no PRESEMBLE_SESSION_KEY, so editing is disabled. The
+# conductor daemon is reused.
+
+log "Restarting serve with editing disabled (closed editorial plane)..."
+kill "$PID" 2>/dev/null || true
+wait "$PID" 2>/dev/null || true
+pkill -f "presemble serve $SITE_DIR" 2>/dev/null || true
+for i in $(seq 1 20); do
+    if ! curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
+        break
+    fi
+    sleep 0.5
+done
+
+# Prints the response (body, or headers+body with -D -) followed by a final
+# line holding the HTTP status. Split with ${R##*$'\n'} / ${R%$'\n'*}.
+http_with_status() { curl -s -w '\n%{http_code}' "$@" 2>&1 || true; }
+
+if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
+    fail "closed: port $PORT still in use 10s after stopping serve"
+else
+    env -u PRESEMBLE_SESSION_KEY cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" > "$SITE_DIR/serve-closed.log" 2>&1 &
+    PID=$!
+
+    for i in $(seq 1 30); do
+        if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    if ! curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
+        fail "closed: server failed to restart without a session store"
+        cat "$SITE_DIR/serve-closed.log"
+    else
+        log "Server ready on port $PORT (editing disabled)"
+        CLOSED_LOG=$(cat "$SITE_DIR/serve-closed.log")
+        assert_contains "closed: banner says editing disabled" "$CLOSED_LOG" "Session store: none (editing disabled)"
+        assert_not_contains "closed: no Login URL printed" "$CLOSED_LOG" "Login URL:"
+
+        assert_status_anon "closed: published page still 200" GET "/post/hello-world" "200"
+
+        EDIT_JSON='{"file":"content/index.md","slot":"tagline","value":"x"}'
+        R=$(http_with_status -X POST "http://127.0.0.1:$PORT/_presemble/edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")
+        S="${R##*$'\n'}"; B="${R%$'\n'*}"
+        if [ "$S" = "401" ]; then pass "closed: anonymous edit is 401"; else fail "closed: anonymous edit is 401 (got $S: $B)"; fi
+        assert_contains "closed: anonymous edit says editing is disabled" "$B" "Editing is disabled"
+
+        R=$(http_with_status -b "$COOKIE_JAR" -X POST "http://127.0.0.1:$PORT/_presemble/edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")
+        S="${R##*$'\n'}"; B="${R%$'\n'*}"
+        if [ "$S" = "401" ]; then pass "closed: old dev cookie edit is 401"; else fail "closed: old dev cookie edit is 401 (got $S: $B)"; fi
+        assert_contains "closed: old dev cookie edit says editing is disabled" "$B" "Editing is disabled"
+
+        R=$(http_with_status -D - "http://127.0.0.1:$PORT/_presemble/login?token=bogus")
+        S="${R##*$'\n'}"; B="${R%$'\n'*}"
+        if [ "$S" = "401" ]; then pass "closed: login is 401"; else fail "closed: login is 401 (got $S: $B)"; fi
+        assert_contains "closed: login says editing is disabled" "$B" "Editing is disabled"
+        if grep -qi '^set-cookie:' <<< "$B"; then
+            fail "closed: login sets no cookie (got: $B)"
+        else
+            pass "closed: login sets no cookie"
+        fi
+    fi
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────
 

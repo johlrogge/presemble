@@ -1239,7 +1239,11 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state.reload_tx.subscribe()))
+    // Subscribe before the 101 response goes out: subscribing inside the
+    // upgrade callback would lose broadcasts sent between the handshake and
+    // the callback running. Public route (ADR-054/055) — no `Session`.
+    let rx = state.reload_tx.subscribe();
+    ws.on_upgrade(move |socket| handle_ws(socket, rx))
 }
 
 /// Public login hand-off — always mounted at `GET /_presemble/login`.
@@ -3507,6 +3511,72 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
             "/_presemble/ws without cookie must not return 401");
+    }
+
+    // (g) The live-reload receiver is subscribed BEFORE the 101 response is
+    // sent, so a broadcast fired the moment the client sees the handshake
+    // complete is delivered (no lost-message window). Anonymous on purpose:
+    // the route is public (ADR-054/055).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_subscribes_before_upgrade_response() {
+        use std::io::{Read, Write};
+
+        let (client, _tmp) = start_test_conductor();
+        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
+        let state = AppState {
+            output_dir: _tmp.path().join("output"),
+            reload_tx: reload_tx.clone(),
+            site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
+            conductor: Arc::new(client),
+            session_store: Arc::new(accounts::DevSessionStore::with_key(TEST_SESSION_KEY))
+                as Arc<dyn SessionStore>,
+        };
+        let app = Router::new()
+            .route("/_presemble/ws", get(ws_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (head, receivers_at_101, frame) = tokio::task::spawn_blocking(move || {
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            write!(
+                s,
+                "GET /_presemble/ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
+                 Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 Sec-WebSocket-Version: 13\r\n\r\n"
+            )
+            .unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            // Sample immediately: no sleep, no retry.
+            let receivers = reload_tx.receiver_count();
+            let _ = reload_tx.send(BrowserMessage::Resync);
+            let frame = (|| -> std::io::Result<Vec<u8>> {
+                let mut hdr = [0u8; 2];
+                s.read_exact(&mut hdr)?;
+                let mut payload = vec![0u8; (hdr[1] & 0x7f) as usize];
+                s.read_exact(&mut payload)?;
+                Ok(payload)
+            })();
+            (String::from_utf8_lossy(&head).into_owned(), receivers, frame)
+        })
+        .await
+        .unwrap();
+        server.abort();
+
+        assert!(head.starts_with("HTTP/1.1 101"), "expected 101 upgrade, got: {head}");
+        assert_eq!(receivers_at_101, 1,
+            "ws_handler must subscribe before the 101 response is sent");
+        let payload = frame.expect("broadcast sent right after the handshake must arrive");
+        assert_eq!(String::from_utf8_lossy(&payload), r#"{"type":"resync"}"#);
     }
 
     // ── V1 auth hand-off integration tests ──────────────────────────────────
