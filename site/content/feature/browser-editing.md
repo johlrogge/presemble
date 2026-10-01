@@ -2,7 +2,7 @@
 
 Edit content directly in the browser — no editor required.
 
-`presemble serve` turns the browser into a live editing environment. Click any body element to open an inline textarea. Fill in missing slots from a suggestion node. Accept or reject editorial suggestions with a toolbar button. Create new content pages with the "+" button — without touching the filesystem directly.
+`presemble serve --dev-session` turns the browser into a live editing environment (open the printed Login URL; without the flag the server is preview-only and the editor says "Editing is disabled"). Click any body element to open an inline textarea. Fill in missing slots from a suggestion node. Accept or reject editorial suggestions with a toolbar button. Create new content pages with the "+" button — without touching the filesystem directly.
 
 ----
 

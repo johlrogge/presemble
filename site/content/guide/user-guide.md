@@ -509,9 +509,10 @@ Scaffolds a hello-world site with a `note` schema, one content file, matching te
 
 ```
 presemble serve <site-dir>
+presemble serve <site-dir> --dev-session
 ```
 
-Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors are reported to the terminal on every rebuild.
+Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors are reported to the terminal on every rebuild. Plain `presemble serve` is preview-only. To edit in the browser (Edit and Suggest modes, creating content, the site wizard), start the server with `--dev-session` and open the Login URL it prints. Without the flag the editor shows "Editing is disabled on this server. Restart presemble serve with --dev-session to enable it."
 
 ### Live reload
 
@@ -521,7 +522,7 @@ When a file changes and the rebuild completes, the browser reloads automatically
 
 In serve mode, missing or invalid content slots render as inline suggestion nodes instead of error pages. Each suggestion node is derived from the schema: it shows the slot's hint text and indicates what is expected. The page is always browsable — a content file with no fields renders as a fully scaffolded guide. Suggestion nodes never appear in a published build; `presemble build` still fails on missing required slots.
 
-Suggestion nodes are interactive: clicking one in the browser opens an inline editing form for that slot. This is Phase A of the browser editing feature (M5). The suggestion UI has dedicated CSS polish to distinguish editing state from normal content.
+When the server runs with `--dev-session`, suggestion nodes are interactive: clicking one in the browser opens an inline editing form for that slot. This is Phase A of the browser editing feature (M5). The suggestion UI has dedicated CSS polish to distinguish editing state from normal content.
 
 ### Mascot overlay
 
@@ -533,7 +534,7 @@ The serve UI includes a mascot overlay in the corner of every served page. It in
 | All clear | Thumbs up | No suggestions — all slots are filled |
 | Edit mode | Pencil | Inline editing is active |
 
-Clicking the mascot opens a popover menu with three mode options: View, Edit, and Suggest.
+Clicking the mascot opens a popover menu with three mode options: View, Edit, and Suggest. Edit and Suggest require `presemble serve <site-dir> --dev-session`; open the Login URL it prints to sign in.
 
 ### Inline body editing
 
@@ -557,7 +558,7 @@ Suggestions are expressed as NED mutations via `CreateNedSuggestion`. Each sugge
 
 ### Creating new content from the browser
 
-The "+" button in the serve toolbar opens a form to create a new content file. Select a content type, enter a slug, and submit. The conductor scaffolds the file and the browser navigates to the new page immediately, with all required slots present as suggestion nodes.
+With `--dev-session` and a signed-in browser, the "+" button in the serve toolbar opens a form to create a new content file. Select a content type, enter a slug, and submit. The conductor scaffolds the file and the browser navigates to the new page immediately, with all required slots present as suggestion nodes.
 
 ### Dirty buffer tracking
 
@@ -887,7 +888,7 @@ Opens a full-screen terminal REPL with three panels: output history, a doc panel
 
 ## Site wizard
 
-Point `presemble serve` at an empty directory and the browser opens a guided setup wizard. Six steps take you from zero to a fully styled, working site.
+Run `presemble serve <dir> --dev-session` on an empty directory and open the Login URL it prints to start the guided setup wizard. Without `--dev-session` the wizard shows "Editing is disabled on this server." Six steps take you from zero to a fully styled, working site.
 
 ### Steps
 
@@ -922,6 +923,6 @@ Every starter includes shared navigation via `presemble:include` and breadcrumb 
 
 ### After scaffolding
 
-The wizard writes files to disk and the file watcher picks them up immediately. Edit content files, see changes in the browser, use the LSP for completions and diagnostics. The normal serve workflow applies from the first page load.
+The wizard writes files to disk and the file watcher picks them up immediately. Edit content files, see changes in the browser, use the LSP for completions and diagnostics. The normal serve workflow applies from the first page load; keep `--dev-session` on to keep editing in the browser.
 
 `presemble init <dir>` is still available for scripted setups — it produces a minimal hello-world `note` site without the browser wizard.

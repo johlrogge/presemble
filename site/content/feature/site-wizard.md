@@ -10,10 +10,10 @@ Point `presemble serve` at an empty directory and the browser opens a guided set
 
 ```
 mkdir my-site
-presemble serve my-site/
+presemble serve my-site/ --dev-session
 ```
 
-If `my-site/` contains no Presemble files, the server serves the wizard instead of an error page.
+If `my-site/` contains no Presemble files, the server serves the wizard instead of an error page. Open the printed Login URL to use it; without `--dev-session` the server is preview-only and the wizard says "Editing is disabled".
 
 ### Six-step wizard
 

@@ -14,14 +14,14 @@ cargo install --path projects/publisher
 
 ## Start with the site wizard
 
-The fastest way to start is to point `presemble serve` at an empty directory:
+The fastest way to start is to point `presemble serve --dev-session` at an empty directory and open the printed Login URL:
 
 ```
 mkdir my-site
-presemble serve my-site/
+presemble serve my-site/ --dev-session
 ```
 
-The browser opens a six-step wizard: site type (blog, personal, or portfolio), font mood, color seed, palette type, complexity, and template syntax (Hiccup or HTML). A live preview panel updates on each step. The wizard generates a custom stylesheet and scaffolds a complete working site, then navigates the browser to your new homepage.
+Without `--dev-session` the server is preview-only and the wizard says "Editing is disabled". With it, the browser opens a six-step wizard: site type (blog, personal, or portfolio), font mood, color seed, palette type, complexity, and template syntax (Hiccup or HTML). A live preview panel updates on each step. The wizard generates a custom stylesheet and scaffolds a complete working site, then navigates the browser to your new homepage.
 
 ## Or scaffold from the command line
 
@@ -50,10 +50,10 @@ Output goes to `output/my-site/` (a sibling of your site directory). The publish
 ## Serve locally
 
 ```
-presemble serve my-site/
+presemble serve my-site/ --dev-session
 ```
 
-Starts a local server with file watching and live rebuild on every change. The browser reloads automatically — and navigates directly to the changed page if you were on a different one. Click any body element to edit it inline.
+Starts a local server with file watching and live rebuild on every change. The browser reloads automatically — and navigates directly to the changed page if you were on a different one. Open the printed Login URL, then click any body element to edit it inline. Without `--dev-session` the server is preview-only and the editor says "Editing is disabled".
 
 ## Editor support
 

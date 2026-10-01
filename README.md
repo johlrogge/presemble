@@ -8,29 +8,31 @@ Content is data. Templates are data. Schemas are the contracts between them.
 
 - **Schema-validated content** — define document grammars in markdown; the publisher enforces them at build time with hard failures and clear error messages
 - **Data-bound templates** — templates are parsed DOM trees, not text with holes; written in Hiccup (EDN) and composed with `juxt` and pipe combinators
-- **Live serve** — `presemble serve` rebuilds only affected pages on each save and reloads the browser automatically; click body elements to edit inline
+- **Live serve** — `presemble serve` rebuilds only affected pages on each save and reloads the browser automatically; with `--dev-session`, click body elements to edit inline (without it the server is preview-only and editing is disabled)
 - **LSP support** — `presemble lsp` provides completions, diagnostics, hover, and go-to-definition for content, template, and schema files in any LSP-capable editor; requires a conductor daemon running for the same site
 - **Editorial suggestions** — Claude and human editors push suggestions via the MCP server or conductor; each appears as an LSP diagnostic with accept/reject code actions
 - **Presemble Lisp** — content files include link expressions that assemble collections at build time: `(->> :post (sort-by :published :desc) (take 5))`. Reverse references (`(refs-to self)`) populate a slot with all pages that link to the current page.
 - **nREPL** — Calva and CIDER can jack in and evaluate expressions against the live content graph
 - **TUI REPL** — `presemble repl` opens a full-screen terminal REPL with EDN syntax highlighting, completion popup, doc panel, and command history; runs standalone with no conductor required, or connects automatically to a running one
-- **Site wizard** — point `presemble serve` at an empty directory for a browser-based starter scaffold
+- **Site wizard** — point `presemble serve --dev-session` at an empty directory for a browser-based starter scaffold
 - **Deployment URL rewriting** — authors write root-relative paths; the publisher rewrites them to relative, root-relative with base path, or absolute at build time
 
 ## Quickstart
 
 ```
 cargo install --path projects/publisher
-presemble serve my-site/   # opens browser wizard for empty dirs
+presemble serve my-site/ --dev-session   # opens browser wizard for empty dirs
 ```
 
-Open `http://localhost:3000`. Pick a starter template in the browser wizard, or edit files under `my-site/content/`, `my-site/schemas/`, or `my-site/templates/` — the browser reloads automatically.
+Open the **Login URL** that `serve` prints. Pick a starter template in the browser wizard, or edit files under `my-site/content/`, `my-site/schemas/`, or `my-site/templates/` — the browser reloads automatically.
+
+Without `--dev-session`, `serve` is preview-only: pages and live reload work, but the editor and wizard answer "Editing is disabled".
 
 To scaffold without the wizard:
 
 ```
 presemble init my-site/
-presemble serve my-site/
+presemble serve my-site/ --dev-session
 ```
 
 To build for deployment:

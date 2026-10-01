@@ -15,6 +15,19 @@ Accepted
 
 **The boundary is type-enforced, not a per-route check.** Authentication lives in the `accounts` component: a `Session` newtype with no public constructor from untrusted input, produced only by `SessionStore::verify` / `verify_str`, and an axum `FromRequestParts` extractor that returns `401` before any handler body runs. An editorial handler names `Session` in its signature; a handler that omits it cannot obtain one, and the editorial routes are additionally isolated on a nested router. "Make illegal states unrepresentable" applied to a security boundary: an ungated editorial handler does not compile. V0 ships an HMAC-SHA256 `DevSessionStore` with a `--dev-session` local-login flow; V1 swaps in a magic-link `SessionStore` implementing the same trait, with no handler changes.
 
+## Amendment (2026-10): editorial modes and explained 401s
+
+`presemble serve` runs in one of three **editorial modes**, chosen at startup:
+- **Hosted** — `PRESEMBLE_SESSION_KEY` is set → `MagicLinkSessionStore` (ADR-055). `--dev-session` is ignored with a warning.
+- **DevLogin** — `--dev-session <label>` → `DevSessionStore` with a random key; the login URL is printed.
+- **Closed** — neither → `ClosedSessionStore`, which never verifies any token. **This is the default: editing is closed unless explicitly enabled.**
+
+In Closed mode the published site and the live-reload websocket work normally; every editorial route, `/_schema/*` and `/_presemble/login` answer 401.
+
+**401s explain themselves.** The `Unauthorized` rejection has two variants: `NotLoggedIn` (the store can issue sessions but the request has none valid) and `EditingDisabled` (the store can never issue one). The variant is chosen by `SessionStore::login_availability()` (`Open` / `Closed`). The response is `401` with `www-authenticate: Cookie realm="presemble"` and a JSON body `{"ok":false,"error":"<message>"}`. The message is fixed text and never contains token, principal or key material. The extractor and the `/_schema` check share one function, `accounts::authenticate`.
+
+Closed is a store type, not a flag, so "this server can't issue sessions" is reported by the boundary as a type rather than as a branch in each handler. The type boundary is unchanged: `ClosedSessionStore` has no key and no mint, and `Session` still has no public constructor.
+
 ## Why
 
 1. **A single shared password could not survive a real link.** Before V0 the editorial plane was gated only by one shared Caddy `editor` password — world-writable to anyone who had it, with no per-user suggestion authorship. Accounts make an app-level session boundary mandatory.
@@ -36,4 +49,5 @@ Accepted
 - Every future `/_presemble` route must take `Session` (gated by default); exempting one is a deliberate, reviewable act. The public exceptions are exactly: published file serving and the live-reload ws.
 - The Caddy `editor` basic_auth is now redundant for editorial endpoints and can be retired once V0 is verified in production (a separate devops follow-up; do not remove it in the same change that adds the app gate).
 - **Known V0 gaps (accepted):** authn-only (no per-principal authorization); the live-reload ws is public; the `--dev-session` flow prints a token usable via a URL query param (dev-only, localhost convenience).
+- The default `serve` (no flags, no key) has editing closed; user docs must say to run `--dev-session` and open the printed Login URL to edit locally.
 - Builds on ADR-031 (conductor as sole authority), ADR-035 (one conductor serves one account's workspace), ADR-051 (accounts / the editorial-plane-not-readership boundary), ADR-053 (this is its Task 1). Shipped in commit `c6dbf10`.

@@ -10,7 +10,7 @@ Implements the `presemble` subcommand dispatch using `clap`. Ties together the `
 |---|---|
 | `presemble build <site-dir>` | Full or incremental build; writes output to a sibling `output/` directory |
 | `presemble build <site-dir> --config <file>` | Build with a named URL config (e.g. `.presemble/github-pages.json`) |
-| `presemble serve <site-dir>` | Local HTTP server on port 3000 with file watching and live reload over WebSocket; starts the conductor daemon |
+| `presemble serve <site-dir> [--dev-session <label>]` | Local HTTP server on port 3000 with file watching and live reload over WebSocket; starts the conductor daemon. Editing is closed by default (preview-only; editor and wizard answer 401 "Editing is disabled"). `--dev-session` prints a **Login URL** that enables local editing. Hosted deployments set `PRESEMBLE_SESSION_KEY` instead (`--dev-session` is then ignored with a warning) |
 | `presemble lsp <site-dir>` | LSP server over stdio — handles content, template, and schema files; delegates to conductor |
 | `presemble mcp <site-dir>` | MCP server for Claude Code integration; each tool call accepts an optional `site` parameter |
 | `presemble nrepl <site-dir>` | nREPL server for Calva, CIDER, and `rep` |

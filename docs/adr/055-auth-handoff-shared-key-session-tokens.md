@@ -13,7 +13,12 @@ Hosted Presemble runs a **control plane** (owner login, dashboard, provisioning 
 - **`DevSessionStore`** — per-process *random* key, `dev:<label>` payloads. Local-dev only (the `--dev-session` flow). Cannot participate in hand-off (its key is not shared).
 - **`MagicLinkSessionStore`** — the shared `PRESEMBLE_SESSION_KEY`, stateless HMAC, `acct:<account-id>` payloads. Used by the control plane (mint) and by every hosted conductor (verify).
 
-`presemble serve` selects the store **by environment**: `PRESEMBLE_SESSION_KEY` present → `MagicLinkSessionStore`; absent → `DevSessionStore::new_random()`. The **payload prefix is the discriminator**: a `dev:` token cannot cross into an account session *even under a shared key*, because verification strips and matches the `acct:` prefix. Missing key at boot is a **fail-fast panic** (a deliberate misconfiguration signal, only reachable when the env var is set-then-unset).
+`presemble serve` selects the store from the environment and flags (see the ADR-054 amendment):
+- `PRESEMBLE_SESSION_KEY` present → `MagicLinkSessionStore` (`--dev-session` is ignored with a warning);
+- absent, with `--dev-session <label>` → `DevSessionStore::new_random()`;
+- absent, without the flag → `ClosedSessionStore` (editing disabled; no session can ever be obtained).
+
+The **payload prefix is the discriminator**: a `dev:` token can't become an account session even under a shared key, because verification strips and matches the `acct:` prefix. Missing key at boot is a **fail-fast panic** (a deliberate misconfiguration signal, only reachable when the env var is set-then-unset).
 
 **The hand-off flow (two token kinds, two places):**
 1. **Login token** (`LoginTokenStore`) — short-TTL, single-use, HMAC-signed. Issued by the control plane, delivered via the emailed magic link. Its issue/verify/consume lifecycle lives **entirely in the control plane**.
@@ -27,7 +32,7 @@ So the **login-token → session-token exchange happens at the control plane**; 
 
 **Router topology is the auth invariant.** Gating is **per-handler**, via the `Session` `FromRequestParts` extractor appearing in a handler's signature — *not* per-router-layer. `/_presemble/login`, `/_presemble/ws`, and the published `file_handler` are public precisely because their handlers do not take `Session`; every editorial handler does. Mounting the public routes on the outer router chain therefore cannot ungate the editorial ones. **Any future refactor to nested-router or middleware-based gating must preserve this per-handler property**, or the boundary silently breaks.
 
-**Crate-boundary invariant makes the public login route safe.** `SessionToken::from_raw` is crate-private; an untrusted string can only become a verified `Session` through `SessionStore::verify_str`. The public `/_presemble/login` handler thus cannot be turned into a bypass — a bad token yields 401 with no cookie; only an HMAC-valid token sets one, to the verified value verbatim.
+**Crate-boundary invariant makes the public login route safe.** `SessionToken::from_raw` is crate-private; an untrusted string can only become a verified `Session` through `SessionStore::verify_str`. The public `/_presemble/login` handler thus cannot be turned into a bypass — a bad token yields 401 with no cookie; only an HMAC-valid token sets one, to the verified value verbatim. When the store is `ClosedSessionStore`, `/_presemble/login` answers 401 with the "Editing is disabled" explanation before attempting verification, and never sets a cookie.
 
 **Cookie attributes:** `HttpOnly; SameSite=Lax; Path=/`; **`Secure` is omitted** because Caddy terminates TLS in front of the conductor. This is a deployment-coupled choice — if a conductor is ever exposed without a TLS-terminating proxy, `Secure` must be added.
 

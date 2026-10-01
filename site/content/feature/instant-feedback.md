@@ -17,7 +17,7 @@ mode" that skips checks — broken content fails fast in development, not at dep
 Start the server:
 
 ```
-presemble serve site/
+presemble serve site/   # preview-only; add --dev-session to edit in the browser
 
 
 ```

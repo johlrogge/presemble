@@ -9,7 +9,7 @@ A thin entry point that depends only on `publisher_cli`. All logic lives in `pub
 ```
 cargo build -p publisher
 cargo run -p publisher -- build site/
-cargo run -p publisher -- serve site/
+cargo run -p publisher -- serve site/ --dev-session   # --dev-session enables editing; open the printed Login URL
 cargo run -p publisher -- lsp site/
 ```
 
