@@ -261,7 +261,7 @@ log "Creating suggestion via MCP-style endpoint..."
 
 log "Testing NED suggestions via HTTP..."
 
-NED_SUG_BODY='{"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"SetText":"Suggested Title"},"reason":"smoketest"}'
+NED_SUG_BODY='{"file":"content/post/hello-world.md","selection":"(ned/text-in (ned/children (ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")))","mutation":{"SetText":"Suggested Title"},"reason":"smoketest"}'
 NED_SUG_RESPONSE=$(curl -s -X POST "http://127.0.0.1:$PORT/_presemble/ned-suggestions" -H 'Content-Type: application/json' -d "$NED_SUG_BODY" 2>&1)
 
 if echo "$NED_SUG_RESPONSE" | grep -qF '"ok":true'; then

@@ -1,7 +1,6 @@
 use ned::NodeTree;
 
 mod ned_program;
-pub use ned_program::compose_ned_program;
 pub use ned_program::clj_str_literal;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -93,29 +92,132 @@ impl fmt::Display for ContentPath {
 
 // ── NED-based suggestion types (Phase C) ─────────────────────────────────────
 
-/// Structured mutation for a NED suggestion.
+/// Structured mutation for a NED suggestion (ADR-056: exact addressing).
+///
+/// Every suggestion's selection must resolve to exactly one node of the kind
+/// given by [`NedMutation::target_kind`]: a Text node that is the only child
+/// of a text block, a block (direct child of a slot or of body), or a
+/// container (a slot or body element).
 ///
 /// `NodeTree` payloads in the `Replace`, `InsertChild`, `InsertBefore`, and
-/// `InsertAfter` variants are materialised into the NodeStore at accept time.
-/// `NodeTree::Existing` should not appear in persisted mutations — use
+/// `InsertAfter` variants must be non-empty lists of block-kind roots; they
+/// are decoded into canonical blocks and inserted in order at accept time.
+/// `NodeTree::Existing` must not appear in persisted mutations — use
 /// `NodeTree::Element` / `NodeTree::Text` for cross-session payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NedMutation {
-    /// Set the text content of the selected node.
+    /// Set the text of the single addressed Text node. The new text must
+    /// round-trip through the block's markdown serializer as the same single
+    /// block.
     SetText(String),
-    /// Replace all occurrences of `search` in the selection's Text descendants.
-    /// Text-level surgery, not structural.
+    /// Replace the single occurrence of `search` in the addressed Text node.
+    /// Zero or several occurrences make the suggestion inapplicable (drift
+    /// detection). Text-level surgery, not structural.
     SearchReplace { search: String, replace: String },
-    /// Replace the selected node(s) with the given subtrees.
+    /// Replace the single addressed block with the given non-empty list of
+    /// blocks, inserted in order.
     Replace(Vec<NodeTree>),
-    /// Insert the given subtrees as children of the selected node.
+    /// Append the given non-empty list of blocks, in order, to the single
+    /// addressed container (slot or body).
     InsertChild(Vec<NodeTree>),
-    /// Insert the given subtrees immediately before the selected node.
+    /// Insert the given non-empty list of blocks, in order, immediately before
+    /// the single addressed block.
     InsertBefore(Vec<NodeTree>),
-    /// Insert the given subtrees immediately after the selected node.
+    /// Insert the given non-empty list of blocks, in order, immediately after
+    /// the single addressed block.
     InsertAfter(Vec<NodeTree>),
-    /// Delete the selected node(s).
+    /// Delete the single addressed block.
     Delete,
+}
+
+/// The kind of node a [`NedMutation`]'s selection must resolve to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetKind {
+    /// A Text node that is the only child of a text block.
+    Text,
+    /// A block: a direct child of a slot or of body.
+    Block,
+    /// A container: a slot or body element.
+    Container,
+}
+
+impl fmt::Display for TargetKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetKind::Text => f.write_str("text"),
+            TargetKind::Block => f.write_str("block"),
+            TargetKind::Container => f.write_str("container"),
+        }
+    }
+}
+
+impl NedMutation {
+    /// The kind of node this mutation's selection must address.
+    pub fn target_kind(&self) -> TargetKind {
+        match self {
+            NedMutation::SetText(_) | NedMutation::SearchReplace { .. } => TargetKind::Text,
+            NedMutation::Replace(_)
+            | NedMutation::Delete
+            | NedMutation::InsertBefore(_)
+            | NedMutation::InsertAfter(_) => TargetKind::Block,
+            NedMutation::InsertChild(_) => TargetKind::Container,
+        }
+    }
+}
+
+/// Why a NED suggestion could not be created or applied (ADR-056).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum StaleCause {
+    /// Persisted before typed causes existed.
+    #[default]
+    Unspecified,
+    /// The address matches no live node.
+    Unresolved,
+    /// The address matches several nodes.
+    Ambiguous { matches: usize },
+    /// The address matches a node of the wrong kind.
+    WrongKind { expected: TargetKind, found: String },
+    /// The search text does not occur in the addressed text.
+    SearchNotFound,
+    /// The search text occurs more than once in the addressed text.
+    SearchNotUnique { occurrences: usize },
+    /// The new value is not valid for the target.
+    InvalidValue { detail: String },
+    /// Applying the mutation would change nothing.
+    NoChange,
+    /// The selection could not be evaluated.
+    EvalError { detail: String },
+}
+
+impl fmt::Display for StaleCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StaleCause::Unspecified => f.write_str("the suggestion can no longer be applied"),
+            StaleCause::Unresolved => {
+                f.write_str("the address matches no node in a live document")
+            }
+            StaleCause::Ambiguous { matches } => write!(
+                f,
+                "the address matches {matches} nodes; it must match exactly one"
+            ),
+            StaleCause::WrongKind { expected, found } => write!(
+                f,
+                "the address matches a {found}, but this change needs a {expected} node"
+            ),
+            StaleCause::SearchNotFound => {
+                f.write_str("the search text does not occur in the addressed text")
+            }
+            StaleCause::SearchNotUnique { occurrences } => write!(
+                f,
+                "the search text occurs {occurrences} times in the addressed text; it must occur exactly once"
+            ),
+            StaleCause::InvalidValue { detail } => write!(f, "the new value is invalid: {detail}"),
+            StaleCause::NoChange => f.write_str("applying the change would change nothing"),
+            StaleCause::EvalError { detail } => {
+                write!(f, "the address could not be evaluated: {detail}")
+            }
+        }
+    }
 }
 
 /// Lifecycle state for a NED suggestion.
@@ -132,7 +234,12 @@ pub enum NedSuggestionStatus {
     Rejected,
     /// Accept-time re-evaluation failed. Suggestion stays visible with its
     /// failure reason until the author manually rejects or deletes it.
-    Stale { reason: String },
+    /// `reason` is the human-readable rendering of `cause`.
+    Stale {
+        reason: String,
+        #[serde(default)]
+        cause: StaleCause,
+    },
 }
 
 /// A NED-based editorial suggestion.
@@ -431,15 +538,95 @@ mod tests {
         let mut sug = base_ned_suggestion(NedMutation::Delete);
         sug.status = NedSuggestionStatus::Stale {
             reason: "selection doesn't resolve".to_string(),
+            cause: StaleCause::Unresolved,
         };
         let json = serde_json::to_string(&sug).expect("serialize");
         let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
         match back.status {
-            NedSuggestionStatus::Stale { reason } => {
+            NedSuggestionStatus::Stale { reason, cause } => {
                 assert_eq!(reason, "selection doesn't resolve");
+                assert_eq!(cause, StaleCause::Unresolved);
             }
             other => panic!("expected Stale, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn old_stale_json_without_cause_defaults_to_unspecified() {
+        let status: NedSuggestionStatus =
+            serde_json::from_str(r#"{"Stale":{"reason":"x"}}"#).expect("deserialize");
+        assert_eq!(
+            status,
+            NedSuggestionStatus::Stale {
+                reason: "x".to_string(),
+                cause: StaleCause::Unspecified,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_status_serializes_with_cause() {
+        let status = NedSuggestionStatus::Stale {
+            reason: "r".to_string(),
+            cause: StaleCause::Ambiguous { matches: 2 },
+        };
+        let json = serde_json::to_string(&status).expect("serialize");
+        assert!(json.contains("\"cause\""), "json: {json}");
+    }
+
+    #[test]
+    fn every_stale_cause_round_trips_through_json() {
+        let causes = vec![
+            StaleCause::Unspecified,
+            StaleCause::Unresolved,
+            StaleCause::Ambiguous { matches: 3 },
+            StaleCause::WrongKind {
+                expected: TargetKind::Text,
+                found: "heading".to_string(),
+            },
+            StaleCause::SearchNotFound,
+            StaleCause::SearchNotUnique { occurrences: 2 },
+            StaleCause::InvalidValue {
+                detail: "newline in heading".to_string(),
+            },
+            StaleCause::NoChange,
+            StaleCause::EvalError {
+                detail: "boom".to_string(),
+            },
+        ];
+        for cause in causes {
+            let json = serde_json::to_string(&cause).expect("serialize");
+            let back: StaleCause = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, cause, "json: {json}");
+            assert!(!cause.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn stale_cause_display_reads_as_sentence() {
+        assert_eq!(
+            StaleCause::Ambiguous { matches: 3 }.to_string(),
+            "the address matches 3 nodes; it must match exactly one"
+        );
+    }
+
+    #[test]
+    fn target_kind_for_each_mutation() {
+        let tree = || vec![NodeTree::element("paragraph").with_child(NodeTree::text("x"))];
+        assert_eq!(NedMutation::SetText("x".into()).target_kind(), TargetKind::Text);
+        assert_eq!(
+            NedMutation::SearchReplace {
+                search: "a".into(),
+                replace: "b".into()
+            }
+            .target_kind(),
+            TargetKind::Text
+        );
+        assert_eq!(NedMutation::Replace(tree()).target_kind(), TargetKind::Block);
+        assert_eq!(NedMutation::Delete.target_kind(), TargetKind::Block);
+        assert_eq!(NedMutation::InsertBefore(tree()).target_kind(), TargetKind::Block);
+        assert_eq!(NedMutation::InsertAfter(tree()).target_kind(), TargetKind::Block);
+        assert_eq!(NedMutation::InsertChild(tree()).target_kind(), TargetKind::Container);
     }
 
     #[test]

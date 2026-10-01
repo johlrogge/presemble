@@ -162,14 +162,13 @@ function buildPreambleAnchor(el, file, slot) {
     if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
     return 0;
   });
-  // Single-child slot: select the slot Element directly. Safe for set-text
-  // (descendants/texts walk the only child anyway). DO NOT use this branch
-  // if a future caller passes the result to ned/replace — that would replace
-  // the slot element rather than its child.
-  if (sibs.length === 1) {
-    return nedSlot(file, slot);
-  }
   var kind = kindFromTag(el);
+  // Single-child slot: address the slot's only block — NEVER the slot itself
+  // (ADR-056 exact addressing). Text edits wrap this with ned/text-in.
+  if (sibs.length === 1) {
+    if (kind === null) return '(ned/nth-child '+nedSlot(file, slot)+' 0)';
+    return nedNthOfKind(nedChildrenSlot(file, slot), kind, 0);
+  }
   if (kind === null) {
     console.warn('buildPreambleAnchor: unknown kind for', el.tagName);
     return '(ned/nth-child '+nedSlot(file, slot)+' '+slotChildIndex(el)+')';
@@ -1401,7 +1400,7 @@ if (sel === null) {
   var idx = slotChildIndex(el);
   sel = '(ned/nth-child (ned/slot (ned/doc-by-path '+cljStr(pfile)+') '+cljStr(editSlot)+') '+idx+')';
 }
-var program = '(ned/set-text (-> '+sel+' ned/descendants ned/texts) '+cljStr(value)+')';
+var program = '(ned/set-text (ned/text-in '+sel+') '+cljStr(value)+')';
 busy=true;
 _setToolbarBusy(toolbar,true);
 el.contentEditable='false';
@@ -1474,7 +1473,7 @@ bbusy=true;
 _setToolbarBusy(btoolbar,true);
 ta.readOnly=true;
 fetchJson('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
+body:JSON.stringify({file:bfile,selection:'(ned/text-in '+sel+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(data){
 if(!data.ok){throw new Error(data.error||'Suggest failed');}
 bbusy=false;
@@ -1540,7 +1539,7 @@ busy=true;
 _setToolbarBusy(toolbar,true);
 el.contentEditable='false';
 fetchJson('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,selection:sel,mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
+body:JSON.stringify({file:pfile,selection:'(ned/text-in '+sel+')',mutation:{SearchReplace:{search:diff.search,replace:diff.replace}},reason:''})
 }).then(function(data){
 if(!data.ok){throw new Error(data.error||'Suggest failed');}
 // A suggestion is not an edit: restore the original text before closing.

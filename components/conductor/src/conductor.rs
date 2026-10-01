@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use rayon::prelude::*;
 
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, RenderMode, Response};
+use crate::suggestion_apply::{self, DOCUMENT_KIND};
 
 /// Element kind given to a document root that has been superseded by a
 /// re-ingest of the same file (ADR-056). See `Conductor::retire_document_root`.
@@ -1694,7 +1695,7 @@ impl Conductor {
     fn retire_document_root(store: &mut node_store::NodeStore, root: node_store::NodeId) {
         if !matches!(
             store.get(root),
-            Some(node_store::Node::Element(name)) if store.resolve_name(*name) == "document"
+            Some(node_store::Node::Element(name)) if store.resolve_name(*name) == DOCUMENT_KIND
         ) {
             return;
         }
@@ -1889,92 +1890,6 @@ impl Conductor {
         }
     }
 
-    /// Synchronously validate that a selection source string targets only
-    /// text-compatible slots before persisting a NED suggestion.
-    ///
-    /// Returns `Ok(())` when the selection is acceptable, or `Err(reason)`
-    /// when it should be rejected at creation time.
-    ///
-    /// Rejection conditions:
-    /// - The source string fails to evaluate.
-    /// - The evaluated value is not a Selection.
-    /// - The selection resolves to zero nodes (guaranteed-stale suggestion).
-    /// - Any node in the selection has a Slot ancestor whose shape is `NonText`
-    ///   (Link, Image, List, etc.).
-    ///
-    /// Body-level nodes (no slot ancestor) and text slots are allowed.
-    ///
-    /// Note: multi-node selections that span different slots are validated on
-    /// the first slot ancestor encountered. This is sufficient for current use
-    /// cases (selections produced by `(slot doc name)` resolve to a single slot)
-    /// but may need revisiting if multi-slot selections become common.
-    ///
-    fn classify_selection_for_creation(&self, selection_src: &str) -> Result<(), String> {
-        // Build the NED evaluator root without holding any store lock.
-        let root = self.make_ned_root()
-            .map_err(|e| format!("selection failed to evaluate: {e}"))?;
-
-        // Evaluate the selection source string.
-        let value = evaluator::eval_str_with_root(selection_src, &root)
-            .map_err(|e| format!("selection failed to evaluate: {e}"))?;
-
-        // Extract a Selection from the result.
-        let sel = evaluator::ned_primitives::extract_selection(&value)
-            .map_err(|_| "selection did not produce a node selection".to_string())?;
-
-        // Reject empty selections — no point persisting a guaranteed-stale suggestion.
-        if sel.is_empty() {
-            return Err("selection resolves to no nodes".to_string());
-        }
-
-        // For each node in the selection, walk the ancestor chain to find any
-        // Slot ancestor and check its shape.
-        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-
-        for node_id in sel.iter() {
-            // Walk parents upward looking for the nearest slot ancestor.
-            let mut frontier = vec![node_id];
-            let mut visited = std::collections::HashSet::new();
-
-            while let Some(current) = frontier.pop() {
-                if !visited.insert(current) {
-                    continue;
-                }
-                if let Some(node_store::Node::Element(name)) = store.get(current)
-                    && store.resolve_name(*name) == "slot"
-                {
-                    // Found a slot ancestor — classify it.
-                    let slot_name = node_store_bridge::content_bridge::find_attr_text(
-                        &store, current, "name",
-                    )
-                    .unwrap_or_default();
-
-                    // Drop the read lock before calling slot_shape_for_node,
-                    // which also acquires it.
-                    drop(store);
-
-                    match self.slot_shape_for_node(current) {
-                        SlotShape::NonText => {
-                            return Err(format!(
-                                "non-text slot '{slot_name}': structured mutation unsupported"
-                            ));
-                        }
-                        SlotShape::Empty | SlotShape::SingleText | SlotShape::Multi | SlotShape::Missing => {
-                            return Ok(());
-                        }
-                    }
-                }
-
-                for parent in store.parents(current) {
-                    frontier.push(parent);
-                }
-            }
-            // No slot ancestor found for this node — body-level, always allowed.
-        }
-
-        Ok(())
-    }
-
     /// Slot edits. Text-only 1-child cases are lowered to NED; all other shapes
     /// (empty, multi-element, link/image/list, missing) are handled by the
     /// grammar-aware slot_editor escape hatch in `node_store_bridge`.
@@ -2065,14 +1980,7 @@ impl Conductor {
                     )?;
                 }
 
-                // Mark dirty and rebuild.
-                self.dirty_docs
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .mark(content_path.clone());
-
-                let (rebuilt_urls, _failed_urls) =
-                    self.rebuild_pages_for_modified_nodes(&[content_path]);
+                let (rebuilt_urls, _failed_urls) = self.mark_dirty_and_rebuild(&[content_path]);
                 Ok(rebuilt_urls)
             }
         }
@@ -2232,6 +2140,81 @@ impl Conductor {
         Ok(root)
     }
 
+    /// Build an evaluator root with only the read-only NED builtins and the
+    /// prelude (ADR-056). Suggestion selections, at creation and at accept,
+    /// are evaluated only in this root, so they can never change the store.
+    pub(crate) fn make_ned_query_root(&self) -> Result<evaluator::RootEnv, String> {
+        let root = evaluator::RootEnv::new();
+        evaluator::init_root(&root).map_err(|e| format!("evaluator init failed: {e}"))?;
+        evaluator::ned_primitives::register_ned_query_builtins(&root, self.node_store());
+        evaluator::load_ned_prelude(&root).map_err(|e| format!("ned prelude failed: {e}"))?;
+        Ok(root)
+    }
+
+    /// Evaluate a suggestion selection in the query-only root.
+    ///
+    /// Must be called without holding any store lock: the query builtins take
+    /// their own read locks.
+    fn eval_selection(&self, src: &str) -> Result<ned::Selection, editorial_types::StaleCause> {
+        let eval_error = |detail: String| editorial_types::StaleCause::EvalError { detail };
+        let root = self.make_ned_query_root().map_err(eval_error)?;
+        let value = evaluator::eval_str_with_root(src, &root).map_err(eval_error)?;
+        evaluator::ned_primitives::extract_selection(&value)
+            .map_err(|e| eval_error(format!("the address did not produce a node selection: {e}")))
+    }
+
+    /// Mark `paths` dirty and re-render their pages.
+    ///
+    /// Returns `(rebuilt_urls, failed_urls)`.
+    fn mark_dirty_and_rebuild(&self, paths: &[PathBuf]) -> (Vec<String>, Vec<String>) {
+        {
+            let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
+            for path in paths {
+                dirty.mark(path.clone());
+            }
+        }
+        self.rebuild_pages_for_modified_nodes(paths)
+    }
+
+    /// Resolve `sel`, validate `mutation` against the target and apply it.
+    ///
+    /// The caller holds the store write lock for the whole call, so the
+    /// target cannot change between resolution and application. Returns the
+    /// `file` attribute of the affected document, read before mutating.
+    ///
+    /// The target must lie in `expected_file` (the suggestion's file); a
+    /// selection that now resolves into another document is `Unresolved`.
+    fn resolve_validate_apply(
+        store: &mut node_store::NodeStore,
+        sel: &ned::Selection,
+        mutation: &editorial_types::NedMutation,
+        expected_file: &Path,
+    ) -> Result<PathBuf, editorial_types::StaleCause> {
+        let target = suggestion_apply::resolve_target(store, sel, mutation.target_kind())?;
+        let plan = suggestion_apply::validate(store, &target, mutation)?;
+        let path = PathBuf::from(
+            node_store_bridge::content_bridge::find_attr_text(store, target.document(), "file")
+                .unwrap_or_default(),
+        );
+        if path != expected_file {
+            return Err(editorial_types::StaleCause::Unresolved);
+        }
+        suggestion_apply::apply(store, plan)?;
+        Ok(path)
+    }
+
+    /// Format a creation-time rejection: the cause as a sentence, plus a hint
+    /// when one applies.
+    fn creation_error(
+        cause: &editorial_types::StaleCause,
+        kind: editorial_types::TargetKind,
+    ) -> CommandResult {
+        match suggestion_apply::creation_hint(cause, kind) {
+            Some(hint) => CommandResult::error(format!("{cause}. Hint: {hint}")),
+            None => CommandResult::error(format!("{cause}")),
+        }
+    }
+
     /// Walk the NodeStore upward from each node in `sel`, collecting every
     /// ancestor (and the nodes themselves) that is an `Element("document")`.
     ///
@@ -2251,7 +2234,7 @@ impl Conductor {
                     continue;
                 }
                 if let Some(node_store::Node::Element(name)) = store.get(id)
-                    && store.resolve_name(*name) == "document"
+                    && store.resolve_name(*name) == DOCUMENT_KIND
                 {
                     doc_roots.push(id);
                     // Don't walk further up from a document root.
@@ -2318,26 +2301,19 @@ impl Conductor {
             });
         }
 
-        // Collect file paths from document root attributes and mark as dirty.
-        let mut dirty_paths: Vec<PathBuf> = Vec::new();
-        {
+        // Collect file paths from document root attributes.
+        // Roots without a file attr (synthetic roots, e.g. root index) are skipped.
+        let dirty_paths: Vec<PathBuf> = {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-            for root_id in &dirty_roots {
-                match node_store_bridge::content_bridge::find_attr_text(&store, *root_id, "file") {
-                    Some(file_attr) if !file_attr.is_empty() => {
-                        let path = PathBuf::from(&file_attr);
-                        dirty_paths.push(path.clone());
-                        self.dirty_docs
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .mark(path);
-                    }
-                    Some(_) | None => {
-                        // Root has no file attr — skip (synthetic root, e.g. root index)
-                    }
-                }
-            }
-        }
+            dirty_roots
+                .iter()
+                .filter_map(|root_id| {
+                    node_store_bridge::content_bridge::find_attr_text(&store, *root_id, "file")
+                })
+                .filter(|file_attr| !file_attr.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        };
 
         if dirty_paths.is_empty() {
             return CommandResult::with_response(Response::Applied {
@@ -2347,8 +2323,8 @@ impl Conductor {
             });
         }
 
-        // Rebuild pages for modified nodes.
-        let (rebuilt_urls, failed_urls) = self.rebuild_pages_for_modified_nodes(&dirty_paths);
+        // Mark dirty and rebuild pages for modified nodes.
+        let (rebuilt_urls, failed_urls) = self.mark_dirty_and_rebuild(&dirty_paths);
 
         let dirty_path_count = dirty_paths.len();
         let mut events = Vec::new();
@@ -2979,9 +2955,36 @@ impl Conductor {
 
             // ── NED suggestion commands ───────────────────────────────────────
             Command::CreateNedSuggestion { file, selection, mutation, reason, author } => {
-                // Validate the selection before persisting
-                if let Err(e) = self.classify_selection_for_creation(&selection) {
-                    return CommandResult::error(e);
+                // ADR-056: the selection must address exactly one node of the
+                // kind the mutation needs, and the mutation must be valid there.
+                let kind = mutation.target_kind();
+                let sel = match self.eval_selection(&selection) {
+                    Ok(sel) => sel,
+                    Err(cause) => return Self::creation_error(&cause, kind),
+                };
+                let checked: Result<String, editorial_types::StaleCause> = {
+                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                    suggestion_apply::resolve_target(&store, &sel, kind)
+                        .map_err(editorial_types::StaleCause::from)
+                        .and_then(|target| {
+                            suggestion_apply::validate(&store, &target, &mutation)?;
+                            Ok(node_store_bridge::content_bridge::find_attr_text(
+                                &store,
+                                target.document(),
+                                "file",
+                            )
+                            .unwrap_or_default())
+                        })
+                };
+                match checked {
+                    Err(cause) => return Self::creation_error(&cause, kind),
+                    Ok(doc_file) if Path::new(&doc_file) != file.as_path() => {
+                        return CommandResult::error(format!(
+                            "selection resolves into {doc_file}, not {}",
+                            file.display()
+                        ));
+                    }
+                    Ok(_) => {}
                 }
 
                 let id = editorial_types::SuggestionId::new();
@@ -3025,8 +3028,9 @@ impl Conductor {
                 };
 
                 // Helper: mark Stale, persist, emit event, return Ok
-                let mark_stale = |conductor: &Conductor, mut s: editorial_types::NedSuggestion, reason: String| -> CommandResult {
-                    s.status = editorial_types::NedSuggestionStatus::Stale { reason: reason.clone() };
+                let mark_stale = |conductor: &Conductor, mut s: editorial_types::NedSuggestion, cause: editorial_types::StaleCause| -> CommandResult {
+                    let reason = cause.to_string();
+                    s.status = editorial_types::NedSuggestionStatus::Stale { reason: reason.clone(), cause };
                     if let Err(e) = conductor.persist_ned_suggestion(&s) {
                         eprintln!("conductor: failed to persist stale ned suggestion: {e}");
                     }
@@ -3036,57 +3040,33 @@ impl Conductor {
                     ])
                 };
 
-                // 2. Re-evaluate the selection
-                let root = match self.make_ned_root() {
-                    Ok(r) => r,
-                    Err(e) => return mark_stale(self, sug, format!("selection failed to evaluate: {e}")),
-                };
-                let value = match evaluator::eval_str_with_root(&sug.selection, &root) {
-                    Ok(v) => v,
-                    Err(e) => return mark_stale(self, sug, format!("selection failed to evaluate: {e}")),
+                // 2. Re-evaluate the selection (query-only root, no lock held)
+                let sel = match self.eval_selection(&sug.selection) {
+                    Ok(sel) => sel,
+                    Err(cause) => return mark_stale(self, sug, cause),
                 };
 
-                // 3. Extract Selection
-                let sel = match evaluator::ned_primitives::extract_selection(&value) {
-                    Ok(s) => s,
-                    Err(_) => return mark_stale(self, sug, "selection did not produce a node selection".to_string()),
+                // 3. Resolve, validate and apply under ONE store write lock (ADR-056).
+                let applied: Result<PathBuf, editorial_types::StaleCause> = {
+                    let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+                    Self::resolve_validate_apply(
+                        &mut store,
+                        &sel,
+                        &sug.mutation,
+                        Path::new(sug.file.as_str()),
+                    )
+                };
+                let path = match applied {
+                    Ok(path) => path,
+                    Err(cause) => return mark_stale(self, sug, cause),
                 };
 
-                // 4. Empty selection
-                if sel.is_empty() {
-                    return mark_stale(self, sug, "selection no longer resolves to any node".to_string());
-                }
+                // 4. Mark the document dirty and re-render its page.
+                // `path` equals the suggestion's (non-empty) file, checked above.
+                let dirty: Vec<PathBuf> = vec![path];
+                let (pages, failed) = self.mark_dirty_and_rebuild(&dirty);
 
-                // 5. Single-target mutations: reject multi-node selections
-                let is_single_target = matches!(sug.mutation,
-                    editorial_types::NedMutation::SetText(_)
-                    | editorial_types::NedMutation::Delete
-                    | editorial_types::NedMutation::SearchReplace { .. });
-                if is_single_target {
-                    let n = sel.iter().count();
-                    if n > 1 {
-                        return mark_stale(self, sug, format!("selection resolved to {n} nodes, expected 1"));
-                    }
-                }
-
-                // 6. Compose the program
-                let program = match editorial_types::compose_ned_program(&sug.selection, &sug.mutation) {
-                    Ok(p) => p,
-                    Err(e) => return mark_stale(self, sug, e),
-                };
-
-                // 7. Apply the program
-                let result = self.apply_ned_program(&program);
-                if let Response::Error(e) = &result.response {
-                    return mark_stale(self, sug, format!("mutation failed to apply: {e}"));
-                }
-
-                // 8. Success: mark Accepted
-                let pages: Vec<String> = result.events.iter().flat_map(|ev| match ev {
-                    ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
-                    _ => vec![],
-                }).collect();
-
+                // 5. Success: mark Accepted
                 let mut updated = sug.clone();
                 updated.status = editorial_types::NedSuggestionStatus::Accepted;
                 if let Err(e) = self.persist_ned_suggestion(&updated) {
@@ -3095,22 +3075,28 @@ impl Conductor {
                 let accepted_file = updated.file.clone();
                 self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
 
-                CommandResult::ok_with_events(vec![
-                    ConductorEvent::NedSuggestionAccepted {
-                        id,
-                        file: accepted_file,
-                        pages,
-                    },
-                ])
+                let mut events = vec![ConductorEvent::NedSuggestionAccepted {
+                    id,
+                    file: accepted_file,
+                    pages,
+                }];
+                if !failed.is_empty() {
+                    events.push(ConductorEvent::BuildFailed { error_pages: failed });
+                }
+                CommandResult::ok_with_events(events)
             }
 
             Command::RejectNedSuggestion { id } => {
-                // Look up suggestion; must be Pending
+                // Look up suggestion; must be Pending or Stale
                 let sug = {
                     let map = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
                     match map.get(&id) {
-                        Some(s) if s.status == editorial_types::NedSuggestionStatus::Pending => s.clone(),
-                        Some(_) => return CommandResult::error(format!("ned suggestion {id} is not pending")),
+                        Some(s) if matches!(
+                            s.status,
+                            editorial_types::NedSuggestionStatus::Pending
+                                | editorial_types::NedSuggestionStatus::Stale { .. }
+                        ) => s.clone(),
+                        Some(_) => return CommandResult::error(format!("ned suggestion {id} is not pending or stale")),
                         None => return CommandResult::error(format!("ned suggestion not found: {id}")),
                     }
                 };
@@ -4785,7 +4771,7 @@ mod slot_shape_tests {
 }
 
 #[cfg(test)]
-mod classify_selection_tests {
+mod creation_check_tests {
     use super::*;
     use content::{ContentElement, Document, DocumentSlot};
     use schema::{HeadingLevel, SlotName, Span, Spanned};
@@ -4794,8 +4780,9 @@ mod classify_selection_tests {
     /// Build a minimal conductor with a document loaded into the NodeStore.
     ///
     /// The document at `content/test/doc.md` has:
-    /// - a "title" slot containing a heading (SingleText)
-    /// - a "link-slot" slot containing a link element (NonText)
+    /// - a "title" slot containing a heading
+    /// - a "link-slot" slot containing a link element
+    /// - a "summary" slot containing two paragraphs
     /// - a body paragraph
     fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4813,10 +4800,6 @@ mod classify_selection_tests {
             .build();
         let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
 
-        // Populate the NodeStore with a document that has:
-        // - "title" slot with a heading (SingleText → text-ok)
-        // - "link-slot" slot with a link (NonText → reject)
-        // - body with a paragraph
         let doc = Document {
             preamble: im::vector![
                 DocumentSlot {
@@ -4838,6 +4821,19 @@ mod classify_selection_tests {
                         },
                         span: Span { start: 0, end: 0 },
                     }],
+                },
+                DocumentSlot {
+                    name: SlotName::new("summary"),
+                    elements: im::vector![
+                        Spanned {
+                            node: ContentElement::Paragraph { text: "First.".to_string() },
+                            span: Span { start: 0, end: 0 },
+                        },
+                        Spanned {
+                            node: ContentElement::Paragraph { text: "Second.".to_string() },
+                            span: Span { start: 0, end: 0 },
+                        },
+                    ],
                 },
             ],
             body: im::vector![
@@ -4866,82 +4862,157 @@ mod classify_selection_tests {
     }
 
     // -------------------------------------------------------------------------
-    // Tests
+    // Tests: creation-time checks (ADR-056), through `handle_command`
     // -------------------------------------------------------------------------
 
+    const DOC: &str = "content/test/doc.md";
+
+    fn create(
+        conductor: &Conductor,
+        file: &str,
+        selection: &str,
+        mutation: editorial_types::NedMutation,
+    ) -> Response {
+        conductor
+            .handle_command(Command::CreateNedSuggestion {
+                file: PathBuf::from(file),
+                selection: selection.to_string(),
+                mutation,
+                reason: "test".to_string(),
+                author: editorial_types::Author::Claude,
+            })
+            .response
+    }
+
+    fn create_error(
+        conductor: &Conductor,
+        file: &str,
+        selection: &str,
+        mutation: editorial_types::NedMutation,
+    ) -> String {
+        match create(conductor, file, selection, mutation) {
+            Response::Error(e) => e,
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    fn no_suggestions_persisted(conductor: &Conductor, tmp: &tempfile::TempDir) {
+        assert!(conductor.ned_suggestions.read().unwrap().is_empty());
+        let dir = tmp.path().join(".presemble/suggestions/ned");
+        let has_files =
+            dir.exists() && std::fs::read_dir(&dir).map(|mut d| d.next().is_some()).unwrap_or(false);
+        assert!(!has_files, "no suggestion file may be written");
+    }
+
     #[test]
-    fn text_slot_selection_is_ok() {
+    fn text_in_title_selection_is_accepted() {
         let (conductor, _tmp) = make_conductor_with_doc();
-        // Select the title slot of the test document — it has a heading child (SingleText).
+        let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+        let resp = create(&conductor, DOC, src, editorial_types::NedMutation::SetText("New".into()));
+        assert!(matches!(resp, Response::SuggestionCreated(_)), "got {resp:?}");
+    }
+
+    /// Regression for the duplication bug: a slot address with SetText used to
+    /// set every text under the slot.
+    #[test]
+    fn slot_address_with_set_text_is_rejected_with_text_in_hint() {
+        let (conductor, tmp) = make_conductor_with_doc();
         let src = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
-        let result = conductor.classify_selection_for_creation(src);
+        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
+        assert!(err.contains("ned/text-in"), "error should hint at ned/text-in: {err}");
+        no_suggestions_persisted(&conductor, &tmp);
+    }
+
+    #[test]
+    fn block_address_with_set_text_is_rejected_with_text_in_hint() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+        let src = r#"(ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))"#;
+        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
+        assert!(err.contains("heading"), "{err}");
+        assert!(err.contains("ned/text-in"), "{err}");
+    }
+
+    #[test]
+    fn multi_block_slot_is_rejected_as_ambiguous_with_hint() {
+        let (conductor, tmp) = make_conductor_with_doc();
+        let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "summary")))"#;
+        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
         assert!(
-            result.is_ok(),
-            "expected Ok for text slot selection, got: {result:?}"
+            err.contains(&editorial_types::StaleCause::Ambiguous { matches: 2 }.to_string()),
+            "{err}"
+        );
+        assert!(err.contains("ned/nth-of-kind"), "{err}");
+        no_suggestions_persisted(&conductor, &tmp);
+    }
+
+    #[test]
+    fn empty_selection_is_rejected_as_unresolved() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+        let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/nope.md") "title")))"#;
+        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
+        assert!(err.contains(&editorial_types::StaleCause::Unresolved.to_string()), "{err}");
+        assert!(err.contains("Hint:"), "{err}");
+    }
+
+    #[test]
+    fn malformed_clojure_is_rejected_as_eval_error() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+        let err = create_error(
+            &conductor,
+            DOC,
+            "(this is (not valid clojure",
+            editorial_types::NedMutation::Delete,
+        );
+        assert!(err.contains("could not be evaluated"), "{err}");
+    }
+
+    /// Security regression: selections are evaluated query-only, so a
+    /// selection that tries to mutate the store fails and changes nothing.
+    #[test]
+    fn mutating_selection_is_rejected_and_store_unchanged() {
+        let (conductor, tmp) = make_conductor_with_doc();
+        let src = r#"(do (ned/delete (ned/doc-by-path "content/test/doc.md")) (ned/doc-by-path "content/test/doc.md"))"#;
+        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::Delete);
+        assert!(err.contains("could not be evaluated"), "{err}");
+        no_suggestions_persisted(&conductor, &tmp);
+
+        let root = conductor.make_ned_root().expect("root");
+        let count = evaluator::eval_str_with_root(
+            r#"(ned/count (ned/doc-by-path "content/test/doc.md"))"#,
+            &root,
+        )
+        .expect("count");
+        assert!(
+            matches!(count, template::Value::Integer(1)),
+            "document must still exist exactly once, got {count:?}"
         );
     }
 
     #[test]
-    fn link_slot_selection_is_rejected() {
-        let (conductor, _tmp) = make_conductor_with_doc();
-        // Select the link-slot — it has a link child (NonText).
-        let src = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "link-slot")"#;
-        let result = conductor.classify_selection_for_creation(src);
-        assert!(
-            result.is_err(),
-            "expected Err for non-text slot selection, got Ok"
+    fn file_mismatch_is_rejected() {
+        let (conductor, tmp) = make_conductor_with_doc();
+        let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+        let err = create_error(
+            &conductor,
+            "content/test/other.md",
+            src,
+            editorial_types::NedMutation::SetText("x".into()),
         );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("non-text slot"),
-            "error message should mention 'non-text slot', got: {err:?}"
-        );
+        assert_eq!(err, "selection resolves into content/test/doc.md, not content/test/other.md");
+        no_suggestions_persisted(&conductor, &tmp);
     }
 
     #[test]
-    fn empty_selection_is_rejected() {
+    fn invalid_value_is_rejected_at_creation() {
         let (conductor, _tmp) = make_conductor_with_doc();
-        // Select a non-existent document — returns empty selection.
-        let src = r#"(ned/doc-by-path "content/test/does-not-exist.md")"#;
-        let result = conductor.classify_selection_for_creation(src);
-        assert!(
-            result.is_err(),
-            "expected Err for empty selection, got Ok"
+        let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+        let err = create_error(
+            &conductor,
+            DOC,
+            src,
+            editorial_types::NedMutation::SetText("two\nlines".into()),
         );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("resolves to no nodes"),
-            "error should mention 'resolves to no nodes', got: {err:?}"
-        );
-    }
-
-    #[test]
-    fn body_element_selection_is_ok() {
-        let (conductor, _tmp) = make_conductor_with_doc();
-        // Select the first body element — it has no slot ancestor.
-        let src = r#"(ned/body-at (ned/doc-by-path "content/test/doc.md") 0)"#;
-        let result = conductor.classify_selection_for_creation(src);
-        assert!(
-            result.is_ok(),
-            "expected Ok for body element (no slot ancestor), got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn malformed_clojure_is_rejected() {
-        let (conductor, _tmp) = make_conductor_with_doc();
-        // Malformed Clojure that fails to parse/evaluate.
-        let src = "(this is (not valid clojure";
-        let result = conductor.classify_selection_for_creation(src);
-        assert!(
-            result.is_err(),
-            "expected Err for malformed Clojure, got Ok"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("failed to evaluate"),
-            "error should mention 'failed to evaluate', got: {err:?}"
-        );
+        assert!(err.contains("invalid"), "{err}");
     }
 }
 
@@ -5023,47 +5094,24 @@ mod ned_suggestion_handler_tests {
         (conductor, tmp)
     }
 
-    // ── 1. Round-trip evaluation test ─────────────────────────────────────────
+    // ── 1. Query-only evaluation root ─────────────────────────────────────────
 
     #[test]
-    fn round_trip_set_text_on_real_document() {
+    fn query_root_evaluates_selections_but_binds_no_mutations() {
         let (conductor, _tmp) = make_conductor_with_doc();
+        let root = conductor.make_ned_query_root().expect("make_ned_query_root");
 
-        // Selection: the title slot of the test document
-        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
-        let mutation = editorial_types::NedMutation::SetText("New Title Text".to_string());
-        let program = editorial_types::compose_ned_program(selection, &mutation)
-            .expect("compose program");
+        let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+        let value = evaluator::eval_str_with_root(selection, &root).expect("query evaluates");
+        let sel = evaluator::ned_primitives::extract_selection(&value).expect("selection");
+        assert_eq!(sel.len(), 1, "title text resolves to exactly one node");
 
-        // Evaluate the program directly
-        let root = conductor.make_ned_root().expect("make_ned_root");
-        let value = evaluator::eval_str_with_root(&program, &root)
-            .expect("eval should succeed");
-
-        // Result should be a Selection (the mutation returns one)
-        let sel = evaluator::ned_primitives::extract_selection(&value)
-            .expect("should produce a selection");
-
-        // Confirm the NodeStore was mutated: title slot text should now read "New Title Text"
-        let store = conductor.node_store.read().unwrap();
-        let mut found_new_text = false;
-        for node_id in sel.iter() {
-            // Walk descendants for text nodes
-            let mut frontier = vec![node_id];
-            let mut visited = std::collections::HashSet::new();
-            while let Some(current) = frontier.pop() {
-                if !visited.insert(current) { continue; }
-                if let Some(node_store::Node::Text(t)) = store.get(current) {
-                    if t == "New Title Text" {
-                        found_new_text = true;
-                    }
-                }
-                for child in store.children(current) {
-                    frontier.push(child);
-                }
-            }
+        for name in evaluator::ned_primitives::NED_MUTATING_BUILTINS {
+            assert!(
+                evaluator::eval_str_with_root(name, &root).is_err(),
+                "{name} must not be bound in the query root"
+            );
         }
-        assert!(found_new_text, "NodeStore should contain 'New Title Text' after mutation");
     }
 
     // ── 2. Create happy path ──────────────────────────────────────────────────
@@ -5072,7 +5120,7 @@ mod ned_suggestion_handler_tests {
     fn create_ned_suggestion_happy_path() {
         let (conductor, tmp) = make_conductor_with_doc();
 
-        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let cmd = Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
             selection: selection.to_string(),
@@ -5158,7 +5206,7 @@ mod ned_suggestion_handler_tests {
     fn accept_ned_suggestion_happy_path() {
         let (conductor, tmp) = make_conductor_with_doc();
 
-        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let create_cmd = Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
             selection: selection.to_string(),
@@ -5217,7 +5265,7 @@ mod ned_suggestion_handler_tests {
 
         // Create a suggestion targeting a document that doesn't actually exist on disk
         // so that after we clear the NodeStore, the selection will fail to resolve.
-        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let create_cmd = Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
             selection: selection.to_string(),
@@ -5256,12 +5304,18 @@ mod ned_suggestion_handler_tests {
             accept_result.events
         );
 
-        // Status should be Stale
+        // Status should be Stale with cause Unresolved
         let map = conductor.ned_suggestions.read().unwrap();
         let sug = map.get(&id).expect("suggestion in memory");
         assert!(
-            matches!(sug.status, editorial_types::NedSuggestionStatus::Stale { .. }),
-            "expected Stale status, got: {:?}",
+            matches!(
+                sug.status,
+                editorial_types::NedSuggestionStatus::Stale {
+                    cause: editorial_types::StaleCause::Unresolved,
+                    ..
+                }
+            ),
+            "expected Stale(Unresolved) status, got: {:?}",
             sug.status
         );
     }
@@ -5272,7 +5326,8 @@ mod ned_suggestion_handler_tests {
     fn reject_ned_suggestion() {
         let (conductor, tmp) = make_conductor_with_doc();
 
-        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        // Delete addresses a block: the title slot's single heading.
+        let selection = r#"(ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))"#;
         let create_cmd = Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
             selection: selection.to_string(),
@@ -5338,7 +5393,7 @@ mod ned_suggestion_handler_tests {
     fn get_ned_suggestions_returns_pending_suggestion() {
         let (conductor, _tmp) = make_conductor_with_doc();
 
-        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let create_cmd = Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
             selection: selection.to_string(),
@@ -5371,7 +5426,7 @@ mod ned_suggestion_handler_tests {
 
         let file_path = std::path::PathBuf::from("content/test/doc.md");
         let file = editorial_types::ContentPath::new("content/test/doc.md");
-        let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
 
         // Create a Pending suggestion
         let create_pending = Command::CreateNedSuggestion {
@@ -5461,7 +5516,7 @@ mod ned_suggestion_handler_tests {
         let (conductor, _tmp) = make_conductor_with_doc();
 
         let file_a = std::path::PathBuf::from("content/test/doc.md");
-        let selection_a = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
+        let selection_a = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
 
         // Create suggestion on file_a
         let create_a = Command::CreateNedSuggestion {
@@ -5643,6 +5698,7 @@ mod ned_suggestion_handler_tests {
             reason: "stale reason".to_string(),
             status: editorial_types::NedSuggestionStatus::Stale {
                 reason: "selection no longer resolves".to_string(),
+                cause: editorial_types::StaleCause::Unresolved,
             },
             created_at: "2026-04-28T00:00:00Z".to_string(),
         };
@@ -5702,6 +5758,400 @@ mod ned_suggestion_handler_tests {
             }
             other => panic!("expected NedSuggestionFiles, got: {other:?}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-056 accept: resolve + validate + apply under one write lock, against a
+// real on-disk site so pages actually re-render.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod suggestion_accept_tests {
+    use super::*;
+    use editorial_types::{NedMutation, NedSuggestionStatus, StaleCause, SuggestionId};
+
+    const FILE: &str = "content/post/first.md";
+    const SCHEMA: &str =
+        "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+    const TEMPLATE: &str =
+        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+    const CONTENT: &str =
+        "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```rust\nfn a() {}\n```\n";
+
+    const TITLE_TEXT: &str =
+        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")))"#;
+    const FIRST_PARAGRAPH: &str =
+        r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#;
+    const ALPHA_TEXT: &str =
+        r#"(ned/text-containing (ned/body (ned/doc-by-path "content/post/first.md")) "Alpha")"#;
+    const CODE_TEXT: &str =
+        r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "code-block" 0))"#;
+
+    fn build_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("schemas/post")).unwrap();
+        std::fs::create_dir_all(root.join("templates/post")).unwrap();
+        std::fs::create_dir_all(root.join("content/post")).unwrap();
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
+        std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
+        std::fs::write(root.join(FILE), CONTENT).unwrap();
+        tmp
+    }
+
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    fn create(conductor: &Conductor, selection: &str, mutation: NedMutation) -> SuggestionId {
+        let result = conductor.handle_command(Command::CreateNedSuggestion {
+            file: PathBuf::from(FILE),
+            selection: selection.to_string(),
+            mutation,
+            reason: "test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+        match result.response {
+            Response::SuggestionCreated(id) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        }
+    }
+
+    fn accept(conductor: &Conductor, id: &SuggestionId) -> CommandResult {
+        conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() })
+    }
+
+    fn status(conductor: &Conductor, id: &SuggestionId) -> NedSuggestionStatus {
+        conductor.ned_suggestions.read().unwrap().get(id).expect("suggestion").status.clone()
+    }
+
+    fn live_root(conductor: &Conductor) -> node_store::NodeId {
+        conductor.doc_root_for_path(Path::new(FILE)).expect("live root")
+    }
+
+    fn block_text(store: &node_store::NodeStore, block: node_store::NodeId) -> String {
+        match store.children(block).first().and_then(|t| store.get(*t)) {
+            Some(node_store::Node::Text(s)) => s.clone(),
+            other => panic!("expected a text child, got {other:?}"),
+        }
+    }
+
+    fn body_texts(conductor: &Conductor) -> Vec<String> {
+        let root = live_root(conductor);
+        let store = conductor.node_store.read().unwrap();
+        let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body")
+            .expect("body");
+        store.children(body).into_iter().map(|b| block_text(&store, b)).collect()
+    }
+
+    fn title(conductor: &Conductor) -> String {
+        let root = live_root(conductor);
+        let store = conductor.node_store.read().unwrap();
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                .expect("preamble");
+        let slot = store.children(preamble)[0];
+        block_text(&store, store.children(slot)[0])
+    }
+
+    fn is_dirty(conductor: &Conductor) -> bool {
+        conductor.dirty_docs().read().unwrap().contains(Path::new(FILE))
+    }
+
+    fn accepted_pages(result: &CommandResult) -> Vec<String> {
+        result
+            .events
+            .iter()
+            .find_map(|ev| match ev {
+                ConductorEvent::NedSuggestionAccepted { pages, .. } => Some(pages.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no NedSuggestionAccepted in {:?}", result.events))
+    }
+
+    fn original_body() -> Vec<String> {
+        vec!["Alpha para.".to_string(), "Beta para.".to_string(), "fn a() {}".to_string()]
+    }
+
+    #[test]
+    fn fixture_has_expected_shape() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(title(&conductor), "First Post");
+        assert_eq!(body_texts(&conductor), original_body());
+        assert!(!is_dirty(&conductor));
+    }
+
+    #[test]
+    fn accept_set_text_on_title_changes_only_title_and_rebuilds() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Renamed Post".into()));
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert_eq!(title(&conductor), "Renamed Post");
+        assert_eq!(body_texts(&conductor), original_body(), "body must be untouched");
+        assert!(is_dirty(&conductor), "file must be marked dirty");
+        let pages = accepted_pages(&result);
+        assert!(!pages.is_empty(), "accepted event must list rebuilt pages");
+        assert!(pages.contains(&"/post/first".to_string()), "pages: {pages:?}");
+    }
+
+    #[test]
+    fn accept_delete_marks_dirty() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(&conductor, FIRST_PARAGRAPH, NedMutation::Delete);
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert_eq!(body_texts(&conductor), vec!["Beta para.", "fn a() {}"]);
+        assert!(is_dirty(&conductor));
+    }
+
+    #[test]
+    fn accept_insert_after_marks_dirty_and_keeps_order() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let para = |t: &str| ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text(t));
+        let id = create(&conductor, FIRST_PARAGRAPH, NedMutation::InsertAfter(vec![para("X."), para("Y.")]));
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert_eq!(
+            body_texts(&conductor),
+            vec!["Alpha para.", "X.", "Y.", "Beta para.", "fn a() {}"]
+        );
+        assert!(is_dirty(&conductor));
+    }
+
+    #[test]
+    fn accept_goes_stale_when_search_no_longer_unique() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(
+            &conductor,
+            ALPHA_TEXT,
+            NedMutation::SearchReplace { search: "Alpha".into(), replace: "Gamma".into() },
+        );
+
+        // Edit the text so the search string occurs twice.
+        {
+            let root = live_root(&conductor);
+            let mut store = conductor.node_store.write().unwrap();
+            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+            let first = store.children(body)[0];
+            let text = store.children(first)[0];
+            store.replace_node(text, node_store::Node::Text("Alpha and Alpha.".into()));
+        }
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(result
+            .events
+            .iter()
+            .any(|ev| matches!(ev, ConductorEvent::NedSuggestionStaled { .. })));
+        match status(&conductor, &id) {
+            NedSuggestionStatus::Stale { reason, cause } => {
+                assert_eq!(cause, StaleCause::SearchNotUnique { occurrences: 2 });
+                assert_eq!(reason, cause.to_string());
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+        assert_eq!(body_texts(&conductor)[0], "Alpha and Alpha.", "nothing applied");
+        assert!(!is_dirty(&conductor));
+    }
+
+    #[test]
+    fn accept_after_target_deleted_is_stale_unresolved_and_persists_cause() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(&conductor, ALPHA_TEXT, NedMutation::SetText("Changed.".into()));
+
+        {
+            let root = live_root(&conductor);
+            let mut store = conductor.node_store.write().unwrap();
+            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+            let first = store.children(body)[0];
+            ned::mutation::delete(&mut store, &ned::Selection::single(first));
+        }
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(matches!(
+            status(&conductor, &id),
+            NedSuggestionStatus::Stale { cause: StaleCause::Unresolved, .. }
+        ));
+
+        let path = tmp.path().join(".presemble/suggestions/ned").join(format!("{id}.json"));
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json["status"]["Stale"]["cause"], "Unresolved", "persisted: {json}");
+        assert!(json["status"]["Stale"]["reason"].as_str().is_some_and(|r| !r.is_empty()));
+    }
+
+    #[test]
+    fn accept_goes_stale_when_selection_resolves_into_another_file() {
+        const OTHER: &str = "content/post/second.md";
+        let tmp = build_site();
+        std::fs::write(
+            tmp.path().join(OTHER),
+            "# Second Post\n\n----\n\nGamma para.\n",
+        )
+        .unwrap();
+        let conductor = make_conductor(&tmp);
+
+        // Scoped over both bodies; at creation only A's text contains "Alpha".
+        let selection = format!(
+            r#"(ned/text-containing (ned/union (ned/body (ned/doc-by-path "{FILE}")) (ned/body (ned/doc-by-path "{OTHER}"))) "Alpha")"#
+        );
+        let id = create(&conductor, &selection, NedMutation::SetText("Changed.".into()));
+
+        // Edit the store so the selection now resolves uniquely into B.
+        let other_text = {
+            let root_a = live_root(&conductor);
+            let root_b = conductor.doc_root_for_path(Path::new(OTHER)).expect("B root");
+            let mut store = conductor.node_store.write().unwrap();
+            let body_a =
+                node_store_bridge::content_bridge::find_child_by_name(&store, root_a, "body").unwrap();
+            let text_a = store.children(store.children(body_a)[0])[0];
+            store.replace_node(text_a, node_store::Node::Text("Omega para.".into()));
+            let body_b =
+                node_store_bridge::content_bridge::find_child_by_name(&store, root_b, "body").unwrap();
+            let text_b = store.children(store.children(body_b)[0])[0];
+            store.replace_node(text_b, node_store::Node::Text("Alpha in B.".into()));
+            text_b
+        };
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(
+                status(&conductor, &id),
+                NedSuggestionStatus::Stale { cause: StaleCause::Unresolved, .. }
+            ),
+            "got {:?}",
+            status(&conductor, &id)
+        );
+        let store = conductor.node_store.read().unwrap();
+        assert!(
+            matches!(store.get(other_text), Some(node_store::Node::Text(s)) if s == "Alpha in B."),
+            "B must be unchanged: {:?}",
+            store.get(other_text)
+        );
+        drop(store);
+        assert!(
+            !conductor.dirty_docs().read().unwrap().contains(Path::new(OTHER)),
+            "B must not be marked dirty"
+        );
+    }
+
+    #[test]
+    fn stale_suggestion_can_be_rejected_but_not_accepted() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(&conductor, ALPHA_TEXT, NedMutation::SetText("Changed.".into()));
+        {
+            let root = live_root(&conductor);
+            let mut store = conductor.node_store.write().unwrap();
+            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+            let first = store.children(body)[0];
+            ned::mutation::delete(&mut store, &ned::Selection::single(first));
+        }
+        accept(&conductor, &id);
+        assert!(matches!(status(&conductor, &id), NedSuggestionStatus::Stale { .. }));
+
+        let again = accept(&conductor, &id);
+        match again.response {
+            Response::Error(e) => assert!(e.contains("not pending"), "{e}"),
+            other => panic!("accepting a Stale suggestion must fail, got {other:?}"),
+        }
+
+        let rejected = conductor.handle_command(Command::RejectNedSuggestion { id: id.clone() });
+        assert!(matches!(rejected.response, Response::Ok), "got {:?}", rejected.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Rejected);
+    }
+
+    #[test]
+    fn rebuild_page_then_accept_changes_the_live_root() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Live Title".into()));
+
+        let old_root = live_root(&conductor);
+        conductor
+            .rebuild_page(&tmp.path().join(FILE), CONTENT)
+            .expect("rebuild_page");
+        let new_root = live_root(&conductor);
+        assert_ne!(old_root, new_root, "re-ingest creates a new live root");
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert_eq!(title(&conductor), "Live Title", "live root must be changed");
+
+        // The superseded root is left untouched.
+        let store = conductor.node_store.read().unwrap();
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, old_root, "preamble")
+                .unwrap();
+        let slot = store.children(preamble)[0];
+        assert_eq!(block_text(&store, store.children(slot)[0]), "First Post");
+    }
+
+    #[test]
+    fn accept_multi_line_code_block_is_a_fixed_point_after_rebuild() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let code = "let x = 1;\nlet y = 2;\n";
+        let id = create(&conductor, CODE_TEXT, NedMutation::SetText(code.into()));
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert_eq!(body_texts(&conductor)[2], code);
+
+        let serialize = |c: &Conductor| {
+            let root = live_root(c);
+            let store = c.node_store.read().unwrap();
+            node_store_bridge::serialize_from_store(&store, root)
+        };
+        let first = serialize(&conductor);
+        assert!(first.contains("let y = 2;"), "markdown: {first}");
+        conductor
+            .rebuild_page(&tmp.path().join(FILE), &first)
+            .expect("rebuild_page from serialized markdown");
+        let second = serialize(&conductor);
+        assert_eq!(first, second, "file content must be a fixed point");
+        assert_eq!(body_texts(&conductor)[2], code, "code survives the round trip");
+    }
+
+    #[test]
+    fn old_format_stale_suggestion_loads_with_unspecified_cause() {
+        let tmp = build_site();
+        let dir = tmp.path().join(".presemble/suggestions/ned");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sug-old.json"),
+            r#"{"id":"sug-old","author":"Claude","file":"content/post/first.md","selection":"(x)","mutation":{"SetText":"y"},"workspace_hash":"abc","reason":"r","status":{"Stale":{"reason":"old reason"}},"created_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let conductor = make_conductor(&tmp);
+        let id = SuggestionId::from("sug-old".to_string());
+        assert_eq!(
+            status(&conductor, &id),
+            NedSuggestionStatus::Stale {
+                reason: "old reason".to_string(),
+                cause: StaleCause::Unspecified,
+            }
+        );
     }
 }
 

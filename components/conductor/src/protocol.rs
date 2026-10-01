@@ -234,6 +234,9 @@ pub enum ConductorEvent {
     },
     /// A NED-based suggestion was accepted and its mutation applied.
     /// `pages` lists the pages that were rebuilt as a result of the mutation.
+    /// An empty `pages` means "nothing was re-rendered" (e.g. the page has no
+    /// template or the rebuild failed — see the accompanying `BuildFailed`);
+    /// it never means "full rebuild".
     NedSuggestionAccepted {
         id: editorial_types::SuggestionId,
         file: editorial_types::ContentPath,

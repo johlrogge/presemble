@@ -132,6 +132,11 @@ fn browser_message_for(ev: conductor::ConductorEvent) -> BrowserMessage {
         ConductorEvent::NedSuggestionStaled { file, .. } => {
             BrowserMessage::SuggestionListChanged { file: Some(file.to_string()) }
         }
+        // Empty `pages` means nothing was re-rendered (never "full rebuild"),
+        // so only the suggestion list needs refreshing.
+        ConductorEvent::NedSuggestionAccepted { file, pages, .. } if pages.is_empty() => {
+            BrowserMessage::SuggestionListChanged { file: Some(file.to_string()) }
+        }
         ConductorEvent::NedSuggestionAccepted { pages, .. } => {
             BrowserMessage::Reload { pages, anchor: None }
         }
@@ -2245,6 +2250,21 @@ mod tests {
     }
 
     #[test]
+    fn browser_message_for_ned_suggestion_accepted_without_pages_is_suggestion_list_changed() {
+        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
+            id: editorial_types::SuggestionId::from("sug-1".to_string()),
+            file: editorial_types::ContentPath::new("content/post/a.md"),
+            pages: vec![],
+        });
+        match msg {
+            BrowserMessage::SuggestionListChanged { file } => {
+                assert_eq!(file.as_deref(), Some("content/post/a.md"));
+            }
+            other => panic!("expected SuggestionListChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn browser_message_for_ned_suggestion_rejected_is_suggestion_list_changed() {
         let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionRejected {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
@@ -2739,13 +2759,14 @@ mod tests {
             reason: "Clearer title".to_string(),
             status: editorial_types::NedSuggestionStatus::Stale {
                 reason: "test reason".to_string(),
+                cause: editorial_types::StaleCause::SearchNotFound,
             },
             created_at: "2026-04-28T00:00:00Z".to_string(),
         };
         let stale_json = serde_json::to_value(NedSuggestionJson::from(&stale_sug)).unwrap();
         assert_eq!(
             stale_json["status"],
-            serde_json::json!({"Stale": {"reason": "test reason"}})
+            serde_json::json!({"Stale": {"reason": "test reason", "cause": "SearchNotFound"}})
         );
     }
 
@@ -2765,7 +2786,7 @@ mod tests {
         let root = tmp.path();
 
         // Minimal site layout — must match the selection strings used in tests:
-        // `(ned/slot (ned/doc-by-path "content/test/doc.md") "title")`
+        // `(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))`
         std::fs::create_dir_all(root.join("schemas/test")).unwrap();
         std::fs::create_dir_all(root.join("content/test")).unwrap();
         std::fs::create_dir_all(root.join("templates/test")).unwrap();
@@ -2878,8 +2899,8 @@ mod tests {
 
         let body = serde_json::json!({
             "file": "content/test/doc.md",
-            "selection": r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#,
-            "mutation": {"SetText": "Test Title"},
+            "selection": r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#,
+            "mutation": {"SetText": "Created Title"},
             "reason": "Test"
         });
 
@@ -2905,7 +2926,8 @@ mod tests {
         use tower::ServiceExt;
 
         let file = "content/test/doc.md";
-        let selection = format!(r#"(ned/slot (ned/doc-by-path "{file}") "title")"#);
+        let selection =
+            format!(r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{file}") "title")))"#);
         let create_body = serde_json::json!({
             "file": file,
             "selection": selection,
@@ -2976,7 +2998,7 @@ mod tests {
         // Create a suggestion via conductor directly (not HTTP) so we get the id.
         let create_result = client.send(&conductor::Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
-            selection: r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#.to_string(),
+            selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#.to_string(),
             mutation: editorial_types::NedMutation::SetText("Accepted Title".to_string()),
             reason: "accept test".to_string(),
             author: editorial_types::Author::Human("tester".to_string()),
@@ -3048,7 +3070,7 @@ mod tests {
         // Create suggestion via conductor directly
         let create_result = client.send(&conductor::Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
-            selection: r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#.to_string(),
+            selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#.to_string(),
             mutation: editorial_types::NedMutation::SetText("Rejected Title".to_string()),
             reason: "reject test".to_string(),
             author: editorial_types::Author::Human("tester".to_string()),
@@ -3099,7 +3121,7 @@ mod tests {
         // Create a suggestion — it will be Pending
         let create_result = client.send(&conductor::Command::CreateNedSuggestion {
             file: std::path::PathBuf::from("content/test/doc.md"),
-            selection: r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#.to_string(),
+            selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#.to_string(),
             mutation: editorial_types::NedMutation::SetText("Files Test".to_string()),
             reason: "files test".to_string(),
             author: editorial_types::Author::Human("tester".to_string()),

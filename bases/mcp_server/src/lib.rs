@@ -711,15 +711,17 @@ fn handle_request(
 /// mutation, ready to pass to [`conductor::Command::CreateNedSuggestion`].
 ///
 /// Builds a selection of the form:
-/// `(ned/slot (ned/doc-by-path "<file>") "<slot>")`,
-/// with `file` and `slot` properly escaped as Clojure string literals.
+/// `(ned/text-in (ned/children (ned/slot (ned/doc-by-path "<file>") "<slot>")))`,
+/// i.e. the text of the slot's single block (ADR-056 exact addressing), with
+/// `file` and `slot` properly escaped as Clojure string literals. Slots with
+/// several blocks (or none) are rejected by the conductor at creation.
 fn lower_suggest_args(
     file: &str,
     slot: &str,
     value: &str,
 ) -> (String, editorial_types::NedMutation) {
     let selection = format!(
-        "(ned/slot (ned/doc-by-path {}) {})",
+        "(ned/text-in (ned/children (ned/slot (ned/doc-by-path {}) {})))",
         editorial_types::clj_str_literal(file),
         editorial_types::clj_str_literal(slot),
     );
@@ -730,19 +732,19 @@ fn lower_suggest_args(
 /// Lower `suggest_body_edit` arguments to a NED selection + [`NedMutation::SearchReplace`]
 /// mutation, ready to pass to [`conductor::Command::CreateNedSuggestion`].
 ///
-/// There is currently no `ned/body-of` primitive that returns all body content as
-/// a Selection, so the selection targets the whole document via `(ned/doc-by-path …)`.
-/// This widens scope versus the legacy behaviour — `SearchReplace` will match across
-/// preamble + body rather than body-only.  A body-scoping primitive is tracked as a
-/// follow-up to tighten this.
+/// The selection is the body Text node containing `search`:
+/// `(ned/text-containing (ned/body (ned/doc-by-path "<file>")) "<search>")`.
+/// The conductor requires it to match exactly one text node, in which the
+/// search string must occur exactly once (ADR-056).
 fn lower_body_edit_args(
     file: &str,
     search: &str,
     replace: &str,
 ) -> (String, editorial_types::NedMutation) {
     let selection = format!(
-        "(ned/doc-by-path {})",
+        "(ned/text-containing (ned/body (ned/doc-by-path {})) {})",
         editorial_types::clj_str_literal(file),
+        editorial_types::clj_str_literal(search),
     );
     let mutation = editorial_types::NedMutation::SearchReplace {
         search: search.to_string(),
@@ -772,7 +774,7 @@ fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
     };
 
     let stale_suffix = match &s.status {
-        editorial_types::NedSuggestionStatus::Stale { reason } => {
+        editorial_types::NedSuggestionStatus::Stale { reason, .. } => {
             format!(" [was: {reason}]")
         }
         _ => String::new(),
@@ -1101,7 +1103,7 @@ mod tests {
             lower_suggest_args("content/post/x.md", "title", "Hello");
         assert_eq!(
             selection,
-            r#"(ned/slot (ned/doc-by-path "content/post/x.md") "title")"#
+            r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/x.md") "title")))"#
         );
         assert!(
             matches!(mutation, editorial_types::NedMutation::SetText(ref s) if s == "Hello"),
@@ -1145,7 +1147,7 @@ mod tests {
             lower_body_edit_args("content/post/x.md", "old text", "new text");
         assert_eq!(
             selection,
-            r#"(ned/doc-by-path "content/post/x.md")"#
+            r#"(ned/text-containing (ned/body (ned/doc-by-path "content/post/x.md")) "old text")"#
         );
         assert!(
             matches!(
@@ -1166,6 +1168,11 @@ mod tests {
         assert!(
             selection.contains(r#"\"hi\""#),
             "double-quote in file not escaped; got: {selection}"
+        );
+        // The search string is also embedded in the selection and must be escaped.
+        assert!(
+            selection.contains(r#"\"x\""#),
+            "double-quote in search not escaped in selection; got: {selection}"
         );
         // search/replace go into the mutation struct as-is (no escaping needed).
         assert!(
@@ -1348,6 +1355,7 @@ mod tests {
             editorial_types::NedMutation::SetText("Hi".to_string()),
             editorial_types::NedSuggestionStatus::Stale {
                 reason: "selection no longer resolves to any node".to_string(),
+                cause: editorial_types::StaleCause::Unresolved,
             },
             editorial_types::Author::Claude,
         );
@@ -1418,13 +1426,15 @@ mod tests {
         fs::create_dir_all(root.join("content/post")).expect("content dir");
         fs::write(
             root.join("schemas/post/item.md"),
-            "# Post title {#title}\noccurs\n: exactly once\n",
+            "# Post title {#title}\noccurs\n: exactly once\n\n----\nBody.\n",
         )
         .expect("schema file");
         fs::write(root.join("templates/post/item.hiccup"), "[:div]").expect("template file");
+        // `suggest_body_edit` addresses body text only (ADR-056), so the
+        // fixture has a real body after the separator.
         fs::write(
             root.join("content/post/first-post.md"),
-            "# First Post\n\nBody text here.\n",
+            "# First Post\n\n----\n\nBody text here.\n",
         )
         .expect("content file");
 
@@ -1513,7 +1523,7 @@ mod tests {
         let site_dir = tmp.path();
         let file = "content/post/first-post.md";
         let selection = format!(
-            r#"(ned/slot (ned/doc-by-path "{}") "title")"#,
+            r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{}") "title")))"#,
             file
         );
 
