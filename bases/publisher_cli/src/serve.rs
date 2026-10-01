@@ -36,6 +36,9 @@ enum BrowserMessage {
     SuggestionListChanged {
         file: Option<String>,
     },
+    /// The browser may have missed messages (lagged receiver); it should
+    /// reload in place to pick up whatever it missed.
+    Resync,
 }
 
 /// Serialisable projection of a [`editorial_types::StructuralAnchor`] for the
@@ -109,7 +112,92 @@ impl BrowserMessage {
                 };
                 format!(r#"{{"type":"suggestion-list-changed"{}}}"#, file_json)
             }
+            BrowserMessage::Resync => r#"{"type":"resync"}"#.to_string(),
         }
+    }
+}
+
+/// Project a conductor event onto the message the browser should receive.
+fn browser_message_for(ev: conductor::ConductorEvent) -> BrowserMessage {
+    use conductor::ConductorEvent;
+    match ev {
+        ConductorEvent::PagesRebuilt { pages, anchor } => BrowserMessage::Reload { pages, anchor },
+        ConductorEvent::BuildFailed { error_pages } => {
+            BrowserMessage::Reload { pages: error_pages, anchor: None }
+        }
+        ConductorEvent::CursorScrollTo { anchor } => BrowserMessage::ScrollTo { anchor },
+        ConductorEvent::NedSuggestionCreated { suggestion } => {
+            BrowserMessage::SuggestionListChanged { file: Some(suggestion.file.to_string()) }
+        }
+        ConductorEvent::NedSuggestionStaled { file, .. } => {
+            BrowserMessage::SuggestionListChanged { file: Some(file.to_string()) }
+        }
+        ConductorEvent::NedSuggestionAccepted { pages, .. } => {
+            BrowserMessage::Reload { pages, anchor: None }
+        }
+        ConductorEvent::NedSuggestionRejected { file, .. } => {
+            BrowserMessage::SuggestionListChanged { file: Some(file.to_string()) }
+        }
+    }
+}
+
+const RELAY_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
+const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+/// Double `current`, capped at [`RELAY_BACKOFF_MAX`].
+fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(RELAY_BACKOFF_MAX)
+}
+
+/// Connect to the conductor's PUB socket, retrying with capped exponential
+/// backoff until a subscriber is obtained. Never gives up.
+fn connect_subscriber_with_retry(pub_url: &str) -> conductor::ConductorSubscriber {
+    let mut backoff = RELAY_BACKOFF_INITIAL;
+    loop {
+        match conductor::ConductorSubscriber::connect(pub_url) {
+            Ok(sub) => return sub,
+            Err(e) => {
+                eprintln!(
+                    "Conductor subscription connect failed ({e}); retrying in {}ms",
+                    backoff.as_millis()
+                );
+                std::thread::sleep(backoff);
+                backoff = next_backoff(backoff);
+            }
+        }
+    }
+}
+
+/// Relay conductor events to the browser broadcast channel for the lifetime
+/// of the process. Decode errors are logged and skipped; transport errors drop
+/// the subscriber and reconnect after a backoff (escalating across consecutive
+/// transport failures, reset once an event is relayed).
+fn relay_conductor_events(pub_url: &str, reload_tx: &broadcast::Sender<BrowserMessage>) {
+    let mut transport_backoff = RELAY_BACKOFF_INITIAL;
+    loop {
+        let sub = connect_subscriber_with_retry(pub_url);
+        loop {
+            match sub.recv() {
+                Ok(ev) => {
+                    transport_backoff = RELAY_BACKOFF_INITIAL;
+                    // Err only means no browser is currently connected.
+                    let _ = reload_tx.send(browser_message_for(ev));
+                }
+                Err(conductor::SubscriberError::Decode(e)) => {
+                    eprintln!("Conductor subscription: skipping undecodable event: {e}");
+                }
+                Err(conductor::SubscriberError::Transport(e)) => {
+                    eprintln!(
+                        "Conductor subscription transport error ({e}); reconnecting in {}ms",
+                        transport_backoff.as_millis()
+                    );
+                    break;
+                }
+            }
+        }
+        drop(sub);
+        std::thread::sleep(transport_backoff);
+        transport_backoff = next_backoff(transport_backoff);
     }
 }
 
@@ -178,7 +266,7 @@ async fn serve_async(
         }
     }
 
-    let (reload_tx, _) = broadcast::channel::<BrowserMessage>(16);
+    let (reload_tx, _) = broadcast::channel::<BrowserMessage>(256);
 
     // Connect to conductor — mandatory for serve mode.
     let conductor_client = Arc::new(
@@ -198,45 +286,7 @@ async fn serve_async(
     {
         let pub_url = format!("{}-pub", conductor::socket_url(site_dir));
         let reload_tx_clone = reload_tx.clone();
-        std::thread::spawn(move || {
-            if let Ok(sub) = conductor::ConductorSubscriber::connect(&pub_url) {
-                loop {
-                    match sub.recv() {
-                        Ok(conductor::ConductorEvent::PagesRebuilt { pages, anchor }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor });
-                        }
-                        Ok(conductor::ConductorEvent::BuildFailed { error_pages }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages: error_pages, anchor: None });
-                        }
-                        Ok(conductor::ConductorEvent::CursorScrollTo { anchor }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::ScrollTo { anchor });
-                        }
-                        Ok(conductor::ConductorEvent::NedSuggestionCreated { suggestion }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
-                                file: Some(suggestion.file.to_string()),
-                            });
-                        }
-                        Ok(conductor::ConductorEvent::NedSuggestionStaled { file, .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
-                                file: Some(file.to_string()),
-                            });
-                        }
-                        Ok(conductor::ConductorEvent::NedSuggestionAccepted { pages, .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::Reload { pages, anchor: None });
-                        }
-                        Ok(conductor::ConductorEvent::NedSuggestionRejected { file, .. }) => {
-                            let _ = reload_tx_clone.send(BrowserMessage::SuggestionListChanged {
-                                file: Some(file.to_string()),
-                            });
-                        }
-                        Err(e) => {
-                            eprintln!("Conductor subscription error: {e}");
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        std::thread::spawn(move || relay_conductor_events(&pub_url, &reload_tx_clone));
     }
 
     // Build session store.
@@ -1170,21 +1220,45 @@ async fn login_handler(
     ).into_response()
 }
 
+/// What the reload WebSocket should do with one result from the broadcast receiver.
+#[derive(Debug)]
+enum WsStep {
+    /// Send this message to the browser (a lagged receiver yields
+    /// [`BrowserMessage::Resync`]).
+    Forward(BrowserMessage),
+    /// The broadcast channel is closed; end the connection.
+    Close,
+}
+
+fn ws_step(r: Result<BrowserMessage, broadcast::error::RecvError>) -> WsStep {
+    use broadcast::error::RecvError;
+    match r {
+        Ok(msg) => WsStep::Forward(msg),
+        Err(RecvError::Lagged(n)) => {
+            eprintln!("Reload WebSocket lagged by {n} message(s); asking browser to resync");
+            WsStep::Forward(BrowserMessage::Resync)
+        }
+        Err(RecvError::Closed) => WsStep::Close,
+    }
+}
+
 async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<BrowserMessage>) {
     loop {
         tokio::select! {
             result = rx.recv() => {
-                match result {
-                    Err(_) => break,
-                    Ok(msg) => {
-                        if socket.send(Message::Text(msg.to_json().into())).await.is_err() {
-                            break;
-                        }
-                    }
+                let msg = match ws_step(result) {
+                    WsStep::Forward(msg) => msg,
+                    WsStep::Close => break,
+                };
+                if socket.send(Message::Text(msg.to_json().into())).await.is_err() {
+                    break;
                 }
             }
             msg = socket.recv() => {
-                if msg.is_none() { break; }
+                match msg {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                }
             }
         }
     }
@@ -2029,6 +2103,160 @@ fn guess_content_type(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ws_step ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ws_step_lagged_requests_resync() {
+        let step = ws_step(Err(broadcast::error::RecvError::Lagged(42)));
+        assert!(matches!(step, WsStep::Forward(BrowserMessage::Resync)), "got {step:?}");
+    }
+
+    #[test]
+    fn ws_step_closed_closes() {
+        let step = ws_step(Err(broadcast::error::RecvError::Closed));
+        assert!(matches!(step, WsStep::Close), "got {step:?}");
+    }
+
+    #[test]
+    fn ws_step_ok_forwards_message() {
+        let step = ws_step(Ok(BrowserMessage::Reload { pages: vec!["/a".to_string()], anchor: None }));
+        match step {
+            WsStep::Forward(BrowserMessage::Reload { pages, anchor: None }) => {
+                assert_eq!(pages, vec!["/a".to_string()]);
+            }
+            other => panic!("expected Forward(Reload), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resync_message_serializes_as_resync_type() {
+        assert_eq!(BrowserMessage::Resync.to_json(), r#"{"type":"resync"}"#);
+    }
+
+    // ── next_backoff ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn next_backoff_doubles_and_caps() {
+        assert_eq!(next_backoff(Duration::from_millis(250)), Duration::from_millis(500));
+        assert_eq!(next_backoff(Duration::from_secs(4)), RELAY_BACKOFF_MAX);
+        assert_eq!(next_backoff(RELAY_BACKOFF_MAX), RELAY_BACKOFF_MAX);
+    }
+
+    // ── browser_message_for ──────────────────────────────────────────────────
+
+    fn test_anchor() -> editorial_types::StructuralAnchor {
+        editorial_types::StructuralAnchor {
+            file: "content/post/a.md".to_string(),
+            slot: "body".to_string(),
+            heading_text: None,
+            node_kind: "paragraph".to_string(),
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn browser_message_for_pages_rebuilt_is_reload_with_anchor() {
+        let msg = browser_message_for(conductor::ConductorEvent::PagesRebuilt {
+            pages: vec!["/post/a".to_string()],
+            anchor: Some(test_anchor()),
+        });
+        match msg {
+            BrowserMessage::Reload { pages, anchor } => {
+                assert_eq!(pages, vec!["/post/a".to_string()]);
+                assert_eq!(anchor, Some(test_anchor()));
+            }
+            other => panic!("expected Reload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_message_for_build_failed_is_reload_of_error_pages() {
+        let msg = browser_message_for(conductor::ConductorEvent::BuildFailed {
+            error_pages: vec!["/post/broken".to_string()],
+        });
+        match msg {
+            BrowserMessage::Reload { pages, anchor: None } => {
+                assert_eq!(pages, vec!["/post/broken".to_string()]);
+            }
+            other => panic!("expected Reload without anchor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_message_for_cursor_scroll_to_is_scroll_to() {
+        let msg = browser_message_for(conductor::ConductorEvent::CursorScrollTo { anchor: test_anchor() });
+        match msg {
+            BrowserMessage::ScrollTo { anchor } => assert_eq!(anchor, test_anchor()),
+            other => panic!("expected ScrollTo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_message_for_ned_suggestion_created_is_suggestion_list_changed() {
+        let suggestion = editorial_types::NedSuggestion {
+            id: editorial_types::SuggestionId::from("sug-1".to_string()),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new("content/post/a.md"),
+            selection: "(root)".to_string(),
+            mutation: editorial_types::NedMutation::Delete,
+            workspace_hash: "untracked".to_string(),
+            reason: "test".to_string(),
+            status: editorial_types::NedSuggestionStatus::Pending,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionCreated { suggestion });
+        match msg {
+            BrowserMessage::SuggestionListChanged { file } => {
+                assert_eq!(file.as_deref(), Some("content/post/a.md"));
+            }
+            other => panic!("expected SuggestionListChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_message_for_ned_suggestion_staled_is_suggestion_list_changed() {
+        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionStaled {
+            id: editorial_types::SuggestionId::from("sug-1".to_string()),
+            file: editorial_types::ContentPath::new("content/post/a.md"),
+            reason: "gone".to_string(),
+        });
+        match msg {
+            BrowserMessage::SuggestionListChanged { file } => {
+                assert_eq!(file.as_deref(), Some("content/post/a.md"));
+            }
+            other => panic!("expected SuggestionListChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_message_for_ned_suggestion_accepted_is_reload_of_pages() {
+        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
+            id: editorial_types::SuggestionId::from("sug-1".to_string()),
+            file: editorial_types::ContentPath::new("content/post/a.md"),
+            pages: vec!["/post/a".to_string()],
+        });
+        match msg {
+            BrowserMessage::Reload { pages, anchor: None } => {
+                assert_eq!(pages, vec!["/post/a".to_string()]);
+            }
+            other => panic!("expected Reload without anchor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_message_for_ned_suggestion_rejected_is_suggestion_list_changed() {
+        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionRejected {
+            id: editorial_types::SuggestionId::from("sug-1".to_string()),
+            file: editorial_types::ContentPath::new("content/post/a.md"),
+        });
+        match msg {
+            BrowserMessage::SuggestionListChanged { file } => {
+                assert_eq!(file.as_deref(), Some("content/post/a.md"));
+            }
+            other => panic!("expected SuggestionListChanged, got {other:?}"),
+        }
+    }
 
     #[test]
     fn reload_message_full_rebuild_json() {

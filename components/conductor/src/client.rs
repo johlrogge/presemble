@@ -139,6 +139,21 @@ impl ConductorClient {
     }
 }
 
+/// Error returned by [`ConductorSubscriber::recv`].
+///
+/// The two variants call for different recovery strategies:
+/// - `Transport` — the underlying socket failed; the subscriber should be
+///   dropped and a new one connected.
+/// - `Decode` — a message arrived but could not be deserialized; the
+///   subscription itself is healthy and the caller can keep receiving.
+#[derive(Debug, thiserror::Error)]
+pub enum SubscriberError {
+    #[error("failed to receive event: {0}")]
+    Transport(String),
+    #[error("failed to deserialize event: {0}")]
+    Decode(String),
+}
+
 /// Subscriber for receiving broadcast events from the conductor via nng SUB socket.
 pub struct ConductorSubscriber {
     socket: nng::Socket,
@@ -160,13 +175,16 @@ impl ConductorSubscriber {
     }
 
     /// Receive the next event (blocking).
-    pub fn recv(&self) -> Result<ConductorEvent, String> {
+    ///
+    /// Returns [`SubscriberError::Transport`] when the socket itself fails and
+    /// [`SubscriberError::Decode`] when a message arrived but was not a valid
+    /// [`ConductorEvent`].
+    pub fn recv(&self) -> Result<ConductorEvent, SubscriberError> {
         let msg = self
             .socket
             .recv()
-            .map_err(|e| format!("failed to receive event: {e}"))?;
-        serde_json::from_slice(&msg)
-            .map_err(|e| format!("failed to deserialize event: {e}"))
+            .map_err(|e| SubscriberError::Transport(e.to_string()))?;
+        serde_json::from_slice(&msg).map_err(|e| SubscriberError::Decode(e.to_string()))
     }
 }
 
@@ -324,5 +342,65 @@ mod tests {
             all_results.len(),
             failures.first(),
         );
+    }
+
+    #[test]
+    fn subscriber_recv_reports_decode_error_then_recovers_on_valid_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("ipc://{}", dir.path().join("pub.sock").display());
+
+        let publisher = nng::Socket::new(nng::Protocol::Pub0).unwrap();
+        publisher.listen(&url).unwrap();
+
+        let sub = ConductorSubscriber::connect(&url).unwrap();
+        // Bound each recv so the "slow joiner" handshake below can't hang the test.
+        sub.socket
+            .set_opt::<nng::options::RecvTimeout>(Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+
+        // PUB/SUB drops messages until the pipe is fully attached, so keep
+        // publishing garbage until the subscriber observes one.
+        let garbage: &[u8] = b"\xff\x00 definitely not json";
+        let mut first = None;
+        for _ in 0..50 {
+            publisher.send(nng::Message::from(garbage)).unwrap();
+            match sub.recv() {
+                Err(SubscriberError::Transport(_)) => continue, // timeout: not yet attached
+                other => {
+                    first = Some(other);
+                    break;
+                }
+            }
+        }
+        let first = first.expect("subscriber never received any message");
+        assert!(
+            matches!(first, Err(SubscriberError::Decode(_))),
+            "expected Decode error for garbage bytes, got {first:?}"
+        );
+
+        // A valid event must still be delivered after the decode error — the
+        // subscription survives undecodable messages.
+        let event = ConductorEvent::BuildFailed { error_pages: vec!["/x".to_string()] };
+        let bytes = serde_json::to_vec(&event).unwrap();
+        publisher.send(nng::Message::from(bytes.as_slice())).unwrap();
+
+        // Earlier garbage sends may still be queued; skip those decode errors.
+        let mut received = None;
+        for _ in 0..60 {
+            match sub.recv() {
+                Ok(ev) => {
+                    received = Some(ev);
+                    break;
+                }
+                Err(SubscriberError::Decode(_)) => continue,
+                Err(SubscriberError::Transport(e)) => panic!("unexpected transport error: {e}"),
+            }
+        }
+        match received {
+            Some(ConductorEvent::BuildFailed { error_pages }) => {
+                assert_eq!(error_pages, vec!["/x".to_string()]);
+            }
+            other => panic!("expected BuildFailed event, got {other:?}"),
+        }
     }
 }

@@ -394,6 +394,7 @@ dependencies = [
  "tempfile",
  "template",
  "template_registry",
+ "thiserror",
  "time",
  "tokio",
  "validation",
