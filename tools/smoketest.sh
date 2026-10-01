@@ -8,6 +8,7 @@ set -euo pipefail
 PROFILE="${1:-dev}"
 PORT=3000
 SITE_DIR=""
+COOKIE_JAR=""
 PID=""
 PASS=0
 FAIL=0
@@ -27,8 +28,10 @@ cleanup() {
     # Kill any conductor processes for our site dir
     if [ -n "$SITE_DIR" ]; then
         pkill -f "presemble conductor $SITE_DIR" 2>/dev/null || true
+        pkill -f "presemble serve $SITE_DIR" 2>/dev/null || true
         rm -rf "$SITE_DIR"
     fi
+    [ -n "$COOKIE_JAR" ] && rm -f "$COOKIE_JAR"
     # Clean up nrepl port file
     rm -f "$(dirname "${SITE_DIR:-/tmp/x}")/.nrepl-port" 2>/dev/null || true
 }
@@ -38,12 +41,17 @@ log() { echo -e "${YELLOW}▸${NC} $1"; }
 pass() { PASS=$((PASS + 1)); echo -e "  ${GREEN}✓${NC} $1"; }
 fail() { FAIL=$((FAIL + 1)); ERRORS="${ERRORS}\n  ✗ $1"; echo -e "  ${RED}✗${NC} $1"; }
 
-# Kill any stale presemble processes on our port
+# Reclaim port $PORT from smoketest runs that leaked (e.g. SIGKILL'd before
+# cleanup ran). Only processes serving a smoketest temp dir are touched —
+# a user's own `presemble serve` is never killed.
 if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
-    log "Port $PORT is busy — killing stale processes..."
-    pkill -f "presemble serve" 2>/dev/null || true
-    pkill -f "presemble conductor" 2>/dev/null || true
+    log "Port $PORT is busy — killing leaked smoketest processes..."
+    pkill -f "presemble (serve|conductor) /tmp/presemble-smoke-" 2>/dev/null || true
     sleep 2
+    if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
+        echo -e "${RED}Port $PORT is in use by something other than a smoketest run (your own 'presemble serve'?). Stop it and re-run.${NC}" >&2
+        exit 1
+    fi
 fi
 
 # ── Static check: browser JS resources parse ───────────────────────────────
@@ -83,14 +91,17 @@ if [ $JS_CHECK_FAILED -eq 1 ]; then
     exit 1
 fi
 
+# All editorial requests go through here so the session cookie is sent.
+acurl() { curl -s -b "$COOKIE_JAR" "$@"; }
+
 # Assert a curl response contains expected text
 assert_curl() {
     local desc="$1" url="$2" method="${3:-GET}" body="${4:-}" expected="$5"
     local response
     if [ "$method" = "POST" ]; then
-        response=$(curl -s -X POST "http://127.0.0.1:$PORT$url" -H 'Content-Type: application/json' -d "$body" 2>&1)
+        response=$(acurl -X POST "http://127.0.0.1:$PORT$url" -H 'Content-Type: application/json' -d "$body" 2>&1)
     else
-        response=$(curl -s "http://127.0.0.1:$PORT$url" 2>&1)
+        response=$(acurl "http://127.0.0.1:$PORT$url" 2>&1)
     fi
     # Use herestring (<<<) instead of pipe to avoid SIGPIPE: with `set -o pipefail`,
     # `echo "$response" | grep -qF` would propagate a SIGPIPE failure when grep finds
@@ -106,7 +117,7 @@ assert_curl() {
 assert_curl_not_contains() {
     local desc="$1" url="$2" unexpected="$3"
     local response
-    response=$(curl -s "http://127.0.0.1:$PORT$url" 2>&1)
+    response=$(acurl "http://127.0.0.1:$PORT$url" 2>&1)
     if grep -qF "$unexpected" <<< "$response"; then
         fail "$desc (unexpected '$unexpected' found in: $response)"
     else
@@ -118,12 +129,48 @@ assert_curl_not_contains() {
 assert_status() {
     local desc="$1" url="$2" expected="$3"
     local status
-    status=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT$url" 2>&1)
+    status=$(acurl -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT$url" 2>&1)
     if [ "$status" = "$expected" ]; then
         pass "$desc"
     else
         fail "$desc (expected HTTP $expected, got $status)"
     fi
+}
+
+# Assert HTTP status code WITHOUT the session cookie (auth boundary checks).
+assert_status_anon() {
+    local desc="$1" method="$2" url="$3" expected="$4" body="${5:-}"
+    local status
+    if [ "$method" = "POST" ]; then
+        status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT$url" -H 'Content-Type: application/json' -d "$body" 2>&1)
+    else
+        status=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT$url" 2>&1)
+    fi
+    if [ "$status" = "$expected" ]; then
+        pass "$desc"
+    else
+        fail "$desc (expected HTTP $expected, got $status)"
+    fi
+}
+
+# Assert on an already-fetched response (POST once, assert many times).
+assert_contains() {   # desc response expected
+    if grep -qF -- "$3" <<< "$2"; then pass "$1"; else fail "$1 (expected '$3', got: $2)"; fi
+}
+assert_not_contains() {   # desc response unexpected
+    if grep -qF -- "$3" <<< "$2"; then fail "$1 (unexpected '$3' in: $2)"; else pass "$1"; fi
+}
+post_json() { acurl -X POST "http://127.0.0.1:$PORT$1" -H 'Content-Type: application/json' -d "$2" 2>&1; }
+
+# Build the /apply JSON body exactly as inject.js bsave does (cljStr + program
+# shape), so this exercises the browser's body-edit wire format.
+# deno eval runs with all permissions implicitly, so no --allow-env is needed.
+bsave_body() {
+    SCHEMA_SRC="$1" SEL="$2" BVALUE="$3" deno eval '
+const cljStr = (s) => "\"" + String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"";
+const program = "(let [g (ned/parse-grammar " + cljStr(Deno.env.get("SCHEMA_SRC")) + ")]\n  (ned/replace\n    "
+  + Deno.env.get("SEL") + "\n    (ned/parse-body " + cljStr(Deno.env.get("BVALUE")) + " g)))";
+console.log(JSON.stringify({ program }));'
 }
 
 # Assert rep expression contains expected text
@@ -145,13 +192,28 @@ log "Building presemble ($PROFILE profile)..."
 cargo polylith cargo --profile "$PROFILE" build --bin presemble -q 2>/dev/null
 
 SITE_DIR=$(mktemp -d /tmp/presemble-smoke-XXXXXX)
+# Cookie jar lives outside $SITE_DIR so the file watcher never sees it.
+COOKIE_JAR=$(mktemp /tmp/presemble-smoke-cookies-XXXXXX)
 log "Site directory: $SITE_DIR"
 
-# Start serve on a non-default port
+# Seed legacy (pre-ADR-056) NED suggestions BEFORE serve starts — the
+# conductor loads suggestions only at startup. Does not affect the empty-site
+# welcome page: is_source_empty only inspects schemas/ and content/.
+mkdir -p "$SITE_DIR/.presemble/suggestions/ned"
+cat > "$SITE_DIR/.presemble/suggestions/ned/sug-legacy-smoke.json" <<'JSON'
+{"id":"sug-legacy-smoke","author":{"Human":"smoketest"},"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"SetText":"Legacy Title"},"workspace_hash":"untracked","reason":"legacy slot-addressed","status":"Pending","created_at":"2026-01-01T00:00:00Z"}
+JSON
+cat > "$SITE_DIR/.presemble/suggestions/ned/sug-legacy-stale.json" <<'JSON'
+{"id":"sug-legacy-stale","author":{"Human":"smoketest"},"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"SetText":"x"},"workspace_hash":"untracked","reason":"legacy stale no cause","status":{"Stale":{"reason":"old"}},"created_at":"2026-01-01T00:00:00Z"}
+JSON
+
+# Start serve with a dev session (ADR-054/055: editorial routes need a session).
+# PRESEMBLE_SESSION_KEY would make serve ignore --dev-session, so unset it.
 log "Starting presemble serve..."
 # Clean up stale nrepl-port files
 rm -f "$(dirname "$SITE_DIR")/.nrepl-port"
-cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" > "$SITE_DIR/serve.log" 2>&1 &
+# `env` execs cargo, so $! is still the cargo process, as before.
+env -u PRESEMBLE_SESSION_KEY cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" --dev-session=smoketest > "$SITE_DIR/serve.log" 2>&1 &
 PID=$!
 
 # Wait for server to be ready
@@ -169,6 +231,35 @@ if ! curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
 fi
 
 log "Server ready on port $PORT"
+
+# ── Login (dev session) ───────────────────────────────────────────────────
+# serve prints "Login URL: http://127.0.0.1:<port>/_presemble/login?token=..."
+# using its bind port, which is the default 3000 == $PORT here.
+
+login_fail() { echo -e "${RED}Login failed: $1${NC}"; cat "$SITE_DIR/serve.log"; exit 1; }
+LOGIN_URL=""
+for i in $(seq 1 20); do
+    LOGIN_URL=$(sed -n '/Login URL:/{s/.*Login URL:[[:space:]]*//p;q}' "$SITE_DIR/serve.log")
+    [ -n "$LOGIN_URL" ] && break
+    sleep 0.25
+done
+[ -n "$LOGIN_URL" ] || login_fail "no 'Login URL:' line in serve.log (is --dev-session wired?)"
+LOGIN_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -c "$COOKIE_JAR" "$LOGIN_URL")
+[ "$LOGIN_STATUS" = "302" ] || login_fail "GET /_presemble/login returned $LOGIN_STATUS (expected 302)"
+grep -qF presemble_session "$COOKIE_JAR" || login_fail "no presemble_session cookie in jar"
+PROBE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/_presemble/dirty-buffers")
+[ "$PROBE" = "200" ] || login_fail "authenticated probe returned $PROBE"
+log "Logged in (dev session)"
+
+# ── Test: Auth boundary (ADR-054) ──────────────────────────────────────────
+# Plain curl, no cookie.
+
+log "Testing auth boundary..."
+assert_status_anon "editorial POST without session is 401" POST "/_presemble/edit" "401" \
+    '{"file":"content/index.md","slot":"tagline","value":"x"}'
+assert_status_anon "schema URL without session is 401" GET "/_schema/index" "401"
+assert_status_anon "login with bogus token is 401" GET "/_presemble/login?token=bogus.token" "401"
+assert_status_anon "published page without session is 200" GET "/" "200"
 
 # ── Test: Welcome page ─────────────────────────────────────────────────────
 
@@ -241,6 +332,8 @@ assert_curl "edit post title" "/_presemble/edit" POST '{"file":"content/post/fir
 # ── Test: nth-child scopes edit to one paragraph, leaves others intact ────
 
 log "Testing nth-child slot edit scoping..."
+# Deliberately a raw /apply program (ned/set-text over descendants), NOT the
+# browser's (ned/text-in ...) shape — it exercises the generic NED apply path.
 NED_PROGRAM='(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path "content/post/hello-world.md") "summary") 1) ned/descendants ned/texts) "NTHCHILD ONLY SECOND")'
 # Build JSON by escaping the double quotes inside the program string
 APPLY_BODY='{"program":"'"$(echo "$NED_PROGRAM" | sed 's/"/\\"/g')"'"}'
@@ -262,27 +355,21 @@ log "Creating suggestion via MCP-style endpoint..."
 log "Testing NED suggestions via HTTP..."
 
 NED_SUG_BODY='{"file":"content/post/hello-world.md","selection":"(ned/text-in (ned/children (ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")))","mutation":{"SetText":"Suggested Title"},"reason":"smoketest"}'
-NED_SUG_RESPONSE=$(curl -s -X POST "http://127.0.0.1:$PORT/_presemble/ned-suggestions" -H 'Content-Type: application/json' -d "$NED_SUG_BODY" 2>&1)
+NED_SUG_RESPONSE=$(acurl -X POST "http://127.0.0.1:$PORT/_presemble/ned-suggestions" -H 'Content-Type: application/json' -d "$NED_SUG_BODY" 2>&1)
 
-if echo "$NED_SUG_RESPONSE" | grep -qF '"ok":true'; then
-    pass "ned_suggestions_create_returns_ok"
-else
-    fail "ned_suggestions_create_returns_ok (expected '\"ok\":true', got: $NED_SUG_RESPONSE)"
-fi
-
-if echo "$NED_SUG_RESPONSE" | grep -qF '"id":"sug-'; then
-    pass "ned_suggestions_create_returns_id"
-else
-    fail "ned_suggestions_create_returns_id (expected '\"id\":\"sug-', got: $NED_SUG_RESPONSE)"
-fi
+assert_contains "ned_suggestions_create_returns_ok" "$NED_SUG_RESPONSE" '"ok":true'
+assert_contains "ned_suggestions_create_returns_id" "$NED_SUG_RESPONSE" '"id":"sug-'
 
 # Capture the suggestion id for subsequent reject
-NED_SUG_ID=$(echo "$NED_SUG_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | sed 's/"id":"//;s/"//')
+NED_SUG_ID=$(grep -o '"id":"[^"]*"' <<< "$NED_SUG_RESPONSE" | head -1 | sed 's/"id":"//;s/"//' || true)
 
 assert_curl "ned_suggestions_list_for_file_reason" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"reason":"smoketest"'
-assert_curl "ned_suggestions_list_for_file_anchor_kind" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"kind":"slot"'
-assert_curl "ned_suggestions_list_for_file_anchor_slot" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"slot":"title"'
+# The seeded legacy suggestions also produce a slot anchor, so assert on this
+# suggestion's exact (ned/text-in ...) selection instead of the anchor kind.
+assert_curl "ned_suggestions_list_for_file_exact_selection" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"selection":"(ned/text-in'
 
+# NOTE: the seeded legacy suggestions also target this file, so this only
+# proves the endpoint lists it — creation is proven by the checks above.
 assert_curl "ned_suggestion_files_includes_file" "/_presemble/ned-suggestion-files" GET "" '"content/post/hello-world.md"'
 
 NED_REJECT_BODY='{"id":"'"$NED_SUG_ID"'"}'
@@ -291,8 +378,103 @@ assert_curl "ned_suggestions_reject_marks_rejected" "/_presemble/ned-suggestions
 assert_curl "ned_suggestions_list_after_reject_contains_rejected" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"Rejected"'
 
 NED_BAD_BODY='{"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"Replace":[{"Existing":0}]},"reason":"reject me"}'
-assert_curl "ned_suggestions_create_rejects_existing_node_ok_false" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" '"ok":false'
-assert_curl "ned_suggestions_create_rejects_existing_node_mentions_existing" "/_presemble/ned-suggestions" POST "$NED_BAD_BODY" 'Existing'
+R=$(post_json /_presemble/ned-suggestions "$NED_BAD_BODY")
+assert_contains "ned_suggestions_create_rejects_existing_node_ok_false" "$R" '"ok":false'
+assert_contains "ned_suggestions_create_rejects_existing_node_mentions_existing" "$R" 'Existing'
+
+# ── Test: Exact addressing (ADR-056) ──────────────────────────────────────
+# Order matters: D rewrites the "What to Edit" paragraph that C's ambiguity
+# depends on, and E runs after D.
+
+# A. Accept an exactly-addressed SetText on the title
+log "Testing exact-addressed title suggestion accept..."
+ACC_BODY='{"file":"content/post/hello-world.md","selection":"(ned/text-in (ned/children (ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")))","mutation":{"SetText":"Accepted Smoke Title"},"reason":"smoketest accept"}'
+R=$(post_json /_presemble/ned-suggestions "$ACC_BODY")
+assert_contains "exact title suggestion created" "$R" '"ok":true'
+ACC_ID=$(grep -o '"id":"[^"]*"' <<< "$R" | head -1 | sed 's/"id":"//;s/"//' || true)
+R=$(post_json /_presemble/ned-suggestions/accept '{"id":"'"$ACC_ID"'"}')
+assert_contains "accept exact title suggestion" "$R" '"ok":true'
+
+PAGE=$(acurl "http://127.0.0.1:$PORT/post/hello-world")
+count=$(grep -oF '>Accepted Smoke Title<' <<< "$PAGE" | wc -l || true)
+if [ "$((count))" -eq 1 ]; then
+    pass "accepted title rendered exactly once"
+else
+    fail "accepted title rendered exactly once (found $((count)) occurrences of '>Accepted Smoke Title<')"
+fi
+assert_curl_not_contains "old title gone" "/post/hello-world" "Hello, World: Your First Post"
+assert_curl "title accept marks doc dirty" "/_presemble/dirty-buffers" GET "" "content/post/hello-world.md"
+assert_curl "accepted suggestion listed as Accepted" "/_presemble/ned-suggestions?file=content/post/hello-world.md" GET "" '"Accepted"'
+
+# B. A slot-addressed SetText is rejected with a hint
+log "Testing slot-addressed SetText rejection..."
+R=$(post_json /_presemble/ned-suggestions '{"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"SetText":"Should Not Apply"},"reason":"slot address"}')
+assert_contains "slot-addressed SetText rejected" "$R" '"ok":false'
+assert_contains "slot-addressed SetText hint mentions ned/text-in" "$R" 'ned/text-in'
+
+# C. An ambiguous body SearchReplace is rejected
+# ("file" occurs in both body paragraphs of the scaffolded hello-world.md.)
+log "Testing ambiguous SearchReplace rejection..."
+R=$(post_json /_presemble/ned-suggestions '{"file":"content/post/hello-world.md","selection":"(ned/text-containing (ned/body (ned/doc-by-path \"content/post/hello-world.md\")) \"file\")","mutation":{"SearchReplace":{"search":"file","replace":"document"}},"reason":"ambiguous"}')
+assert_contains "ambiguous SearchReplace rejected" "$R" '"ok":false'
+assert_contains "ambiguous SearchReplace says must match exactly one" "$R" 'must match exactly one'
+
+# C2. A mutating selection is rejected and the doc is left intact
+log "Testing mutating-selection rejection..."
+R=$(post_json /_presemble/ned-suggestions '{"file":"content/post/hello-world.md","selection":"(do (ned/delete (ned/doc-by-path \"content/post/hello-world.md\")) (ned/doc-by-path \"content/post/hello-world.md\"))","mutation":"Delete","reason":"mutating selection"}')
+assert_contains "mutating selection rejected" "$R" '"ok":false'
+assert_contains "mutating selection could not be evaluated" "$R" 'could not be evaluated'
+assert_curl "doc intact after mutating selection" "/_presemble/render?path=/post/hello-world&mode=view" GET "" "Getting Started"
+
+# D. A browser-style body edit (the bsave shape) via /apply survives save
+log "Testing bsave-shaped body edit..."
+SCHEMA_SRC=$(acurl "http://127.0.0.1:$PORT/_presemble/grammar?stem=post")
+assert_contains "grammar for post fetched" "$SCHEMA_SRC" "{#title}"
+BSAVE_SEL='(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/post/hello-world.md") "body")) "What to Edit") "paragraph" 0)'
+BSAVE_BODY=$(bsave_body "$SCHEMA_SRC" "$BSAVE_SEL" "Smoke body edit via bsave.") || {
+    fail "deno eval failed to build bsave body"
+    BSAVE_BODY='{}'
+}
+R=$(post_json /_presemble/apply "$BSAVE_BODY")
+assert_contains "bsave-shaped apply ok" "$R" '"ok":true'
+assert_contains "bsave-shaped apply dirties one doc" "$R" '"dirtyPaths":1'
+
+assert_curl "bsave edit rendered" "/post/hello-world" GET "" "Smoke body edit via bsave."
+assert_curl "sibling heading intact" "/post/hello-world" GET "" "What to Edit"
+assert_curl "other body para intact" "/post/hello-world" GET "" "Open the"
+assert_curl "bsave marks dirty" "/_presemble/dirty-buffers" GET "" "content/post/hello-world.md"
+assert_curl "save after bsave" "/_presemble/save-all" POST "" '"ok":true'
+
+F="$SITE_DIR/content/post/hello-world.md"
+if grep -qF 'Smoke body edit via bsave.' "$F"; then
+    pass "bsave edit survives save"
+else
+    fail "bsave edit survives save (not found in $F)"
+fi
+if grep -qF '# Accepted Smoke Title' "$F"; then
+    pass "accepted title survives save"
+else
+    fail "accepted title survives save (not found in $F)"
+fi
+if [ "$(grep -c '^## What to Edit$' "$F" || true)" -eq 1 ]; then
+    pass "heading not duplicated on save"
+else
+    fail "heading not duplicated on save ($(grep -c '^## What to Edit$' "$F" || true) occurrences in $F)"
+fi
+assert_curl "no dirty buffers after bsave save" "/_presemble/dirty-buffers" GET "" "[]"
+
+# E. Legacy (pre-ADR-056) suggestions seeded before serve
+log "Testing legacy suggestions..."
+LIST=$(acurl "http://127.0.0.1:$PORT/_presemble/ned-suggestions?file=content/post/hello-world.md")
+assert_contains "legacy stale without cause deserialises as Unspecified" "$LIST" '"cause":"Unspecified"'
+# Going stale on accept still returns ok:true.
+R=$(post_json /_presemble/ned-suggestions/accept '{"id":"sug-legacy-smoke"}')
+assert_contains "legacy slot-addressed accept returns ok" "$R" '"ok":true'
+LIST=$(acurl "http://127.0.0.1:$PORT/_presemble/ned-suggestions?file=content/post/hello-world.md")
+assert_contains "legacy accept goes stale with WrongKind" "$LIST" '"WrongKind"'
+assert_contains "legacy accept WrongKind expects Text" "$LIST" '"expected":"Text"'
+assert_curl "legacy accept did not change title" "/post/hello-world" GET "" "Accepted Smoke Title"
+assert_curl_not_contains "legacy title not applied" "/post/hello-world" "Legacy Title"
 
 # ── Test: Structure mode rendering via render endpoint ────────────────────
 
