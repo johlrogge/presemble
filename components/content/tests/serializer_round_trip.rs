@@ -1,0 +1,534 @@
+//! Property harness for lossless serializer canonicalisation (ADR-057).
+//!
+//! Properties, checked over documents built by a deterministic hand-rolled
+//! generator (no `proptest` in the workspace; see `SEEDS`):
+//!
+//! (a) `parse(serialize(doc))` equals `doc` on the flattened block sequence
+//!     (preamble blocks in order, the separator if present, then body).
+//!     Blocks are compared, not slot assignment.
+//! (b) Serialisation is a fixed point:
+//!     `serialize(parse(serialize(doc))) == serialize(doc)`.
+//!
+//! ## Domain
+//!
+//! The generators cover only the *lossless* domain: inputs the serializer can
+//! write and read back without any canonicalisation decision.
+//!
+//! - fields other than paragraphs and code contain no newlines; paragraphs
+//!   have 2-4 non-blank lines at most;
+//! - literal-text fields contain no characters that start inline markup (`*`,
+//!   `_`, backtick, `[`, `]`, `\`, `&`, `<`) except as a deliberate leading
+//!   block opener (paragraphs store their source, so table rows and
+//!   definition lookalikes are allowed there);
+//! - no leading or trailing whitespace in fields the parser trims, except
+//!   indentation on paragraph lines (stripped on the first line, which the
+//!   parser trims anyway, and kept on later lines).
+//!
+//! It DOES include leading block openers (also behind 1-3 spaces), closing
+//! `#` runs in headings, table header/delimiter rows and link reference
+//! definition lookalikes in paragraphs, code with backtick/tilde runs and odd
+//! language strings, and hrefs with spaces, parentheses, angle brackets,
+//! backslashes and entities.
+//!
+//! Besides the generated documents, `from_disk_corpus_is_written_unchanged`
+//! and `repository_markdown_round_trips` check markdown as it is found on
+//! disk.
+//!
+//! ## Widening the domain
+//!
+//! Every generator draws from a named pool in `Domain`. When ADR-057 open
+//! questions 5/6 (newlines in single-line blocks, inline escaping, whitespace
+//! trimming, table cells) are decided, widen the domain by adding entries to
+//! the relevant pool (or a new generator arm in `gen_block`) and, if the
+//! decision is lossy, by teaching `expected_after_round_trip` the canonical
+//! form. The properties themselves should not need to change.
+
+use content::{parse_document, serialize_document, ContentElement, Document, DocumentSlot};
+use schema::{HeadingLevel, SlotName, Span, Spanned};
+
+/// Fixed seed list. Each seed produces one document.
+const SEEDS: std::ops::Range<u64> = 0..2000;
+
+// ── Deterministic PRNG (splitmix64) ─────────────────────────────────────────
+
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+
+    fn chance(&mut self, percent: usize) -> bool {
+        self.below(100) < percent
+    }
+
+    fn pick<'a>(&mut self, pool: &[&'a str]) -> &'a str {
+        pool[self.below(pool.len())]
+    }
+}
+
+// ── Domain pools ────────────────────────────────────────────────────────────
+
+/// The value pools the generators draw from. Widen the domain here.
+struct Domain {
+    /// Plain words: no inline-markup starters, no leading block openers.
+    words: &'static [&'static str],
+    /// Leading block openers that may be followed by more text.
+    openers_with_tail: &'static [&'static str],
+    /// Leading block openers that only count as openers on their own line.
+    openers_alone: &'static [&'static str],
+    /// Indentation openers. On a block's first line the serializer strips
+    /// them (the parser trims them anyway); on later lines they are kept.
+    indentation: &'static [&'static str],
+    /// Table header and delimiter rows (paragraph lines only).
+    table_lines: &'static [&'static str],
+    /// Lines that look like (parts of) link reference definitions.
+    definition_lines: &'static [&'static str],
+    /// Heading endings that look like a closing ATX sequence.
+    heading_tails: &'static [&'static str],
+    /// Lines for code block bodies.
+    code_lines: &'static [&'static str],
+    /// Code block info strings.
+    languages: &'static [&'static str],
+    /// Link and image destinations.
+    hrefs: &'static [&'static str],
+}
+
+const DOMAIN: Domain = Domain {
+    words: &[
+        "hello", "World", "x1", "2024", "a-b", "it's", "end.", "#tag", "1.5", "(paren)", "q?",
+        "+1", "a>b", "--", "a#b", "C#", "\"quoted\"", "50%", "e=mc2", "x:y", "/path", "ünï",
+        "日本", "a.b.c", "!", "@me", "-x", "=", "~tilde",
+    ],
+    openers_with_tail: &[
+        "# ", "## ", "###### ", "> ", ">", "- ", "+ ", "* ", "1. ", "1) ", "42. ", "7) ",
+        "``` ", "```", "~~~ ", "~~~", "````rust ", "<div> ", "<div>", "<!-- ", "<?x ",
+        "<script> ", "</p ", "  # ", " > ", "   - ", "  1. ",
+    ],
+    openers_alone: &[
+        "#", "###", "-", "+", "*", "1.", "3)", "---", "***", "___", "- - -", "* * *",
+        "```", "~~~~", "<span>", "</p>", "<a href=\"x\">", "<br/>",
+    ],
+    indentation: &["    ", "\t", "      ", "  \t", " ", "  ", "   "],
+    table_lines: &[
+        "a | b", "| a | b |", "x|y", "a | b | c", "a \\| b", "--- | ---", "|---|---|",
+        ":-: | :--", "-|-", "| - |", "   --- | ---", "--- | :", "--- | --- | ---", "-||-",
+    ],
+    definition_lines: &[
+        "[a]: /x", "[a]:", "[b]: /y \"t\"", "[ ]: /x", "[a] : /x", "[a\\]b]: /z", "[a",
+        "b]: /x",
+    ],
+    heading_tails: &[" #", " ##", " ###", " ####### ", "#", "##"],
+    code_lines: &[
+        "fn main() {}", "`", "``", "```", "````", "~~~", "~~~~~", "    indented", "",
+        "x = `y`", "# not heading", "> not quote", "- not list", "\tTab", "</div>", "\\*esc\\*",
+    ],
+    languages: &[
+        "rust", "c++", "a`b", "``", "x~y", "foo bar", "a\\*b", "a&amp;b", "{.class}",
+        "rust,ignore", "ünï", "a&b", "a\\b", "a\\", "&#38;",
+    ],
+    hrefs: &[
+        "/a/b", "https://x.y/p?q=1", "/a b", "/x(1)", "/x (y)", "(z)", "a<b>c", "/p)", "/p(",
+        "#frag", "mailto:me@x.y", "../up/one.md", "/with space/and (parens)", "<", ">",
+        "/?a=1&b=2", "/a&amp;b", "/a\\b", "/a\\*b", "/a\\", "/a b\\", "/x &#38; y",
+    ],
+};
+
+// ── Generators ──────────────────────────────────────────────────────────────
+
+fn gen_words(rng: &mut Rng, min: usize, max: usize) -> String {
+    let n = min + rng.below(max - min + 1);
+    (0..n).map(|_| rng.pick(DOMAIN.words)).collect::<Vec<_>>().join(" ")
+}
+
+/// Single-line text that may start with a leading block opener.
+fn gen_opener_text(rng: &mut Rng, allow_indentation: bool) -> String {
+    match rng.below(if allow_indentation { 5 } else { 3 }) {
+        0 => gen_words(rng, 1, 5),
+        1 => format!("{}{}", rng.pick(DOMAIN.openers_with_tail), gen_words(rng, 1, 4)),
+        2 => rng.pick(DOMAIN.openers_alone).to_string(),
+        3 => format!("{}{}", rng.pick(DOMAIN.indentation), gen_words(rng, 1, 4)),
+        // Indentation that would make a code block, hiding a block opener.
+        _ => format!(
+            "{}{}{}",
+            rng.pick(DOMAIN.indentation),
+            rng.pick(DOMAIN.openers_with_tail),
+            gen_words(rng, 1, 4)
+        ),
+    }
+}
+
+/// One line of paragraph text: plain words, an opener line, a table row or a
+/// link-reference-definition lookalike.
+fn gen_paragraph_line(rng: &mut Rng) -> String {
+    match rng.below(4) {
+        0 => gen_words(rng, 1, 5),
+        1 => gen_opener_text(rng, true),
+        2 => rng.pick(DOMAIN.table_lines).to_string(),
+        _ => rng.pick(DOMAIN.definition_lines).to_string(),
+    }
+}
+
+/// A paragraph of 2-4 non-blank lines joined with `\n`.
+fn gen_multiline_paragraph(rng: &mut Rng) -> ContentElement {
+    let n = 2 + rng.below(3);
+    let text = (0..n).map(|_| gen_paragraph_line(rng)).collect::<Vec<_>>().join("\n");
+    ContentElement::Paragraph { text }
+}
+
+fn gen_heading(rng: &mut Rng) -> ContentElement {
+    let level = HeadingLevel::new(1 + rng.below(6) as u8).expect("1..=6");
+    let text = match rng.below(3) {
+        0 => gen_words(rng, 1, 4),
+        1 => format!("{}{}", gen_words(rng, 1, 3), rng.pick(DOMAIN.heading_tails).trim_end()),
+        _ => rng.pick(DOMAIN.heading_tails).trim().to_string(),
+    };
+    ContentElement::Heading { level, text }
+}
+
+fn gen_code(rng: &mut Rng) -> ContentElement {
+    let language = if rng.chance(30) {
+        None
+    } else {
+        Some(rng.pick(DOMAIN.languages).to_string())
+    };
+    let n = rng.below(5);
+    let code = (0..n).map(|_| rng.pick(DOMAIN.code_lines)).collect::<Vec<_>>().join("\n");
+    ContentElement::CodeBlock { language, code }
+}
+
+fn gen_block(rng: &mut Rng) -> ContentElement {
+    match rng.below(8) {
+        0 => gen_heading(rng),
+        1 => ContentElement::Paragraph { text: gen_paragraph_line(rng) },
+        7 => gen_multiline_paragraph(rng),
+        // Blockquote text is trimmed by the parser, so leading whitespace is
+        // outside the lossless domain (ADR-057 open questions 5/6).
+        2 => ContentElement::Blockquote {
+            text: gen_opener_text(rng, false).trim_start().to_string(),
+        },
+        3 => gen_code(rng),
+        4 => ContentElement::Link {
+            text: gen_words(rng, 1, 3),
+            href: rng.pick(DOMAIN.hrefs).to_string(),
+        },
+        5 => ContentElement::Image {
+            alt: if rng.chance(30) { None } else { Some(gen_words(rng, 1, 3)) },
+            path: rng.pick(DOMAIN.hrefs).to_string(),
+        },
+        _ => ContentElement::Separator,
+    }
+}
+
+fn spanned(node: ContentElement) -> Spanned<ContentElement> {
+    Spanned { node, span: Span { start: 0, end: 0 } }
+}
+
+fn gen_document(seed: u64) -> Document {
+    let mut rng = Rng::new(seed);
+    let slots = rng.below(3);
+    let preamble = (0..slots)
+        .map(|i| DocumentSlot {
+            name: SlotName::new(&format!("slot{i}")),
+            elements: (0..1 + rng.below(2)).map(|_| spanned(gen_block(&mut rng))).collect(),
+        })
+        .collect();
+    let has_separator = rng.chance(60);
+    let body = (0..rng.below(6)).map(|_| spanned(gen_block(&mut rng))).collect();
+    Document { preamble, body, has_separator, separator_span: None }
+}
+
+// ── Properties ──────────────────────────────────────────────────────────────
+
+/// Preamble blocks in order, the separator if present, then body blocks.
+fn flatten(doc: &Document) -> Vec<ContentElement> {
+    let mut out: Vec<ContentElement> = doc
+        .preamble
+        .iter()
+        .flat_map(|slot| slot.elements.iter().map(|s| s.node.clone()))
+        .collect();
+    if doc.has_separator {
+        out.push(ContentElement::Separator);
+    }
+    out.extend(doc.body.iter().map(|s| s.node.clone()));
+    out
+}
+
+fn body_only(blocks: &[ContentElement]) -> Document {
+    Document {
+        preamble: im::Vector::new(),
+        body: blocks.iter().cloned().map(spanned).collect(),
+        has_separator: false,
+        separator_span: None,
+    }
+}
+
+/// The block we expect to read back after serialize → parse.
+///
+/// KNOWN GAP (reported to the architect): a text-only `Paragraph` stores its
+/// raw markdown SOURCE span, not literal text (parser.rs, `End(Paragraph)`).
+/// So the backslash the serializer adds to keep `# x` a paragraph reads back
+/// as part of the text (`\# x`). The block kind is preserved and the result is
+/// a fixed point, but the text is the escaped source. Every other block kind
+/// stores literal text and must read back exactly.
+fn expected_after_round_trip(block: &ContentElement) -> ContentElement {
+    match block {
+        ContentElement::Paragraph { .. } => {
+            let source = serialize_document(&body_only(std::slice::from_ref(block)));
+            ContentElement::Paragraph { text: source.trim().to_string() }
+        }
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn round_trip_preserves_flattened_blocks() {
+    let mut failures = Vec::new();
+    for seed in SEEDS {
+        let doc = gen_document(seed);
+        let markdown = serialize_document(&doc);
+        let parsed: Vec<ContentElement> = parse_document(&markdown)
+            .expect("serialized markdown parses")
+            .elements
+            .iter()
+            .map(|s| s.node.clone())
+            .collect();
+        let expected: Vec<ContentElement> =
+            flatten(&doc).iter().map(expected_after_round_trip).collect();
+        if parsed != expected {
+            failures.push(format!(
+                "seed {seed}\n--- markdown ---\n{markdown}\n--- expected ---\n{expected:#?}\n--- parsed ---\n{parsed:#?}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} documents did not round-trip; first:\n{}",
+        failures.len(),
+        SEEDS.end - SEEDS.start,
+        failures[0]
+    );
+}
+
+#[test]
+fn serialization_is_a_fixed_point() {
+    let mut failures = Vec::new();
+    for seed in SEEDS {
+        let doc = gen_document(seed);
+        let first = serialize_document(&doc);
+        let reparsed: Vec<ContentElement> = parse_document(&first)
+            .expect("serialized markdown parses")
+            .elements
+            .iter()
+            .map(|s| s.node.clone())
+            .collect();
+        let second = serialize_document(&body_only(&reparsed));
+        if first != second {
+            failures.push(format!("seed {seed}\n--- first ---\n{first}\n--- second ---\n{second}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} documents were not a fixed point; first:\n{}",
+        failures.len(),
+        SEEDS.end - SEEDS.start,
+        failures[0]
+    );
+}
+
+#[test]
+fn generator_exercises_every_block_kind_and_opener() {
+    // Guard against a generator change silently shrinking the domain.
+    let mut kinds = std::collections::HashSet::new();
+    let mut escaped_paragraphs = 0;
+    let mut multiline = 0;
+    let mut escaped_later_lines = 0;
+    let mut escaped_tables = 0;
+    let mut escaped_definitions = 0;
+    for seed in SEEDS {
+        for block in flatten(&gen_document(seed)) {
+            if let ContentElement::Paragraph { text } = &block {
+                let out = serialize_document(&body_only(std::slice::from_ref(&block)));
+                let out = out.trim();
+                if out != text.as_str() {
+                    escaped_paragraphs += 1;
+                }
+                if text.contains('\n') {
+                    multiline += 1;
+                    let (_, rest_in) = text.split_once('\n').expect("multi-line");
+                    let (_, rest_out) = out.split_once('\n').expect("multi-line");
+                    if rest_in != rest_out {
+                        escaped_later_lines += 1;
+                    }
+                    let second = rest_out.lines().next().unwrap_or("");
+                    if second.trim_start().trim_start_matches(['|', ':', ' ']).starts_with("\\-")
+                        && second.contains('|')
+                    {
+                        escaped_tables += 1;
+                    }
+                }
+                if out.starts_with("\\[") {
+                    escaped_definitions += 1;
+                }
+            }
+            kinds.insert(std::mem::discriminant(&block));
+        }
+    }
+    assert_eq!(kinds.len(), 7, "expected 7 block kinds in the generated domain");
+    assert!(escaped_paragraphs > 50, "too few paragraphs needed escaping: {escaped_paragraphs}");
+    assert!(multiline > 100, "too few multi-line paragraphs: {multiline}");
+    assert!(escaped_later_lines > 30, "too few later lines escaped: {escaped_later_lines}");
+    assert!(escaped_tables > 5, "too few table delimiter rows escaped: {escaped_tables}");
+    assert!(escaped_definitions > 20, "too few definitions escaped: {escaped_definitions}");
+}
+
+// ── Markdown as found on disk ───────────────────────────────────────────────
+
+fn parse_blocks(md: &str) -> Vec<ContentElement> {
+    parse_document(md)
+        .expect("markdown parses")
+        .elements
+        .iter()
+        .map(|s| s.node.clone())
+        .collect()
+}
+
+/// Markdown that the parser reads as non-escaped paragraphs must be written
+/// back byte for byte: the serializer may only add escapes where the text
+/// would otherwise change meaning, and such text cannot come from disk.
+#[test]
+fn from_disk_corpus_is_written_unchanged() {
+    let corpus = [
+        "a\n2. b",
+        "a\n<span>",
+        "a\n*",
+        "a\n+ ",
+        "a\n    - b",
+        "a\n=== x",
+        "x\n[a]: /y",
+        "a | b\nc | d",
+        // pulldown-cmark 0.12 does not make this a table (the header needs a
+        // pipe), so it is a paragraph that must stay untouched.
+        "a\n--- | ---",
+        "<span> text",
+        "a\n\\# b",
+        "1.5 litres\nmore",
+        "a | b | c\n--- | ---",
+        "x\na | b\n--- | ---",
+        "a \\| b\n--- | ---",
+        "[ ]: /x",
+        "\\[a]: /x",
+        "a | b\n\\--- | ---",
+        "[t](/a&b)",
+        "[t](/a\\b)",
+        "```a&b\nx\n```",
+        "```a\\b\nx\n```",
+    ];
+    let mut failures = Vec::new();
+    for md in corpus {
+        let out = serialize_document(&body_only(&parse_blocks(md)));
+        if out.trim() != md.trim() {
+            failures.push(format!("{md:?} was written as {:?}", out.trim()));
+        }
+    }
+    assert!(failures.is_empty(), "from-disk markdown changed:\n{}", failures.join("\n"));
+}
+
+/// Representative markdown files from the repository: parse → serialize →
+/// parse must give the same block list.
+///
+/// No listed file needed excluding for link expressions written with raw
+/// spaces (the follow-up package for the `LinkExpression` arm); the ones in
+/// `site/content/index.md` sit inside fenced code.
+///
+/// Excluded: `site/content/guide/user-guide.md` and
+/// `site/content/feature/the-presemble-repl.md`. Their tables have inline
+/// code in cells, which the parser stores as `<code>…</code>` HTML; written
+/// back verbatim, that HTML reads back as plain text, so the cell changes.
+/// Table cells are not canonicalised yet (ADR-057 open questions 5/6).
+const REPOSITORY_MARKDOWN: &[(&str, &str)] = &[
+    (
+        "fixtures/blog-site/content/article/hello-world.md",
+        include_str!("../../../fixtures/blog-site/content/article/hello-world.md"),
+    ),
+    (
+        "fixtures/blog-site/content/article/invalid-post.md",
+        include_str!("../../../fixtures/blog-site/content/article/invalid-post.md"),
+    ),
+    (
+        "fixtures/blog-site/content/author/johlrogge.md",
+        include_str!("../../../fixtures/blog-site/content/author/johlrogge.md"),
+    ),
+    (
+        "fixtures/blog-site/schemas/article/item.md",
+        include_str!("../../../fixtures/blog-site/schemas/article/item.md"),
+    ),
+    ("site/content/index.md", include_str!("../../../site/content/index.md")),
+    (
+        "site/content/post/building-presemble.md",
+        include_str!("../../../site/content/post/building-presemble.md"),
+    ),
+    (
+        "site/content/post/the-dream-of-a-semantic-site-generator.md",
+        include_str!("../../../site/content/post/the-dream-of-a-semantic-site-generator.md"),
+    ),
+    (
+        "site/content/guide/getting-started.md",
+        include_str!("../../../site/content/guide/getting-started.md"),
+    ),
+    (
+        "site/content/feature/browser-editing.md",
+        include_str!("../../../site/content/feature/browser-editing.md"),
+    ),
+    (
+        "site/content/feature/the-data-graph.md",
+        include_str!("../../../site/content/feature/the-data-graph.md"),
+    ),
+    (
+        "site/content/feature/template-conversion.md",
+        include_str!("../../../site/content/feature/template-conversion.md"),
+    ),
+    (
+        "site/content/guide/the-presemble-model.md",
+        include_str!("../../../site/content/guide/the-presemble-model.md"),
+    ),
+    (
+        "site/content/feature/site-wizard.md",
+        include_str!("../../../site/content/feature/site-wizard.md"),
+    ),
+    ("site/content/author/johlrogge.md", include_str!("../../../site/content/author/johlrogge.md")),
+    ("site/content/post/index.md", include_str!("../../../site/content/post/index.md")),
+];
+
+#[test]
+fn repository_markdown_round_trips() {
+    let mut failures = Vec::new();
+    for (path, md) in REPOSITORY_MARKDOWN {
+        let first = parse_blocks(md);
+        let markdown = serialize_document(&body_only(&first));
+        let second = parse_blocks(&markdown);
+        if first != second {
+            let at = first.iter().zip(&second).position(|(a, b)| a != b).unwrap_or(first.len().min(second.len()));
+            failures.push(format!(
+                "{path}: {} blocks, then {}; first difference at block {at}:\n  before: {:?}\n  after:  {:?}",
+                first.len(),
+                second.len(),
+                first.get(at),
+                second.get(at)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "repository markdown did not round-trip:\n{}", failures.join("\n"));
+}

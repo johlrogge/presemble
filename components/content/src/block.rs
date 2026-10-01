@@ -335,6 +335,78 @@ mod tests {
         assert_eq!(check_block_round_trip(&paragraph("*em*")), Ok(()));
     }
 
+    // ── round trip: lossless escaping (ADR-057) ─────────────────────────────
+
+    #[test]
+    fn escaped_literal_text_blocks_round_trip() {
+        let cases = [
+            ContentElement::Heading {
+                level: HeadingLevel::new(2).unwrap(),
+                text: "Sharp ##".to_string(),
+            },
+            ContentElement::Blockquote {
+                text: "# not a heading".to_string(),
+            },
+            ContentElement::Blockquote {
+                text: "1. not a list".to_string(),
+            },
+            ContentElement::Blockquote {
+                text: "[a]: /not-a-definition".to_string(),
+            },
+            ContentElement::Link {
+                text: "t".to_string(),
+                href: "/a&amp;b\\*c".to_string(),
+            },
+            ContentElement::CodeBlock {
+                language: Some("a&b&amp;c\\d\\*".to_string()),
+                code: "x".to_string(),
+            },
+            ContentElement::CodeBlock {
+                language: Some("a`b".to_string()),
+                code: "```\n~~~".to_string(),
+            },
+            ContentElement::Link {
+                text: "t".to_string(),
+                href: "/a b (c)".to_string(),
+            },
+            ContentElement::Image {
+                alt: Some("a".to_string()),
+                path: "my img.png".to_string(),
+            },
+        ];
+        for el in cases {
+            assert_eq!(check_block_round_trip(&el), Ok(()), "{el:?}");
+        }
+    }
+
+    #[test]
+    fn paragraph_with_leading_opener_stays_one_paragraph() {
+        // The opener is escaped so the block kind survives, but a text-only
+        // paragraph stores its source span, so the text reads back escaped and
+        // the strict check still reports `Changed` (see ADR-057 gap report).
+        for text in [
+            "# x",
+            "- x",
+            "1. x",
+            "> x",
+            "---",
+            "<div>",
+            "  # x",
+            "[a]: /x",
+            "[a]: /x\n[b]: /y",
+            "a | b\n--- | ---",
+            "x\n| a | b |\n--- | ---",
+        ] {
+            let err = check_block_round_trip(&paragraph(text)).unwrap_err();
+            match err {
+                RoundTripError::Changed { got } => {
+                    assert!(got.starts_with("Paragraph"), "{text:?} read back as {got}")
+                }
+                other => panic!("{text:?}: expected Changed paragraph, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn round_trip_error_display() {
         assert!(RoundTripError::BlockCount(2).to_string().contains('2'));
