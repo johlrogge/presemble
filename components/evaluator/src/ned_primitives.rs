@@ -1811,4 +1811,210 @@ mod tests {
         .unwrap();
         assert!(matches!(heading_count, Value::Integer(1)), "got {heading_count:?}");
     }
+
+    // ── Body-slot structural selectors (as emitted by inject.js buildBodyAnchor) ──
+
+    /// Document at `content/index.md` whose body is:
+    /// H2 "Intro", P "Intro para one", P "Intro para two", H2 "Why Presemble", P "Why para".
+    fn make_structured_body_store() -> Arc<RwLock<NodeStore>> {
+        use content::{ContentElement, Document, DocumentSlot};
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+        use schema::{HeadingLevel, SlotName, Span, Spanned};
+
+        fn spanned(node: ContentElement) -> Spanned<ContentElement> {
+            Spanned { node, span: Span { start: 0, end: 0 } }
+        }
+        fn h2(text: &str) -> Spanned<ContentElement> {
+            spanned(ContentElement::Heading {
+                level: HeadingLevel::new(2).unwrap(),
+                text: text.to_string(),
+            })
+        }
+        fn p(text: &str) -> Spanned<ContentElement> {
+            spanned(ContentElement::Paragraph { text: text.to_string() })
+        }
+
+        let doc = Document {
+            preamble: im::vector![DocumentSlot {
+                name: SlotName::new("title"),
+                elements: im::vector![spanned(ContentElement::Heading {
+                    level: HeadingLevel::new(1).unwrap(),
+                    text: "Home".to_string(),
+                })],
+            }],
+            body: im::vector![
+                h2("Intro"),
+                p("Intro para one"),
+                p("Intro para two"),
+                h2("Why Presemble"),
+                p("Why para"),
+            ],
+            has_separator: true,
+            separator_span: None,
+        };
+        let meta = DocumentMeta {
+            url: "/".to_string(),
+            stem: "index".to_string(),
+            file: "content/index.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut store = NodeStore::new();
+        document_to_store(&doc, &mut store, Some(&meta));
+        Arc::new(RwLock::new(store))
+    }
+
+    /// Selector strings exactly as `inject.js` builds them (cf. the
+    /// `derive_anchor_structural_*` tests in publisher_cli serve.rs), paired with
+    /// the expected (kind, text) of the single node they must resolve to.
+    const BODY_SELECTOR_CASES: &[(&str, &str, &str)] = &[
+        // nth-after / heading-with-text
+        (
+            r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Intro") "paragraph" 0)"#,
+            "paragraph",
+            "Intro para one",
+        ),
+        (
+            r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Intro") "paragraph" 1)"#,
+            "paragraph",
+            "Intro para two",
+        ),
+        (
+            r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Why Presemble") "paragraph" 0)"#,
+            "paragraph",
+            "Why para",
+        ),
+        // heading-with-text
+        (
+            r#"(ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Intro")"#,
+            "heading",
+            "Intro",
+        ),
+        (
+            r#"(ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "Why Presemble")"#,
+            "heading",
+            "Why Presemble",
+        ),
+        // nth-of-kind
+        (
+            r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "paragraph" 2)"#,
+            "paragraph",
+            "Why para",
+        ),
+        (
+            r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/index.md") "body")) "heading" 1)"#,
+            "heading",
+            "Why Presemble",
+        ),
+        // nth-child fallback
+        (
+            r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "body") 2)"#,
+            "paragraph",
+            "Intro para two",
+        ),
+        (
+            r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "body") 3)"#,
+            "heading",
+            "Why Presemble",
+        ),
+    ];
+
+    fn assert_resolves_to(root_env: &RootEnv, sel: &str, kind: &str, text: &str) {
+        let count = crate::eval_str_with_root(&format!("(ned/count {sel})"), root_env)
+            .unwrap_or_else(|e| panic!("count eval failed for {sel}: {e}"));
+        assert!(
+            matches!(count, Value::Integer(1)),
+            "expected exactly one node for {sel}, got {count:?}"
+        );
+
+        let kinds = crate::eval_str_with_root(&format!("(ned/kind-of {sel})"), root_env)
+            .unwrap_or_else(|e| panic!("kind-of eval failed for {sel}: {e}"));
+        match kinds {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1, "kind-of for {sel}: {items:?}");
+                assert!(
+                    matches!(&items[0], Value::Text(s) if s == kind),
+                    "expected kind {kind:?} for {sel}, got {items:?}"
+                );
+            }
+            other => panic!("expected List from ned/kind-of, got {other:?}"),
+        }
+
+        let texts = crate::eval_str_with_root(
+            &format!("(ned/text-of (ned/filter (ned/descendants {sel}) :text))"),
+            root_env,
+        )
+        .unwrap_or_else(|e| panic!("text-of eval failed for {sel}: {e}"));
+        match texts {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1, "text-of for {sel}: {items:?}");
+                assert!(
+                    matches!(&items[0], Value::Text(s) if s == text),
+                    "expected text {text:?} for {sel}, got {items:?}"
+                );
+            }
+            other => panic!("expected List from ned/text-of, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slot_body_returns_the_body_element() {
+        let store = make_structured_body_store();
+        let root_env = setup_with_prelude(store);
+        let kinds = crate::eval_str_with_root(
+            r#"(ned/kind-of (ned/slot (ned/doc-by-path "content/index.md") "body"))"#,
+            &root_env,
+        )
+        .unwrap();
+        match kinds {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1, "got {items:?}");
+                assert!(matches!(&items[0], Value::Text(s) if s == "body"), "got {items:?}");
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+        let body_count = crate::eval_str_with_root(
+            r#"(ned/count (ned/body (ned/doc-by-path "content/index.md")))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(body_count, Value::Integer(1)), "got {body_count:?}");
+        // Preamble slots still resolve as before.
+        let title_count = crate::eval_str_with_root(
+            r#"(ned/count (ned/slot (ned/doc-by-path "content/index.md") "title"))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(matches!(title_count, Value::Integer(1)), "got {title_count:?}");
+    }
+
+    #[test]
+    fn inject_js_body_selectors_resolve_to_single_expected_node() {
+        let store = make_structured_body_store();
+        let root_env = setup_with_prelude(store);
+        for (sel, kind, text) in BODY_SELECTOR_CASES {
+            assert_resolves_to(&root_env, sel, kind, text);
+        }
+    }
+
+    #[test]
+    fn inject_js_body_selectors_resolve_in_query_only_root() {
+        let store = make_structured_body_store();
+        let root_env = setup_query_only(store);
+        crate::load_ned_prelude(&root_env).expect("ned prelude must load on a query-only root");
+        for (sel, kind, text) in BODY_SELECTOR_CASES {
+            assert_resolves_to(&root_env, sel, kind, text);
+        }
+    }
+
+    #[test]
+    fn body_at_still_picks_idx_via_ned_body() {
+        let store = make_structured_body_store();
+        let root_env = setup_with_prelude(store);
+        assert_resolves_to(
+            &root_env,
+            r#"(ned/body-at (ned/doc-by-path "content/index.md") 4)"#,
+            "paragraph",
+            "Why para",
+        );
+    }
 }

@@ -5611,6 +5611,180 @@ mod apply_ned_program_diagnostic_tests {
 }
 
 // ---------------------------------------------------------------------------
+// Browser body edits: the exact `bsave` program shape from inject.js, with a
+// structural body selector (`(ned/slot doc "body")`-rooted).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod body_structural_bsave_tests {
+    use super::*;
+    use content::{ContentElement, Document, DocumentSlot};
+    use node_store_bridge::content_bridge::{DocumentMeta, document_to_store, store_to_document};
+    use schema::{HeadingLevel, SlotName, Span, Spanned};
+
+    const SCHEMA_SRC: &str = "# Title {#title}\noccurs\n: exactly once\n";
+    const FILE: &str = "content/test/doc.md";
+
+    fn spanned(node: ContentElement) -> Spanned<ContentElement> {
+        Spanned { node, span: Span { start: 0, end: 0 } }
+    }
+
+    fn h2(text: &str) -> Spanned<ContentElement> {
+        spanned(ContentElement::Heading {
+            level: HeadingLevel::new(2).unwrap(),
+            text: text.to_string(),
+        })
+    }
+
+    fn p(text: &str) -> Spanned<ContentElement> {
+        spanned(ContentElement::Paragraph { text: text.to_string() })
+    }
+
+    /// Mirror of `cljStr` in inject.js.
+    fn clj_str(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// Conductor with `content/test/doc.md` whose body is:
+    /// H2 "Intro", P "Intro para one", P "Intro para two", H2 "Why Presemble", P "Why para".
+    /// Returns the conductor, its tempdir, and the document root NodeId.
+    fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir, node_store::NodeId) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
+        std::fs::create_dir_all(root.join("templates/test")).expect("templates");
+        std::fs::create_dir_all(root.join("content/test")).expect("content");
+        std::fs::write(root.join("schemas/test/item.md"), SCHEMA_SRC).expect("schema");
+        std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").expect("template");
+
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
+        let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
+
+        let doc = Document {
+            preamble: im::vector![DocumentSlot {
+                name: SlotName::new("title"),
+                elements: im::vector![spanned(ContentElement::Heading {
+                    level: HeadingLevel::new(1).unwrap(),
+                    text: "Test Title".to_string(),
+                })],
+            }],
+            body: im::vector![
+                h2("Intro"),
+                p("Intro para one"),
+                p("Intro para two"),
+                h2("Why Presemble"),
+                p("Why para"),
+            ],
+            has_separator: true,
+            separator_span: None,
+        };
+        let meta = DocumentMeta {
+            url: "/test/doc".to_string(),
+            stem: "test".to_string(),
+            file: FILE.to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = {
+            let mut store = conductor.node_store.write().unwrap();
+            document_to_store(&doc, &mut store, Some(&meta))
+        };
+
+        (conductor, tmp, doc_root)
+    }
+
+    /// Build the program exactly as inject.js `bsave` does.
+    fn bsave_program(sel: &str, bvalue: &str) -> String {
+        format!(
+            "(let [g (ned/parse-grammar {})]\n  (ned/replace\n    {}\n    (ned/parse-body {} g)))",
+            clj_str(SCHEMA_SRC),
+            sel,
+            clj_str(bvalue)
+        )
+    }
+
+    fn body_texts(conductor: &Conductor, doc_root: node_store::NodeId) -> Vec<(String, String)> {
+        let store = conductor.node_store.read().unwrap();
+        let doc = store_to_document(&store, doc_root);
+        doc.body
+            .iter()
+            .map(|el| match &el.node {
+                ContentElement::Heading { text, .. } => ("heading".to_string(), text.clone()),
+                ContentElement::Paragraph { text } => ("paragraph".to_string(), text.clone()),
+                other => ("other".to_string(), format!("{other:?}")),
+            })
+            .collect()
+    }
+
+    fn dirty_buffers(conductor: &Conductor) -> Vec<String> {
+        match conductor.handle_command(Command::GetDirtyBuffers).response {
+            Response::DirtyBuffers(paths) => paths,
+            other => panic!("expected DirtyBuffers, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bsave_with_nth_after_heading_selector_replaces_body_paragraph_and_marks_dirty() {
+        let (conductor, _tmp, doc_root) = make_conductor_with_doc();
+        assert!(dirty_buffers(&conductor).is_empty(), "nothing dirty before the edit");
+
+        let sel = format!(
+            "(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path {}) \"body\")) \"Intro\") \"paragraph\" 1)",
+            clj_str(FILE)
+        );
+        let program = bsave_program(&sel, "Rewritten paragraph");
+
+        match conductor.handle_command(Command::ApplyNedProgram { program }).response {
+            Response::Applied { dirty_paths, .. } => {
+                assert_eq!(dirty_paths, 1, "body edit should dirty exactly one document");
+            }
+            Response::Error(e) => panic!("unexpected error: {e}"),
+            other => panic!("expected Response::Applied, got: {other:?}"),
+        }
+
+        let body = body_texts(&conductor, doc_root);
+        let expected: Vec<(String, String)> = [
+            ("heading", "Intro"),
+            ("paragraph", "Intro para one"),
+            ("paragraph", "Rewritten paragraph"),
+            ("heading", "Why Presemble"),
+            ("paragraph", "Why para"),
+        ]
+        .iter()
+        .map(|(k, t)| (k.to_string(), t.to_string()))
+        .collect();
+        assert_eq!(body, expected);
+
+        assert_eq!(dirty_buffers(&conductor), vec![FILE.to_string()]);
+    }
+
+    #[test]
+    fn bsave_with_heading_selector_replaces_body_heading_and_marks_dirty() {
+        let (conductor, _tmp, doc_root) = make_conductor_with_doc();
+
+        let sel = format!(
+            "(ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path {}) \"body\")) \"Why Presemble\")",
+            clj_str(FILE)
+        );
+        let program = bsave_program(&sel, "## Why \"Presemble\" rocks");
+
+        match conductor.handle_command(Command::ApplyNedProgram { program }).response {
+            Response::Applied { dirty_paths, .. } => assert_eq!(dirty_paths, 1),
+            Response::Error(e) => panic!("unexpected error: {e}"),
+            other => panic!("expected Response::Applied, got: {other:?}"),
+        }
+
+        let body = body_texts(&conductor, doc_root);
+        assert_eq!(body.len(), 5, "body: {body:?}");
+        assert_eq!(body[3], ("heading".to_string(), "Why \"Presemble\" rocks".to_string()));
+        assert_eq!(body[4], ("paragraph".to_string(), "Why para".to_string()));
+        assert_eq!(dirty_buffers(&conductor), vec![FILE.to_string()]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests for schema_url_for_page and page_url_for_schema
 // ---------------------------------------------------------------------------
 

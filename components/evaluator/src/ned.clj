@@ -73,19 +73,26 @@
 (defn ned/doc-by-path [path]
   (ned/filter (ned/all-documents) :attr "file" path))
 
-(def-doc! ned/slot "(ned/slot doc slot-name)" "Given a document selection, return the named slot element under its preamble.")
-(defn ned/slot [doc slot-name]
+(def-doc! ned/body "(ned/body doc)" "Given a document selection, return its body element.")
+(defn ned/body [doc]
   (-> doc
       (ned/children)
-      (ned/filter :kind "preamble")
-      (ned/children)
-      (ned/filter :attr "name" slot-name)))
+      (ned/filter :kind "body")))
+
+(def-doc! ned/slot "(ned/slot doc slot-name)" "Given a document selection, return the named slot element. \"body\" returns the document's body element (same as ned/body); any other name returns the named slot element under its preamble.")
+(defn ned/slot [doc slot-name]
+  (if (= slot-name "body")
+    (ned/body doc)
+    (-> doc
+        (ned/children)
+        (ned/filter :kind "preamble")
+        (ned/children)
+        (ned/filter :attr "name" slot-name))))
 
 (def-doc! ned/body-at "(ned/body-at doc idx)" "Given a document selection, return the idx-th body child element.")
 (defn ned/body-at [doc idx]
   (-> doc
-      (ned/children)
-      (ned/filter :kind "body")
+      (ned/body)
       (ned/nth-child idx)))
 
 ;; ── Source document discovery ────────────────────────────────────────────
