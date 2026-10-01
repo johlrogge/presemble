@@ -1534,6 +1534,7 @@ dependencies = [
  "ned",
  "nng",
  "node_store",
+ "node_store_bridge",
  "serde",
  "serde_json",
  "tempfile",

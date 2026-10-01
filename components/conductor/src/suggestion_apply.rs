@@ -446,7 +446,7 @@ pub(crate) fn creation_hint(cause: &StaleCause, kind: TargetKind) -> Option<&'st
             )
         }
         StaleCause::Ambiguous { .. } if kind == TargetKind::Text => Some(
-            "the slot has several blocks; pick one with (ned/nth-of-kind (ned/children <slot>) \"paragraph\" i)",
+            "the address matches several text nodes; narrow it to one block, e.g. (ned/text-in (ned/nth-of-kind (ned/children <slot>) \"paragraph\" i)), or use a longer search string so it occurs in only one block",
         ),
         StaleCause::Unresolved => {
             Some("check the file path and slot name; empty slots need InsertChild on the slot")

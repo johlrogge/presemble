@@ -1841,12 +1841,14 @@ fn parse_doc_by_path(src: &str, pos: usize) -> Option<(String, usize)> {
 }
 
 /// Parse `(ned/children (ned/slot (ned/doc-by-path "FILE") "SLOT"))` starting
-/// at `pos`. Returns `(file, slot, pos_after_outer_close)` or `None`.
+/// at `pos`. `ned/blocks` is accepted as an alias of `ned/children`.
+/// Returns `(file, slot, pos_after_outer_close)` or `None`.
 fn parse_children_slot(src: &str, pos: usize) -> Option<(String, String, usize)> {
     let pos = skip_ws(src, pos);
     let pos = match_literal(src, pos, "(")?;
     let pos = skip_ws(src, pos);
-    let pos = match_literal(src, pos, "ned/children")?;
+    let pos = match_literal(src, pos, "ned/children")
+        .or_else(|| match_literal(src, pos, "ned/blocks"))?;
     let pos = skip_ws(src, pos);
     // Inner `(ned/slot ...)`
     let pos = match_literal(src, pos, "(")?;
@@ -1889,6 +1891,9 @@ fn parse_usize(src: &str, pos: usize) -> Option<(usize, usize)> {
 /// - `(ned/slot (ned/doc-by-path "FILE") "SLOT")` → `AnchorJson::Slot`
 /// - `(ned/doc-by-path "FILE")` anywhere → `AnchorJson::Doc { file: Some(...) }`
 /// - anything else → `AnchorJson::Doc { file: None }`
+///
+/// `ned/blocks` is accepted wherever `ned/children` is, and a surrounding
+/// `(ned/text-in ...)` wrapper is seen through (the forms are found by search).
 ///
 /// Note: `(ned/body-at ...)` is intentionally NOT matched here. Per ADR-045, the
 /// `BodyNth` variant was removed. Legacy `body-at` selections fall through to the
@@ -2664,6 +2669,60 @@ mod tests {
                 offset: 0,
             })
         );
+    }
+
+    // ── ned/blocks alias and ned/text-in wrappers (ADR-056) ────────────────
+
+    fn structural(
+        file: &str,
+        heading_text: Option<&str>,
+        node_kind: &str,
+        offset: usize,
+    ) -> AnchorJson {
+        AnchorJson::Structural(editorial_types::StructuralAnchor {
+            file: file.to_string(),
+            slot: "body".to_string(),
+            heading_text: heading_text.map(str::to_string),
+            node_kind: node_kind.to_string(),
+            offset,
+        })
+    }
+
+    /// The three structural selection forms, built over `children_fn`
+    /// (`ned/children` or `ned/blocks`), paired with their expected anchors.
+    fn structural_forms(children_fn: &str) -> Vec<(String, AnchorJson)> {
+        let slot = format!(r#"({children_fn} (ned/slot (ned/doc-by-path "content/page.md") "body"))"#);
+        vec![
+            (
+                format!(r#"(ned/nth-after (ned/heading-with-text {slot} "Intro") "paragraph" 1)"#),
+                structural("content/page.md", Some("Intro"), "paragraph", 1),
+            ),
+            (
+                format!(r#"(ned/heading-with-text {slot} "About Us")"#),
+                structural("content/page.md", Some("About Us"), "heading", 0),
+            ),
+            (
+                format!(r#"(ned/nth-of-kind {slot} "paragraph" 2)"#),
+                structural("content/page.md", None, "paragraph", 2),
+            ),
+        ]
+    }
+
+    #[test]
+    fn derive_anchor_accepts_ned_blocks_alias_for_each_structural_form() {
+        for (sel, expected) in structural_forms("ned/blocks") {
+            assert_eq!(derive_anchor(&sel), expected, "selection: {sel}");
+        }
+    }
+
+    #[test]
+    fn derive_anchor_sees_through_text_in_wrapper_for_each_structural_form() {
+        for children_fn in ["ned/children", "ned/blocks"] {
+            for (sel, expected) in structural_forms(children_fn) {
+                let wrapped = format!("(ned/text-in {sel})");
+                assert_eq!(derive_anchor(&wrapped), expected, "selection: {wrapped}");
+            }
+        }
     }
 
     #[test]

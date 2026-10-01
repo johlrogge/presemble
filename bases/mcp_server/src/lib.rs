@@ -229,7 +229,7 @@ fn handle_request(
                     },
                     {
                         "name": "suggest",
-                        "description": "Suggest an editorial change to a content slot. The suggestion appears as an LSP diagnostic in the editor with accept/reject actions. The author is always in charge. (routed through NED internally)",
+                        "description": SUGGEST_DESCRIPTION,
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -277,7 +277,7 @@ fn handle_request(
                     },
                     {
                         "name": "suggest_body_edit",
-                        "description": "Suggest a text replacement in the body of a content file. The suggestion appears as a diagnostic in the editor. (routed through NED — search/replace now matches across preamble + body; scope tightening tracked for follow-up)",
+                        "description": SUGGEST_BODY_EDIT_DESCRIPTION,
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -287,7 +287,7 @@ fn handle_request(
                                 },
                                 "search": {
                                     "type": "string",
-                                    "description": "Exact text to find and replace"
+                                    "description": "Exact body text to replace; must occur exactly once, inside one block (matched against markdown source)"
                                 },
                                 "replace": {
                                     "type": "string",
@@ -307,7 +307,7 @@ fn handle_request(
                     },
                     {
                         "name": "suggest_ned",
-                        "description": "Author a NED-based editorial suggestion. NED is a graph query language over the document tree. Selections are Clojure expressions that return a Selection over nodes; the mutation is structured. Examples: selection `(ned/slot (ned/doc-by-path \"content/post/x.md\") \"title\")`; mutation `{\"SetText\": \"New title\"}` or `{\"SearchReplace\": {\"search\": \"old\", \"replace\": \"new\"}}`. Re-evaluated against current content at accept time. Use `suggest` and `suggest_body_edit` for common cases.",
+                        "description": suggest_ned_description(),
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -501,7 +501,7 @@ fn handle_request(
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
-                                "content": [{"type": "text", "text": format!("Error: {e}")}],
+                                "content": [{"type": "text", "text": format!("{e}\n{SUGGEST_ERROR_POINTER}")}],
                                 "isError": true
                             }),
                         ),
@@ -585,6 +585,16 @@ fn handle_request(
                     let replace = arguments.get("replace").and_then(|v| v.as_str()).unwrap_or("");
                     let reason = arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("");
 
+                    if let Err(e) = validate_body_edit_args(search, replace) {
+                        return json_rpc_ok(
+                            req.id.clone(),
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": e}],
+                                "isError": true
+                            }),
+                        );
+                    }
+
                     let (selection, mutation) = lower_body_edit_args(file, search, replace);
                     match cond.send(&conductor::Command::CreateNedSuggestion {
                         file: std::path::PathBuf::from(file),
@@ -602,7 +612,7 @@ fn handle_request(
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
-                                "content": [{"type": "text", "text": format!("Error: {e}")}],
+                                "content": [{"type": "text", "text": e}],
                                 "isError": true
                             }),
                         ),
@@ -659,13 +669,13 @@ fn handle_request(
                         Ok(conductor::Response::SuggestionCreated(id)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
-                                "content": [{"type": "text", "text": format!("NED suggestion created: {id}. It will appear as a diagnostic in the editor.")}]
+                                "content": [{"type": "text", "text": format!("NED suggestion created: {id}. It will appear in the editor.")}]
                             }),
                         ),
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
-                                "content": [{"type": "text", "text": format!("Error: {e}")}],
+                                "content": [{"type": "text", "text": e}],
                                 "isError": true
                             }),
                         ),
@@ -706,6 +716,97 @@ fn handle_request(
     }
 }
 
+// ── Tool descriptions (ADR-056 exact addressing) ─────────────────────────────
+
+const SUGGEST_DESCRIPTION: &str = "Suggest new text for a slot that holds exactly one text block (e.g. title, summary). Fails with a hint for empty or multi-block slots; for those, use suggest_ned with an explicit block address.";
+
+/// Appended to conductor errors from `suggest`, pointing at the tool that can
+/// address one block of a multi-block (or empty) slot.
+const SUGGEST_ERROR_POINTER: &str =
+    "For empty or multi-block slots, use suggest_ned with an explicit block address.";
+
+const SUGGEST_BODY_EDIT_DESCRIPTION: &str = "Suggest replacing a piece of text in the body of a content file. Only the body is searched (never the title or other slots). `search` must occur exactly once in the body, inside a single block's text, so include enough surrounding words to make it unique. A search cannot span blocks (e.g. two paragraphs or a heading and a paragraph). Paragraph text is matched as markdown source, so write inline markup exactly as it appears in the file (e.g. `**bold**`, `[label](url)`). For structural changes use suggest_ned.";
+
+/// A paragraph `NodeTree` payload, as produced by `serde_json::to_string`
+/// (asserted in tests).
+const NODE_TREE_PARAGRAPH_EXAMPLE: &str =
+    r#"{"Element":{"name":"paragraph","attrs":[],"children":[{"Text":"New paragraph."}]}}"#;
+
+/// A level-2 heading `NodeTree` payload, as produced by `serde_json::to_string`
+/// (asserted in tests).
+const NODE_TREE_HEADING_EXAMPLE: &str =
+    r#"{"Element":{"name":"heading","attrs":[["level","2"]],"children":[{"Text":"New section"}]}}"#;
+
+fn suggest_ned_description() -> String {
+    format!(
+        "Author a NED editorial suggestion: a Clojure selection that addresses exactly one node, plus a structured mutation. The selection is re-evaluated against current content at accept time.\n\
+         \n\
+         Exact addressing rules:\n\
+         - Text mutations (SetText, SearchReplace) need exactly one Text node: the text of a single block (wrap a block address in ned/text-in).\n\
+         - Replace, Delete, InsertBefore and InsertAfter need exactly one block (a direct child of a slot or of the body).\n\
+         - InsertChild needs a slot or the body (it appends blocks).\n\
+         - Ambiguous addresses (matching several nodes) are refused; they are never applied to every match or to the first one.\n\
+         \n\
+         Helpers:\n\
+         - (ned/doc-by-path path): the document whose file is path.\n\
+         - (ned/slot doc name): a named slot of doc; \"body\" gives the body.\n\
+         - (ned/body doc): the body of doc.\n\
+         - (ned/children sel) / (ned/blocks sel): the blocks of a slot or body.\n\
+         - (ned/nth-of-kind sel kind i): the i-th (0-based) element of kind within sel.\n\
+         - (ned/heading-with-text sel text): headings in sel whose text equals text.\n\
+         - (ned/nth-after sel kind i): for each node in sel, the i-th following sibling of kind.\n\
+         - (ned/first-after sel kind): for each node in sel, the first following sibling of kind.\n\
+         - (ned/text-in sel): the text of each selected block.\n\
+         - (ned/nth-text sel i): for each node in sel, the i-th Text node under it.\n\
+         - (ned/first-text sel): for each node in sel, the first Text node under it.\n\
+         - (ned/text-containing sel s): Text nodes under sel whose text contains s.\n\
+         \n\
+         Examples:\n\
+         - The title's text, with mutation {{\"SetText\": \"New title\"}}: (ned/text-in (ned/children (ned/slot (ned/doc-by-path \"content/post/x.md\") \"title\")))\n\
+         - The second body paragraph's text, with SetText or {{\"SearchReplace\": {{\"search\": \"old\", \"replace\": \"new\"}}}}: (ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path \"content/post/x.md\") \"body\")) \"paragraph\" 1))\n\
+         - The paragraph after the heading \"Intro\", with Replace or InsertAfter: (ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path \"content/post/x.md\") \"body\")) \"Intro\") \"paragraph\" 0)\n\
+         \n\
+         Replace, InsertBefore, InsertAfter and InsertChild take a non-empty list of NodeTree blocks, inserted in order. Example: {{\"InsertAfter\": [{NODE_TREE_PARAGRAPH_EXAMPLE}, {NODE_TREE_HEADING_EXAMPLE}]}}. Heading levels are strings in payloads (\"2\", not 2). Text blocks (heading, paragraph) have exactly one Text child. Delete is the plain string \"Delete\"."
+    )
+}
+
+/// Reject `suggest_body_edit` arguments the selection cannot represent.
+///
+/// `clj_str_literal` strips `\r` and `\0`, so a search containing them would
+/// select text that does not match the mutation's search string.
+fn validate_body_edit_args(search: &str, replace: &str) -> Result<(), String> {
+    if search.is_empty() {
+        return Err("search must not be empty; give the exact body text to replace".to_string());
+    }
+    for (name, value) in [("search", search), ("replace", replace)] {
+        if value.contains(['\r', '\0']) {
+            return Err(format!(
+                "{name} must not contain carriage returns (\\r) or NUL characters (\\0)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A short re-suggest hint for a Stale suggestion, where one applies.
+fn stale_hint(cause: &editorial_types::StaleCause) -> Option<&'static str> {
+    use editorial_types::StaleCause;
+    match cause {
+        StaleCause::WrongKind { .. } | StaleCause::Unspecified => {
+            Some("re-suggest with an exact address")
+        }
+        StaleCause::Ambiguous { .. } => Some("address is ambiguous; edit manually or re-suggest"),
+        StaleCause::SearchNotFound | StaleCause::NoChange => {
+            Some("text changed; likely already handled")
+        }
+        StaleCause::SearchNotUnique { .. } => {
+            Some("text now occurs more than once; review manually")
+        }
+        StaleCause::Unresolved | StaleCause::InvalidValue { .. } | StaleCause::EvalError { .. } => {
+            None
+        }
+    }
+}
 
 /// Lower the legacy `suggest` tool arguments to a NED selection expression and
 /// mutation, ready to pass to [`conductor::Command::CreateNedSuggestion`].
@@ -757,7 +858,8 @@ fn lower_body_edit_args(
 ///
 /// The format varies by mutation kind and status:
 /// - Status prefix: `PENDING` is omitted (default), `ACCEPTED`, `REJECTED`,
-///   or `STALE` are prepended (with `[was: <reason>]` appended for Stale).
+///   or `STALE` are prepended (with `[was: <reason>]` appended for Stale,
+///   followed by `[hint: <hint>]` when the typed cause has a re-suggest hint).
 /// - Author prefix: `[Claude]` for `Author::Claude`, `[<name>]` for `Author::Human`.
 fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
     let author_label = match &s.author {
@@ -774,9 +876,10 @@ fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
     };
 
     let stale_suffix = match &s.status {
-        editorial_types::NedSuggestionStatus::Stale { reason, .. } => {
-            format!(" [was: {reason}]")
-        }
+        editorial_types::NedSuggestionStatus::Stale { reason, cause } => match stale_hint(cause) {
+            Some(hint) => format!(" [was: {reason}] [hint: {hint}]"),
+            None => format!(" [was: {reason}]"),
+        },
         _ => String::new(),
     };
 
@@ -1366,6 +1469,213 @@ mod tests {
         );
     }
 
+    fn stale(cause: editorial_types::StaleCause) -> String {
+        let s = make_ned_suggestion(
+            editorial_types::NedMutation::SetText("Hi".to_string()),
+            editorial_types::NedSuggestionStatus::Stale {
+                reason: cause.to_string(),
+                cause,
+            },
+            editorial_types::Author::Claude,
+        );
+        format_ned_suggestion(&s)
+    }
+
+    #[test]
+    fn format_ned_suggestion_stale_wrong_kind_hints_exact_address() {
+        let cause = editorial_types::StaleCause::WrongKind {
+            expected: editorial_types::TargetKind::Text,
+            found: "slot".to_string(),
+        };
+        let reason = cause.to_string();
+        assert_eq!(
+            stale(cause),
+            format!(
+                r#"[Claude] STALE set-text @ (ned/slot (ned/doc-by-path "content/post/hello.md") "title"): Test reason -> "Hi" [was: {reason}] [hint: re-suggest with an exact address] (sug-test-id)"#
+            )
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_stale_unspecified_hints_exact_address() {
+        let result = stale(editorial_types::StaleCause::Unspecified);
+        assert!(result.contains("[hint: re-suggest with an exact address]"), "{result}");
+        assert!(result.ends_with(" (sug-test-id)"), "{result}");
+    }
+
+    #[test]
+    fn format_ned_suggestion_stale_ambiguous_hints_manual_edit() {
+        let result = stale(editorial_types::StaleCause::Ambiguous { matches: 2 });
+        assert!(
+            result.contains("[hint: address is ambiguous; edit manually or re-suggest]"),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_stale_text_drift_hints_already_handled() {
+        for cause in [
+            editorial_types::StaleCause::SearchNotFound,
+            editorial_types::StaleCause::NoChange,
+        ] {
+            let result = stale(cause);
+            assert!(
+                result.contains("[hint: text changed; likely already handled]"),
+                "{result}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_ned_suggestion_stale_search_not_unique_hints_manual_review() {
+        let result = stale(editorial_types::StaleCause::SearchNotUnique { occurrences: 2 });
+        assert!(
+            result.contains("[hint: text now occurs more than once; review manually]"),
+            "{result}"
+        );
+    }
+
+    #[test]
+    fn format_ned_suggestion_stale_without_hint_for_other_causes() {
+        for cause in [
+            editorial_types::StaleCause::Unresolved,
+            editorial_types::StaleCause::InvalidValue { detail: "x".to_string() },
+            editorial_types::StaleCause::EvalError { detail: "y".to_string() },
+        ] {
+            let result = stale(cause);
+            assert!(!result.contains("[hint:"), "{result}");
+            assert!(result.contains("[was: "), "{result}");
+        }
+    }
+
+    // ── tool description tests ────────────────────────────────────────────────
+
+    #[test]
+    fn suggest_description_is_exact_and_drops_lsp_claims() {
+        assert_eq!(
+            SUGGEST_DESCRIPTION,
+            "Suggest new text for a slot that holds exactly one text block (e.g. title, summary). Fails with a hint for empty or multi-block slots; for those, use suggest_ned with an explicit block address."
+        );
+        assert!(!SUGGEST_DESCRIPTION.contains("LSP"));
+        assert!(!SUGGEST_DESCRIPTION.contains("accept/reject"));
+    }
+
+    #[test]
+    fn suggest_body_edit_description_states_scope_and_uniqueness() {
+        let d = SUGGEST_BODY_EDIT_DESCRIPTION;
+        assert!(d.contains("Only the body is searched"), "{d}");
+        assert!(d.contains("exactly once"), "{d}");
+        assert!(d.contains("single block"), "{d}");
+        assert!(d.contains("surrounding words"), "{d}");
+        assert!(d.contains("cannot span blocks"), "{d}");
+        assert!(d.contains("markdown source"), "{d}");
+        assert!(d.contains("**bold**"), "{d}");
+    }
+
+    #[test]
+    fn suggest_ned_description_lists_rules_helpers_and_examples() {
+        let d = suggest_ned_description();
+        for needle in [
+            "SetText, SearchReplace",
+            "exactly one Text node",
+            "Replace, Delete, InsertBefore and InsertAfter need exactly one block",
+            "InsertChild needs a slot or the body",
+            "Ambiguous addresses",
+            "(ned/text-in sel)",
+            "(ned/children sel) / (ned/blocks sel)",
+            "(ned/nth-of-kind sel kind i)",
+            "(ned/nth-after sel kind i)",
+            "(ned/first-after sel kind)",
+            "(ned/heading-with-text sel text)",
+            "(ned/nth-text sel i)",
+            "(ned/first-text sel)",
+            "(ned/text-containing sel s)",
+            "(ned/slot doc name)",
+            "(ned/body doc)",
+            "(ned/doc-by-path path)",
+            r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/x.md") "title")))"#,
+            r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/x.md") "body")) "paragraph" 1))"#,
+            r#"(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/post/x.md") "body")) "Intro") "paragraph" 0)"#,
+            "Heading levels are strings",
+        ] {
+            assert!(d.contains(needle), "description missing {needle:?}:\n{d}");
+        }
+    }
+
+    #[test]
+    fn node_tree_examples_match_real_serialization() {
+        use ned::NodeTree;
+        let paragraph = NodeTree::element("paragraph").with_child(NodeTree::text("New paragraph."));
+        let heading = NodeTree::element("heading")
+            .with_attr("level", "2")
+            .with_child(NodeTree::text("New section"));
+        assert_eq!(serde_json::to_string(&paragraph).unwrap(), NODE_TREE_PARAGRAPH_EXAMPLE);
+        assert_eq!(serde_json::to_string(&heading).unwrap(), NODE_TREE_HEADING_EXAMPLE);
+    }
+
+    #[test]
+    fn suggest_ned_description_payload_example_decodes_to_blocks() {
+        let payload =
+            format!(r#"{{"InsertAfter": [{NODE_TREE_PARAGRAPH_EXAMPLE}, {NODE_TREE_HEADING_EXAMPLE}]}}"#);
+        assert!(suggest_ned_description().contains(&payload), "payload example not embedded");
+
+        let mutation: editorial_types::NedMutation =
+            serde_json::from_str(&payload).expect("example mutation deserializes");
+        let editorial_types::NedMutation::InsertAfter(trees) = mutation else {
+            panic!("expected InsertAfter, got {mutation:?}");
+        };
+        assert_eq!(trees.len(), 2);
+        for tree in &trees {
+            node_store_bridge::content_bridge::tree_to_block(tree)
+                .unwrap_or_else(|e| panic!("example tree must decode to a block: {e}; tree: {tree:?}"));
+        }
+    }
+
+    #[test]
+    fn suggest_ned_description_delete_example_deserializes() {
+        let m: editorial_types::NedMutation = serde_json::from_str(r#""Delete""#).unwrap();
+        assert_eq!(m, editorial_types::NedMutation::Delete);
+    }
+
+    // ── validate_body_edit_args tests ─────────────────────────────────────────
+
+    #[test]
+    fn validate_body_edit_args_rejects_empty_search() {
+        let err = validate_body_edit_args("", "x").unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn validate_body_edit_args_rejects_cr_and_nul() {
+        for (search, replace) in [("a\rb", "x"), ("a\0b", "x"), ("ab", "x\ry"), ("ab", "x\0y")] {
+            assert!(
+                validate_body_edit_args(search, replace).is_err(),
+                "should reject search={search:?} replace={replace:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_body_edit_args_accepts_ordinary_text_and_empty_replace() {
+        assert!(validate_body_edit_args("old words", "new words").is_ok());
+        assert!(validate_body_edit_args("old words", "").is_ok());
+    }
+
+    #[test]
+    fn lower_body_edit_args_strips_cr_from_selection_but_not_mutation() {
+        // Why `validate_body_edit_args` rejects `\r`: the literal loses it, so
+        // the selection would search for different text than the mutation.
+        let (selection, mutation) = lower_body_edit_args("content/post/x.md", "a\rb", "c");
+        assert!(selection.ends_with(r#" "ab")"#), "got: {selection}");
+        assert!(
+            matches!(
+                mutation,
+                editorial_types::NedMutation::SearchReplace { ref search, .. } if search == "a\rb"
+            ),
+            "mutation search must be raw; got: {mutation:?}"
+        );
+    }
+
     #[test]
     fn format_ned_suggestion_accepted_and_rejected() {
         let accepted = make_ned_suggestion(
@@ -1419,25 +1729,28 @@ mod tests {
     ///   templates/post/item.hiccup
     ///   content/post/first-post.md
     fn build_e2e_site(tmp: &tempfile::TempDir) {
+        // `suggest_body_edit` addresses body text only (ADR-056), so the
+        // fixture has a real body after the separator.
+        build_e2e_site_with(tmp, TITLE_ONLY_SCHEMA, "# First Post\n\n----\n\nBody text here.\n");
+    }
+
+    /// A schema with a single-heading `title` slot and a body.
+    const TITLE_ONLY_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\n----\nBody.\n";
+
+    /// A schema with a `title` slot, a 1..3 paragraph `summary` slot and a body.
+    const TITLE_SUMMARY_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\nPost summary. {#summary}\noccurs\n: 1..3\n\n----\nBody.\n";
+
+    /// Build a site in `tmp` with `schema` as `schemas/post/item.md` and
+    /// `content` as `content/post/first-post.md`.
+    fn build_e2e_site_with(tmp: &tempfile::TempDir, schema: &str, content: &str) {
         use std::fs;
         let root = tmp.path();
         fs::create_dir_all(root.join("schemas/post")).expect("schemas dir");
         fs::create_dir_all(root.join("templates/post")).expect("templates dir");
         fs::create_dir_all(root.join("content/post")).expect("content dir");
-        fs::write(
-            root.join("schemas/post/item.md"),
-            "# Post title {#title}\noccurs\n: exactly once\n\n----\nBody.\n",
-        )
-        .expect("schema file");
+        fs::write(root.join("schemas/post/item.md"), schema).expect("schema file");
         fs::write(root.join("templates/post/item.hiccup"), "[:div]").expect("template file");
-        // `suggest_body_edit` addresses body text only (ADR-056), so the
-        // fixture has a real body after the separator.
-        fs::write(
-            root.join("content/post/first-post.md"),
-            "# First Post\n\n----\n\nBody text here.\n",
-        )
-        .expect("content file");
-
+        fs::write(root.join("content/post/first-post.md"), content).expect("content file");
     }
 
     /// Start an in-process conductor IPC server for `site_dir` on a background thread.
@@ -1673,5 +1986,224 @@ mod tests {
             text2.contains("(sug-"),
             "get_suggestions should include a suggestion id; got: {text2}"
         );
+    }
+
+    // ── E2E: exact addressing through the legacy tools (ADR-056) ─────────────
+
+    const E2E_FILE: &str = "content/post/first-post.md";
+
+    fn is_error(resp: &JsonRpcResponse) -> bool {
+        resp.result
+            .as_ref()
+            .and_then(|r| r.get("isError"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn call_tool(site_dir: &std::path::Path, name: &str, arguments: Value) -> JsonRpcResponse {
+        let req = make_request(
+            Value::from(1),
+            "tools/call",
+            serde_json::json!({ "name": name, "arguments": arguments }),
+        );
+        handle_request(&req, site_dir)
+    }
+
+    fn body_edit(site_dir: &std::path::Path, search: &str, replace: &str) -> JsonRpcResponse {
+        call_tool(
+            site_dir,
+            "suggest_body_edit",
+            serde_json::json!({
+                "file": E2E_FILE,
+                "search": search,
+                "replace": replace,
+                "reason": "e2e"
+            }),
+        )
+    }
+
+    /// Accept the only suggestion for `E2E_FILE`, save the document and return
+    /// the file's new contents on disk.
+    fn accept_only_suggestion_and_save(url: &str, site_dir: &std::path::Path) -> String {
+        let client = conductor::ConductorClient::connect(url).expect("connect");
+        let suggestions = match client
+            .send(&conductor::Command::GetNedSuggestions {
+                file: editorial_types::ContentPath::new(E2E_FILE),
+            })
+            .expect("get suggestions")
+        {
+            conductor::Response::NedSuggestions(s) => s,
+            other => panic!("expected NedSuggestions, got {other:?}"),
+        };
+        assert_eq!(suggestions.len(), 1, "expected one suggestion: {suggestions:?}");
+        let id = suggestions[0].id.clone();
+
+        let accepted = client
+            .send(&conductor::Command::AcceptNedSuggestion { id: id.clone() })
+            .expect("accept");
+        assert!(matches!(accepted, conductor::Response::Ok), "accept: {accepted:?}");
+
+        let after = match client
+            .send(&conductor::Command::GetNedSuggestions {
+                file: editorial_types::ContentPath::new(E2E_FILE),
+            })
+            .expect("get suggestions")
+        {
+            conductor::Response::NedSuggestions(s) => s,
+            other => panic!("expected NedSuggestions, got {other:?}"),
+        };
+        assert_eq!(
+            after[0].status,
+            editorial_types::NedSuggestionStatus::Accepted,
+            "suggestion should be Accepted, not Stale: {after:?}"
+        );
+
+        let saved = client
+            .send(&conductor::Command::SaveBuffer { path: E2E_FILE.to_string() })
+            .expect("save");
+        assert!(matches!(saved, conductor::Response::Ok), "save: {saved:?}");
+        std::fs::read_to_string(site_dir.join(E2E_FILE)).expect("read saved file")
+    }
+
+    #[test]
+    fn e2e_suggest_on_single_heading_title_changes_only_the_title() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        let url = start_conductor_server(tmp.path());
+
+        let resp = call_tool(
+            tmp.path(),
+            "suggest",
+            serde_json::json!({
+                "file": E2E_FILE,
+                "slot": "title",
+                "value": "A Better Title",
+                "reason": "clearer"
+            }),
+        );
+        assert!(!is_error(&resp), "suggest failed: {}", extract_text(&resp));
+
+        let saved = accept_only_suggestion_and_save(&url, tmp.path());
+        assert!(saved.contains("# A Better Title"), "title not changed: {saved:?}");
+        assert!(!saved.contains("First Post"), "old title remains: {saved:?}");
+        assert!(saved.contains("Body text here."), "body changed: {saved:?}");
+        assert_eq!(saved.matches("A Better Title").count(), 1, "title duplicated: {saved:?}");
+    }
+
+    #[test]
+    fn e2e_suggest_on_multi_block_slot_is_error_pointing_at_suggest_ned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site_with(
+            &tmp,
+            TITLE_SUMMARY_SCHEMA,
+            "# First Post\n\nSummary one.\n\nSummary two.\n\n----\n\nBody text here.\n",
+        );
+        let _url = start_conductor_server(tmp.path());
+
+        let resp = call_tool(
+            tmp.path(),
+            "suggest",
+            serde_json::json!({
+                "file": E2E_FILE,
+                "slot": "summary",
+                "value": "One summary",
+                "reason": "shorter"
+            }),
+        );
+        let text = extract_text(&resp);
+        assert!(is_error(&resp), "multi-block slot must be refused; got: {text}");
+        assert!(text.contains("suggest_ned"), "error should point at suggest_ned; got: {text}");
+        // The conductor's own text is passed through verbatim.
+        assert!(
+            text.contains(&editorial_types::StaleCause::Ambiguous { matches: 2 }.to_string()),
+            "conductor error should be passed through; got: {text}"
+        );
+    }
+
+    #[test]
+    fn e2e_suggest_body_edit_ignores_title_occurrence() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site_with(
+            &tmp,
+            TITLE_ONLY_SCHEMA,
+            "# Hello World\n\n----\n\nHello reader, welcome.\n",
+        );
+        let url = start_conductor_server(tmp.path());
+
+        let resp = body_edit(tmp.path(), "Hello", "Hi");
+        assert!(!is_error(&resp), "body edit failed: {}", extract_text(&resp));
+
+        let saved = accept_only_suggestion_and_save(&url, tmp.path());
+        assert!(saved.contains("# Hello World"), "title must be unchanged: {saved:?}");
+        assert!(saved.contains("Hi reader, welcome."), "body not edited: {saved:?}");
+    }
+
+    #[test]
+    fn e2e_suggest_body_edit_search_repeated_in_one_block_is_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site_with(
+            &tmp,
+            TITLE_ONLY_SCHEMA,
+            "# First Post\n\n----\n\nThe cat sat on the cat mat.\n",
+        );
+        let _url = start_conductor_server(tmp.path());
+
+        let resp = body_edit(tmp.path(), "cat", "dog");
+        let text = extract_text(&resp);
+        assert!(is_error(&resp), "duplicate search must be refused; got: {text}");
+        assert!(text.contains("occur"), "error should mention occurrences; got: {text}");
+        assert!(text.contains("exactly once"), "{text}");
+    }
+
+    #[test]
+    fn e2e_suggest_body_edit_search_in_two_blocks_is_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site_with(
+            &tmp,
+            TITLE_ONLY_SCHEMA,
+            "# First Post\n\n----\n\nThe cat sat.\n\nAnother cat.\n",
+        );
+        let _url = start_conductor_server(tmp.path());
+
+        let resp = body_edit(tmp.path(), "cat", "dog");
+        let text = extract_text(&resp);
+        assert!(is_error(&resp), "search in two blocks must be refused; got: {text}");
+        assert!(
+            text.contains(&editorial_types::StaleCause::Ambiguous { matches: 2 }.to_string()),
+            "conductor error should be passed through; got: {text}"
+        );
+        assert!(
+            text.contains("longer search string"),
+            "hint should suggest a longer search; got: {text}"
+        );
+    }
+
+    #[test]
+    fn e2e_suggest_body_edit_rejects_empty_and_cr_search() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        let url = start_conductor_server(tmp.path());
+
+        for (search, replace) in [("", "x"), ("Body\rtext", "x"), ("Body text", "x\ry")] {
+            let resp = body_edit(tmp.path(), search, replace);
+            assert!(
+                is_error(&resp),
+                "search={search:?} replace={replace:?} must be rejected; got: {}",
+                extract_text(&resp)
+            );
+        }
+
+        let client = conductor::ConductorClient::connect(&url).expect("connect");
+        match client
+            .send(&conductor::Command::GetNedSuggestions {
+                file: editorial_types::ContentPath::new(E2E_FILE),
+            })
+            .expect("get suggestions")
+        {
+            conductor::Response::NedSuggestions(s) => {
+                assert!(s.is_empty(), "no suggestion may be created: {s:?}")
+            }
+            other => panic!("expected NedSuggestions, got {other:?}"),
+        }
     }
 }
