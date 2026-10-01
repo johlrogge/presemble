@@ -104,6 +104,15 @@ fn reg(
     );
 }
 
+/// Extract a non-negative integer index argument. Negative or non-integer → error.
+fn extract_non_negative_index(fn_name: &str, val: &Value) -> Result<usize, String> {
+    match val {
+        Value::Integer(n) if *n < 0 => Err(format!("{fn_name}: idx must be non-negative")),
+        Value::Integer(n) => Ok(*n as usize),
+        _ => Err(format!("{fn_name}: idx must be an integer")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registration entry point
 // ---------------------------------------------------------------------------
@@ -425,6 +434,28 @@ pub fn register_ned_query_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>
         };
         let st = s.read().map_err(|e| e.to_string())?;
         Ok(wrap_selection(sel.nth_of_kind(&st, &name, idx)))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/nth-text", "(ned/nth-text sel idx)", "For each node in sel, the idx-th Text node under it (depth-first, document order). Union over all scope nodes: two scope nodes may give two results. Out of range gives nothing; negative idx is an error.", move |args| {
+        if args.len() < 2 { return Err("ned/nth-text requires a selection and an index".into()); }
+        let sel = extract_selection(&args[0])?;
+        let idx = extract_non_negative_index("ned/nth-text", &args[1])?;
+        let st = s.read().map_err(|e| e.to_string())?;
+        Ok(wrap_selection(sel.nth_text_each(&st, idx)))
+    });
+
+    let s = store.clone();
+    reg(root, "ned/nth-following-of-kind", "(ned/nth-following-of-kind sel kind idx)", "For each node in sel, its idx-th following sibling element of the given kind (document order). Union over all scope nodes: each anchor resolves separately. Out of range gives nothing; negative idx is an error.", move |args| {
+        if args.len() < 3 { return Err("ned/nth-following-of-kind requires a selection, kind name, and index".into()); }
+        let sel = extract_selection(&args[0])?;
+        let kind = match &args[1] {
+            Value::Text(s) => s.clone(),
+            _ => return Err("ned/nth-following-of-kind: kind name must be a string".into()),
+        };
+        let idx = extract_non_negative_index("ned/nth-following-of-kind", &args[2])?;
+        let st = s.read().map_err(|e| e.to_string())?;
+        Ok(wrap_selection(sel.nth_following_of_kind_each(&st, &kind, idx)))
     });
 
     // ── NodeTree constructors ─────────────────────────────────────────────────
@@ -2003,6 +2034,193 @@ mod tests {
         crate::load_ned_prelude(&root_env).expect("ned prelude must load on a query-only root");
         for (sel, kind, text) in BODY_SELECTOR_CASES {
             assert_resolves_to(&root_env, sel, kind, text);
+        }
+    }
+
+    // ── Text-addressing helpers (ADR-056) ─────────────────────────────────────
+
+    const BODY: &str = r#"(ned/slot (ned/doc-by-path "content/index.md") "body")"#;
+
+    fn eval(root_env: &RootEnv, src: &str) -> Value {
+        crate::eval_str_with_root(src, root_env).unwrap_or_else(|e| panic!("eval failed for {src}: {e}"))
+    }
+
+    fn count_of(root_env: &RootEnv, sel: &str) -> i64 {
+        match eval(root_env, &format!("(ned/count {sel})")) {
+            Value::Integer(n) => n,
+            other => panic!("expected Integer from ned/count, got {other:?}"),
+        }
+    }
+
+    fn texts_of(root_env: &RootEnv, sel: &str) -> Vec<String> {
+        match eval(root_env, &format!("(ned/text-of {sel})")) {
+            Value::List(items) => items
+                .into_iter()
+                .map(|v| match v {
+                    Value::Text(s) => s,
+                    other => panic!("expected Text, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected List from ned/text-of, got {other:?}"),
+        }
+    }
+
+    /// Body: H2 "Example", P "Alpha", H2 "Example", P "Beta".
+    fn make_duplicate_heading_store() -> Arc<RwLock<NodeStore>> {
+        use content::{ContentElement, Document};
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+        use schema::{HeadingLevel, Span, Spanned};
+
+        fn spanned(node: ContentElement) -> Spanned<ContentElement> {
+            Spanned { node, span: Span { start: 0, end: 0 } }
+        }
+        let h2 = |t: &str| spanned(ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), text: t.to_string() });
+        let p = |t: &str| spanned(ContentElement::Paragraph { text: t.to_string() });
+
+        let doc = Document {
+            preamble: im::vector![],
+            body: im::vector![h2("Example"), p("Alpha"), h2("Example"), p("Beta")],
+            has_separator: true,
+            separator_span: None,
+        };
+        let meta = DocumentMeta {
+            url: "/".to_string(),
+            stem: "index".to_string(),
+            file: "content/index.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut store = NodeStore::new();
+        document_to_store(&doc, &mut store, Some(&meta));
+        Arc::new(RwLock::new(store))
+    }
+
+    #[test]
+    fn nth_after_with_duplicated_heading_returns_two_nodes() {
+        let store = make_duplicate_heading_store();
+        let root_env = setup_with_prelude(store);
+        let sel = format!(r#"(ned/nth-after (ned/heading-with-text (ned/blocks {BODY}) "Example") "paragraph" 0)"#);
+        assert_eq!(count_of(&root_env, &sel), 2, "each anchor heading resolves separately");
+        let mut texts = texts_of(&root_env, &format!("(ned/texts-under {sel})"));
+        texts.sort();
+        assert_eq!(texts, vec!["Alpha".to_string(), "Beta".to_string()]);
+
+        // first-after behaves the same way.
+        let sel = format!(r#"(ned/first-after (ned/heading-with-text (ned/blocks {BODY}) "Example") "paragraph")"#);
+        assert_eq!(count_of(&root_env, &sel), 2);
+
+        // idx 1 after the first heading is "Beta"; after the second there is none.
+        let sel = format!(r#"(ned/nth-after (ned/heading-with-text (ned/blocks {BODY}) "Example") "paragraph" 1)"#);
+        assert_eq!(texts_of(&root_env, &format!("(ned/texts-under {sel})")), vec!["Beta".to_string()]);
+    }
+
+    #[test]
+    fn ned_blocks_returns_body_children() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        assert_eq!(count_of(&root_env, &format!("(ned/blocks {BODY})")), 5);
+    }
+
+    #[test]
+    fn ned_text_in_returns_direct_text_of_block() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        let sel = format!(r#"(ned/text-in (ned/nth-of-kind (ned/blocks {BODY}) "paragraph" 1))"#);
+        assert_eq!(count_of(&root_env, &sel), 1);
+        assert_eq!(texts_of(&root_env, &sel), vec!["Intro para two".to_string()]);
+        // The body element's direct children are blocks, not Text nodes.
+        assert_eq!(count_of(&root_env, &format!("(ned/text-in {BODY})")), 0);
+    }
+
+    #[test]
+    fn ned_texts_under_returns_all_descendant_texts() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        assert_eq!(count_of(&root_env, &format!("(ned/texts-under {BODY})")), 5);
+    }
+
+    #[test]
+    fn ned_nth_text_per_scope_node() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        assert_eq!(texts_of(&root_env, &format!("(ned/nth-text {BODY} 0)")), vec!["Intro".to_string()]);
+        assert_eq!(texts_of(&root_env, &format!("(ned/nth-text {BODY} 4)")), vec!["Why para".to_string()]);
+        assert_eq!(count_of(&root_env, &format!("(ned/nth-text {BODY} 5)")), 0, "out of range is empty");
+        // Scope of all paragraphs: one result per paragraph.
+        assert_eq!(count_of(&root_env, &format!(r#"(ned/nth-text (ned/filter (ned/blocks {BODY}) :kind "paragraph") 0)"#)), 3);
+        // Negative idx is an error.
+        assert!(crate::eval_str_with_root(&format!("(ned/nth-text {BODY} -1)"), &root_env).is_err());
+    }
+
+    #[test]
+    fn ned_nth_following_of_kind_negative_idx_is_error() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        let src = format!(r#"(ned/nth-following-of-kind (ned/nth-of-kind (ned/blocks {BODY}) "heading" 0) "paragraph" -1)"#);
+        assert!(crate::eval_str_with_root(&src, &root_env).is_err());
+        let src = format!(r#"(ned/nth-following-of-kind (ned/nth-of-kind (ned/blocks {BODY}) "heading" 0) "paragraph" 9)"#);
+        assert_eq!(count_of(&root_env, &src), 0, "out of range is empty");
+    }
+
+    #[test]
+    fn ned_first_text_returns_first_text_per_scope_node() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        let sel = format!(r#"(ned/first-text (ned/heading-with-text (ned/blocks {BODY}) "Why Presemble"))"#);
+        assert_eq!(texts_of(&root_env, &sel), vec!["Why Presemble".to_string()]);
+        assert_eq!(texts_of(&root_env, &format!("(ned/first-text {BODY})")), vec!["Intro".to_string()]);
+    }
+
+    #[test]
+    fn ned_text_containing_returns_matching_text_nodes() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        let sel = format!(r#"(ned/text-containing {BODY} "Why")"#);
+        assert_eq!(count_of(&root_env, &sel), 2, "ambiguous: heading text and paragraph text");
+        let sel = format!(r#"(ned/text-containing {BODY} "Why para")"#);
+        assert_eq!(texts_of(&root_env, &sel), vec!["Why para".to_string()]);
+        // Results are Text nodes, not their parent blocks.
+        assert!(
+            matches!(eval(&root_env, &format!("(ned/kind-of {sel})")), Value::List(ref items) if items.is_empty()),
+            "text-containing must yield Text nodes, not elements"
+        );
+        assert_eq!(count_of(&root_env, &format!(r#"(ned/text-containing {BODY} "nope")"#)), 0);
+    }
+
+    #[test]
+    fn ned_filter_text_predicates_match_text_nodes() {
+        let root_env = setup_with_prelude(make_structured_body_store());
+        let sel = format!(r#"(ned/filter (ned/texts-under {BODY}) :text-equals "Intro")"#);
+        assert_eq!(texts_of(&root_env, &sel), vec!["Intro".to_string()]);
+        let sel = format!(r#"(ned/filter (ned/texts-under {BODY}) :text-contains "para")"#);
+        assert_eq!(count_of(&root_env, &sel), 3);
+    }
+
+    #[test]
+    fn new_text_helpers_run_on_query_only_root() {
+        let root_env = setup_query_only(make_structured_body_store());
+        crate::load_ned_prelude(&root_env).expect("ned prelude must load on a query-only root");
+        for (sel, expected) in [
+            (format!("(ned/blocks {BODY})"), 5),
+            (format!(r#"(ned/text-in (ned/nth-of-kind (ned/blocks {BODY}) "paragraph" 0))"#), 1),
+            (format!("(ned/texts-under {BODY})"), 5),
+            (format!("(ned/nth-text {BODY} 1)"), 1),
+            (format!("(ned/first-text {BODY})"), 1),
+            (format!(r#"(ned/text-containing {BODY} "Intro para")"#), 2),
+            (format!(r#"(ned/nth-following-of-kind (ned/nth-of-kind (ned/blocks {BODY}) "heading" 0) "paragraph" 1)"#), 1),
+            (format!(r#"(ned/nth-after (ned/nth-of-kind (ned/blocks {BODY}) "heading" 0) "paragraph" 1)"#), 1),
+            (format!(r#"(ned/first-after (ned/nth-of-kind (ned/blocks {BODY}) "heading" 1) "paragraph")"#), 1),
+        ] {
+            assert_eq!(count_of(&root_env, &sel), expected, "for {sel}");
+        }
+    }
+
+    #[test]
+    fn ned_prelude_references_no_mutating_builtin() {
+        let tokens: Vec<&str> = crate::NED_PRELUDE
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '[' || c == ']')
+            .collect();
+        for name in NED_MUTATING_BUILTINS {
+            assert!(!tokens.contains(name), "ned.clj must not reference mutating builtin {name}");
+        }
+    }
+
+    #[test]
+    fn new_query_builtins_are_not_mutating() {
+        for name in ["ned/nth-text", "ned/nth-following-of-kind"] {
+            assert!(!NED_MUTATING_BUILTINS.contains(&name));
         }
     }
 

@@ -164,28 +164,71 @@ impl Selection {
         Self { nodes: result }
     }
 
-    /// Among the current selection's members (in iteration order), filter to elements whose
-    /// name matches `name` and return the `idx`-th. Out-of-range → empty. Empty receiver → empty.
+    /// Among the current selection's members, filter to elements whose name matches
+    /// `name`, order them by document position and return the `idx`-th.
+    /// Out-of-range → empty. Empty receiver → empty.
+    ///
+    /// Document position is `(parent, index in parent)` — see [`doc_position`]. This
+    /// is NOT NodeId (creation) order: a block inserted before the first one counts
+    /// as the first.
     ///
     /// Intended to be called on a pre-flattened selection (e.g. after `children()` or
     /// `following_siblings()`), where the nodes to filter are already in the selection.
     pub fn nth_of_kind(&self, store: &NodeStore, name: &str, idx: usize) -> Selection {
-        let matching: Vec<NodeId> = self
+        let mut matching: Vec<NodeId> = self
             .nodes
             .iter()
             .copied()
-            .filter(|&id| {
-                if let Some(Node::Element(n)) = store.get(id) {
-                    store.resolve_name(*n) == name
-                } else {
-                    false
-                }
-            })
+            .filter(|&id| is_element_named(store, id, name))
             .collect();
+        matching.sort_by_key(|&id| doc_position(store, id));
         match matching.get(idx) {
             Some(&id) => Selection::single(id),
             None => Selection::new(),
         }
+    }
+
+    /// For each scope node, walk its descendants depth-first in child order and take
+    /// the `idx`-th Text node. Returns the union over all scope nodes.
+    ///
+    /// Ambiguity is preserved: a scope of two nodes that both have an `idx`-th Text
+    /// descendant yields two nodes. The scope node itself is never counted — only
+    /// nodes under it. A scope node with fewer than `idx + 1` Text descendants
+    /// contributes nothing.
+    pub fn nth_text_each(&self, store: &NodeStore, idx: usize) -> Selection {
+        let mut result = OrdSet::new();
+        for &scope in &self.nodes {
+            if let Some(id) = nth_text_under(store, scope, idx) {
+                result.insert(id);
+            }
+        }
+        Self { nodes: result }
+    }
+
+    /// For each scope node, take its `idx`-th following sibling (document order) that
+    /// is an element named `kind`. Returns the union over all scope nodes.
+    ///
+    /// Unlike `following_siblings().nth_of_kind(..)`, each scope node is resolved
+    /// separately, so two anchors yield two results rather than one picked from
+    /// their merged following siblings.
+    pub fn nth_following_of_kind_each(&self, store: &NodeStore, kind: &str, idx: usize) -> Selection {
+        let mut result = OrdSet::new();
+        for &id in &self.nodes {
+            for parent_id in store.parents(id) {
+                let children = store.children(parent_id);
+                let Some(p) = children.iter().position(|&c| c == id) else {
+                    continue;
+                };
+                if let Some(&hit) = children[p + 1..]
+                    .iter()
+                    .filter(|&&c| is_element_named(store, c, kind))
+                    .nth(idx)
+                {
+                    result.insert(hit);
+                }
+            }
+        }
+        Self { nodes: result }
     }
 
     /// All descendants (transitive children). Uses BFS, cycle-safe via visited set.
@@ -225,6 +268,55 @@ impl Selection {
         }
         Self { nodes: result }
     }
+}
+
+// --- Ordering / walking helpers ---
+
+fn is_element_named(store: &NodeStore, id: NodeId, name: &str) -> bool {
+    matches!(store.get(id), Some(Node::Element(n)) if store.resolve_name(*n) == name)
+}
+
+/// Document-position sort key: `(parent, index in parent, id)`.
+///
+/// Nodes without a parent sort before parented nodes (by id). For a node with
+/// several parents, the first parent is used. `id` is a final tie-breaker so the
+/// key is total.
+fn doc_position(store: &NodeStore, id: NodeId) -> (Option<NodeId>, usize, NodeId) {
+    match store.parents(id).first() {
+        Some(&parent) => {
+            let index = store
+                .children(parent)
+                .iter()
+                .position(|&c| c == id)
+                .unwrap_or(usize::MAX);
+            (Some(parent), index, id)
+        }
+        None => (None, 0, id),
+    }
+}
+
+/// The `idx`-th Text node under `scope` in depth-first, child-order traversal.
+/// `scope` itself is not counted. Cycle-safe via a visited set.
+fn nth_text_under(store: &NodeStore, scope: NodeId, idx: usize) -> Option<NodeId> {
+    let mut seen = 0usize;
+    let mut visited = OrdSet::new();
+    visited.insert(scope);
+    // Stack of children in reverse so that pop() yields document order.
+    let mut stack: Vec<NodeId> = store.children(scope).into_iter().rev().collect();
+    while let Some(id) = stack.pop() {
+        if visited.contains(&id) {
+            continue;
+        }
+        visited.insert(id);
+        if matches!(store.get(id), Some(Node::Text(_))) {
+            if seen == idx {
+                return Some(id);
+            }
+            seen += 1;
+        }
+        stack.extend(store.children(id).into_iter().rev());
+    }
+    None
 }
 
 // --- Filter ---
@@ -304,15 +396,27 @@ fn collect_text_descendants(store: &NodeStore, id: NodeId, out: &mut String) {
     }
 }
 
-/// Match nodes whose concatenated Text descendants contain `needle`.
+// Private helper: the text a predicate should look at for `id`. A Text node
+// contributes its own string; any other node contributes the concatenation of
+// its Text descendants in document order.
+fn own_or_descendant_text(store: &NodeStore, id: NodeId) -> String {
+    if let Some(Node::Text(s)) = store.get(id) {
+        return s.clone();
+    }
+    let mut text = String::new();
+    collect_text_descendants(store, id, &mut text);
+    text
+}
+
+/// Match nodes whose text contains `needle`. For a Text node the text is its
+/// own string; for any other node it is the concatenation of its Text
+/// descendants.
 ///
-/// Edge case: empty `needle` returns true iff the candidate has at least one
-/// Text descendant (does NOT delegate to `String::contains("")` which always
-/// returns true).
+/// Edge case: empty `needle` returns true iff that text is non-empty
+/// (does NOT delegate to `String::contains("")` which always returns true).
 pub fn has_text_containing<'a>(needle: &'a str) -> impl Fn(&NodeStore, NodeId) -> bool + 'a {
     move |store, id| {
-        let mut text = String::new();
-        collect_text_descendants(store, id, &mut text);
+        let text = own_or_descendant_text(store, id);
         if needle.is_empty() {
             !text.is_empty()
         } else {
@@ -321,18 +425,17 @@ pub fn has_text_containing<'a>(needle: &'a str) -> impl Fn(&NodeStore, NodeId) -
     }
 }
 
-/// Match nodes whose concatenated Text descendants equal `value` after
-/// whitespace normalization (runs of whitespace collapse to a single space,
-/// leading/trailing whitespace is stripped).
+/// Match nodes whose text equals `value` after whitespace normalization (runs
+/// of whitespace collapse to a single space, leading/trailing whitespace is
+/// stripped). For a Text node the text is its own string; for any other node it
+/// is the concatenation of its Text descendants.
 ///
-/// A node with no Text descendants concatenates to `""`, so
-/// `has_text_equals("")` matches nodes that have no Text descendants.
-/// Case-sensitive.
+/// A non-Text node with no Text descendants concatenates to `""`, so
+/// `has_text_equals("")` matches such nodes. Case-sensitive.
 pub fn has_text_equals<'a>(value: &'a str) -> impl Fn(&NodeStore, NodeId) -> bool + 'a {
     let normalized_target = normalize_ws(value);
     move |store, id| {
-        let mut text = String::new();
-        collect_text_descendants(store, id, &mut text);
+        let text = own_or_descendant_text(store, id);
         normalize_ws(&text) == normalized_target
     }
 }
@@ -692,5 +795,138 @@ mod tests {
 
         let pred3 = has_text_equals("Hello  World");
         assert!(pred3(&store, p));
+    }
+
+    #[test]
+    fn has_text_containing_matches_text_node_itself() {
+        let (store, _root, _h1, text1, _p1, text2, _h2, _text3) = sample_store();
+        assert!(has_text_containing("ell")(&store, text1));
+        assert!(!has_text_containing("ell")(&store, text2));
+        let sel = Selection::all(&store)
+            .filter(&store, is_text())
+            .filter(&store, has_text_containing("orl"));
+        assert_eq!(sel.len(), 1);
+        assert!(sel.contains(text2));
+    }
+
+    #[test]
+    fn has_text_equals_matches_text_node_itself() {
+        let (store, _root, _h1, text1, _p1, text2, _h2, _text3) = sample_store();
+        assert!(has_text_equals("Hello")(&store, text1));
+        assert!(has_text_equals(" Hello ")(&store, text1));
+        assert!(!has_text_equals("Hello")(&store, text2));
+        // A Text node's own string is used, not its (empty) descendants.
+        assert!(!has_text_equals("")(&store, text1));
+    }
+
+    // ── document-order tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn nth_of_kind_uses_document_order_after_insert_before_first() {
+        // root: [h0, p0, h1, p1, p2, p3]. Insert a new paragraph before p0.
+        // The new paragraph has a larger NodeId than every existing node but is
+        // the first paragraph in document order.
+        let (mut store, root, _h0, p0, ..) = multi_child_store();
+        let inserted = crate::mutation::insert_before_tree(
+            &mut store,
+            &Selection::single(p0),
+            crate::NodeTree::element("paragraph"),
+        );
+        assert_eq!(inserted.len(), 1);
+        let new_p = inserted.iter().next().unwrap();
+
+        let first = Selection::single(root)
+            .children(&store)
+            .nth_of_kind(&store, "paragraph", 0);
+        assert_eq!(first.len(), 1);
+        assert!(first.contains(new_p), "inserted paragraph is first in document order");
+
+        let second = Selection::single(root)
+            .children(&store)
+            .nth_of_kind(&store, "paragraph", 1);
+        assert!(second.contains(p0));
+    }
+
+    #[test]
+    fn nth_text_each_follows_document_order_after_insert_before() {
+        // p > [t_a]; then insert a text "Before" before t_a. First text is "Before".
+        let mut store = NodeStore::new();
+        let p_name = store.intern("paragraph");
+        let em_name = store.intern("em");
+        let p = store.add_node(Node::Element(p_name));
+        let em = store.add_node(Node::Element(em_name));
+        let t_inner = store.add_node(Node::Text("inner".to_string()));
+        store.add_edge(em, Edge::Child(t_inner));
+        let t_a = store.add_node(Node::Text("after".to_string()));
+        store.add_edge(p, Edge::Child(em));
+        store.add_edge(p, Edge::Child(t_a));
+
+        // Depth-first: em/inner comes before "after".
+        let first = Selection::single(p).nth_text_each(&store, 0);
+        assert_eq!(first.len(), 1);
+        assert!(first.contains(t_inner));
+        let second = Selection::single(p).nth_text_each(&store, 1);
+        assert!(second.contains(t_a));
+
+        let inserted = crate::mutation::insert_before_tree(
+            &mut store,
+            &Selection::single(em),
+            crate::NodeTree::text("Before"),
+        );
+        let t_before = inserted.iter().next().unwrap();
+
+        let first = Selection::single(p).nth_text_each(&store, 0);
+        assert_eq!(first.len(), 1);
+        assert!(first.contains(t_before), "newly inserted text is first in document order");
+        assert!(Selection::single(p).nth_text_each(&store, 1).contains(t_inner));
+        assert!(Selection::single(p).nth_text_each(&store, 2).contains(t_a));
+        assert!(Selection::single(p).nth_text_each(&store, 3).is_empty());
+    }
+
+    #[test]
+    fn nth_text_each_over_two_scope_nodes_returns_two() {
+        let (store, _root, h1, text1, p1, text2, _h2, _text3) = sample_store();
+        let sel = Selection::from_ids([h1, p1]).nth_text_each(&store, 0);
+        assert_eq!(sel.len(), 2);
+        assert!(sel.contains(text1));
+        assert!(sel.contains(text2));
+    }
+
+    #[test]
+    fn nth_text_each_does_not_count_scope_itself() {
+        let (store, _root, _h1, text1, ..) = sample_store();
+        assert!(Selection::single(text1).nth_text_each(&store, 0).is_empty());
+    }
+
+    #[test]
+    fn nth_following_of_kind_each_resolves_each_anchor_separately() {
+        // root: [h0, p0, h1, p1, p2, p3]
+        let (store, _root, h0, p0, h1_node, p1, p2, _p3) = multi_child_store();
+        let sel = Selection::from_ids([h0, h1_node]).nth_following_of_kind_each(&store, "paragraph", 0);
+        assert_eq!(sel.len(), 2);
+        assert!(sel.contains(p0));
+        assert!(sel.contains(p1));
+
+        let sel = Selection::single(h1_node).nth_following_of_kind_each(&store, "paragraph", 1);
+        assert_eq!(sel.len(), 1);
+        assert!(sel.contains(p2));
+
+        let sel = Selection::single(h1_node).nth_following_of_kind_each(&store, "paragraph", 3);
+        assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn nth_following_of_kind_each_uses_document_order_after_insert() {
+        let (mut store, _root, _h0, p0, h1_node, p1, ..) = multi_child_store();
+        let inserted = crate::mutation::insert_before_tree(
+            &mut store,
+            &Selection::single(p1),
+            crate::NodeTree::element("paragraph"),
+        );
+        let new_p = inserted.iter().next().unwrap();
+        let sel = Selection::single(h1_node).nth_following_of_kind_each(&store, "paragraph", 0);
+        assert_eq!(sel.len(), 1);
+        assert!(sel.contains(new_p));
+        assert!(!sel.contains(p0));
     }
 }

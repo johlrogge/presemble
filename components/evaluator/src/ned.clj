@@ -113,10 +113,33 @@
 (defn ned/nth-heading [sel idx]
   (ned/nth-of-kind sel "heading" idx))
 
-(def-doc! ned/first-after "(ned/first-after sel kind)" "First element of given kind among the following siblings of sel.")
+(def-doc! ned/first-after "(ned/first-after sel kind)" "For each node in sel, the first following sibling element of the given kind. Each anchor resolves separately, so two anchors give two results.")
 (defn ned/first-after [sel kind]
-  (-> sel ned/following-siblings (ned/nth-of-kind kind 0)))
+  (ned/nth-following-of-kind sel kind 0))
 
-(def-doc! ned/nth-after "(ned/nth-after sel kind idx)" "idx-th element of given kind among the following siblings of sel.")
+(def-doc! ned/nth-after "(ned/nth-after sel kind idx)" "For each node in sel, the idx-th following sibling element of the given kind (document order). Each anchor resolves separately, so two anchors give two results; ambiguity is never narrowed.")
 (defn ned/nth-after [sel kind idx]
-  (-> sel ned/following-siblings (ned/nth-of-kind kind idx)))
+  (ned/nth-following-of-kind sel kind idx))
+
+;; ── Text addressing (ADR-056: SetText/SearchReplace target one Text node) ──
+;; ned/nth-text is a Rust builtin: (ned/nth-text sel idx).
+
+(def-doc! ned/blocks "(ned/blocks sel)" "The block elements of a slot or body: the children of each selected node.")
+(defn ned/blocks [sel]
+  (ned/children sel))
+
+(def-doc! ned/text-in "(ned/text-in sel)" "The direct Text children of each selected block, i.e. \"the\" text of a block. Several Text children (or several blocks) give several results.")
+(defn ned/text-in [sel]
+  (-> sel ned/children ned/texts))
+
+(def-doc! ned/texts-under "(ned/texts-under sel)" "All Text nodes at any depth under the selected nodes.")
+(defn ned/texts-under [sel]
+  (-> sel ned/descendants ned/texts))
+
+(def-doc! ned/first-text "(ned/first-text sel)" "For each selected node, the first Text node under it in document order. Same as (ned/nth-text sel 0).")
+(defn ned/first-text [sel]
+  (ned/nth-text sel 0))
+
+(def-doc! ned/text-containing "(ned/text-containing sel s)" "Text nodes at any depth under the selected nodes whose own text contains s. Every match is returned; ambiguity is never narrowed.")
+(defn ned/text-containing [sel s]
+  (-> sel ned/texts-under (ned/filter :text-contains s)))
