@@ -25,10 +25,10 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-/// Message sent over the WebSocket reload channel.
+/// Message sent over the session-gated editorial WebSocket (`/_presemble/editorial-ws`).
 /// Empty `pages` = full rebuild → reload in place.
 #[derive(Clone, Debug)]
-enum BrowserMessage {
+enum EditorialMessage {
     Reload {
         pages: Vec<String>,
         anchor: Option<editorial_types::StructuralAnchor>,
@@ -72,10 +72,90 @@ impl<'a> From<&'a editorial_types::StructuralAnchor> for AnchorWire<'a> {
     }
 }
 
-impl BrowserMessage {
+/// Message sent over the public WebSocket (`/_presemble/ws`).
+///
+/// Carries no editorial data: only the paths of rebuilt pages and resync
+/// requests. No anchors, heading text, scroll targets or draft file names.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum PublicMessage {
+    Reload { pages: Vec<String> },
+    Resync,
+}
+
+impl PublicMessage {
+    fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("PublicMessage is always serialisable")
+    }
+}
+
+/// A message type that can be streamed over a browser WebSocket.
+trait SocketMessage: Clone + Send + 'static {
+    fn to_json(&self) -> String;
+    /// The message telling the browser it may have missed messages.
+    fn resync() -> Self;
+}
+
+impl SocketMessage for PublicMessage {
+    fn to_json(&self) -> String {
+        PublicMessage::to_json(self)
+    }
+    fn resync() -> Self {
+        PublicMessage::Resync
+    }
+}
+
+impl SocketMessage for EditorialMessage {
+    fn to_json(&self) -> String {
+        EditorialMessage::to_json(self)
+    }
+    fn resync() -> Self {
+        EditorialMessage::Resync
+    }
+}
+
+/// The two browser broadcast channels. All sending goes through [`BrowserChannels::publish`],
+/// which guarantees the public channel only ever sees the public projection.
+#[derive(Clone)]
+struct BrowserChannels {
+    public: broadcast::Sender<PublicMessage>,
+    editorial: broadcast::Sender<EditorialMessage>,
+}
+
+impl BrowserChannels {
+    fn new(capacity: usize) -> Self {
+        let (public, _) = broadcast::channel(capacity);
+        let (editorial, _) = broadcast::channel(capacity);
+        Self { public, editorial }
+    }
+
+    /// Send the public projection (if any) to the public channel, then the
+    /// full message to the editorial channel. Send errors (no receivers) are ignored.
+    fn publish(&self, msg: EditorialMessage) {
+        if let Some(public) = msg.to_public() {
+            let _ = self.public.send(public);
+        }
+        let _ = self.editorial.send(msg);
+    }
+}
+
+impl EditorialMessage {
+    /// Project onto the public message, dropping everything editorial.
+    /// Exhaustive on purpose: a new variant must decide its public projection.
+    fn to_public(&self) -> Option<PublicMessage> {
+        match self {
+            EditorialMessage::Reload { pages, anchor: _ } => {
+                Some(PublicMessage::Reload { pages: pages.clone() })
+            }
+            EditorialMessage::Resync => Some(PublicMessage::Resync),
+            EditorialMessage::ScrollTo { .. } => None,
+            EditorialMessage::SuggestionListChanged { .. } => None,
+        }
+    }
+
     fn to_json(&self) -> String {
         match self {
-            BrowserMessage::Reload { pages, anchor } => {
+            EditorialMessage::Reload { pages, anchor } => {
                 let anchor_json = match anchor {
                     Some(a) => {
                         let wire = AnchorWire::from(a);
@@ -99,14 +179,14 @@ impl BrowserMessage {
                     )
                 }
             }
-            BrowserMessage::ScrollTo { anchor } => {
+            EditorialMessage::ScrollTo { anchor } => {
                 let wire = AnchorWire::from(anchor);
                 format!(
                     r#"{{"type":"scroll","anchor":{}}}"#,
                     serde_json::to_string(&wire).unwrap_or_default()
                 )
             }
-            BrowserMessage::SuggestionListChanged { file } => {
+            EditorialMessage::SuggestionListChanged { file } => {
                 let file_json = match file {
                     Some(f) => format!(
                         r#","file":"{}""#,
@@ -116,36 +196,36 @@ impl BrowserMessage {
                 };
                 format!(r#"{{"type":"suggestion-list-changed"{}}}"#, file_json)
             }
-            BrowserMessage::Resync => r#"{"type":"resync"}"#.to_string(),
+            EditorialMessage::Resync => r#"{"type":"resync"}"#.to_string(),
         }
     }
 }
 
 /// Project a conductor event onto the message the browser should receive.
-fn browser_message_for(ev: conductor::ConductorEvent) -> BrowserMessage {
+fn editorial_message_for(ev: conductor::ConductorEvent) -> EditorialMessage {
     use conductor::ConductorEvent;
     match ev {
-        ConductorEvent::PagesRebuilt { pages, anchor } => BrowserMessage::Reload { pages, anchor },
+        ConductorEvent::PagesRebuilt { pages, anchor } => EditorialMessage::Reload { pages, anchor },
         ConductorEvent::BuildFailed { error_pages } => {
-            BrowserMessage::Reload { pages: error_pages, anchor: None }
+            EditorialMessage::Reload { pages: error_pages, anchor: None }
         }
-        ConductorEvent::CursorScrollTo { anchor } => BrowserMessage::ScrollTo { anchor },
+        ConductorEvent::CursorScrollTo { anchor } => EditorialMessage::ScrollTo { anchor },
         ConductorEvent::NedSuggestionCreated { suggestion } => {
-            BrowserMessage::SuggestionListChanged { file: Some(suggestion.file.to_string()) }
+            EditorialMessage::SuggestionListChanged { file: Some(suggestion.file.to_string()) }
         }
         ConductorEvent::NedSuggestionStaled { file, .. } => {
-            BrowserMessage::SuggestionListChanged { file: Some(file.to_string()) }
+            EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
         }
         // Empty `pages` means nothing was re-rendered (never "full rebuild"),
         // so only the suggestion list needs refreshing.
         ConductorEvent::NedSuggestionAccepted { file, pages, .. } if pages.is_empty() => {
-            BrowserMessage::SuggestionListChanged { file: Some(file.to_string()) }
+            EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
         }
         ConductorEvent::NedSuggestionAccepted { pages, .. } => {
-            BrowserMessage::Reload { pages, anchor: None }
+            EditorialMessage::Reload { pages, anchor: None }
         }
         ConductorEvent::NedSuggestionRejected { file, .. } => {
-            BrowserMessage::SuggestionListChanged { file: Some(file.to_string()) }
+            EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
         }
     }
 }
@@ -177,11 +257,11 @@ fn connect_subscriber_with_retry(pub_url: &str) -> conductor::ConductorSubscribe
     }
 }
 
-/// Relay conductor events to the browser broadcast channel for the lifetime
+/// Relay conductor events to the browser broadcast channels for the lifetime
 /// of the process. Decode errors are logged and skipped; transport errors drop
 /// the subscriber and reconnect after a backoff (escalating across consecutive
 /// transport failures, reset once an event is relayed).
-fn relay_conductor_events(pub_url: &str, reload_tx: &broadcast::Sender<BrowserMessage>) {
+fn relay_conductor_events(pub_url: &str, channels: &BrowserChannels) {
     let mut transport_backoff = RELAY_BACKOFF_INITIAL;
     loop {
         let sub = connect_subscriber_with_retry(pub_url);
@@ -189,8 +269,7 @@ fn relay_conductor_events(pub_url: &str, reload_tx: &broadcast::Sender<BrowserMe
             match sub.recv() {
                 Ok(ev) => {
                     transport_backoff = RELAY_BACKOFF_INITIAL;
-                    // Err only means no browser is currently connected.
-                    let _ = reload_tx.send(browser_message_for(ev));
+                    channels.publish(editorial_message_for(ev));
                 }
                 Err(conductor::SubscriberError::Decode(e)) => {
                     eprintln!("Conductor subscription: skipping undecodable event: {e}");
@@ -300,7 +379,7 @@ fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) 
 #[derive(Clone)]
 struct AppState {
     output_dir: std::path::PathBuf,
-    reload_tx: broadcast::Sender<BrowserMessage>,
+    channels: BrowserChannels,
     site_dir: std::path::PathBuf,
     conductor: Arc<conductor::ConductorClient>,
     session_store: Arc<dyn SessionStore>,
@@ -351,7 +430,7 @@ async fn serve_async(
         }
     }
 
-    let (reload_tx, _) = broadcast::channel::<BrowserMessage>(256);
+    let channels = BrowserChannels::new(256);
 
     // Connect to conductor — mandatory for serve mode.
     let conductor_client = Arc::new(
@@ -367,11 +446,11 @@ async fn serve_async(
         watch_and_rebuild(&site_dir_owned, conductor_for_watcher);
     });
 
-    // Subscribe to conductor events and forward to the reload broadcast channel
+    // Subscribe to conductor events and forward to the browser broadcast channels
     {
         let pub_url = format!("{}-pub", conductor::socket_url(site_dir));
-        let reload_tx_clone = reload_tx.clone();
-        std::thread::spawn(move || relay_conductor_events(&pub_url, &reload_tx_clone));
+        let channels_clone = channels.clone();
+        std::thread::spawn(move || relay_conductor_events(&pub_url, &channels_clone));
     }
 
     // Build session store from the selected editorial mode.
@@ -396,17 +475,39 @@ async fn serve_async(
 
     let state = AppState {
         output_dir: out_dir.clone(),
-        reload_tx,
+        channels,
         site_dir: site_dir.to_path_buf(),
         conductor: conductor_client,
         session_store,
     };
 
-    // ── Router split ─────────────────────────────────────────────────────────
-    // editorial: all /_presemble/* routes that require authentication.
-    // public: /_presemble/ws (live-reload broadcast) and the fallback file handler.
+    let app = app_router(state);
 
+    let addr = format!("127.0.0.1:{port}");
+    println!("Serving at http://{addr}");
+    println!("Press Ctrl-C to stop.");
+    print_available_pages(&out_dir, &addr);
+
+    let listener = TcpListener::bind(&addr).await
+        .map_err(|e| CliError::Render(format!("failed to bind {addr}: {e}")))?;
+
+    axum::serve(listener, app).await
+        .map_err(|e| CliError::Render(format!("server error: {e}")))?;
+
+    Ok(())
+}
+
+/// The complete route table for `serve`.
+///
+/// Router split:
+/// - editorial: all `/_presemble/*` routes that require authentication,
+///   including the editorial WebSocket and the session probe.
+/// - public: `/_presemble/ws` (reload-only broadcast), `/_presemble/login`
+///   and the fallback file handler.
+fn app_router(state: AppState) -> Router {
     let editorial = Router::new()
+        .route("/_presemble/editorial-ws", get(editorial_ws_handler))
+        .route("/_presemble/session", get(session_handler))
         .route("/_presemble/lsp", get(lsp_ws_handler))
         .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/edit-body", post(edit_body_handler))
@@ -434,24 +535,11 @@ async fn serve_async(
     // /_presemble/login is always mounted on the public side (no Session extractor).
     // It is how a caller *obtains* a session — gating it would be a chicken-and-egg
     // lock-out.  ws and file_handler are also public for the same structural reason.
-    let app = editorial
+    editorial
         .route("/_presemble/ws", get(ws_handler))
         .route("/_presemble/login", get(login_handler))
         .fallback(get(file_handler))
-        .with_state(state);
-
-    let addr = format!("127.0.0.1:{port}");
-    println!("Serving at http://{addr}");
-    println!("Press Ctrl-C to stop.");
-    print_available_pages(&out_dir, &addr);
-
-    let listener = TcpListener::bind(&addr).await
-        .map_err(|e| CliError::Render(format!("failed to bind {addr}: {e}")))?;
-
-    axum::serve(listener, app).await
-        .map_err(|e| CliError::Render(format!("server error: {e}")))?;
-
-    Ok(())
+        .with_state(state)
 }
 
 #[derive(serde::Deserialize)]
@@ -1255,8 +1343,78 @@ async fn ws_handler(
     // Subscribe before the 101 response goes out: subscribing inside the
     // upgrade callback would lose broadcasts sent between the handshake and
     // the callback running. Public route (ADR-054/055) — no `Session`.
-    let rx = state.reload_tx.subscribe();
+    // Carries only `PublicMessage`s: page reloads and resyncs.
+    let rx = state.channels.public.subscribe();
     ws.on_upgrade(move |socket| handle_ws(socket, rx))
+}
+
+/// Session-gated editorial WebSocket — anchors, scroll-follow and
+/// suggestion-list notifications. `Session` is the first extractor so an
+/// unauthenticated request gets the standard JSON 401.
+async fn editorial_ws_handler(
+    _session: Session,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    if !origin_matches_host(&headers) {
+        return cross_origin_ws_refused();
+    }
+    // Subscribe before the 101 response goes out (see `ws_handler`).
+    let rx = state.channels.editorial.subscribe();
+    ws.on_upgrade(move |socket| handle_ws(socket, rx)).into_response()
+}
+
+/// 403 response for a WebSocket upgrade whose `Origin` does not match `Host`.
+fn cross_origin_ws_refused() -> axum::response::Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        axum::Json(serde_json::json!({
+            "ok": false,
+            "error": "Cross-origin WebSocket upgrade refused",
+        })),
+    )
+        .into_response()
+}
+
+/// Whether a WebSocket upgrade is same-origin.
+///
+/// No `Origin` header (non-browser client) → `true`. Otherwise the authority
+/// after `://` in `Origin` must exactly equal the `Host` header. `Origin: null`,
+/// an unparsable `Origin`, or a missing `Host` → `false`.
+fn origin_matches_host(headers: &axum::http::HeaderMap) -> bool {
+    use axum::http::header;
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some((_, authority)) = origin.split_once("://") else {
+        return false;
+    };
+    if authority.is_empty() || authority.contains('/') {
+        return false;
+    }
+    match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+        Some(host) => authority == host,
+        None => false,
+    }
+}
+
+/// Session probe at `GET /_presemble/session`: 200 when the request carries a
+/// valid session, the standard JSON 401 otherwise. Returns no principal data.
+async fn session_handler(_session: Session) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "ok": true }))
+}
+
+/// Which injection a page response gets: the editor UI for an authenticated
+/// request, the reader live-reload script otherwise. Never rejects.
+fn audience_for(store: &dyn SessionStore, headers: &axum::http::HeaderMap) -> serve_ui::Audience {
+    match accounts::authenticate(store, headers) {
+        Ok(_) => serve_ui::Audience::Editor,
+        Err(_) => serve_ui::Audience::Reader,
+    }
 }
 
 /// Public login hand-off — always mounted at `GET /_presemble/login`.
@@ -1308,29 +1466,29 @@ async fn login_handler(
     ).into_response()
 }
 
-/// What the reload WebSocket should do with one result from the broadcast receiver.
+/// What a browser WebSocket should do with one result from the broadcast receiver.
 #[derive(Debug)]
-enum WsStep {
+enum WsStep<M> {
     /// Send this message to the browser (a lagged receiver yields
-    /// [`BrowserMessage::Resync`]).
-    Forward(BrowserMessage),
+    /// [`SocketMessage::resync`]).
+    Forward(M),
     /// The broadcast channel is closed; end the connection.
     Close,
 }
 
-fn ws_step(r: Result<BrowserMessage, broadcast::error::RecvError>) -> WsStep {
+fn ws_step<M: SocketMessage>(r: Result<M, broadcast::error::RecvError>) -> WsStep<M> {
     use broadcast::error::RecvError;
     match r {
         Ok(msg) => WsStep::Forward(msg),
         Err(RecvError::Lagged(n)) => {
-            eprintln!("Reload WebSocket lagged by {n} message(s); asking browser to resync");
-            WsStep::Forward(BrowserMessage::Resync)
+            eprintln!("Browser WebSocket lagged by {n} message(s); asking browser to resync");
+            WsStep::Forward(M::resync())
         }
         Err(RecvError::Closed) => WsStep::Close,
     }
 }
 
-async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<BrowserMessage>) {
+async fn handle_ws<M: SocketMessage>(mut socket: WebSocket, mut rx: broadcast::Receiver<M>) {
     loop {
         tokio::select! {
             result = rx.recv() => {
@@ -1354,10 +1512,15 @@ async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<BrowserMes
 
 async fn lsp_ws_handler(
     _session: Session,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_lsp_ws(socket, state.site_dir))
+) -> axum::response::Response {
+    // This socket accepts writes: refuse cross-origin upgrades.
+    if !origin_matches_host(&headers) {
+        return cross_origin_ws_refused();
+    }
+    ws.on_upgrade(move |socket| handle_lsp_ws(socket, state.site_dir)).into_response()
 }
 
 async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
@@ -1428,21 +1591,29 @@ async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
     }
 }
 
+/// Headers for every HTML page served by `file_handler`. The injected script
+/// depends on the session cookie, so caches must neither store nor share it.
+const HTML_PAGE_HEADERS: [(axum::http::HeaderName, &str); 3] = [
+    (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+    (axum::http::header::CACHE_CONTROL, "no-store"),
+    (axum::http::header::VARY, "Cookie"),
+];
+
 /// Render a canonical `/_schema/...` URL by asking the conductor and injecting
-/// the reload script (same as regular content pages).
-async fn render_schema_url_directly(state: AppState, path: &str) -> axum::response::Response {
+/// the editor script. `_session` is proof the caller is authenticated.
+async fn render_schema_url_directly(
+    _session: &Session,
+    state: AppState,
+    path: &str,
+) -> axum::response::Response {
     use axum::http::{StatusCode, header};
     match state.conductor.send(&conductor::Command::RenderPage {
         path: path.to_string(),
         mode: conductor::RenderMode::Schema,
     }) {
         Ok(conductor::Response::PageRendered { html }) => {
-            let final_bytes = inject_reload_script(html.into_bytes());
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                final_bytes,
-            ).into_response()
+            let final_bytes = inject_reload_script(html.into_bytes(), serve_ui::Audience::Editor);
+            (StatusCode::OK, HTML_PAGE_HEADERS, final_bytes).into_response()
         }
         Ok(conductor::Response::Error(e)) => {
             (
@@ -1470,11 +1641,15 @@ async fn file_handler(
     // Intercept canonical `/_schema/...` URLs — editorial reads, must be authenticated.
     if site_index::parse_schema_url(path).is_some() {
         let store: Arc<dyn SessionStore> = Arc::from_ref(&state);
-        if let Err(unauthorized) = accounts::authenticate(store.as_ref(), &headers) {
-            return unauthorized.into_response();
-        }
-        return render_schema_url_directly(state, path).await;
+        let session = match accounts::authenticate(store.as_ref(), &headers) {
+            Ok(session) => session,
+            Err(unauthorized) => return unauthorized.into_response(),
+        };
+        return render_schema_url_directly(&session, state, path).await;
     }
+
+    // Editors get the editorial UI; everyone else gets the reader reload script.
+    let audience = audience_for(state.session_store.as_ref(), &headers);
 
     // Check for build errors before attempting to serve from disk.
     // Normalise: look up with and without trailing slash.
@@ -1486,12 +1661,8 @@ async fn file_handler(
         let bare = path.trim_end_matches('/');
         let key = if bare.is_empty() { "/" } else { bare };
         if let Some(messages) = errors.get(key).or_else(|| errors.get(&format!("{key}/"))) {
-            let html = render_error_page(path, messages);
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                html.into_bytes(),
-            )
+            let html = render_error_page(path, messages, audience);
+            return (StatusCode::UNPROCESSABLE_ENTITY, HTML_PAGE_HEADERS, html.into_bytes())
                 .into_response();
         }
     }
@@ -1509,16 +1680,14 @@ async fn file_handler(
             && let Ok(bytes) = std::fs::read(candidate)
         {
             let content_type = guess_content_type(candidate);
-            let is_html = content_type.starts_with("text/html");
-            let final_bytes = if is_html {
-                inject_reload_script(bytes)
-            } else {
-                bytes
-            };
+            if content_type.starts_with("text/html") {
+                let final_bytes = inject_reload_script(bytes, audience);
+                return (StatusCode::OK, HTML_PAGE_HEADERS, final_bytes).into_response();
+            }
             return (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, content_type)],
-                final_bytes,
+                bytes,
             ).into_response();
         }
     }
@@ -1532,11 +1701,11 @@ async fn file_handler(
         collect_html_files(&state.output_dir, &state.output_dir, &mut pages);
         let has_output = !pages.is_empty();
         if !source_empty && has_output {
-            return serve_auto_index(&state.output_dir).into_response();
+            return (HTML_PAGE_HEADERS, serve_auto_index(&state.output_dir)).into_response();
         }
         return (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            HTML_PAGE_HEADERS,
             serve_ui::WELCOME_HTML.as_bytes().to_vec(),
         )
             .into_response();
@@ -1546,8 +1715,8 @@ async fn file_handler(
     (StatusCode::NOT_FOUND, "404 Not Found").into_response()
 }
 
-fn inject_reload_script(bytes: Vec<u8>) -> Vec<u8> {
-    let inject_html = serve_ui::build_inject_html();
+fn inject_reload_script(bytes: Vec<u8>, audience: serve_ui::Audience) -> Vec<u8> {
+    let inject_html = serve_ui::build_inject_html(audience);
     let html = String::from_utf8_lossy(&bytes);
     let result = if let Some(pos) = html.rfind("</body>") {
         format!("{}{}{}", &html[..pos], inject_html, &html[pos..])
@@ -1751,7 +1920,7 @@ fn watch_and_rebuild(
 
         // Delegate rebuild to the conductor — it handles classification,
         // rebuild, error tracking, and emits PagesRebuilt/BuildFailed events.
-        // The conductor event subscriber thread forwards those as BrowserMessage::Reload.
+        // The conductor event subscriber thread forwards those as EditorialMessage::Reload.
         match conductor.send(&conductor::Command::FileChanged { paths }) {
             Ok(_) => {}
             Err(e) => eprintln!("  conductor FileChanged failed: {e}"),
@@ -2134,7 +2303,7 @@ fn find_doc_by_path_anywhere(src: &str) -> Option<String> {
     Some(file)
 }
 
-fn render_error_page(url_path: &str, messages: &[String]) -> String {
+fn render_error_page(url_path: &str, messages: &[String], audience: serve_ui::Audience) -> String {
     let items = messages
         .iter()
         .map(|m| format!("<li>{}</li>", template::html_escape_text(m)))
@@ -2166,7 +2335,7 @@ p.hint{{color:#666;font-size:.9em;margin-top:2rem}}
 </html>"#,
         url = template::html_escape_text(url_path),
         items = items,
-        inject = serve_ui::build_inject_html(),
+        inject = serve_ui::build_inject_html(audience),
     )
 }
 
@@ -2191,22 +2360,41 @@ mod tests {
     // ── ws_step ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn ws_step_lagged_requests_resync() {
-        let step = ws_step(Err(broadcast::error::RecvError::Lagged(42)));
-        assert!(matches!(step, WsStep::Forward(BrowserMessage::Resync)), "got {step:?}");
+    fn ws_step_lagged_requests_editorial_resync() {
+        let step = ws_step::<EditorialMessage>(Err(broadcast::error::RecvError::Lagged(42)));
+        assert!(matches!(step, WsStep::Forward(EditorialMessage::Resync)), "got {step:?}");
+    }
+
+    #[test]
+    fn ws_step_lagged_requests_public_resync() {
+        let step = ws_step::<PublicMessage>(Err(broadcast::error::RecvError::Lagged(42)));
+        assert!(matches!(step, WsStep::Forward(PublicMessage::Resync)), "got {step:?}");
     }
 
     #[test]
     fn ws_step_closed_closes() {
-        let step = ws_step(Err(broadcast::error::RecvError::Closed));
+        let step = ws_step::<EditorialMessage>(Err(broadcast::error::RecvError::Closed));
+        assert!(matches!(step, WsStep::Close), "got {step:?}");
+        let step = ws_step::<PublicMessage>(Err(broadcast::error::RecvError::Closed));
         assert!(matches!(step, WsStep::Close), "got {step:?}");
     }
 
     #[test]
-    fn ws_step_ok_forwards_message() {
-        let step = ws_step(Ok(BrowserMessage::Reload { pages: vec!["/a".to_string()], anchor: None }));
+    fn ws_step_ok_forwards_editorial_message() {
+        let step = ws_step(Ok(EditorialMessage::Reload { pages: vec!["/a".to_string()], anchor: None }));
         match step {
-            WsStep::Forward(BrowserMessage::Reload { pages, anchor: None }) => {
+            WsStep::Forward(EditorialMessage::Reload { pages, anchor: None }) => {
+                assert_eq!(pages, vec!["/a".to_string()]);
+            }
+            other => panic!("expected Forward(Reload), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ws_step_ok_forwards_public_message() {
+        let step = ws_step(Ok(PublicMessage::Reload { pages: vec!["/a".to_string()] }));
+        match step {
+            WsStep::Forward(PublicMessage::Reload { pages }) => {
                 assert_eq!(pages, vec!["/a".to_string()]);
             }
             other => panic!("expected Forward(Reload), got {other:?}"),
@@ -2215,7 +2403,195 @@ mod tests {
 
     #[test]
     fn resync_message_serializes_as_resync_type() {
-        assert_eq!(BrowserMessage::Resync.to_json(), r#"{"type":"resync"}"#);
+        assert_eq!(EditorialMessage::Resync.to_json(), r#"{"type":"resync"}"#);
+        assert_eq!(PublicMessage::Resync.to_json(), r#"{"type":"resync"}"#);
+    }
+
+    // ── EditorialMessage::to_public ─────────────────────────────────────────
+
+    #[test]
+    fn to_public_drops_scroll_to() {
+        let msg = EditorialMessage::ScrollTo { anchor: test_anchor() };
+        assert!(msg.to_public().is_none());
+    }
+
+    #[test]
+    fn to_public_drops_suggestion_list_changed() {
+        let msg = EditorialMessage::SuggestionListChanged { file: Some("content/post/a.md".to_string()) };
+        assert!(msg.to_public().is_none());
+        let msg = EditorialMessage::SuggestionListChanged { file: None };
+        assert!(msg.to_public().is_none());
+    }
+
+    #[test]
+    fn to_public_reload_keeps_pages_and_drops_anchor() {
+        let msg = EditorialMessage::Reload {
+            pages: vec!["/post/a".to_string(), "/".to_string()],
+            anchor: Some(test_anchor()),
+        };
+        match msg.to_public() {
+            Some(PublicMessage::Reload { pages }) => {
+                assert_eq!(pages, vec!["/post/a".to_string(), "/".to_string()]);
+            }
+            other => panic!("expected public Reload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_public_resync_is_resync() {
+        assert!(matches!(EditorialMessage::Resync.to_public(), Some(PublicMessage::Resync)));
+    }
+
+    // ── PublicMessage JSON ──────────────────────────────────────────────────
+
+    #[test]
+    fn public_reload_json_has_only_type_and_pages() {
+        let msg = PublicMessage::Reload { pages: vec!["/a".to_string()] };
+        assert_eq!(msg.to_json(), r#"{"type":"reload","pages":["/a"]}"#);
+    }
+
+    #[test]
+    fn public_reload_json_from_anchored_reload_has_no_anchor_or_primary() {
+        let msg = EditorialMessage::Reload {
+            pages: vec!["/a".to_string()],
+            anchor: Some(test_anchor()),
+        };
+        let json = msg.to_public().expect("reload is public").to_json();
+        assert_eq!(json, r#"{"type":"reload","pages":["/a"]}"#);
+        assert!(!json.contains("anchor"));
+        assert!(!json.contains("primary"));
+    }
+
+    #[test]
+    fn public_reload_json_escapes_double_quote() {
+        let msg = PublicMessage::Reload { pages: vec!["/bad\"path".to_string()] };
+        let json = msg.to_json();
+        assert_eq!(json, r#"{"type":"reload","pages":["/bad\"path"]}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["pages"][0], "/bad\"path");
+    }
+
+    // ── BrowserChannels::publish ────────────────────────────────────────────
+
+    #[test]
+    fn publish_scroll_to_reaches_only_editorial() {
+        let channels = BrowserChannels::new(4);
+        let mut public_rx = channels.public.subscribe();
+        let mut editorial_rx = channels.editorial.subscribe();
+        channels.publish(EditorialMessage::ScrollTo { anchor: test_anchor() });
+        assert!(matches!(public_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(editorial_rx.try_recv(), Ok(EditorialMessage::ScrollTo { .. })));
+    }
+
+    #[test]
+    fn publish_suggestion_list_changed_reaches_only_editorial() {
+        let channels = BrowserChannels::new(4);
+        let mut public_rx = channels.public.subscribe();
+        let mut editorial_rx = channels.editorial.subscribe();
+        channels.publish(EditorialMessage::SuggestionListChanged {
+            file: Some("content/post/draft.md".to_string()),
+        });
+        assert!(matches!(public_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            editorial_rx.try_recv(),
+            Ok(EditorialMessage::SuggestionListChanged { .. })
+        ));
+    }
+
+    #[test]
+    fn publish_reload_reaches_both() {
+        let channels = BrowserChannels::new(4);
+        let mut public_rx = channels.public.subscribe();
+        let mut editorial_rx = channels.editorial.subscribe();
+        channels.publish(EditorialMessage::Reload {
+            pages: vec!["/a".to_string()],
+            anchor: Some(test_anchor()),
+        });
+        match public_rx.try_recv() {
+            Ok(PublicMessage::Reload { pages }) => assert_eq!(pages, vec!["/a".to_string()]),
+            other => panic!("expected public Reload, got {other:?}"),
+        }
+        match editorial_rx.try_recv() {
+            Ok(EditorialMessage::Reload { pages, anchor }) => {
+                assert_eq!(pages, vec!["/a".to_string()]);
+                assert_eq!(anchor, Some(test_anchor()));
+            }
+            other => panic!("expected editorial Reload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_without_receivers_does_not_panic() {
+        let channels = BrowserChannels::new(4);
+        channels.publish(EditorialMessage::Resync);
+    }
+
+    // ── origin_matches_host ─────────────────────────────────────────────────
+
+    fn headers_with(pairs: &[(&'static str, &str)]) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, axum::http::HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn origin_absent_matches() {
+        assert!(origin_matches_host(&headers_with(&[("host", "127.0.0.1:3000")])));
+    }
+
+    #[test]
+    fn origin_same_authority_matches() {
+        assert!(origin_matches_host(&headers_with(&[
+            ("host", "127.0.0.1:3000"),
+            ("origin", "http://127.0.0.1:3000"),
+        ])));
+        assert!(origin_matches_host(&headers_with(&[
+            ("host", "conductor.presemble.pub"),
+            ("origin", "https://conductor.presemble.pub"),
+        ])));
+    }
+
+    #[test]
+    fn origin_different_port_does_not_match() {
+        assert!(!origin_matches_host(&headers_with(&[
+            ("host", "127.0.0.1:3000"),
+            ("origin", "http://127.0.0.1:3001"),
+        ])));
+    }
+
+    #[test]
+    fn origin_different_host_does_not_match() {
+        assert!(!origin_matches_host(&headers_with(&[
+            ("host", "127.0.0.1:3000"),
+            ("origin", "http://evil.example"),
+        ])));
+    }
+
+    #[test]
+    fn origin_null_does_not_match() {
+        assert!(!origin_matches_host(&headers_with(&[
+            ("host", "127.0.0.1:3000"),
+            ("origin", "null"),
+        ])));
+    }
+
+    #[test]
+    fn origin_unparsable_does_not_match() {
+        assert!(!origin_matches_host(&headers_with(&[
+            ("host", "127.0.0.1:3000"),
+            ("origin", "127.0.0.1:3000"),
+        ])));
+        assert!(!origin_matches_host(&headers_with(&[
+            ("host", "127.0.0.1:3000"),
+            ("origin", "http://"),
+        ])));
+    }
+
+    #[test]
+    fn origin_without_host_does_not_match() {
+        assert!(!origin_matches_host(&headers_with(&[("origin", "http://127.0.0.1:3000")])));
     }
 
     // ── next_backoff ─────────────────────────────────────────────────────────
@@ -2227,7 +2603,7 @@ mod tests {
         assert_eq!(next_backoff(RELAY_BACKOFF_MAX), RELAY_BACKOFF_MAX);
     }
 
-    // ── browser_message_for ──────────────────────────────────────────────────
+    // ── editorial_message_for ──────────────────────────────────────────────────
 
     fn test_anchor() -> editorial_types::StructuralAnchor {
         editorial_types::StructuralAnchor {
@@ -2240,13 +2616,13 @@ mod tests {
     }
 
     #[test]
-    fn browser_message_for_pages_rebuilt_is_reload_with_anchor() {
-        let msg = browser_message_for(conductor::ConductorEvent::PagesRebuilt {
+    fn editorial_message_for_pages_rebuilt_is_reload_with_anchor() {
+        let msg = editorial_message_for(conductor::ConductorEvent::PagesRebuilt {
             pages: vec!["/post/a".to_string()],
             anchor: Some(test_anchor()),
         });
         match msg {
-            BrowserMessage::Reload { pages, anchor } => {
+            EditorialMessage::Reload { pages, anchor } => {
                 assert_eq!(pages, vec!["/post/a".to_string()]);
                 assert_eq!(anchor, Some(test_anchor()));
             }
@@ -2255,12 +2631,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_message_for_build_failed_is_reload_of_error_pages() {
-        let msg = browser_message_for(conductor::ConductorEvent::BuildFailed {
+    fn editorial_message_for_build_failed_is_reload_of_error_pages() {
+        let msg = editorial_message_for(conductor::ConductorEvent::BuildFailed {
             error_pages: vec!["/post/broken".to_string()],
         });
         match msg {
-            BrowserMessage::Reload { pages, anchor: None } => {
+            EditorialMessage::Reload { pages, anchor: None } => {
                 assert_eq!(pages, vec!["/post/broken".to_string()]);
             }
             other => panic!("expected Reload without anchor, got {other:?}"),
@@ -2268,16 +2644,16 @@ mod tests {
     }
 
     #[test]
-    fn browser_message_for_cursor_scroll_to_is_scroll_to() {
-        let msg = browser_message_for(conductor::ConductorEvent::CursorScrollTo { anchor: test_anchor() });
+    fn editorial_message_for_cursor_scroll_to_is_scroll_to() {
+        let msg = editorial_message_for(conductor::ConductorEvent::CursorScrollTo { anchor: test_anchor() });
         match msg {
-            BrowserMessage::ScrollTo { anchor } => assert_eq!(anchor, test_anchor()),
+            EditorialMessage::ScrollTo { anchor } => assert_eq!(anchor, test_anchor()),
             other => panic!("expected ScrollTo, got {other:?}"),
         }
     }
 
     #[test]
-    fn browser_message_for_ned_suggestion_created_is_suggestion_list_changed() {
+    fn editorial_message_for_ned_suggestion_created_is_suggestion_list_changed() {
         let suggestion = editorial_types::NedSuggestion {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
             author: editorial_types::Author::Claude,
@@ -2289,9 +2665,9 @@ mod tests {
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionCreated { suggestion });
+        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionCreated { suggestion });
         match msg {
-            BrowserMessage::SuggestionListChanged { file } => {
+            EditorialMessage::SuggestionListChanged { file } => {
                 assert_eq!(file.as_deref(), Some("content/post/a.md"));
             }
             other => panic!("expected SuggestionListChanged, got {other:?}"),
@@ -2299,14 +2675,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_message_for_ned_suggestion_staled_is_suggestion_list_changed() {
-        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionStaled {
+    fn editorial_message_for_ned_suggestion_staled_is_suggestion_list_changed() {
+        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionStaled {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
             file: editorial_types::ContentPath::new("content/post/a.md"),
             reason: "gone".to_string(),
         });
         match msg {
-            BrowserMessage::SuggestionListChanged { file } => {
+            EditorialMessage::SuggestionListChanged { file } => {
                 assert_eq!(file.as_deref(), Some("content/post/a.md"));
             }
             other => panic!("expected SuggestionListChanged, got {other:?}"),
@@ -2314,14 +2690,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_message_for_ned_suggestion_accepted_is_reload_of_pages() {
-        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
+    fn editorial_message_for_ned_suggestion_accepted_is_reload_of_pages() {
+        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
             file: editorial_types::ContentPath::new("content/post/a.md"),
             pages: vec!["/post/a".to_string()],
         });
         match msg {
-            BrowserMessage::Reload { pages, anchor: None } => {
+            EditorialMessage::Reload { pages, anchor: None } => {
                 assert_eq!(pages, vec!["/post/a".to_string()]);
             }
             other => panic!("expected Reload without anchor, got {other:?}"),
@@ -2329,14 +2705,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_message_for_ned_suggestion_accepted_without_pages_is_suggestion_list_changed() {
-        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
+    fn editorial_message_for_ned_suggestion_accepted_without_pages_is_suggestion_list_changed() {
+        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
             file: editorial_types::ContentPath::new("content/post/a.md"),
             pages: vec![],
         });
         match msg {
-            BrowserMessage::SuggestionListChanged { file } => {
+            EditorialMessage::SuggestionListChanged { file } => {
                 assert_eq!(file.as_deref(), Some("content/post/a.md"));
             }
             other => panic!("expected SuggestionListChanged, got {other:?}"),
@@ -2344,13 +2720,13 @@ mod tests {
     }
 
     #[test]
-    fn browser_message_for_ned_suggestion_rejected_is_suggestion_list_changed() {
-        let msg = browser_message_for(conductor::ConductorEvent::NedSuggestionRejected {
+    fn editorial_message_for_ned_suggestion_rejected_is_suggestion_list_changed() {
+        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionRejected {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
             file: editorial_types::ContentPath::new("content/post/a.md"),
         });
         match msg {
-            BrowserMessage::SuggestionListChanged { file } => {
+            EditorialMessage::SuggestionListChanged { file } => {
                 assert_eq!(file.as_deref(), Some("content/post/a.md"));
             }
             other => panic!("expected SuggestionListChanged, got {other:?}"),
@@ -2359,20 +2735,20 @@ mod tests {
 
     #[test]
     fn reload_message_full_rebuild_json() {
-        let msg = BrowserMessage::Reload { pages: vec![], anchor: None };
+        let msg = EditorialMessage::Reload { pages: vec![], anchor: None };
         assert_eq!(msg.to_json(), r#"{"type":"reload","pages":[],"primary":""}"#);
     }
 
     #[test]
     fn reload_message_single_page_json() {
-        let msg = BrowserMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
+        let msg = EditorialMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
         let json = msg.to_json();
         assert_eq!(json, r#"{"type":"reload","pages":["/article/hello"],"primary":"/article/hello"}"#);
     }
 
     #[test]
     fn reload_message_multiple_pages_primary_is_first() {
-        let msg = BrowserMessage::Reload {
+        let msg = EditorialMessage::Reload {
             pages: vec!["/article/a".to_string(), "/article/b".to_string()],
             anchor: None,
         };
@@ -2382,7 +2758,7 @@ mod tests {
 
     #[test]
     fn reload_message_escapes_double_quote_in_url() {
-        let msg = BrowserMessage::Reload { pages: vec!["/bad\"path".to_string()], anchor: None };
+        let msg = EditorialMessage::Reload { pages: vec!["/bad\"path".to_string()], anchor: None };
         let json = msg.to_json();
         assert!(json.contains(r#"\/bad\"path"#) || json.contains(r#"/bad\""#));
     }
@@ -2396,7 +2772,7 @@ mod tests {
             node_kind: "paragraph".to_string(),
             offset: 2,
         };
-        let msg = BrowserMessage::Reload {
+        let msg = EditorialMessage::Reload {
             pages: vec!["/article/hello".to_string()],
             anchor: Some(anchor),
         };
@@ -2418,7 +2794,7 @@ mod tests {
             node_kind: "paragraph".to_string(),
             offset: 0,
         };
-        let msg = BrowserMessage::ScrollTo { anchor };
+        let msg = EditorialMessage::ScrollTo { anchor };
         let json = msg.to_json();
         assert!(json.contains(r#""type":"scroll""#), "should have type scroll");
         assert!(json.contains(r#""kind":"structural""#), "anchor kind should be structural");
@@ -2428,13 +2804,17 @@ mod tests {
 
     #[test]
     fn reload_message_without_anchor_omits_field() {
-        let msg = BrowserMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
+        let msg = EditorialMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
         assert!(!msg.to_json().contains("anchor"));
     }
 
     #[test]
     fn render_error_page_contains_url_and_messages() {
-        let html = render_error_page("/article/foo", &["[ERROR] title must be capitalized".to_string()]);
+        let html = render_error_page(
+            "/article/foo",
+            &["[ERROR] title must be capitalized".to_string()],
+            serve_ui::Audience::Reader,
+        );
         assert!(html.contains("/article/foo"), "should contain url path");
         assert!(html.contains("[ERROR] title must be capitalized"), "should contain error message");
         assert!(html.contains("Build error"), "should contain heading");
@@ -2442,15 +2822,26 @@ mod tests {
 
     #[test]
     fn render_error_page_escapes_url_and_messages() {
-        let html = render_error_page("/bad<path>", &["message with <b>html</b>".to_string()]);
+        let html = render_error_page(
+            "/bad<path>",
+            &["message with <b>html</b>".to_string()],
+            serve_ui::Audience::Reader,
+        );
         assert!(html.contains("/bad&lt;path&gt;"), "url should be escaped");
         assert!(html.contains("message with &lt;b&gt;html&lt;/b&gt;"), "message should be escaped");
     }
 
     #[test]
-    fn render_error_page_includes_reload_script() {
-        let html = render_error_page("/article/foo", &["some error".to_string()]);
-        assert!(html.contains("_presemble/ws"), "should include live reload script");
+    fn render_error_page_for_reader_includes_public_reload_script_only() {
+        let html = render_error_page("/article/foo", &["some error".to_string()], serve_ui::Audience::Reader);
+        assert!(html.contains("/_presemble/ws"), "should include live reload script");
+        assert!(!html.contains("editorial-ws"), "reader page must not get the editor script");
+    }
+
+    #[test]
+    fn render_error_page_for_editor_includes_editorial_script() {
+        let html = render_error_page("/article/foo", &["some error".to_string()], serve_ui::Audience::Editor);
+        assert!(html.contains("/_presemble/editorial-ws"), "should include editor script");
     }
 
     // --- edit endpoint tests ---
@@ -3009,13 +3400,13 @@ mod tests {
 
     #[cfg(test)]
     fn test_app(client: conductor::ConductorClient) -> axum::Router {
-        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
+        let channels = BrowserChannels::new(4);
         let session_store = Arc::new(
             accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
         let state = AppState {
             output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
-            reload_tx,
+            channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: std::sync::Arc::new(client),
             session_store,
@@ -3148,14 +3539,14 @@ mod tests {
         };
 
         // Build app from a shared Arc so the state (and conductor) is accessible after oneshot.
-        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
+        let channels = BrowserChannels::new(4);
         let conductor = std::sync::Arc::new(client);
         let session_store = Arc::new(
             accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
         let state = AppState {
             output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
-            reload_tx,
+            channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: conductor.clone(),
             session_store,
@@ -3348,28 +3739,10 @@ mod tests {
         client: conductor::ConductorClient,
         out_dir: std::path::PathBuf,
     ) -> axum::Router {
-        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
         let session_store = Arc::new(
             accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
-        let state = AppState {
-            output_dir: out_dir.clone(),
-            reload_tx,
-            site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
-            conductor: std::sync::Arc::new(client),
-            session_store,
-        };
-        Router::new()
-            .route("/_presemble/ws", get(ws_handler))
-            .route("/_presemble/lsp", get(lsp_ws_handler))
-            .route("/_presemble/edit", post(edit_handler))
-            .route("/_presemble/render", get(render_handler))
-            .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
-            .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
-            .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
-            .route("/_presemble/schemas", get(schemas_handler))
-            .fallback(get(file_handler))
-            .with_state(state)
+        test_app_full_with_store(client, out_dir, session_store)
     }
 
     // (a) POST /_presemble/edit without cookie → 401
@@ -3532,70 +3905,309 @@ mod tests {
             "/_presemble/ws without cookie must not return 401");
     }
 
-    // (g) The live-reload receiver is subscribed BEFORE the 101 response is
-    // sent, so a broadcast fired the moment the client sees the handshake
-    // complete is delivered (no lost-message window). Anonymous on purpose:
-    // the route is public (ADR-054/055).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_subscribes_before_upgrade_response() {
-        use std::io::{Read, Write};
+    // ── Raw WebSocket helpers (real TCP) ────────────────────────────────────
 
-        let (client, _tmp) = start_test_conductor();
-        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
-        let state = AppState {
-            output_dir: _tmp.path().join("output"),
-            reload_tx: reload_tx.clone(),
-            site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
-            conductor: Arc::new(client),
-            session_store: Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
-                as Arc<dyn SessionStore>,
-        };
-        let app = Router::new()
-            .route("/_presemble/ws", get(ws_handler))
-            .with_state(state);
+    /// Serve `app` on an ephemeral port. Abort the returned handle when done.
+    async fn serve_ephemeral(app: axum::Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        (addr, server)
+    }
+
+    /// Send a WebSocket upgrade request with extra headers over a blocking
+    /// socket and read the response head. Returns `(head, stream)`.
+    fn raw_ws_upgrade_with_headers(
+        addr: std::net::SocketAddr,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> (String, std::net::TcpStream) {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(addr).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut req = format!(
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n"
+        );
+        for (name, value) in extra_headers {
+            req.push_str(&format!("{name}: {value}\r\n"));
+        }
+        req.push_str("\r\n");
+        s.write_all(req.as_bytes()).unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            s.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        (String::from_utf8_lossy(&head).into_owned(), s)
+    }
+
+    /// Send a WebSocket upgrade request (optionally with a `Cookie` header)
+    /// and read the response head. Returns `(head, stream)`.
+    fn raw_ws_upgrade(
+        addr: std::net::SocketAddr,
+        path: &str,
+        cookie: Option<&str>,
+    ) -> (String, std::net::TcpStream) {
+        match cookie {
+            Some(c) => raw_ws_upgrade_with_headers(addr, path, &[("Cookie", c)]),
+            None => raw_ws_upgrade_with_headers(addr, path, &[]),
+        }
+    }
+
+    /// Read one unmasked server→client text frame and return its payload.
+    fn read_text_frame(s: &mut std::net::TcpStream) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut hdr = [0u8; 2];
+        s.read_exact(&mut hdr)?;
+        assert_eq!(hdr[0] & 0x0f, 0x1, "expected a text frame, got opcode {:#x}", hdr[0] & 0x0f);
+        let len = match hdr[1] & 0x7f {
+            126 => {
+                let mut ext = [0u8; 2];
+                s.read_exact(&mut ext)?;
+                u16::from_be_bytes(ext) as usize
+            }
+            127 => {
+                let mut ext = [0u8; 8];
+                s.read_exact(&mut ext)?;
+                u64::from_be_bytes(ext) as usize
+            }
+            n => n as usize,
+        };
+        let mut payload = vec![0u8; len];
+        s.read_exact(&mut payload)?;
+        Ok(String::from_utf8_lossy(&payload).into_owned())
+    }
+
+    /// Which browser channel a socket endpoint subscribes to.
+    #[derive(Clone, Copy)]
+    enum Channel {
+        Public,
+        Editorial,
+    }
+
+    /// The receiver is subscribed BEFORE the 101 response is sent, so a
+    /// broadcast fired the moment the client sees the handshake complete is
+    /// delivered (no lost-message window).
+    async fn assert_subscribes_before_upgrade_response(
+        path: &'static str,
+        cookie: Option<String>,
+        channel: Channel,
+    ) {
+        let (client, tmp) = start_test_conductor();
+        let channels = BrowserChannels::new(4);
+        let state = test_state(
+            client,
+            tmp.path().join("output"),
+            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))) as Arc<dyn SessionStore>,
+            channels.clone(),
+        );
+        let (addr, server) = serve_ephemeral(app_router(state)).await;
 
         let (head, receivers_at_101, frame) = tokio::task::spawn_blocking(move || {
-            let mut s = std::net::TcpStream::connect(addr).unwrap();
-            s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-            write!(
-                s,
-                "GET /_presemble/ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
-                 Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-                 Sec-WebSocket-Version: 13\r\n\r\n"
-            )
-            .unwrap();
-            let mut head = Vec::new();
-            let mut byte = [0u8; 1];
-            while !head.ends_with(b"\r\n\r\n") {
-                s.read_exact(&mut byte).unwrap();
-                head.push(byte[0]);
-            }
+            let (head, mut s) = raw_ws_upgrade(addr, path, cookie.as_deref());
             // Sample immediately: no sleep, no retry.
-            let receivers = reload_tx.receiver_count();
-            let _ = reload_tx.send(BrowserMessage::Resync);
-            let frame = (|| -> std::io::Result<Vec<u8>> {
-                let mut hdr = [0u8; 2];
-                s.read_exact(&mut hdr)?;
-                let mut payload = vec![0u8; (hdr[1] & 0x7f) as usize];
-                s.read_exact(&mut payload)?;
-                Ok(payload)
-            })();
-            (String::from_utf8_lossy(&head).into_owned(), receivers, frame)
+            let receivers = match channel {
+                Channel::Public => channels.public.receiver_count(),
+                Channel::Editorial => channels.editorial.receiver_count(),
+            };
+            channels.publish(EditorialMessage::Resync);
+            (head, receivers, read_text_frame(&mut s))
         })
         .await
         .unwrap();
         server.abort();
 
-        assert!(head.starts_with("HTTP/1.1 101"), "expected 101 upgrade, got: {head}");
+        assert!(head.starts_with("HTTP/1.1 101"), "{path}: expected 101 upgrade, got: {head}");
         assert_eq!(receivers_at_101, 1,
-            "ws_handler must subscribe before the 101 response is sent");
+            "{path}: handler must subscribe before the 101 response is sent");
         let payload = frame.expect("broadcast sent right after the handshake must arrive");
-        assert_eq!(String::from_utf8_lossy(&payload), r#"{"type":"resync"}"#);
+        assert_eq!(payload, r#"{"type":"resync"}"#);
+    }
+
+    // (g) Public socket — anonymous on purpose: the route is public (ADR-054/055).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_subscribes_before_upgrade_response() {
+        assert_subscribes_before_upgrade_response("/_presemble/ws", None, Channel::Public).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editorial_ws_subscribes_before_upgrade_response() {
+        assert_subscribes_before_upgrade_response(
+            "/_presemble/editorial-ws",
+            Some(test_session_cookie()),
+            Channel::Editorial,
+        )
+        .await;
+    }
+
+    // An anchored reload reaches the editorial socket with its anchor and the
+    // public socket as a bare `{type, pages}` reload.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn anchored_reload_is_stripped_on_public_socket_only() {
+        let (client, tmp) = start_test_conductor();
+        let channels = BrowserChannels::new(4);
+        let state = test_state(
+            client,
+            tmp.path().join("output"),
+            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))) as Arc<dyn SessionStore>,
+            channels.clone(),
+        );
+        let (addr, server) = serve_ephemeral(app_router(state)).await;
+        let cookie = test_session_cookie();
+
+        let (public_head, public_frame, editorial_head, editorial_frame) =
+            tokio::task::spawn_blocking(move || {
+                let (public_head, mut public) = raw_ws_upgrade(addr, "/_presemble/ws", None);
+                let (editorial_head, mut editorial) =
+                    raw_ws_upgrade(addr, "/_presemble/editorial-ws", Some(&cookie));
+                channels.publish(EditorialMessage::Reload {
+                    pages: vec!["/a".to_string()],
+                    anchor: Some(test_anchor()),
+                });
+                (
+                    public_head,
+                    read_text_frame(&mut public),
+                    editorial_head,
+                    read_text_frame(&mut editorial),
+                )
+            })
+            .await
+            .unwrap();
+        server.abort();
+
+        assert!(public_head.starts_with("HTTP/1.1 101"), "public: {public_head}");
+        assert!(editorial_head.starts_with("HTTP/1.1 101"), "editorial: {editorial_head}");
+        let editorial_frame = editorial_frame.expect("editorial frame");
+        assert!(editorial_frame.contains(r#""anchor""#), "editorial frame: {editorial_frame}");
+        assert_eq!(public_frame.expect("public frame"), r#"{"type":"reload","pages":["/a"]}"#);
+    }
+
+    /// Serve the production router with a cookie-accepting store and attempt a
+    /// cross-origin upgrade of `path`; return the response head.
+    async fn cross_origin_upgrade_head(path: &'static str) -> String {
+        let (client, tmp) = start_test_conductor();
+        let out_dir = tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (addr, server) = serve_ephemeral(test_app_full(client, out_dir)).await;
+        let cookie = test_session_cookie();
+        let head = tokio::task::spawn_blocking(move || {
+            raw_ws_upgrade_with_headers(
+                addr,
+                path,
+                &[("Cookie", &cookie), ("Origin", "http://evil.example")],
+            )
+            .0
+        })
+        .await
+        .unwrap();
+        server.abort();
+        head
+    }
+
+    // Cross-origin upgrade of the editorial socket (with a valid cookie) → 403.
+    // Real TCP: `WebSocketUpgrade` cannot be extracted from a oneshot request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editorial_ws_cross_origin_returns_403() {
+        let head = cross_origin_upgrade_head("/_presemble/editorial-ws").await;
+        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lsp_ws_cross_origin_returns_403() {
+        let head = cross_origin_upgrade_head("/_presemble/lsp").await;
+        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+    }
+
+    // ── Editorial socket, session probe and audience injection (oneshot) ───
+
+    async fn oneshot_get(app: axum::Router, uri: &str, cookie: Option<&str>) -> axum::response::Response {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder().method("GET").uri(uri);
+        if let Some(c) = cookie {
+            req = req.header("cookie", c);
+        }
+        app.oneshot(req.body(axum::body::Body::empty()).unwrap()).await.unwrap()
+    }
+
+    fn full_app_with_index(tmp: &tempfile::TempDir, client: conductor::ConductorClient) -> axum::Router {
+        let out_dir = tmp.path().join("output");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("index.html"), b"<html><body>Hello</body></html>").unwrap();
+        test_app_full(client, out_dir)
+    }
+
+    #[tokio::test]
+    async fn editorial_ws_no_cookie_returns_json_401() {
+        let (client, tmp) = start_test_conductor();
+        let resp = oneshot_get(full_app_with_index(&tmp, client), "/_presemble/editorial-ws", None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let text = body_string(resp).await;
+        assert!(text.contains(r#""ok":false"#), "body: {text}");
+    }
+
+    #[tokio::test]
+    async fn editorial_ws_with_cookie_not_401() {
+        let (client, tmp) = start_test_conductor();
+        let cookie = test_session_cookie();
+        let resp =
+            oneshot_get(full_app_with_index(&tmp, client), "/_presemble/editorial-ws", Some(&cookie)).await;
+        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn closed_store_editorial_ws_returns_401_editing_disabled() {
+        let (client, tmp) = start_test_conductor();
+        let cookie = test_session_cookie();
+        let resp = oneshot_get(closed_app(&tmp, client), "/_presemble/editorial-ws", Some(&cookie)).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+        let text = body_string(resp).await;
+        assert!(text.contains("Editing is disabled"), "body: {text}");
+    }
+
+    #[tokio::test]
+    async fn session_probe_no_cookie_returns_401() {
+        let (client, tmp) = start_test_conductor();
+        let resp = oneshot_get(full_app_with_index(&tmp, client), "/_presemble/session", None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn session_probe_with_cookie_returns_200_without_principal() {
+        let (client, tmp) = start_test_conductor();
+        let cookie = test_session_cookie();
+        let resp = oneshot_get(full_app_with_index(&tmp, client), "/_presemble/session", Some(&cookie)).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let text = body_string(resp).await;
+        assert_eq!(text, r#"{"ok":true}"#);
+    }
+
+    #[tokio::test]
+    async fn published_page_for_reader_gets_reload_script_only() {
+        let (client, tmp) = start_test_conductor();
+        let resp = oneshot_get(full_app_with_index(&tmp, client), "/", None).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let headers = resp.headers().clone();
+        assert_eq!(headers.get("cache-control").and_then(|v| v.to_str().ok()), Some("no-store"));
+        assert_eq!(headers.get("vary").and_then(|v| v.to_str().ok()), Some("Cookie"));
+        let text = body_string(resp).await;
+        assert!(text.contains("/_presemble/ws"), "body: {text}");
+        assert!(!text.contains("editorial-ws"), "reader page must not get editor code");
+        assert!(!text.contains("dirty-buffers"), "reader page must not get editor code");
+    }
+
+    #[tokio::test]
+    async fn published_page_for_editor_gets_editor_script() {
+        let (client, tmp) = start_test_conductor();
+        let cookie = test_session_cookie();
+        let resp = oneshot_get(full_app_with_index(&tmp, client), "/", Some(&cookie)).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let text = body_string(resp).await;
+        assert!(text.contains("editorial-ws"), "editor page must get editor code");
     }
 
     // ── V1 auth hand-off integration tests ──────────────────────────────────
@@ -3603,34 +4215,33 @@ mod tests {
     // Verify the cross-process property: a MagicLinkSessionStore minted in one
     // "process" (same key) must be verifiable in a serve app using the same key.
 
-    /// Build a full app (same routes as `test_app_full`) with a caller-supplied
-    /// `SessionStore`.  This lets tests inject either a `DevSessionStore` or a
-    /// `MagicLinkSessionStore`.
+    /// Build the production router (`app_router`) with a caller-supplied
+    /// `SessionStore`.  This lets tests inject either a `DevSessionStore`, a
+    /// `MagicLinkSessionStore` or a `ClosedSessionStore`.
     #[cfg(test)]
     fn test_app_full_with_store(
         client: conductor::ConductorClient,
         out_dir: std::path::PathBuf,
         session_store: Arc<dyn SessionStore>,
     ) -> axum::Router {
-        let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
-        let state = AppState {
+        app_router(test_state(client, out_dir, session_store, BrowserChannels::new(4)))
+    }
+
+    /// An `AppState` for tests, with caller-supplied channels so tests can publish.
+    #[cfg(test)]
+    fn test_state(
+        client: conductor::ConductorClient,
+        out_dir: std::path::PathBuf,
+        session_store: Arc<dyn SessionStore>,
+        channels: BrowserChannels,
+    ) -> AppState {
+        AppState {
             output_dir: out_dir,
-            reload_tx,
+            channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: std::sync::Arc::new(client),
             session_store,
-        };
-        Router::new()
-            .route("/_presemble/ws", get(ws_handler))
-            .route("/_presemble/login", get(login_handler))
-            .route("/_presemble/edit", post(edit_handler))
-            .route("/_presemble/render", get(render_handler))
-            .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
-            .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
-            .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
-            .route("/_presemble/schemas", get(schemas_handler))
-            .fallback(get(file_handler))
-            .with_state(state)
+        }
     }
 
     // (V1-a) Token minted by MagicLinkSessionStore(K) verifies in a serve app

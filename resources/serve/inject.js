@@ -321,8 +321,10 @@ else if(m.primary){location.href=m.primary;}
 // Call at the end of every editor cleanup.
 function _onEditorClosed(){if(_pendingReload&&!_editorOpen()){location.reload();}}
 function _wsConnect(){
-var sock=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/_presemble/ws');
+var sock=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/_presemble/editorial-ws');
+var opened=false;
 sock.onopen=function(){
+opened=true;
 var recovered=_wsLost;
 _wsAttempts=0;_wsLost=false;
 // Messages may have been missed while disconnected: treat as a same-page reload.
@@ -331,6 +333,7 @@ if(recovered){_requestReload({resync:true});}
 sock.onmessage=_wsOnMessage;
 sock.onclose=function(){
 _wsLost=true;
+if(!opened){fetch('/_presemble/session').then(function(r){if(r.status===401){_requestReload({resync:true});}}).catch(function(){});}
 var base=Math.min(30000,500*Math.pow(2,Math.min(_wsAttempts,16)));
 _wsAttempts++;
 setTimeout(_wsConnect,base+Math.floor(Math.random()*base*0.25));
