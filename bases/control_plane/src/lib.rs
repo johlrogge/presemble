@@ -569,7 +569,10 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    use accounts::{AccountId, InMemoryAccountStore, LoginTokenStore, MagicLinkSessionStore, SessionStore};
+    use accounts::{
+        AccountId, InMemoryAccountStore, LoginTokenStore, MagicLinkSessionStore, SessionKey,
+        SessionStore,
+    };
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use provisioning::FakeProvisioner;
@@ -592,10 +595,11 @@ mod tests {
         let captured_clone = Arc::clone(&captured);
 
         let sessions = Arc::new(MagicLinkSessionStore::with_key(
-            b"test-session-key-32-bytes-padded".to_vec(),
+            SessionKey::try_from("test-session-key-32-bytes-padded").unwrap(),
         ));
-        let login_tokens =
-            LoginTokenStore::with_key(b"test-login-key-32-bytes-padded!!".to_vec());
+        let login_tokens = LoginTokenStore::with_key(
+            SessionKey::try_from("test-login-key-32-bytes-padded!!").unwrap(),
+        );
         let account_store: Arc<dyn accounts::AccountStore> =
             Arc::new(InMemoryAccountStore::new());
         let mail: Arc<dyn accounts::MailSender> =
@@ -631,7 +635,9 @@ mod tests {
 
     /// Mint a session cookie string for a given `AccountId` using the test key.
     fn session_cookie_for(account_id: &AccountId) -> String {
-        let store = MagicLinkSessionStore::with_key(b"test-session-key-32-bytes-padded".to_vec());
+        let store = MagicLinkSessionStore::with_key(
+            SessionKey::try_from("test-session-key-32-bytes-padded").unwrap(),
+        );
         let token = store.mint(account_id);
         format!("presemble_session={}", token.as_str())
     }
@@ -1116,7 +1122,7 @@ mod tests {
             .strip_prefix(expected_prefix)
             .expect("token must follow the prefix");
         let verify_store = accounts::MagicLinkSessionStore::with_key(
-            b"test-session-key-32-bytes-padded".to_vec(),
+            SessionKey::try_from("test-session-key-32-bytes-padded").unwrap(),
         );
         let session = verify_store.verify_str(token_str);
         assert!(

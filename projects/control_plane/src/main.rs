@@ -4,7 +4,7 @@
 //! control plane HTTP API via axum on a configurable address.
 //!
 //! Required environment variables:
-//! - `PRESEMBLE_SESSION_KEY` — HMAC signing key (fail-fast if absent/empty).
+//! - `PRESEMBLE_SESSION_KEY` — HMAC signing key (fail-fast if absent, empty, or shorter than 32 bytes).
 //!
 //! Optional environment variables:
 //! - `PRESEMBLE_LISTEN_ADDR`      — bind address (default: `0.0.0.0:8080`)
@@ -31,17 +31,21 @@ async fn main() {
     .expect("failed to initialise site registry");
 
     // ── Session key ───────────────────────────────────────────────────────────
-    // This single string is the ONLY source of the signing key.  It is fed to
+    // This single validated key is the ONLY source of the signing key.  It is fed to
     // MagicLinkSessionStore, LoginTokenStore, AND SharedVmProvisioner so they
     // can never drift (ADR-055).  No hardcoded fallback is permitted.
 
-    let session_key_str = match std::env::var("PRESEMBLE_SESSION_KEY") {
-        Ok(val) if !val.is_empty() => val,
-        _ => {
+    let session_key = match accounts::SessionKey::from_env() {
+        Ok(Some(k)) => k,
+        Ok(None) => {
             eprintln!(
-                "error: PRESEMBLE_SESSION_KEY must be set \
-                 (the shared session-signing key; see ADR-055)"
+                "error: PRESEMBLE_SESSION_KEY must be set (the shared session-signing key, \
+                 at least 32 bytes; see ADR-055). Generate one with: openssl rand -base64 32"
             );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     };
@@ -79,7 +83,7 @@ async fn main() {
         launcher,
         health,
         router,
-        session_key: provisioning::SessionKey::from(session_key_str.clone()),
+        session_key: session_key.clone(),
         port_range: 3100..4000,
         accounts_root,
         host: "127.0.0.1".to_string(),
@@ -88,13 +92,10 @@ async fn main() {
 
     // ── Accounts stores ───────────────────────────────────────────────────────
 
-    let sessions = Arc::new(accounts::MagicLinkSessionStore::with_key(
-        session_key_str.as_bytes().to_vec(),
-    ));
+    let sessions = Arc::new(accounts::MagicLinkSessionStore::with_key(session_key.clone()));
     // LoginTokenStore's `consumed` set is per-process memory; the control plane
     // must remain single-instance unless this is moved to a shared store (ADR-055).
-    let login_tokens =
-        accounts::LoginTokenStore::with_key(session_key_str.as_bytes().to_vec());
+    let login_tokens = accounts::LoginTokenStore::with_key(session_key);
     // Alpha placeholders — replace with a persistent AccountStore and a real
     // MailSender before any production deployment.
     let account_store: Arc<dyn accounts::AccountStore> =

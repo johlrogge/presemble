@@ -2,7 +2,7 @@ use crate::error::CliError;
 use crate::{build_for_serve, UrlConfig};
 use accounts::{
     ClosedSessionStore, DevSessionStore, LoginAvailability, MagicLinkSessionStore, Session,
-    SessionStore, Unauthorized,
+    SessionKey, SessionStore, Unauthorized,
 };
 use axum::{
     Router,
@@ -17,6 +17,7 @@ use tower_lsp::{LspService, Server};
 use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -215,37 +216,53 @@ pub fn serve_site(
     url_config: &UrlConfig,
     dev_session_label: Option<String>,
 ) -> Result<(), CliError> {
+    // Validate the session key before doing anything else: a set-but-invalid
+    // key is a fatal startup error (ADR-055 amendment).
+    let mode = resolve_editorial_mode(std::env::var_os(accounts::SESSION_KEY_ENV), dev_session_label)?;
     tokio::runtime::Runtime::new()
         .map_err(|e| CliError::Render(format!("failed to create tokio runtime: {e}")))?
-        .block_on(serve_async(site_dir, port, url_config, dev_session_label))
+        .block_on(serve_async(site_dir, port, url_config, mode))
 }
 
 /// How the editorial plane is configured for this `serve` process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum EditorialMode {
-    /// `PRESEMBLE_SESSION_KEY` is set: verify control-plane `acct:` tokens.
+    /// A valid `PRESEMBLE_SESSION_KEY` is set: verify control-plane `acct:` tokens.
     /// `dev_session_ignored` records that `--dev-session` was also given.
-    Hosted { dev_session_ignored: bool },
+    Hosted { key: SessionKey, dev_session_ignored: bool },
     /// `--dev-session <label>`: random per-process key and a printed login link.
     DevLogin { label: String },
     /// Neither: no session can be obtained, editing is disabled.
     Closed,
 }
 
-/// Pick the editorial mode from the environment and CLI flags.
-fn select_editorial_mode(session_key_set: bool, dev_label: Option<String>) -> EditorialMode {
-    match (session_key_set, dev_label) {
-        (true, dev_label) => EditorialMode::Hosted { dev_session_ignored: dev_label.is_some() },
-        (false, Some(label)) => EditorialMode::DevLogin { label },
-        (false, None) => EditorialMode::Closed,
+/// Pick the editorial mode from the validated session key and CLI flags.
+fn select_editorial_mode(session_key: Option<SessionKey>, dev_label: Option<String>) -> EditorialMode {
+    match (session_key, dev_label) {
+        (Some(key), dev_label) => EditorialMode::Hosted {
+            key,
+            dev_session_ignored: dev_label.is_some(),
+        },
+        (None, Some(label)) => EditorialMode::DevLogin { label },
+        (None, None) => EditorialMode::Closed,
     }
+}
+
+/// Validate the raw `PRESEMBLE_SESSION_KEY` value and pick the editorial mode.
+/// A set-but-invalid key is an error regardless of `--dev-session`.
+fn resolve_editorial_mode(
+    raw_key: Option<OsString>,
+    dev_label: Option<String>,
+) -> Result<EditorialMode, CliError> {
+    let key = SessionKey::from_env_value(raw_key)?;
+    Ok(select_editorial_mode(key, dev_label))
 }
 
 /// Startup text describing the editorial mode. Each line ends with `\n`.
 fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) -> String {
     let mut out = String::new();
     match mode {
-        EditorialMode::Hosted { dev_session_ignored } => {
+        EditorialMode::Hosted { dev_session_ignored, .. } => {
             out.push_str("Session store: MagicLinkSessionStore (PRESEMBLE_SESSION_KEY set)\n");
             if *dev_session_ignored {
                 out.push_str(
@@ -299,7 +316,7 @@ async fn serve_async(
     site_dir: &Path,
     port: u16,
     url_config: &UrlConfig,
-    dev_session_label: Option<String>,
+    mode: EditorialMode,
 ) -> Result<(), CliError> {
     // Ensure the site directory exists so canonicalize produces an absolute path.
     // In serve mode the dir will be populated by scaffold or the user.
@@ -358,14 +375,10 @@ async fn serve_async(
     }
 
     // Build session store from the selected editorial mode.
-    let mode = select_editorial_mode(
-        std::env::var("PRESEMBLE_SESSION_KEY").is_ok(),
-        dev_session_label,
-    );
     let (session_store, login_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) =
         match &mode {
-            EditorialMode::Hosted { .. } => {
-                (Arc::new(MagicLinkSessionStore::from_env()) as Arc<dyn SessionStore>, None)
+            EditorialMode::Hosted { key, .. } => {
+                (Arc::new(MagicLinkSessionStore::with_key(key.clone())) as Arc<dyn SessionStore>, None)
             }
             EditorialMode::DevLogin { label } => {
                 let ds = DevSessionStore::new_random();
@@ -2978,12 +2991,18 @@ mod tests {
     }
 
     /// Test session key — fixed so tests can mint cookies in advance.
-    const TEST_SESSION_KEY: &[u8] = b"presemble-test-session-key-fixed";
+    /// Exactly 32 bytes (the `SessionKey` minimum).
+    const TEST_SESSION_KEY: &str = "presemble-test-session-key-fixed";
+
+    /// Wrap a test key literal as a validated `SessionKey`.
+    fn sk(raw: &str) -> SessionKey {
+        SessionKey::try_from(raw).unwrap()
+    }
 
     /// Mint a valid session cookie value for use in test requests.
     #[cfg(test)]
     fn test_session_cookie() -> String {
-        let store = accounts::DevSessionStore::with_key(TEST_SESSION_KEY);
+        let store = accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY));
         let token = store.mint("test");
         format!("presemble_session={}", token.as_str())
     }
@@ -2992,7 +3011,7 @@ mod tests {
     fn test_app(client: conductor::ConductorClient) -> axum::Router {
         let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
         let session_store = Arc::new(
-            accounts::DevSessionStore::with_key(TEST_SESSION_KEY)
+            accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
         let state = AppState {
             output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
@@ -3132,7 +3151,7 @@ mod tests {
         let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
         let conductor = std::sync::Arc::new(client);
         let session_store = Arc::new(
-            accounts::DevSessionStore::with_key(TEST_SESSION_KEY)
+            accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
         let state = AppState {
             output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
@@ -3331,7 +3350,7 @@ mod tests {
     ) -> axum::Router {
         let (reload_tx, _) = tokio::sync::broadcast::channel::<BrowserMessage>(4);
         let session_store = Arc::new(
-            accounts::DevSessionStore::with_key(TEST_SESSION_KEY)
+            accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
         let state = AppState {
             output_dir: out_dir.clone(),
@@ -3528,7 +3547,7 @@ mod tests {
             reload_tx: reload_tx.clone(),
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: Arc::new(client),
-            session_store: Arc::new(accounts::DevSessionStore::with_key(TEST_SESSION_KEY))
+            session_store: Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
                 as Arc<dyn SessionStore>,
         };
         let app = Router::new()
@@ -3620,9 +3639,9 @@ mod tests {
     async fn v1_magic_link_same_key_login_returns_302_and_sets_cookie() {
         use tower::ServiceExt;
 
-        const KEY: &[u8] = b"v1-integration-test-key-abc123";
-        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY);
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY))
+        const KEY: &str = "v1-integration-test-key-abc123-xyz";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY));
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY)))
             as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
@@ -3657,10 +3676,10 @@ mod tests {
     async fn v1_magic_link_wrong_key_returns_401() {
         use tower::ServiceExt;
 
-        const KEY_A: &[u8] = b"v1-key-a-for-mint";
-        const KEY_B: &[u8] = b"v1-key-b-for-serve";
-        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY_A);
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY_B))
+        const KEY_A: &str = "v1-key-a-for-mint-padded-to-32-bytes";
+        const KEY_B: &str = "v1-key-b-for-serve-padded-to-32-bytes";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY_A));
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY_B)))
             as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
@@ -3697,9 +3716,9 @@ mod tests {
     async fn v1_login_route_is_public_no_prior_session_needed() {
         use tower::ServiceExt;
 
-        const KEY: &[u8] = b"v1-public-check-key";
-        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY);
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY))
+        const KEY: &str = "v1-public-check-key-padded-to-32-bytes";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY));
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY)))
             as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
@@ -3730,9 +3749,9 @@ mod tests {
     async fn v1_magic_link_cookie_authenticates_edit() {
         use tower::ServiceExt;
 
-        const KEY: &[u8] = b"v1-edit-auth-test-key";
-        let mint_store = accounts::MagicLinkSessionStore::with_key(KEY);
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(KEY))
+        const KEY: &str = "v1-edit-auth-test-key-padded-to-32-bytes";
+        let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY));
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY)))
             as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
@@ -3771,7 +3790,7 @@ mod tests {
         use tower::ServiceExt;
 
         let serve_store = Arc::new(
-            accounts::MagicLinkSessionStore::with_key(b"v1-gate-test-key")
+            accounts::MagicLinkSessionStore::with_key(sk("v1-gate-test-key-padded-to-32-bytes"))
         ) as Arc<dyn SessionStore>;
 
         let (client, _tmp) = start_test_conductor();
@@ -3801,31 +3820,78 @@ mod tests {
 
     #[test]
     fn select_editorial_mode_no_key_no_dev_is_closed() {
-        assert_eq!(select_editorial_mode(false, None), EditorialMode::Closed);
+        assert!(matches!(select_editorial_mode(None, None), EditorialMode::Closed));
     }
 
     #[test]
     fn select_editorial_mode_dev_label_is_dev_login() {
-        assert_eq!(
-            select_editorial_mode(false, Some("dev".to_string())),
-            EditorialMode::DevLogin { label: "dev".to_string() }
-        );
+        assert!(matches!(
+            select_editorial_mode(None, Some("dev".to_string())),
+            EditorialMode::DevLogin { label } if label == "dev"
+        ));
     }
 
     #[test]
     fn select_editorial_mode_key_set_is_hosted() {
-        assert_eq!(
-            select_editorial_mode(true, None),
-            EditorialMode::Hosted { dev_session_ignored: false }
-        );
+        assert!(matches!(
+            select_editorial_mode(Some(sk(TEST_SESSION_KEY)), None),
+            EditorialMode::Hosted { dev_session_ignored: false, .. }
+        ));
     }
 
     #[test]
     fn select_editorial_mode_key_and_dev_is_hosted_with_ignored_dev_session() {
-        assert_eq!(
-            select_editorial_mode(true, Some("dev".to_string())),
-            EditorialMode::Hosted { dev_session_ignored: true }
+        assert!(matches!(
+            select_editorial_mode(Some(sk(TEST_SESSION_KEY)), Some("dev".to_string())),
+            EditorialMode::Hosted { dev_session_ignored: true, .. }
+        ));
+    }
+
+    // ── resolve_editorial_mode: key validation at startup (ADR-055 amendment) ──
+
+    #[test]
+    fn resolve_mode_empty_key_is_startup_error() {
+        assert!(matches!(
+            resolve_editorial_mode(Some(OsString::new()), None),
+            Err(CliError::SessionKey(accounts::SessionKeyError::Empty))
+        ));
+    }
+
+    #[test]
+    fn resolve_mode_empty_key_with_dev_session_is_still_error() {
+        assert!(matches!(
+            resolve_editorial_mode(Some(OsString::new()), Some("dev".to_string())),
+            Err(CliError::SessionKey(accounts::SessionKeyError::Empty))
+        ));
+    }
+
+    #[test]
+    fn resolve_mode_short_key_is_startup_error() {
+        let secret = "short-but-secret-value";
+        let err = resolve_editorial_mode(Some(OsString::from(secret)), None)
+            .expect_err("short key must be rejected");
+        assert!(
+            matches!(err, CliError::SessionKey(accounts::SessionKeyError::TooShort { .. })),
+            "got: {err:?}"
         );
+        let msg = err.to_string();
+        assert!(!msg.contains(secret), "error must not leak the key: {msg}");
+    }
+
+    #[test]
+    fn resolve_mode_valid_key_is_hosted() {
+        assert!(matches!(
+            resolve_editorial_mode(Some(OsString::from(TEST_SESSION_KEY)), None),
+            Ok(EditorialMode::Hosted { dev_session_ignored: false, .. })
+        ));
+    }
+
+    #[test]
+    fn resolve_mode_no_key_no_dev_is_closed() {
+        assert!(matches!(
+            resolve_editorial_mode(None, None),
+            Ok(EditorialMode::Closed)
+        ));
     }
 
     #[test]
@@ -3853,9 +3919,17 @@ mod tests {
 
     #[test]
     fn hosted_banner_warns_when_dev_session_ignored() {
-        let warned = editorial_banner(&EditorialMode::Hosted { dev_session_ignored: true }, None, 3000);
+        let warned = editorial_banner(
+            &EditorialMode::Hosted { key: sk(TEST_SESSION_KEY), dev_session_ignored: true },
+            None,
+            3000,
+        );
         assert!(warned.contains("is ignored"), "banner: {warned}");
-        let plain = editorial_banner(&EditorialMode::Hosted { dev_session_ignored: false }, None, 3000);
+        let plain = editorial_banner(
+            &EditorialMode::Hosted { key: sk(TEST_SESSION_KEY), dev_session_ignored: false },
+            None,
+            3000,
+        );
         assert!(!plain.contains("is ignored"), "banner: {plain}");
     }
 

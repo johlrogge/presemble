@@ -8,6 +8,7 @@ pub enum CliError {
     Usage(String),
     Template(template::RenderError),
     Render(String),
+    SessionKey(accounts::SessionKeyError),
 }
 
 impl fmt::Display for CliError {
@@ -19,7 +20,14 @@ impl fmt::Display for CliError {
             CliError::Usage(msg) => write!(f, "usage: {msg}"),
             CliError::Template(e) => write!(f, "template error: {e}"),
             CliError::Render(msg) => write!(f, "render error: {msg}"),
+            CliError::SessionKey(e) => write!(f, "{e}"),
         }
+    }
+}
+
+impl From<accounts::SessionKeyError> for CliError {
+    fn from(e: accounts::SessionKeyError) -> Self {
+        CliError::SessionKey(e)
     }
 }
 

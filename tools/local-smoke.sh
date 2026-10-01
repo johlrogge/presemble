@@ -230,8 +230,8 @@ REGISTRY_PATH="$TMPDIR_ROOT/registry.json"
 mkdir -p "$ACCOUNTS_ROOT"
 
 # PRESEMBLE_SESSION_KEY: shared between control_plane and each conductor it spawns.
-# Must be non-empty; content doesn't matter for the smoke test.
-SESSION_KEY="local-smoke-test-key-$(date +%s)"
+# Must be at least 32 bytes (ADR-055 amendment); 32 random bytes base64 = 44 chars.
+SESSION_KEY="$(head -c 32 /dev/urandom | base64)"
 
 # Control plane listens on a high port to avoid needing root.
 CONTROL_PLANE_PORT=8080

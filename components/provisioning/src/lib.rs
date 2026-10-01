@@ -15,7 +15,9 @@
 //!
 //! # Security
 //!
-//! `SessionKey` has a redacted `Debug` impl — it never prints its secret value.
+//! The HMAC signing key passed to each conductor is an `accounts::SessionKey`:
+//! validated (non-empty, at least 32 bytes) with a redacted `Debug` impl — it
+//! never prints its secret value (ADR-055).
 //!
 //! # Caddy @id note
 //!
@@ -25,7 +27,7 @@
 //! If the `/id/` API endpoint is unavailable, fall back to serialised index ops
 //! (the `route_lock` in `SharedVmProvisioner` already serialises all mutations).
 
-use accounts::AccountId;
+use accounts::{AccountId, SessionKey};
 use async_trait::async_trait;
 use site_registry::{Placement, RegistryError, SiteId, SiteRegistry, SiteStatus, Subdomain};
 use site_templates::StyleConfig;
@@ -47,34 +49,6 @@ pub struct Starter {
     pub format: String,
     /// CSS style configuration used to generate `assets/style.css`.
     pub style: StyleConfig,
-}
-
-// ── SessionKey ────────────────────────────────────────────────────────────────
-
-/// HMAC signing key passed to each conductor via `PRESEMBLE_SESSION_KEY`.
-///
-/// `Debug` is **deliberately redacted** — the key secret must never appear in
-/// logs, error messages, or debug output (ADR-055 blast radius).
-#[derive(Clone)]
-pub struct SessionKey(String);
-
-impl SessionKey {
-    /// Create a `SessionKey` from any string-like value.
-    pub fn from(s: impl Into<String>) -> Self {
-        Self(s.into())
-    }
-
-    /// Expose the raw key bytes for passing to child-process env.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Redacted `Debug` — never reveals the secret.
-impl std::fmt::Debug for SessionKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SessionKey(<redacted>)")
-    }
 }
 
 // ── Error types ───────────────────────────────────────────────────────────────
@@ -322,7 +296,7 @@ impl ConductorLauncher for TokioProcessLauncher {
         }
 
         // Always inject env vars for isolation/auth.
-        cmd.env("PRESEMBLE_SESSION_KEY", spec.session_key.as_str())
+        cmd.env(accounts::SESSION_KEY_ENV, spec.session_key.expose_secret())
             .env("HOME", &spec.home)
             .env("XDG_RUNTIME_DIR", &spec.xdg_runtime_dir);
 
@@ -1316,7 +1290,7 @@ mod tests {
             launcher,
             health,
             router,
-            session_key: SessionKey::from("test-secret"),
+            session_key: test_key(),
             port_range: 3100..4000,
             accounts_root: dir.path().to_path_buf(),
             host: "127.0.0.1".into(),
@@ -1326,6 +1300,10 @@ mod tests {
 
     fn account() -> AccountId {
         AccountId::generate()
+    }
+
+    fn test_key() -> SessionKey {
+        SessionKey::try_from("provisioning-test-key-0123456789ab").unwrap()
     }
 
     fn sub(s: &str) -> Subdomain {
@@ -1341,22 +1319,6 @@ mod tests {
         }
     }
 
-    // ── T2: SessionKey redacted Debug ─────────────────────────────────────────
-
-    #[test]
-    fn session_key_debug_does_not_reveal_secret() {
-        let key = SessionKey::from("super-secret-value");
-        let debug_str = format!("{:?}", key);
-        assert!(
-            !debug_str.contains("super-secret-value"),
-            "SessionKey debug output must not contain the secret; got: {debug_str}"
-        );
-        assert!(
-            debug_str.contains("redacted"),
-            "SessionKey debug output should say 'redacted'; got: {debug_str}"
-        );
-    }
-
     // ── T3: Fake seam unit tests ──────────────────────────────────────────────
 
     #[tokio::test]
@@ -1365,7 +1327,7 @@ mod tests {
         let spec = LaunchSpec {
             site_path: PathBuf::from("/tmp/test/site"),
             port: 3100,
-            session_key: SessionKey::from("key"),
+            session_key: test_key(),
             home: PathBuf::from("/tmp/test"),
             xdg_runtime_dir: PathBuf::from("/tmp/test/.runtime"),
         };
@@ -1382,7 +1344,7 @@ mod tests {
         let spec = LaunchSpec {
             site_path: PathBuf::from("/tmp/site"),
             port: 3100,
-            session_key: SessionKey::from("key"),
+            session_key: test_key(),
             home: PathBuf::from("/tmp"),
             xdg_runtime_dir: PathBuf::from("/tmp/.runtime"),
         };
@@ -1446,7 +1408,7 @@ mod tests {
         let spec = LaunchSpec {
             site_path: PathBuf::from("/tmp/reap-test"),
             port: 3100,
-            session_key: SessionKey::from("test"),
+            session_key: test_key(),
             home: PathBuf::from("/tmp"),
             xdg_runtime_dir: PathBuf::from("/tmp/.runtime"),
         };
@@ -1573,7 +1535,7 @@ mod tests {
             launcher: Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
             health: Arc::clone(&health),
             router: Arc::clone(&router) as Arc<dyn CaddyRouter>,
-            session_key: SessionKey::from("key"),
+            session_key: test_key(),
             port_range: 3100..4000,
             accounts_root: dir.path().to_path_buf(),
             host: "127.0.0.1".into(),
@@ -1971,7 +1933,7 @@ mod tests {
             launcher: Arc::clone(&launcher) as Arc<dyn ConductorLauncher>,
             health: Arc::clone(&health),
             router: Arc::clone(&router) as Arc<dyn CaddyRouter>,
-            session_key: SessionKey::from("key"),
+            session_key: test_key(),
             port_range: 9999..10000,
             accounts_root: dir.path().to_path_buf(),
             host: "127.0.0.1".into(),

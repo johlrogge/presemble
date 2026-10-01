@@ -18,7 +18,7 @@ Hosted Presemble runs a **control plane** (owner login, dashboard, provisioning 
 - absent, with `--dev-session <label>` → `DevSessionStore::new_random()`;
 - absent, without the flag → `ClosedSessionStore` (editing disabled; no session can ever be obtained).
 
-The **payload prefix is the discriminator**: a `dev:` token can't become an account session even under a shared key, because verification strips and matches the `acct:` prefix. Missing key at boot is a **fail-fast panic** (a deliberate misconfiguration signal, only reachable when the env var is set-then-unset).
+The **payload prefix is the discriminator**: a `dev:` token can't become an account session even under a shared key, because verification strips and matches the `acct:` prefix. A set-but-invalid key is a **fail-fast startup error** (see the 2026-10-01 amendment below).
 
 **The hand-off flow (two token kinds, two places):**
 1. **Login token** (`LoginTokenStore`) — short-TTL, single-use, HMAC-signed. Issued by the control plane, delivered via the emailed magic link. Its issue/verify/consume lifecycle lives **entirely in the control plane**.
@@ -60,3 +60,15 @@ So the **login-token → session-token exchange happens at the control plane**; 
 - The conductor's `/_presemble/login` is a **permanent public exception** alongside `/_presemble/ws` (ADR-054); the per-handler `Session` gating invariant must be maintained.
 - **`Secure` cookie flag** is omitted (TLS at Caddy); revisit if deployment changes.
 - Builds on ADR-054 (V0 editorial-plane boundary this extends), ADR-051 (accounts / magic-link), ADR-053 (the control plane this is the auth contract for), ADR-031 (conductor as sole authority — why no external auth in the hot path). Implemented in commits `b94b4eb` (accounts: magic-link + login-token stores) and `7db1564` (serve: public `/_presemble/login` + env-selected store); the control-plane *minting* side is built in V1 Task 3.1.
+
+## Amendment (2026-10-01): key format, validation, and selection
+
+**Format.** `PRESEMBLE_SESSION_KEY` is an opaque UTF-8 string whose raw bytes are the HMAC-SHA256 key (no base64/hex decoding). Generate it with `openssl rand -base64 32` (44 characters, 256 bits of entropy).
+
+**Validation.** The key is parsed once at process start into `accounts::SessionKey`, which cannot hold an empty, whitespace-only, or shorter-than-32-byte value. Every HMAC store (`MagicLinkSessionStore`, `LoginTokenStore`, `DevSessionStore`) accepts only a `SessionKey`. A set-but-invalid key is a fatal startup error in both `presemble serve` and the control plane, regardless of other flags. The error names the variable and the rule and never prints the key. Length is not entropy: the minimum blocks empty and trivially short keys, and operators must still generate keys randomly.
+
+**Selection in `presemble serve`.** A valid key → Hosted (`MagicLinkSessionStore`). An invalid key → refuse to start. No key plus `--dev-session` → DevLogin. No key and no flag → Closed (`ClosedSessionStore`, editing disabled).
+
+**Dev key.** `DevSessionStore::new_random()` draws 32 bytes from a CSPRNG (`rand` `ThreadRng`) and never reads the environment. Dev tokens never survive a restart and never verify in another process.
+
+**Why.** `PRESEMBLE_SESSION_KEY=` (set but empty) previously selected Hosted with an empty HMAC key, letting anyone forge `acct:` sessions. The control plane accepted any non-empty key. The dev key was a 64-bit `DefaultHasher` digest of pid, time and a stack address.
