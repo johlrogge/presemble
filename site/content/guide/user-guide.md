@@ -150,7 +150,7 @@ The body section is optional. Schemas without `----` have no free-form body.
 
 ### Preamble and body
 
-The preamble (above `----`) only holds what the schema's slots allow, in order. Anything else there is kept and saved but not shown, and stops the page from publishing; on save it moves to just above `----`. The body below `----` is free content. To allow free paragraphs near the top, declare a paragraph slot with `occurs: *`.
+The preamble (above `----`) only holds what the schema's slots allow, in order. Anything else there is kept and saved but not shown, and stops the site from publishing (see [Publishing gate](#publishing-gate)); on save it moves to just above `----`. The body below `----` is free content. To allow free paragraphs near the top, declare a paragraph slot with `occurs: *`.
 
 ### Body content types
 
@@ -492,6 +492,17 @@ my-site/content/docs/index.md    â†’  output/my-site/docs/index.html           â
 
 Output lives outside the source tree so the file watcher never sees its own writes. Only assets referenced by templates are copied to `output/assets/`. Unreferenced files are reported as warnings.
 
+### Publishing gate
+
+Before anything is written, `presemble build` validates every schema and content file. If any of them has an error, nothing is written (no pages, no assets, and output from an earlier build is left as it was) and the build exits with code 1. Every problem is printed as one line, with the path relative to the site directory:
+
+```
+content/post/my-post.md: error: slot 'title': missing required element
+1 validation error(s) in 1 file(s); site not published
+```
+
+Warnings are printed too, but they don't fail the build. A schema that fails to parse is an error, and so is every page that uses it ("not built: schema `schemas/post/item.md` does not parse"). Fix the errors and build again; `presemble serve` shows the same pages while you work on them.
+
 ### CLI flags
 
 | Flag | Description |
@@ -516,7 +527,7 @@ presemble serve <site-dir>
 presemble serve <site-dir> --dev-session
 ```
 
-Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors are reported to the terminal on every rebuild. Plain `presemble serve` is preview-only. To edit in the browser (Edit and Suggest modes, creating content, the site wizard), start the server with `--dev-session` and open the Login URL it prints. Without the flag the editor shows "Editing is disabled on this server. Restart presemble serve with --dev-session to enable it."
+Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors and warnings for the whole site are reported to the terminal at startup; pages still render. Reporting them on every rebuild, and showing them in the browser, is future work. Plain `presemble serve` is preview-only. To edit in the browser (Edit and Suggest modes, creating content, the site wizard), start the server with `--dev-session` and open the Login URL it prints. Without the flag the editor shows "Editing is disabled on this server. Restart presemble serve with --dev-session to enable it."
 
 ### Live reload
 

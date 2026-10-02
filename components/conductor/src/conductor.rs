@@ -174,6 +174,9 @@ pub struct Conductor {
     // dependency data: the dependencies are the `Derived` edges in the store.
     // Reset whenever the store is repopulated.
     stem_nodes: RwLock<HashMap<String, node_store::NodeId>>,
+    // Diagnostics for every schema and content file, rebuilt by
+    // `populate_node_store`. The publish gate (ADR-061).
+    validation_report: RwLock<validation::ValidationReport>,
 }
 
 /// A document whose content changed, as input to
@@ -233,15 +236,33 @@ enum SlotShape {
 
 impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
+        let conductor = Self::load(site_dir)?;
+        // Build all pages during startup so the output directory is populated immediately.
+        conductor.build_all_pages();
+        Ok(conductor)
+    }
+
+    /// Load and validate the site without rendering any pages: nothing is
+    /// written to the output directory. The result of validation is in
+    /// [`Conductor::validation_report`].
+    pub fn load(site_dir: PathBuf) -> Result<Self, String> {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let repo = site_repository::SiteRepository::builder()
             .from_dir(&site_dir)
             .build();
-        Self::with_repo(site_dir, repo)
+        Self::load_with_repo(site_dir, repo)
     }
 
     /// Create a conductor with a pre-built repository. Used in tests.
     pub fn with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
+        let conductor = Self::load_with_repo(site_dir, repo)?;
+        // Build all pages during startup so the output directory is populated immediately.
+        conductor.build_all_pages();
+        Ok(conductor)
+    }
+
+    /// Everything [`Conductor::with_repo`] does except rendering pages.
+    fn load_with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
 
@@ -281,6 +302,7 @@ impl Conductor {
                 std::time::Duration::from_secs(5),
             ),
             stem_nodes: RwLock::new(HashMap::new()),
+            validation_report: RwLock::new(validation::ValidationReport::default()),
         };
 
         // One-shot cleanup: delete any legacy sug-*.json files left over from
@@ -291,18 +313,16 @@ impl Conductor {
         let ned_suggestions = Self::load_ned_suggestions(&conductor.ned_suggestions_dir());
         *conductor.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()) = ned_suggestions;
 
-        // Build the site graph from all known content
-        if let Err(e) = conductor.build_full_graph() {
-            eprintln!("conductor: initial graph build failed: {e}");
-        }
-
         // Populate the node store from the site repository
         conductor.populate_node_store();
 
-        // Build all pages during startup so the output directory is populated immediately.
-        conductor.build_all_pages();
-
         Ok(conductor)
+    }
+
+    /// The validation diagnostics from the latest population of the node
+    /// store: every schema and content file of the site.
+    pub fn validation_report(&self) -> validation::ValidationReport {
+        self.validation_report.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn site_dir(&self) -> &Path {
@@ -354,16 +374,89 @@ impl Conductor {
         let mut semantic_index: HashMap<String, node_store::NodeId> = HashMap::new();
         let mut stem_index: HashMap<String, Vec<node_store::NodeId>> = HashMap::new();
 
+        // Validation diagnostics for every schema and content file (ADR-061).
+        let mut report = validation::ValidationReport::default();
+        let relative = |path: PathBuf| -> PathBuf {
+            path.strip_prefix(&self.site_dir).map(Path::to_path_buf).unwrap_or(path)
+        };
+        // Site-relative path of the schema stored under schema cache `key`.
+        let schema_file = |key: &str| -> PathBuf {
+            let path = if key == "index" {
+                repo.collection_schema_path(&site_index::SchemaStem::new(""))
+            } else if let Some(stem) = key.strip_suffix("/index") {
+                repo.collection_schema_path(&site_index::SchemaStem::new(stem))
+            } else {
+                repo.schema_path(&site_index::SchemaStem::new(key))
+            };
+            relative(path)
+        };
+
         // Parse and store all schemas
         let schema_cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
         let mut grammars: HashMap<String, schema::Grammar> = HashMap::new();
+        // Schema cache keys whose schema failed to parse.
+        let mut failed_schemas: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (stem_key, src) in schema_cache.iter() {
-            if let Ok(grammar) = schema::parse_schema(src) {
-                node_store_bridge::schema_bridge::grammar_to_store(&grammar, &mut store);
-                grammars.insert(stem_key.clone(), grammar);
+            match schema::parse_schema(src) {
+                Ok(grammar) => {
+                    node_store_bridge::schema_bridge::grammar_to_store(&grammar, &mut store);
+                    grammars.insert(stem_key.clone(), grammar);
+                }
+                Err(e) => {
+                    report.push(validation::SourceDiagnostic {
+                        file: schema_file(stem_key),
+                        at: None,
+                        severity: validation::Severity::Error,
+                        message: e.to_string(),
+                    });
+                    failed_schemas.insert(stem_key.clone());
+                }
             }
         }
         drop(schema_cache);
+
+        // The "not built" error for a content file with no usable grammar,
+        // given the schema cache keys tried for it, in lookup order.
+        let not_built = |file: PathBuf, keys: &[&str]| -> validation::SourceDiagnostic {
+            let message = match keys.iter().find(|k| failed_schemas.contains(**k)) {
+                Some(key) => format!(
+                    "not built: schema `{}` does not parse",
+                    schema_file(key).display()
+                ),
+                None => "not built: no schema for this page".to_string(),
+            };
+            validation::SourceDiagnostic {
+                file,
+                at: None,
+                severity: validation::Severity::Error,
+                message,
+            }
+        };
+        // Diagnostics for parsed (or unparseable) content at `file`.
+        let content_diagnostics = |report: &mut validation::ValidationReport,
+                                   file: &Path,
+                                   src: &str,
+                                   parsed: &Result<content::Document, content::ContentError>,
+                                   grammar: &schema::Grammar| {
+            match parsed {
+                Ok(doc) => {
+                    for d in validation::validate_document(src, doc, grammar) {
+                        report.push(validation::SourceDiagnostic {
+                            file: file.to_path_buf(),
+                            at: d.span.map(|s| validation::line_col(src, s.start)),
+                            severity: d.severity,
+                            message: d.message,
+                        });
+                    }
+                }
+                Err(e) => report.push(validation::SourceDiagnostic {
+                    file: file.to_path_buf(),
+                    at: None,
+                    severity: validation::Severity::Error,
+                    message: format!("parse error: {e}"),
+                }),
+            }
+        };
 
         // Pass 1: Parse and store all content documents (no semantic content yet)
         // We need all documents indexed before we can resolve link expressions.
@@ -385,9 +478,14 @@ impl Conductor {
                     let grammar = grammars
                         .get(&grammar_key)
                         .or_else(|| grammars.get(stem_str));
-                    if let Some(grammar) = grammar
-                        && let Ok(doc) = content::parse_and_assign(&src, grammar)
-                    {
+                    let file = relative(repo.content_path(&stem, &slug));
+                    let Some(grammar) = grammar else {
+                        report.push(not_built(file, &[&grammar_key, stem_str]));
+                        continue;
+                    };
+                    let parsed = content::parse_and_assign(&src, grammar);
+                    content_diagnostics(&mut report, &file, &src, &parsed, grammar);
+                    if let Ok(doc) = parsed {
                         let slug_str = slug.as_str();
                         let url = format!("/{stem_str}/{slug_str}");
                         let file = format!("content/{stem_str}/{slug_str}.md");
@@ -408,12 +506,34 @@ impl Conductor {
             // Collection content
             if let Some(src) = repo.collection_content_source(&stem) {
                 let grammar_key = site_index::schema_cache_key(stem_str, "index");
-                let grammar = grammars
-                    .get(&grammar_key)
-                    .or_else(|| grammars.get(stem_str));
-                if let Some(grammar) = grammar
-                    && let Ok(doc) = content::parse_and_assign(&src, grammar)
-                {
+                let file = relative(repo.collection_content_path(&stem));
+                // A broken collection schema does not fall back to the item
+                // grammar: the fallback is only for stems with no collection
+                // schema at all.
+                let collection_schema_broken = failed_schemas.contains(&grammar_key);
+                let grammar = if collection_schema_broken {
+                    None
+                } else {
+                    grammars
+                        .get(&grammar_key)
+                        .or_else(|| grammars.get(stem_str))
+                };
+                let parsed = match grammar {
+                    Some(grammar) => {
+                        let parsed = content::parse_and_assign(&src, grammar);
+                        content_diagnostics(&mut report, &file, &src, &parsed, grammar);
+                        parsed.ok()
+                    }
+                    None if collection_schema_broken => {
+                        report.push(not_built(file, &[&grammar_key]));
+                        None
+                    }
+                    None => {
+                        report.push(not_built(file, &[&grammar_key, stem_str]));
+                        None
+                    }
+                };
+                if let Some(doc) = parsed {
                     let url = site_index::url_for_stem_slug(stem_str, "index");
                     let file = if stem_str.is_empty() {
                         "content/index.md".to_string()
@@ -548,6 +668,7 @@ impl Conductor {
         *self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner()) = semantic_index;
         *self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner()) = stem_index;
         *self.path_to_doc_root.write().unwrap_or_else(|e| e.into_inner()) = path_index;
+        *self.validation_report.write().unwrap_or_else(|e| e.into_inner()) = report.sorted();
 
         // Query nodes, stem nodes and preamble fingerprints for the fresh store.
         self.establish_derived_state();
@@ -1397,37 +1518,6 @@ impl Conductor {
     pub fn insert_url_semantic(&self, url: &str, sem: node_store::NodeId) {
         self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner())
             .insert(url.to_string(), sem);
-    }
-
-    /// Build the full site graph using the shared build pipeline.
-    ///
-    /// Builds item pages, collection/index pages, and a legacy fallback root
-    /// page — matching the CLI build pipeline. Link resolution happens lazily
-    /// per-page in `rebuild_page`, not here.
-    ///
-    /// Skips items that fail to parse or have no schema. Errors are logged but
-    /// non-fatal.
-    pub fn build_full_graph(&self) -> Result<(), String> {
-        // Use a fresh repo to discover current files (self.repo may be stale after scaffold)
-        let repo = site_repository::SiteRepository::builder()
-            .from_dir(&self.site_dir)
-            .build();
-
-        let result = site_builder::build_graph(
-            &repo,
-            &self.output_dir,
-            site_builder::SourceAttachment::Attach,
-        );
-
-        // Log parse errors (non-fatal)
-        for (label, msg) in &result.parse_errors {
-            eprintln!("conductor: parse error for {label}: {msg}");
-        }
-
-        // SiteGraph is no longer stored — NodeStore is the primary model.
-        // The build_graph output is used only for its side effects (output files).
-        let _ = result.graph;
-        Ok(())
     }
 
     /// Return all item data graphs for a given schema stem.
@@ -2810,10 +2900,7 @@ impl Conductor {
                 // 3. Refresh schema cache for changed schemas
                 self.refresh_schema_cache();
 
-                // 4. Rebuild the full site graph
-                if let Err(e) = self.build_full_graph() {
-                    eprintln!("conductor: full graph rebuild failed: {e}");
-                }
+                // 4. Repopulate the node store.
                 // A full re-render (D9). The snapshot comparison CreateContent
                 // uses (`snapshot_query_results` before and after the
                 // repopulate) is the basis for a minimal FileChanged later.
@@ -2899,10 +2986,9 @@ impl Conductor {
                         // find the pages the new document changes.
                         let results_before = self.snapshot_query_results();
 
-                        // Refresh schema cache, site index, and rebuild graph for the new content
+                        // Refresh schema cache, site index, and the node store for the new content
                         self.refresh_schema_cache();
                         self.refresh_site_index();
-                        let _ = self.build_full_graph();
                         self.populate_node_store();
 
                         let mut rebuilt_pages: Vec<String> = vec![];
@@ -3165,8 +3251,7 @@ impl Conductor {
                                 // Refresh schema cache and site index — new schemas/dirs were written to disk
                                 self.refresh_schema_cache();
                                 self.refresh_site_index();
-                                // Rebuild the full graph with the new content
-                                let _ = self.build_full_graph();
+                                // Repopulate the node store with the new content
                                 self.populate_node_store();
 
                                 // Batch-render all pages using O(n) pipeline
@@ -3839,7 +3924,134 @@ mod smoke_tests {
 }
 
 #[cfg(test)]
-mod build_full_graph_collection_tests {
+mod validation_report_tests {
+    use super::*;
+
+    const ITEM_SCHEMA_SRC: &str = "# Post title {#title}\noccurs\n: exactly once\n";
+    const COLLECTION_SCHEMA_SRC: &str = "# Heading {#heading}\noccurs\n: exactly once\n";
+    const TEMPLATE_SRC: &str = "[:div]";
+
+    /// A valid site under `<tmp>/site` (so the output dir `<tmp>/output/site`
+    /// stays inside the tempdir): a post schema with two items and a
+    /// collection page.
+    fn valid_site() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let site = tmp.path().join("site");
+        for dir in ["schemas/post", "templates/post", "content/post"] {
+            std::fs::create_dir_all(site.join(dir)).expect("create dir");
+        }
+        let files = [
+            ("schemas/post/item.md", ITEM_SCHEMA_SRC),
+            ("schemas/post/index.md", COLLECTION_SCHEMA_SRC),
+            ("templates/post/item.hiccup", TEMPLATE_SRC),
+            ("templates/post/index.hiccup", TEMPLATE_SRC),
+            ("content/post/hello.md", "# Hello\n"),
+            ("content/post/second.md", "# Second\n"),
+            ("content/post/index.md", "# Posts\n"),
+        ];
+        for (path, src) in files {
+            std::fs::write(site.join(path), src).expect("write file");
+        }
+        (tmp, site)
+    }
+
+    fn errors_for(report: &validation::ValidationReport, file: &str) -> Vec<validation::SourceDiagnostic> {
+        report
+            .iter()
+            .filter(|d| d.file == Path::new(file) && d.severity == validation::Severity::Error)
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn valid_site_has_no_errors() {
+        let (_tmp, site) = valid_site();
+        let report = Conductor::load(site).expect("conductor").validation_report();
+        assert!(
+            !report.has_errors(),
+            "expected no errors, got: {:#?}",
+            report.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn invalid_item_reports_error_at_its_file() {
+        let (_tmp, site) = valid_site();
+        // An H2 where the title slot needs an H1.
+        std::fs::write(site.join("content/post/x.md"), "## Not a title\n").expect("write");
+        let report = Conductor::load(site).expect("conductor").validation_report();
+
+        let errors = errors_for(&report, "content/post/x.md");
+        assert!(!errors.is_empty(), "expected errors for x.md, got: {:#?}", report.iter().collect::<Vec<_>>());
+        assert!(
+            errors.iter().any(|d| d.at.is_some()),
+            "expected a positioned error, got: {errors:#?}"
+        );
+        assert!(report.has_errors());
+        assert_eq!(report.files_with_errors(), 1);
+    }
+
+    #[test]
+    fn unparseable_schema_reports_schema_and_not_built_pages() {
+        let (_tmp, site) = valid_site();
+        std::fs::write(
+            site.join("schemas/post/item.md"),
+            "# Title {#title}\ncontent\n: shouty\n",
+        )
+        .expect("write");
+        let report = Conductor::load(site).expect("conductor").validation_report();
+
+        let schema_errors = errors_for(&report, "schemas/post/item.md");
+        assert_eq!(schema_errors.len(), 1, "got: {schema_errors:#?}");
+        assert!(schema_errors[0].at.is_none());
+
+        for file in ["content/post/hello.md", "content/post/second.md"] {
+            let errors = errors_for(&report, file);
+            assert_eq!(errors.len(), 1, "{file}: {errors:#?}");
+            assert_eq!(
+                errors[0].message,
+                "not built: schema `schemas/post/item.md` does not parse"
+            );
+        }
+        // The collection page has its own (valid) schema.
+        assert!(errors_for(&report, "content/post/index.md").is_empty());
+    }
+
+    #[test]
+    fn broken_collection_schema_does_not_fall_back_to_item_grammar() {
+        let (_tmp, site) = valid_site();
+        std::fs::write(
+            site.join("schemas/post/index.md"),
+            "# Title {#title}\ncontent\n: shouty\n",
+        )
+        .expect("write");
+        let conductor = Conductor::load(site).expect("conductor");
+        let report = conductor.validation_report();
+
+        let errors = errors_for(&report, "content/post/index.md");
+        assert_eq!(errors.len(), 1, "got: {errors:#?}");
+        assert_eq!(
+            errors[0].message,
+            "not built: schema `schemas/post/index.md` does not parse"
+        );
+        assert!(
+            conductor.document_by_url("/post/").is_none(),
+            "the collection page must not be stored"
+        );
+    }
+
+    #[test]
+    fn load_writes_nothing_to_output_dir() {
+        let (_tmp, site) = valid_site();
+        let conductor = Conductor::load(site).expect("conductor");
+        let output = conductor.output_dir.clone();
+        let written = std::fs::read_dir(&output).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(written, 0, "expected nothing under {}", output.display());
+    }
+}
+
+#[cfg(test)]
+mod populate_collection_tests {
     use super::*;
 
     const ITEM_SCHEMA_SRC: &str =
@@ -3865,8 +4077,8 @@ mod build_full_graph_collection_tests {
 
     /// Build a site with a post schema, item content, and a collection index.
     ///
-    /// After build_full_graph() the site_graph must contain a node at
-    /// `/post/` with PageKind::Collection.
+    /// After populating the node store, `/post/` must be indexed as a
+    /// collection page.
     fn build_site_with_collection() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
@@ -3951,7 +4163,7 @@ mod build_full_graph_collection_tests {
     // -------------------------------------------------------------------------
 
     /// A site with item pages and a root collection template but NO root schema
-    /// or root content. After build_full_graph() the root `/` node should still
+    /// or root content. After populating the node store the root `/` node should still
     /// appear (legacy fallback behaviour).
     fn build_legacy_fallback_site() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");

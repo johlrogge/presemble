@@ -388,7 +388,6 @@ dependencies = [
  "schema",
  "serde",
  "serde_json",
- "site_builder",
  "site_index",
  "site_templates",
  "tempfile",
@@ -1917,6 +1916,7 @@ name = "publisher"
 version = "0.35.0"
 dependencies = [
  "publisher_cli",
+ "tempfile",
 ]
 
 [[package]]
@@ -1959,6 +1959,7 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tower-lsp",
+ "validation",
 ]
 
 [[package]]

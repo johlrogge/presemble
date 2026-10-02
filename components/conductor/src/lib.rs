@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn build_full_graph_populates_item_nodes() {
+    fn populate_indexes_item_nodes() {
         let (_dir, conductor) = two_post_conductor();
 
         // Verify via NodeStore that both item pages are indexed

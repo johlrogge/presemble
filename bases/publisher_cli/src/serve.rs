@@ -3325,7 +3325,7 @@ mod tests {
             "# Test Title\n",
         ).unwrap();
 
-        // Use Conductor::new so build_full_graph + populate_node_store run automatically.
+        // Use Conductor::new so populate_node_store runs automatically.
         let c = Arc::new(
             conductor::Conductor::new(root.to_path_buf()).expect("conductor"),
         );

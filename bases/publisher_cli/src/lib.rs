@@ -49,93 +49,82 @@ pub fn output_dir(site_dir: &Path) -> std::path::PathBuf {
 pub struct BuildOutcome {
     pub files_built: usize,
     pub files_failed: usize,
-    /// Pages that were rendered with suggestion nodes due to validation issues.
-    pub files_with_suggestions: usize,
     /// Per-page build errors, keyed by URL path (e.g. "/article/foo").
-    /// Populated only when a content page fails to parse (hard failure).
-    /// `build_via_conductor` prints these to stderr in both modes; in serve mode
-    /// the server also uses this map to return styled error pages instead of 404s.
+    /// Printed to stderr in both modes; in serve mode the server also uses
+    /// this map to return styled error pages instead of 404s.
     pub build_errors: std::collections::HashMap<String, Vec<String>>,
-    /// Per-page suggestion diagnostics, keyed by URL path (e.g. "/article/foo").
-    /// Populated when a content page fails validation but is still rendered with
-    /// suggestion nodes. These pages are reachable — they just have placeholder content.
-    pub page_suggestions: std::collections::HashMap<String, Vec<String>>,
+    /// Validation diagnostics for every schema and content file (ADR-061).
+    pub validation: validation::ValidationReport,
 }
 
-impl BuildOutcome {
-    pub fn has_errors(&self) -> bool {
-        self.files_failed > 0 || self.files_with_suggestions > 0
-    }
-}
-
-/// How validation failures are handled during build.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ValidationMode {
-    /// Validation failures cause pages to be skipped (build mode).
-    Strict,
-    /// Validation failures render with suggestion nodes (serve mode).
-    Lenient,
-}
-
-/// How to handle broken link references.
-#[derive(Clone, Copy, PartialEq)]
-pub enum LinkDisposition {
-    HardError,
-    Warning,
-}
-
-/// Policy for how the build pipeline handles validation failures and broken links.
-pub struct BuildPolicy {
-    pub validation_mode: ValidationMode,
-    pub link_policy: LinkDisposition,
-}
-
-impl BuildPolicy {
-    /// Strict: validation failures skip pages, broken links are errors.
-    pub fn strict() -> Self {
-        BuildPolicy {
-            validation_mode: ValidationMode::Strict,
-            link_policy: LinkDisposition::HardError,
-        }
-    }
-
-    /// Lenient: validation failures produce suggestions, broken links are warnings.
-    pub fn lenient() -> Self {
-        BuildPolicy {
-            validation_mode: ValidationMode::Lenient,
-            link_policy: LinkDisposition::Warning,
-        }
-    }
-}
-
-/// Top-level entry point for production builds.
-/// Copies assets then creates a Conductor (which builds all pages during startup).
+/// Top-level entry point for production builds (the publish gate, ADR-061).
+///
+/// Validates the whole site first. If any schema or content file has an
+/// error, prints every diagnostic and returns [`CliError::Unpublishable`]
+/// without writing anything: no assets are copied and no pages rendered.
+/// Warnings are printed but do not fail the build.
+///
+/// `_url_config` is not applied yet.
 pub fn build_for_publish(site_dir: &Path, _url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
-    build_via_conductor(site_dir)
-}
-
-/// Top-level entry point for development serve.
-/// Copies assets then creates a Conductor (which builds all pages during startup).
-pub fn build_for_serve(site_dir: &Path, _url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
-    build_via_conductor(site_dir)
-}
-
-/// Shared implementation: copy assets and delegate all page building to the Conductor.
-fn build_via_conductor(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
     println!("Building site: {}", site_dir.display());
 
+    let conductor = load_conductor(&site_dir)?;
+    let report = conductor.validation_report();
+    print_report(&report);
+    if report.has_errors() {
+        return Err(CliError::Unpublishable {
+            errors: report.error_count(),
+            files: report.files_with_errors(),
+        });
+    }
+
+    let outcome = render_site(&site_dir, &conductor, report)?;
+    if outcome.files_failed > 0 {
+        return Err(CliError::PagesFailed(outcome.files_failed));
+    }
+    Ok(outcome)
+}
+
+/// Top-level entry point for development serve: the editorial preview.
+///
+/// Lenient: renders every page whatever its validation state, then prints
+/// the validation diagnostics.
+pub fn build_for_serve(site_dir: &Path, _url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+    let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
+    println!("Building site: {}", site_dir.display());
+
+    let conductor = load_conductor(&site_dir)?;
+    let report = conductor.validation_report();
+    let outcome = render_site(&site_dir, &conductor, report)?;
+    print_report(&outcome.validation);
+    let files = report_file_count(&outcome.validation);
+    if files > 0 {
+        eprintln!(
+            "{} errors, {} warnings in {files} files (pages still render in serve)",
+            outcome.validation.error_count(),
+            outcome.validation.warning_count(),
+        );
+    }
+    Ok(outcome)
+}
+
+/// Load and validate the site without rendering anything.
+fn load_conductor(site_dir: &Path) -> Result<conductor::Conductor, CliError> {
+    conductor::Conductor::load(site_dir.to_path_buf())
+        .map_err(|e| CliError::Render(format!("conductor startup failed: {e}")))
+}
+
+/// Copy assets and render every page once, printing render errors.
+fn render_site(
+    site_dir: &Path,
+    conductor: &conductor::Conductor,
+    validation: validation::ValidationReport,
+) -> Result<BuildOutcome, CliError> {
     // Copy assets (conductor handles content → HTML; assets are just file copies)
-    let repo = site_repository::SiteRepository::builder().from_dir(&site_dir).build();
-    copy_site_assets(&site_dir, &repo)?;
+    let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
+    copy_site_assets(site_dir, &repo)?;
 
-    // Create conductor — it calls build_all_pages() during startup, rendering all pages.
-    let conductor = conductor::Conductor::new(site_dir.clone())
-        .map_err(|e| CliError::Render(format!("conductor startup failed: {e}")))?;
-
-    // Collect results from the build that happened during conductor startup.
-    // build_all_pages already ran; call it again to get the counts.
-    // (The pages are already written; this re-run is cheap since NodeStore is populated.)
     let (rebuilt, failed, errors) = conductor.build_all_pages();
 
     let files_built = rebuilt.len();
@@ -152,10 +141,25 @@ fn build_via_conductor(site_dir: &Path) -> Result<BuildOutcome, CliError> {
     Ok(BuildOutcome {
         files_built,
         files_failed,
-        files_with_suggestions: 0,
         build_errors: errors,
-        page_suggestions: std::collections::HashMap::new(),
+        validation,
     })
+}
+
+/// Print every diagnostic of `report` to stderr, one per line.
+fn print_report(report: &validation::ValidationReport) {
+    for diagnostic in report.iter() {
+        eprintln!("{diagnostic}");
+    }
+}
+
+/// The number of distinct files with any diagnostic.
+fn report_file_count(report: &validation::ValidationReport) -> usize {
+    report
+        .iter()
+        .map(|d| &d.file)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// Flatten per-page build errors into `"{url}: {msg}"` lines, sorted by URL so
@@ -368,10 +372,7 @@ pub fn run() -> Result<(), CliError> {
                 base_path.as_deref(),
                 base_url.as_deref(),
             )?;
-            let outcome = build_for_publish(site_path, &url_config)?;
-            if outcome.has_errors() {
-                std::process::exit(1);
-            }
+            build_for_publish(site_path, &url_config)?;
             Ok(())
         }
         Some(Command::Serve { site_dir, config, url_style, base_path, base_url, port, dev_session }) => {
@@ -425,10 +426,7 @@ pub fn run() -> Result<(), CliError> {
             // backward compat: presemble <site-dir>
             let site_dir = cli.site_dir
                 .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?;
-            let outcome = build_for_publish(Path::new(&site_dir), &UrlConfig::default())?;
-            if outcome.has_errors() {
-                std::process::exit(1);
-            }
+            build_for_publish(Path::new(&site_dir), &UrlConfig::default())?;
             Ok(())
         }
     }
@@ -551,20 +549,6 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
     println!("  presemble serve {dir_display}/");
 
     Ok(())
-}
-
-/// Trigger a full rebuild via conductor and return a BuildOutcome.
-/// The `dirty_sources`, `current_graph`, and `policy` parameters are accepted
-/// for API compatibility but the conductor handles all incremental logic internally.
-pub fn rebuild_affected(
-    site_dir: &std::path::Path,
-    _dirty_sources: &std::collections::HashSet<std::path::PathBuf>,
-    _current_graph: &dep_graph::DependencyGraph,
-    _url_config: &UrlConfig,
-    _new_content_files: &[std::path::PathBuf],
-    _policy: &BuildPolicy,
-) -> Result<BuildOutcome, CliError> {
-    build_via_conductor(site_dir)
 }
 
 /// Walk template asset references and populate Stylesheet and LeafAsset nodes

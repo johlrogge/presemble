@@ -98,9 +98,8 @@ fn bench_link_expressions(c: &mut Criterion) {
 ///
 /// Each iteration creates a fresh `Conductor` (clean build). This is distinct
 /// from a true incremental rebuild where the `Conductor` persists across file
-/// changes. The idempotency fix in `inject_collections_in_store` ensures that
-/// the second `build_all_pages` call inside `build_via_conductor` does not
-/// create orphaned Collection nodes, keeping repeated clean builds accurate.
+/// changes. `build_for_serve` loads the site with `Conductor::load` and renders
+/// every page once with a single `build_all_pages` call.
 ///
 /// A true rebuild benchmark (reusing a single `Conductor` across iterations)
 /// would require `conductor::Conductor` to be a dev-dependency of this crate.

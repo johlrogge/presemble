@@ -4,6 +4,8 @@
 
 Accepted
 
+Amended by ADR-061 (publish gate).
+
 ## Context
 
 When content failed schema validation, the publisher skipped the page entirely. In serve mode, a

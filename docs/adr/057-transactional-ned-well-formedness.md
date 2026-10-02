@@ -36,6 +36,7 @@ Principle (2026-10-01): schema-invalid content is legitimate state. It can be ed
    - The document is `Unpublishable` while any diagnostics are present.
    - Edits, suggestion accepts and saves are never refused on grammar grounds.
    - Gating builds and publishing is Wave 4.
+   - Amended by ADR-061 (publish gate).
 6. **Saving is total for well-formed documents.** `serialize_from_store` succeeds for any document that passes §4. A missing `preamble` or `body` serializes as empty. Getting the text right is the serializer's job (canonical escaping, ADR-056 §3 as amended), not a reason to refuse an edit.
 7. **Errors.** `TxnError = OutOfScope { node } | FrameChange { node, kind } | Malformed { node, error }`. Suggestion accept cannot produce these: addressing targets blocks or containers, and payloads are decoded first. So no new `StaleCause` is needed.
 

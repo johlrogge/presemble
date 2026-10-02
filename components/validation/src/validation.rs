@@ -24,19 +24,24 @@ pub struct Diagnostic {
 /// Validate a content document source against a grammar.
 /// Returns diagnostics with byte-range spans where position information is available.
 pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
-    let doc = match content::parse_and_assign(src, grammar) {
-        Ok(d) => d,
-        Err(e) => {
-            return vec![Diagnostic {
-                severity: Severity::Error,
-                message: format!("parse error: {e}"),
-                slot: None,
-                span: None,
-            }];
-        }
-    };
+    match content::parse_and_assign(src, grammar) {
+        Ok(doc) => validate_document(src, &doc, grammar),
+        Err(e) => vec![Diagnostic {
+            severity: Severity::Error,
+            message: format!("parse error: {e}"),
+            slot: None,
+            span: None,
+        }],
+    }
+}
 
-    let result = content::validate(&doc, grammar);
+/// Validate an already-parsed content document against a grammar.
+///
+/// `src` is the source `doc` was parsed from; it is used to position
+/// diagnostics. Returns the same diagnostics as [`validate_content`] does for
+/// a source that parses.
+pub fn validate_document(src: &str, doc: &Document, grammar: &Grammar) -> Vec<Diagnostic> {
+    let result = content::validate(doc, grammar);
 
     let mut diagnostics: Vec<Diagnostic> = result
         .diagnostics
@@ -45,7 +50,7 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
             let span = vd
                 .span
                 .map(Range::from)
-                .or_else(|| find_span_for_diagnostic(vd.slot.as_ref(), &doc));
+                .or_else(|| find_span_for_diagnostic(vd.slot.as_ref(), doc));
             Diagnostic {
                 severity: vd.severity.clone(),
                 message: vd.message.clone(),
@@ -118,6 +123,117 @@ fn find_span_for_diagnostic(
     let slot_name = slot_name?;
     let slot = doc.preamble.iter().find(|s| &s.name == slot_name)?;
     slot.elements.front().map(|e| Range::from(e.span))
+}
+
+// ---------------------------------------------------------------------------
+// Positioned diagnostics (publish gate)
+// ---------------------------------------------------------------------------
+
+/// A 1-based line and column in a source file. The column counts Unicode
+/// scalar values (`char`s), not bytes or UTF-16 units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LineCol {
+    pub line: usize,
+    pub col: usize,
+}
+
+/// The 1-based [`LineCol`] of byte offset `byte` in `src`.
+///
+/// `byte` is clamped to `src.len()`; an offset inside a multibyte character
+/// is moved back to the start of that character.
+pub fn line_col(src: &str, byte: usize) -> LineCol {
+    let mut byte = byte.min(src.len());
+    while !src.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    let before = &src[..byte];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    LineCol {
+        line: before.matches('\n').count() + 1,
+        col: before[line_start..].chars().count() + 1,
+    }
+}
+
+/// A diagnostic attached to a site file, for reporting a whole site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDiagnostic {
+    /// Path relative to the site directory.
+    pub file: std::path::PathBuf,
+    pub at: Option<LineCol>,
+    pub severity: Severity,
+    pub message: String,
+}
+
+impl std::fmt::Display for SourceDiagnostic {
+    /// `path:line:col: severity: message`, or `path: severity: message`
+    /// without a position.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let severity = match self.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        write!(f, "{}", self.file.display())?;
+        if let Some(at) = self.at {
+            write!(f, ":{}:{}", at.line, at.col)?;
+        }
+        write!(f, ": {severity}: {}", self.message)
+    }
+}
+
+/// All diagnostics for a site. This is the publish gate: a site with errors
+/// is not published. Build it with [`ValidationReport::push`], then finish it
+/// with [`ValidationReport::sorted`].
+#[derive(Debug, Clone, Default)]
+pub struct ValidationReport {
+    diagnostics: Vec<SourceDiagnostic>,
+}
+
+impl ValidationReport {
+    /// Add a diagnostic. The order is fixed by [`ValidationReport::sorted`].
+    pub fn push(&mut self, diagnostic: SourceDiagnostic) {
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Finish the report: sort by (file, line, col), unpositioned
+    /// diagnostics first within a file. The sort is stable, so diagnostics
+    /// at the same position keep their insertion order.
+    pub fn sorted(mut self) -> Self {
+        self.diagnostics.sort_by(|a, b| (&a.file, a.at).cmp(&(&b.file, b.at)));
+        self
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.iter().any(|d| d.severity == Severity::Error)
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.count(Severity::Error)
+    }
+
+    pub fn warning_count(&self) -> usize {
+        self.count(Severity::Warning)
+    }
+
+    /// The number of distinct files with at least one error.
+    pub fn files_with_errors(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| &d.file)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    }
+
+    /// The diagnostics. Once the report is finished with
+    /// [`ValidationReport::sorted`], they are in (file, line, col) order,
+    /// unpositioned first within a file.
+    pub fn iter(&self) -> impl Iterator<Item = &SourceDiagnostic> {
+        self.diagnostics.iter()
+    }
+
+    fn count(&self, severity: Severity) -> usize {
+        self.diagnostics.iter().filter(|d| d.severity == severity).count()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +433,114 @@ mod tests {
             src.len(),
             span
         );
+    }
+
+    // ── validate_document ───────────────────────────────────────────────────
+
+    fn messages(diagnostics: &[Diagnostic]) -> Vec<(String, Option<Range<usize>>)> {
+        diagnostics
+            .iter()
+            .map(|d| (d.message.clone(), d.span.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn validate_document_matches_validate_content_for_valid_source() {
+        let src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let grammar = article_grammar();
+        let doc = content::parse_and_assign(src, &grammar).expect("parses");
+        assert_eq!(
+            messages(&validate_document(src, &doc, &grammar)),
+            messages(&validate_content(src, &grammar))
+        );
+    }
+
+    #[test]
+    fn validate_document_matches_validate_content_for_invalid_source() {
+        let src = "Some paragraph without a title.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n";
+        let grammar = article_grammar();
+        let doc = content::parse_and_assign(src, &grammar).expect("parses");
+        let from_doc = validate_document(src, &doc, &grammar);
+        assert!(!from_doc.is_empty(), "expected diagnostics for invalid source");
+        assert_eq!(messages(&from_doc), messages(&validate_content(src, &grammar)));
+    }
+
+    // ── line_col ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn line_col_first_line() {
+        assert_eq!(line_col("abc\ndef\n", 2), LineCol { line: 1, col: 3 });
+        assert_eq!(line_col("abc\ndef\n", 0), LineCol { line: 1, col: 1 });
+    }
+
+    #[test]
+    fn line_col_second_line() {
+        assert_eq!(line_col("abc\ndef\n", 4), LineCol { line: 2, col: 1 });
+        assert_eq!(line_col("abc\ndef\n", 6), LineCol { line: 2, col: 3 });
+    }
+
+    #[test]
+    fn line_col_counts_chars_not_bytes() {
+        // "é" is 2 bytes, "😀" is 4 bytes (2 UTF-16 units): both count as one column.
+        let src = "x\né😀b";
+        let b = src.find('b').unwrap();
+        assert_eq!(line_col(src, b), LineCol { line: 2, col: 3 });
+    }
+
+    #[test]
+    fn line_col_at_and_past_eof() {
+        let src = "abc\nde";
+        assert_eq!(line_col(src, src.len()), LineCol { line: 2, col: 3 });
+        assert_eq!(line_col(src, src.len() + 10), LineCol { line: 2, col: 3 });
+    }
+
+    // ── SourceDiagnostic / ValidationReport ─────────────────────────────────
+
+    fn diag(file: &str, at: Option<(usize, usize)>, severity: Severity, msg: &str) -> SourceDiagnostic {
+        SourceDiagnostic {
+            file: std::path::PathBuf::from(file),
+            at: at.map(|(line, col)| LineCol { line, col }),
+            severity,
+            message: msg.to_string(),
+        }
+    }
+
+    #[test]
+    fn source_diagnostic_display_with_position() {
+        let d = diag("content/post/a.md", Some((3, 1)), Severity::Error, "msg");
+        assert_eq!(d.to_string(), "content/post/a.md:3:1: error: msg");
+    }
+
+    #[test]
+    fn source_diagnostic_display_without_position() {
+        let d = diag("content/post/a.md", None, Severity::Warning, "msg");
+        assert_eq!(d.to_string(), "content/post/a.md: warning: msg");
+    }
+
+    #[test]
+    fn report_orders_by_file_line_col_unpositioned_first() {
+        let mut report = ValidationReport::default();
+        report.push(diag("content/b.md", Some((1, 1)), Severity::Error, "b1"));
+        report.push(diag("content/a.md", Some((3, 2)), Severity::Error, "a3:2"));
+        report.push(diag("content/a.md", Some((3, 1)), Severity::Warning, "a3:1"));
+        report.push(diag("content/a.md", None, Severity::Error, "a-none"));
+        report.push(diag("content/a.md", Some((1, 5)), Severity::Error, "a1:5"));
+        let report = report.sorted();
+        let order: Vec<&str> = report.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(order, vec!["a-none", "a1:5", "a3:1", "a3:2", "b1"]);
+        assert_eq!(report.error_count(), 4);
+        assert_eq!(report.warning_count(), 1);
+        assert_eq!(report.files_with_errors(), 2);
+    }
+
+    #[test]
+    fn report_with_only_warnings_has_no_errors() {
+        let mut report = ValidationReport::default();
+        report.push(diag("content/a.md", None, Severity::Warning, "w"));
+        assert!(!report.has_errors());
+        assert_eq!(report.files_with_errors(), 0);
+        report.push(diag("content/a.md", None, Severity::Error, "e"));
+        assert!(report.has_errors());
     }
 
     // ── validate_schema ─────────────────────────────────────────────────────

@@ -490,13 +490,47 @@ fn collection_page_without_collection_content_is_skipped() {
     );
 }
 
+// ── Publish gate (ADR-061) ──────────────────────────────────────────────────
+
 #[test]
-fn rebuild_affected_completes_successfully() {
-    // Verify that rebuild_affected can be called and returns a BuildOutcome.
-    // Since the conductor now handles all builds, rebuild_affected just delegates
-    // to the conductor and returns counts.
+fn publish_refuses_site_with_validation_errors_and_writes_nothing() {
+    // The blog-site fixture contains content/article/invalid-post.md.
+    let (_tmp, site_dir) = copy_fixture_site();
+
+    let result = publisher_cli::build_for_publish(&site_dir, &publisher_cli::UrlConfig::default());
+
+    match result {
+        Err(publisher_cli::CliError::Unpublishable { errors, files }) => {
+            assert!(errors >= 1, "expected at least one error");
+            assert!(files >= 1, "expected at least one file with errors");
+        }
+        Err(other) => panic!("expected Unpublishable, got error: {other}"),
+        Ok(_) => panic!("expected Unpublishable, got Ok"),
+    }
+    assert!(
+        !publisher_cli::output_dir(&site_dir).exists(),
+        "nothing should be written when the site is unpublishable"
+    );
+}
+
+#[test]
+fn serve_renders_site_with_validation_errors() {
+    let (_tmp, site_dir) = copy_fixture_site();
+
+    let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
+        .expect("serve build should succeed despite validation errors");
+
+    assert!(publisher_cli::output_dir(&site_dir).join("index.html").exists());
+    assert!(
+        outcome.validation.has_errors(),
+        "the report should carry the fixture's validation errors"
+    );
+}
+
+#[test]
+fn publish_succeeds_for_valid_site() {
     let tmp = TempDir::new().unwrap();
-    let site = tmp.path().join("rebuild-site");
+    let site = tmp.path().join("valid-site");
 
     fs::create_dir_all(site.join("schemas/article")).unwrap();
     fs::create_dir_all(site.join("content/article")).unwrap();
@@ -521,17 +555,10 @@ fn rebuild_affected_completes_successfully() {
     .unwrap();
     fs::write(site.join("assets/style.css"), "body {}").unwrap();
 
-    let site = fs::canonicalize(&site).unwrap();
+    let outcome = publisher_cli::build_for_publish(&site, &publisher_cli::UrlConfig::default())
+        .expect("a valid site should publish");
 
-    let rebuild = publisher_cli::rebuild_affected(
-        &site,
-        &std::collections::HashSet::new(),
-        &dep_graph::DependencyGraph::new(),
-        &publisher_cli::UrlConfig::default(),
-        &[],
-        &publisher_cli::BuildPolicy::lenient(),
-    )
-    .expect("rebuild_affected should succeed");
-
-    assert_eq!(rebuild.files_failed, 0, "rebuild should have no failures");
+    assert_eq!(outcome.files_failed, 0, "publish should have no failures");
+    assert!(!outcome.validation.has_errors());
+    assert!(publisher_cli::output_dir(&site).join("article/sample/index.html").exists());
 }

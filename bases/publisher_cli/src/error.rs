@@ -9,6 +9,11 @@ pub enum CliError {
     Template(template::RenderError),
     Render(String),
     SessionKey(accounts::SessionKeyError),
+    /// The publish gate (ADR-061): the site has validation errors, so nothing
+    /// was written.
+    Unpublishable { errors: usize, files: usize },
+    /// Pages that failed to render during a publish build.
+    PagesFailed(usize),
 }
 
 impl fmt::Display for CliError {
@@ -21,6 +26,11 @@ impl fmt::Display for CliError {
             CliError::Template(e) => write!(f, "template error: {e}"),
             CliError::Render(msg) => write!(f, "render error: {msg}"),
             CliError::SessionKey(e) => write!(f, "{e}"),
+            CliError::Unpublishable { errors, files } => write!(
+                f,
+                "{errors} validation error(s) in {files} file(s); site not published"
+            ),
+            CliError::PagesFailed(n) => write!(f, "{n} page(s) failed to render"),
         }
     }
 }

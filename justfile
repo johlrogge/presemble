@@ -35,10 +35,12 @@ default:
 
 # --- local development ---
 
-# Output lands in <parent-of-dir>/output/<dir-name>/. On failure the CLI prints
-# the count ("N pages built, M failed") followed by one "error:" line per page
-# message on stderr.
-# Build a site with the dev profile; exits non-zero if any page fails.
+# Output lands in <parent-of-dir>/output/<dir-name>/. The site is validated
+# first (publish gate, ADR-061): on validation errors every diagnostic is
+# printed on stderr as `path:line:col: error: …`, nothing is written, and the
+# build exits non-zero. On render failure the CLI prints the count
+# ("N pages built, M failed") followed by one "error:" line per page message.
+# Build a site with the dev profile; exits non-zero on validation errors or failed pages.
 site-build dir="site":
     #!/usr/bin/env bash
     set -uo pipefail
