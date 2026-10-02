@@ -886,21 +886,24 @@ fn render_insert_native(
                                         }));
                                     }
                                     "raw-html" => {
-                                        let html = first_child_text(store, child_id);
-                                        if let Ok(nodes) = crate::dom::parse_template_xml(&html) {
-                                            body_nodes.extend(nodes);
-                                        }
+                                        // Never rendered (ADR-062 D2): a placeholder that is not a slot.
+                                        body_nodes.push(Node::Element(Element {
+                                            name: "div".to_string(),
+                                            attrs: vec![(
+                                                "class".to_string(),
+                                                Form::Str(crate::constants::CLASS_HTML_REMOVED.to_string()),
+                                            )],
+                                            children: vec![Node::Text(crate::constants::MSG_HTML_REMOVED.to_string())],
+                                        }));
                                     }
                                     "list" => {
                                         // List stored as raw markdown source
                                         let source = first_child_text(store, child_id);
-                                        let mut html = String::new();
-                                        pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(&source));
-                                        let html = html.trim();
+                                        let html = render_inline_md(&source);
                                         body_nodes.push(Node::Element(Element {
                                             name: "div".to_string(),
                                             attrs: body_attrs.clone(),
-                                            children: parse_html_fragment(html),
+                                            children: parse_html_fragment(&html),
                                         }));
                                     }
                                     "link" | "link-expression" => {
@@ -1176,26 +1179,20 @@ fn node_attr_int(store: &node_store::NodeStore, id: node_store::NodeId, name: &s
     })
 }
 
-/// Render inline markdown (bold, italic, links) to HTML, stripping outer <p> wrapper.
+/// Render inline markdown (bold, italic, links) to HTML, stripping outer <p>
+/// wrapper. HTML in the text is never passed through (ADR-062).
 fn render_inline_md(text: &str) -> String {
-    let mut html = String::new();
-    pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(text));
-    let html = html.trim();
-    if html.starts_with("<p>") && html.ends_with("</p>") {
-        html[3..html.len() - 4].to_string()
-    } else {
-        html.to_string()
-    }
+    crate::markdown_html::safe_inline_html(text)
 }
 
 /// Parse an HTML fragment into dom nodes, falling back to text if parsing fails.
+///
+/// The fragment is always parsed, so entities (`&lt;`, `&amp;`) become their
+/// characters in text nodes; the serializer escapes them again. Text nodes
+/// are never HTML, so `&lt;` stays text.
 fn parse_html_fragment(html: &str) -> Vec<Node> {
-    if html.contains('<') {
-        crate::dom::parse_template_xml(html)
-            .unwrap_or_else(|_| vec![Node::Text(html.to_string())])
-    } else {
-        vec![Node::Text(html.to_string())]
-    }
+    crate::dom::parse_template_xml(html)
+        .unwrap_or_else(|_| vec![Node::Text(html.to_string())])
 }
 
 fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> String {
@@ -3414,5 +3411,101 @@ mod tests {
         assert!(transformer_html.contains("<pre"), "transformer.rs path: expected <pre tag; got: {transformer_html}");
 
         // TODO(post-Phase-C): assert data-presemble-md parity once transformer.rs emits it
+    }
+
+    // ---------------------------------------------------------------------------
+    // HTML from content is never rendered (ADR-062)
+    // ---------------------------------------------------------------------------
+
+    /// Render a body with one child element of `kind` holding `text` (and an
+    /// optional heading `level`) through the native NodeStore path.
+    fn render_native_body_block(kind: &str, text: &str, level: Option<i64>) -> String {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let body_name = store.intern("body");
+        let body = store.add_node(node_store::Node::Element(body_name));
+        let kind_name = store.intern(kind);
+        let block = store.add_node(node_store::Node::Element(kind_name));
+        if let Some(level) = level {
+            let level_name = store.intern("level");
+            let level_val = store.add_node(node_store::Node::Integer(level));
+            store.add_edge(block, node_store::Edge::Attribute { name: level_name, value: level_val });
+        }
+        let text_node = store.add_node(node_store::Node::Text(text.into()));
+        store.add_edge(block, node_store::Edge::Child(text_node));
+        store.add_edge(body, node_store::Edge::Child(block));
+        let body_co_name = store.intern("body");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+
+        let graph = NodeStoreGraphView { store, root };
+        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
+    }
+
+    #[test]
+    fn native_body_paragraph_inline_html_renders_escaped() {
+        let html = render_native_body_block("paragraph", "a <script>x</script> b", None);
+        assert!(!html.contains("<script"), "inline HTML must not be rendered; got: {html}");
+        assert!(html.contains("&lt;script&gt;"), "inline HTML must render escaped; got: {html}");
+    }
+
+    #[test]
+    fn native_body_heading_literal_html_renders_escaped() {
+        let html = render_native_body_block("heading", "<script>x</script>", Some(2));
+        assert!(html.contains("<h2"), "expected h2; got: {html}");
+        assert!(!html.contains("<script"), "heading HTML must not be rendered; got: {html}");
+        assert!(html.contains("&lt;script&gt;"), "heading HTML must render escaped; got: {html}");
+    }
+
+    #[test]
+    fn native_body_list_with_nested_html_block_renders_escaped() {
+        let html = render_native_body_block("list", "- item\n\n  <div>inner</div>\n", None);
+        assert!(!html.contains("<div>inner"), "nested HTML block must not be rendered; got: {html}");
+        assert!(html.contains("&lt;div&gt;inner"), "nested HTML block must render escaped; got: {html}");
+    }
+
+    #[test]
+    fn native_body_paragraph_inline_comment_is_stripped() {
+        let html = render_native_body_block("paragraph", "a <!-- secret --> b", None);
+        assert!(!html.contains("secret"), "inline comment must be stripped; got: {html}");
+    }
+
+    #[test]
+    fn native_body_html_block_renders_only_the_placeholder() {
+        let html = render_native_body_block("raw-html", "<div>secret</div>", None);
+        assert!(!html.contains("secret"), "HTML block source must not be rendered; got: {html}");
+        assert!(html.contains("presemble-html-removed"), "expected the placeholder class; got: {html}");
+        assert!(
+            html.contains("Raw HTML is not published. Remove it to publish this page."),
+            "expected the placeholder message; got: {html}"
+        );
+        assert!(!html.contains("data-presemble-slot"), "placeholder must not be a slot; got: {html}");
+    }
+
+    #[test]
+    fn native_body_paragraph_inline_markdown_still_renders() {
+        let html = render_native_body_block("paragraph", "**b** _i_ `x<y` [here](/a)", None);
+        assert!(html.contains("<strong>b</strong>"), "expected strong; got: {html}");
+        assert!(html.contains("<em>i</em>"), "expected em; got: {html}");
+        assert!(html.contains("<code>x&lt;y</code>"), "expected code span; got: {html}");
+        assert!(html.contains(r#"<a href="/a">here</a>"#), "expected link; got: {html}");
+    }
+
+    #[test]
+    fn parse_html_fragment_keeps_escaped_angle_brackets_as_text() {
+        // Without tags.
+        let nodes = parse_html_fragment("a &lt;script&gt; &amp; b");
+        assert_eq!(serialize_nodes(&nodes), "a &lt;script&gt; &amp; b");
+        assert!(nodes.iter().all(|n| matches!(n, Node::Text(_))), "expected only text nodes: {nodes:?}");
+        // With tags.
+        let nodes = parse_html_fragment("<em>a</em> &lt;script&gt; b");
+        assert_eq!(serialize_nodes(&nodes), "<em>a</em> &lt;script&gt; b");
+        assert!(
+            matches!(nodes.as_slice(), [Node::Element(_), Node::Text(t)] if t == " <script> b"),
+            "escaped angle brackets must stay one text node: {nodes:?}"
+        );
     }
 }

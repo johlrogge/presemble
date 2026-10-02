@@ -1,6 +1,5 @@
 use content::{ContentElement, Document};
 use schema::{Element, Grammar, Spanned};
-use pulldown_cmark;
 use std::sync::Arc;
 
 /// Trait for callable values (closures and primitive functions).
@@ -475,17 +474,10 @@ pub fn inject_schema_included_by(graph: &mut DataGraph, included: &[(&str, &str)
     graph.insert(crate::constants::KEY_SCHEMA_INCLUDED_BY, Value::Text(json));
 }
 
-/// Render a single paragraph's markdown text to inline HTML, stripping the outer `<p>` wrapper.
+/// Render a single paragraph's markdown text to inline HTML, stripping the
+/// outer `<p>` wrapper. HTML in the text is never passed through (ADR-062).
 fn render_inline_markdown(text: &str) -> String {
-    let parser = pulldown_cmark::Parser::new(text);
-    let mut html = String::new();
-    pulldown_cmark::html::push_html(&mut html, parser);
-    let html = html.trim();
-    // Strip outer <p>...</p> if present — we add our own wrapper element
-    html.strip_prefix("<p>")
-        .and_then(|s| s.strip_suffix("</p>"))
-        .unwrap_or(html)
-        .to_string()
+    crate::markdown_html::safe_inline_html(text)
 }
 
 pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, source: Option<&str>) -> String {
@@ -536,9 +528,12 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
             ContentElement::Separator => {
                 format!("<span {attr_slot}=\"body\" hidden></span>")
             }
-            ContentElement::RawHtml { html } => {
+            ContentElement::RawHtml { .. } => {
+                // Never rendered (ADR-062 D2): a placeholder that is not a slot.
                 format!(
-                    "<div {attr_slot}=\"body\"{md_attr}>{html}</div>"
+                    "<div class=\"{}\">{}</div>",
+                    crate::constants::CLASS_HTML_REMOVED,
+                    crate::constants::MSG_HTML_REMOVED
                 )
             }
             ContentElement::Blockquote { text } => {
@@ -1305,6 +1300,67 @@ mod tests {
             html.contains("<em>emphasis</em>"),
             "expected <em>emphasis</em> in heading; got: {html}"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // HTML from content is never rendered (ADR-062)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn body_paragraph_inline_html_renders_escaped() {
+        let para = spanned(ContentElement::Paragraph { text: "a <script>x</script> b".to_string() });
+        let html = render_body_html(&im::vector![para], None);
+        assert!(!html.contains("<script"), "inline HTML must not be rendered; got: {html}");
+        assert!(html.contains("&lt;script&gt;"), "inline HTML must render escaped; got: {html}");
+    }
+
+    #[test]
+    fn body_heading_literal_html_renders_escaped() {
+        let heading = spanned(ContentElement::Heading {
+            level: schema::HeadingLevel::new(2).unwrap(),
+            text: "<script>x</script>".to_string(),
+        });
+        let html = render_body_html(&im::vector![heading], None);
+        assert!(!html.contains("<script"), "heading HTML must not be rendered; got: {html}");
+        assert!(html.contains("&lt;script&gt;"), "heading HTML must render escaped; got: {html}");
+    }
+
+    #[test]
+    fn body_list_with_nested_html_block_renders_escaped() {
+        let list = spanned(ContentElement::List {
+            source: "- item\n\n  <div>inner</div>\n".to_string(),
+        });
+        let html = render_body_html(&im::vector![list], None);
+        assert!(!html.contains("<div>inner"), "nested HTML block must not be rendered; got: {html}");
+        assert!(html.contains("&lt;div&gt;inner"), "nested HTML block must render escaped; got: {html}");
+    }
+
+    #[test]
+    fn body_paragraph_inline_comment_is_stripped() {
+        let para = spanned(ContentElement::Paragraph { text: "a <!-- secret --> b".to_string() });
+        let html = render_body_html(&im::vector![para], None);
+        assert!(!html.contains("secret"), "inline comment must be stripped; got: {html}");
+    }
+
+    #[test]
+    fn body_html_block_renders_only_the_placeholder() {
+        let block = spanned(ContentElement::RawHtml { html: "<div>secret</div>".to_string() });
+        let html = render_body_html(&im::vector![block], None);
+        assert!(!html.contains("secret"), "HTML block source must not be rendered; got: {html}");
+        assert!(html.contains("presemble-html-removed"), "expected the placeholder class; got: {html}");
+        assert!(
+            html.contains("Raw HTML is not published. Remove it to publish this page."),
+            "expected the placeholder message; got: {html}"
+        );
+        assert!(!html.contains("data-presemble-slot"), "placeholder must not be a slot; got: {html}");
+    }
+
+    #[test]
+    fn body_paragraph_code_and_link_still_render() {
+        let para = spanned(ContentElement::Paragraph { text: "Use `x<y` and [here](/a)".to_string() });
+        let html = render_body_html(&im::vector![para], None);
+        assert!(html.contains("<code>x&lt;y</code>"), "expected code span; got: {html}");
+        assert!(html.contains(r#"<a href="/a">here</a>"#), "expected link; got: {html}");
     }
 
     #[test]

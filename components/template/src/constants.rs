@@ -19,6 +19,11 @@ pub const ATTR_HINT: &str = "data-presemble-hint";
 pub const ATTR_MD: &str = "data-presemble-md";
 pub const ATTR_SOURCE_SLOT: &str = "data-presemble-source-slot";
 
+/// Class and message of the placeholder `serve` renders in place of a body
+/// HTML block (ADR-062 D2). The placeholder is not a slot.
+pub const CLASS_HTML_REMOVED: &str = "presemble-html-removed";
+pub const MSG_HTML_REMOVED: &str = "Raw HTML is not published. Remove it to publish this page.";
+
 /// DataGraph key prefix for per-slot schema constraint records.
 /// The full key for slot "title" is `"_presemble_schema_constraints_title"`.
 /// The value is a `Value::Record` where each entry maps a constraint suffix to its string value.
