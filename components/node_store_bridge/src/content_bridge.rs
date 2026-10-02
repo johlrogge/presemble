@@ -218,9 +218,9 @@ pub(crate) fn content_element_to_store(
             }
             node
         }
-        ContentElement::RawHtml { html } => {
-            let node = make_element(store, "raw-html");
-            add_child_text(store, node, html);
+        ContentElement::HtmlBlock { source } => {
+            let node = make_element(store, "html-block");
+            add_child_text(store, node, source);
             node
         }
         ContentElement::Blockquote { text } => {
@@ -371,7 +371,8 @@ fn element_name_of(store: &NodeStore, id: NodeId) -> Option<String> {
 }
 
 /// Element names of single-text blocks: exactly one `Text` child carries the
-/// block's text (see `ContentElement::text`).
+/// block's text (see `ContentElement::text`). `html-block` also stores its
+/// source as one `Text` child, but cannot be text-edited (ADR-062 D4).
 pub const TEXT_BLOCK_KINDS: &[&str] = &[
     "heading",
     "paragraph",
@@ -379,7 +380,6 @@ pub const TEXT_BLOCK_KINDS: &[&str] = &[
     "blockquote",
     "list",
     "code-block",
-    "raw-html",
 ];
 
 /// Every block element name emitted by [`block_to_store`].
@@ -391,14 +391,15 @@ pub const BLOCK_KINDS: &[&str] = &[
     "separator",
     "code-block",
     "table",
-    "raw-html",
+    "html-block",
     "blockquote",
     "list",
     "link-expression",
 ];
 
 /// Block kinds accepted as a suggestion tree payload root:
-/// [`TEXT_BLOCK_KINDS`] plus `"image"`.
+/// [`TEXT_BLOCK_KINDS`] plus `"image"`. An HTML block can never be inserted
+/// through a payload (ADR-062 D4).
 pub const PAYLOAD_BLOCK_KINDS: &[&str] = &[
     "heading",
     "paragraph",
@@ -406,7 +407,6 @@ pub const PAYLOAD_BLOCK_KINDS: &[&str] = &[
     "blockquote",
     "list",
     "code-block",
-    "raw-html",
     "image",
 ];
 
@@ -608,8 +608,8 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(ContentElement::Table { headers, rows })
         }
-        "raw-html" => Ok(ContentElement::RawHtml {
-            html: try_child_text(store, id, kind)?,
+        "html-block" => Ok(ContentElement::HtmlBlock {
+            source: try_child_text(store, id, kind)?,
         }),
         "blockquote" => Ok(ContentElement::Blockquote {
             text: try_child_text(store, id, kind)?,
@@ -1344,7 +1344,7 @@ mod tests {
                 language: None,
                 code: "plain code".to_string(),
             },
-            ContentElement::RawHtml { html: "<b>bold</b>".to_string() },
+            ContentElement::HtmlBlock { source: "<b>bold</b>".to_string() },
             ContentElement::Blockquote { text: "A quote".to_string() },
             ContentElement::List { source: "- item one\n- item two".to_string() },
         ];
@@ -1378,7 +1378,7 @@ mod tests {
                 headers: vec!["a".to_string()],
                 rows: vec![vec!["1".to_string()]],
             },
-            ContentElement::RawHtml { html: "<b>x</b>".to_string() },
+            ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
             ContentElement::Blockquote { text: "q".to_string() },
             ContentElement::List { source: "- a".to_string() },
             ContentElement::LinkExpression {
@@ -2304,6 +2304,16 @@ mod tests {
     }
 
     #[test]
+    fn tree_to_block_rejects_html_block() {
+        // An HTML block can never be inserted through a payload (ADR-062 D4).
+        let tree = ned::NodeTree::element("html-block").with_child(ned::NodeTree::text("<b>x</b>"));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind("html-block".to_string()))
+        );
+    }
+
+    #[test]
     fn tree_to_block_rejects_text_kind_with_two_children() {
         let tree = ned::NodeTree::element("paragraph")
             .with_child(ned::NodeTree::text("a"))
@@ -2446,7 +2456,7 @@ mod tests {
                 headers: vec!["A".to_string()],
                 rows: vec![vec!["1".to_string()]],
             },
-            ContentElement::RawHtml { html: "<b>x</b>".to_string() },
+            ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
             ContentElement::Blockquote { text: "Q".to_string() },
             ContentElement::List { source: "- a".to_string() },
             ContentElement::LinkExpression {
@@ -2488,7 +2498,7 @@ mod tests {
             ContentElement::Separator,
             ContentElement::CodeBlock { language: None, code: "c".to_string() },
             ContentElement::Table { headers: vec![], rows: vec![] },
-            ContentElement::RawHtml { html: "h".to_string() },
+            ContentElement::HtmlBlock { source: "h".to_string() },
             ContentElement::Blockquote { text: "q".to_string() },
             ContentElement::List { source: "- a".to_string() },
             ContentElement::LinkExpression {

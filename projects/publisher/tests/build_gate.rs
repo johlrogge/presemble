@@ -80,6 +80,44 @@ fn build_refusal_leaves_previous_output_untouched() {
     assert!(stale.exists(), "earlier output must be left as it was");
 }
 
+/// The valid fixture site with `extra` appended to the body of
+/// `content/article/hello-world.md`.
+fn valid_site_with_body_appended(extra: &str) -> (TempDir, PathBuf) {
+    let (tmp, site) = copy_fixture_site();
+    fs::remove_file(site.join("content/article/invalid-post.md")).expect("remove invalid post");
+    let post = site.join("content/article/hello-world.md");
+    let mut text = fs::read_to_string(&post).expect("read post");
+    text.push_str(extra);
+    fs::write(&post, text).expect("write post");
+    (tmp, site)
+}
+
+#[test]
+fn html_block_fails_the_build() {
+    let (tmp, site) =
+        valid_site_with_body_appended("\n<div class=\"note\">\n<p>raw</p>\n</div>\n");
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(stderr.contains("content/article/hello-world.md:"), "stderr:\n{stderr}");
+    assert!(stderr.contains("error: HTML block `<div class=\"note\">"), "stderr:\n{stderr}");
+    assert!(stderr.contains("raw HTML is not allowed in content"), "stderr:\n{stderr}");
+    assert!(!index_html(&tmp).exists(), "no page should be written");
+}
+
+#[test]
+fn html_inside_code_fence_does_not_fail() {
+    let (tmp, site) = valid_site_with_body_appended("\n```html\n<div>x</div>\n```\n");
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(index_html(&tmp).exists(), "index.html should be written");
+}
+
 #[test]
 fn build_publishes_valid_site() {
     let (tmp, site) = copy_fixture_site();

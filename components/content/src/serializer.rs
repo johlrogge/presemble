@@ -89,7 +89,8 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
             lines.extend(row_lines);
             lines.join("\n")
         }
-        ContentElement::RawHtml { html } => html.clone(),
+        // Verbatim (ADR-062); the `"\n\n"` join supplies the blank lines.
+        ContentElement::HtmlBlock { source } => source.clone(),
         ContentElement::Blockquote { text } => escape_block_lines(text)
             .iter()
             .map(|l| format!("> {l}"))
@@ -1296,7 +1297,10 @@ headings
         // (removed); pulldown-cmark 0.12 treats `search` as a block tag and
         // `source` as inline.
         assert!(HTML_BLOCK_TAGS.contains(&"search"));
-        assert_eq!(blocks("a\n<search>"), vec![para("a")]);
+        assert_eq!(
+            blocks("a\n<search>"),
+            vec![para("a"), ContentElement::HtmlBlock { source: "<search>".to_string() }]
+        );
         assert!(!HTML_BLOCK_TAGS.contains(&"source"));
         assert_eq!(blocks("a\n<source>"), vec![para("a\n<source>")]);
         for tag in ["span", "a", "em", "img", "input", "button", "select", "source", "picture", "video"] {
@@ -1601,8 +1605,14 @@ headings
     ///   store-originated text, slot assignment is not a fixed point on the
     ///   first save. The text is stable from the second save on. The real fix
     ///   comes with ADR-059.
-    /// - L12: HTML blocks produce no element and are lost on save; pinned by
-    ///   `raw_html_blocks_are_dropped_l12` in `parser.rs`.
+    /// - L12: resolved for HTML blocks, which are kept as `HtmlBlock` elements
+    ///   (ADR-062). Comment-only HTML is still dropped until Step 4 makes it
+    ///   trivia; pinned by `html_comments_are_dropped_l12` in `parser.rs`.
+    /// - L14: an HTML block of CommonMark types 1–5 with no end condition
+    ///   (`<!--` without `-->`, an unclosed `<script>`) runs to the end of the
+    ///   file. An edit that adds content after such a block is folded into
+    ///   the block on the next load. The bytes are kept and the Error is
+    ///   reported. Pinned by `unterminated_html_block_runs_to_eof_l14`.
     #[test]
     fn ordering_limits_are_pinned() {
         let grammar = parse_schema(
@@ -1628,6 +1638,40 @@ headings
         );
         // Text is a fixed point from then on.
         assert_eq!(serialize_document(&second), saved);
+    }
+
+    #[test]
+    fn unterminated_html_block_runs_to_eof_l14() {
+        let blocks = |md: &str| -> Vec<ContentElement> {
+            crate::parser::parse_document(md)
+                .expect("parses")
+                .elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect()
+        };
+        let html = |s: &str| ContentElement::HtmlBlock { source: s.to_string() };
+        // Types 1 and 2 with no end condition swallow the rest of the file.
+        assert_eq!(
+            blocks("Para.\n\n<script>\nx\n\nMore text.\n"),
+            vec![para("Para."), html("<script>\nx\n\nMore text.")]
+        );
+        assert_eq!(
+            blocks("Para.\n\n<!-- open\n\n# Heading\n"),
+            vec![para("Para."), html("<!-- open\n\n# Heading")]
+        );
+        // An edit that adds a block after such a block is folded into it on
+        // the next load; the bytes are kept.
+        let saved = serialize_elements(
+            &vec![
+                Spanned { node: html("<script>"), span: Span { start: 0, end: 0 } },
+                Spanned { node: para("After."), span: Span { start: 0, end: 0 } },
+            ]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(saved, "<script>\n\nAfter.");
+        assert_eq!(blocks(&saved), vec![html("<script>\n\nAfter.")]);
     }
 
     #[test]

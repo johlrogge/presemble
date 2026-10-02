@@ -76,8 +76,9 @@ pub enum ContentElement {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
     },
-    /// Pre-rendered HTML block from body content (inline markdown preserved).
-    RawHtml { html: String },
+    /// A CommonMark HTML block, kept verbatim (trimmed source), never
+    /// rendered, always an Error (ADR-062).
+    HtmlBlock { source: String },
     /// A blockquote element containing quoted text.
     Blockquote { text: String },
     /// A list (ordered or unordered) stored as raw markdown source.

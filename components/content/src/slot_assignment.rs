@@ -20,6 +20,8 @@ pub enum UnassignedReason {
     MarkerNamesNonLinkSlot(Keyword),
     /// A marker-shaped paragraph (a misplaced, stray or invalid `{#name}`).
     MisplacedMarker(LinkExpressionDiagnostic),
+    /// An HTML block: raw HTML is never slotted (ADR-062).
+    Html,
     /// Any other element the schema's slots do not take at this position.
     NotAllowedHere,
 }
@@ -39,6 +41,7 @@ pub fn unassigned_reason(el: &ContentElement, grammar: &Grammar) -> UnassignedRe
         ContentElement::Paragraph { text } if is_marker_paragraph(text) => {
             UnassignedReason::MisplacedMarker(diagnose_marker_paragraph(text))
         }
+        ContentElement::HtmlBlock { .. } => UnassignedReason::Html,
         _ => UnassignedReason::NotAllowedHere,
     }
 }
@@ -81,8 +84,9 @@ pub fn unassigned_reason(el: &ContentElement, grammar: &Grammar) -> UnassignedRe
 /// 1. A pre-pass classifies every element of section 0 by looking only at the
 ///    element and the grammar, never at its position:
 ///    - **B**: marked link expressions whose marker names a link slot;
-///    - **X**: marked link expressions whose marker does not bind, plus
-///      marker-shaped paragraphs (`is_marker_paragraph`);
+///    - **X**: marked link expressions whose marker does not bind,
+///      marker-shaped paragraphs (`is_marker_paragraph`) and HTML blocks
+///      (ADR-062);
 ///    - **R**: everything else.
 /// 2. Positional assignment over R never skips an element in the middle; the
 ///    only skip is the final forward scan. So the placed elements P form a
@@ -123,6 +127,7 @@ pub fn assign_slots(
                     }
                 }
                 ContentElement::Paragraph { text } => is_marker_paragraph(text),
+                ContentElement::HtmlBlock { .. } => true,
                 _ => false,
             };
         if never_slotted {
@@ -909,6 +914,32 @@ headings
             vec![UnassignedReason::NotAllowedHere, UnassignedReason::NotAllowedHere]
         );
         assert_eq!(doc.body.len(), 1);
+    }
+
+    #[test]
+    fn html_blocks_are_never_slotted_and_do_not_stop_positional_assignment() {
+        let grammar = simple_grammar();
+        let html = |s: &str| spanned(ContentElement::HtmlBlock { source: s.to_string() });
+        let elements = im::vector![
+            html("<div>a</div>"),
+            heading(1, "Title"),
+            html("<b>x</b>"),
+            paragraph("Summary."),
+            separator(),
+            html("<i>y</i>"),
+        ];
+        let doc = assign_slots(&elements, &grammar);
+        assert_eq!(doc.preamble[0].elements.len(), 1, "title is still assigned");
+        assert_eq!(doc.preamble[1].elements.len(), 1, "summary is still assigned");
+        assert_eq!(
+            unassigned_nodes(&doc),
+            vec![
+                ContentElement::HtmlBlock { source: "<div>a</div>".to_string() },
+                ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
+            ]
+        );
+        assert_eq!(reasons(&doc, &grammar), vec![UnassignedReason::Html, UnassignedReason::Html]);
+        assert_eq!(doc.body.len(), 1, "body HTML stays in the body");
     }
 
     #[test]

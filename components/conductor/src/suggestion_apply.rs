@@ -693,6 +693,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn set_text_on_html_block_text_is_rejected_and_store_unchanged() {
+        // HTML blocks cannot be text-edited (ADR-062 D4).
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/x".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/x.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut doc = doc_value();
+        doc.body.push_back(sp(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() }));
+        let doc_id = document_to_store(&doc, &mut store, Some(&meta));
+        let f = Fixture { store, doc: doc_id };
+        let html_block = f.body_blocks()[2];
+        let text = f.text_of(html_block);
+        let before = node_store_bridge::content_bridge::serialize_from_store(&f.store, f.doc).unwrap();
+        let nodes_before = f.store.node_count();
+
+        let mutation = NedMutation::SetText("<b>y</b>".to_string());
+        assert!(matches!(
+            f.resolve(&[text], mutation.target_kind()),
+            Err(AddressError::WrongKind { expected: TargetKind::Text, .. })
+        ));
+        assert_eq!(f.store.node_count(), nodes_before);
+        assert!(matches!(f.store.get(text), Some(Node::Text(s)) if s == "<div>x</div>"));
+        assert_eq!(
+            node_store_bridge::content_bridge::serialize_from_store(&f.store, f.doc).unwrap(),
+            before
+        );
+    }
+
     // ── validate ────────────────────────────────────────────────────────────
 
     #[test]
@@ -783,10 +815,11 @@ mod tests {
     }
 
     #[test]
-    fn insert_after_raw_html_payload_is_invalid() {
+    fn insert_after_html_block_payload_is_invalid() {
+        // An HTML block can never be inserted through a payload (ADR-062 D4).
         let f = fixture();
         let block = f.body_blocks()[0];
-        let tree = NodeTree::element("raw-html").with_child(NodeTree::text("<div>x</div>"));
+        let tree = NodeTree::element("html-block").with_child(NodeTree::text("<div>x</div>"));
         assert!(matches!(
             f.plan(block, &NedMutation::InsertAfter(vec![tree])),
             Err(MutationError::InvalidValue(_))

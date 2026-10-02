@@ -48,7 +48,8 @@ function kindFromTag(el) {
   if (t === 'DIV') {
     var md = el.getAttribute('data-presemble-md') || '';
     if (/^\s*([-*+]|\d+\.)\s/.test(md)) return 'list';
-    return 'raw-html';
+    // HTML blocks are never text-editable (ADR-062 D4).
+    return null;
   }
   return null;
 }
@@ -1260,7 +1261,6 @@ return lines.map(function(l) { return l.replace(/^( {4}|\t)/, ''); }).join('\n')
 }
 case 'paragraph':
 case 'list':
-case 'raw-html':
 // Parser stores the trimmed raw markdown source.
 return s.trim();
 default:

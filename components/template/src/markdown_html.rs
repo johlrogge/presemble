@@ -5,6 +5,7 @@
 //! produces is either dropped (comments) or turned into text, so
 //! `push_html` escapes it.
 
+use content::html::is_comment_only;
 use content::MARKDOWN_OPTIONS;
 use pulldown_cmark::{CowStr, Event, Parser, Tag, TagEnd};
 
@@ -154,7 +155,7 @@ fn neutralise_html<'a>(input: impl IntoIterator<Item = Event<'a>>) -> Vec<Event<
 }
 
 /// True for an inline HTML piece that opens a comment and does not close it.
-/// `-->` is searched from offset 2, as in [`is_comment_only`].
+/// `-->` is searched from offset 2, as in `content::html::is_comment_only`.
 fn opens_unclosed_comment(piece: &str) -> bool {
     piece.starts_with("<!--") && !piece[2..].contains("-->")
 }
@@ -164,28 +165,6 @@ fn push_neutralised<'a>(events: &mut Vec<Event<'a>>, source: CowStr<'a>) {
     if !is_comment_only(&source) {
         events.push(Event::Text(source));
     }
-}
-
-/// True when the trimmed source is one or more `<!-- … -->` comments
-/// separated only by whitespace.
-///
-/// `-->` is searched from the comment start + 2, so `<!-->` and `<!--->`
-/// count as (empty) comments, as in CommonMark.
-fn is_comment_only(source: &str) -> bool {
-    let mut rest = source.trim();
-    if rest.is_empty() {
-        return false;
-    }
-    while !rest.is_empty() {
-        if !rest.starts_with("<!--") {
-            return false;
-        }
-        let Some(close) = rest[2..].find("-->") else {
-            return false;
-        };
-        rest = rest[2 + close + 3..].trim_start();
-    }
-    true
 }
 
 #[cfg(test)]
@@ -441,30 +420,5 @@ mod tests {
     fn table_cell_with_unescaped_pipe_renders_whole_source_escaped() {
         assert_eq!(safe_table_cell_html("a | b"), "a | b");
         assert_eq!(safe_table_cell_html("`a|b` <i>"), "`a|b` &lt;i&gt;");
-    }
-
-    // ── is_comment_only ──────────────────────────────────────────────────────
-
-    #[test]
-    fn comment_only_accepts_comments_separated_by_whitespace() {
-        assert!(is_comment_only("<!-- a -->"));
-        assert!(is_comment_only("  <!-- a -->\n<!-- b -->  \n"));
-        assert!(is_comment_only("<!---->"));
-    }
-
-    #[test]
-    fn comment_only_accepts_degenerate_comments() {
-        assert!(is_comment_only("<!-->"));
-        assert!(is_comment_only("<!--->"));
-    }
-
-    #[test]
-    fn comment_only_rejects_anything_else() {
-        assert!(!is_comment_only(""));
-        assert!(!is_comment_only("   "));
-        assert!(!is_comment_only("<!-- a --> x"));
-        assert!(!is_comment_only("<div><!-- a --></div>"));
-        assert!(!is_comment_only("<!-- unclosed"));
-        assert!(!is_comment_only("<!-- a --><b>"));
     }
 }

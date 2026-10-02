@@ -113,6 +113,9 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     // ── Unassigned section-0 elements (ADR-060 P1) ─────────────────────────
     validate_unassigned(doc, grammar, &mut diagnostics);
 
+    // ── Raw HTML in the body (ADR-062) ─────────────────────────────────────
+    validate_html(&doc.body, &mut diagnostics);
+
     // ── Body validation ────────────────────────────────────────────────────
     match &grammar.body {
         Some(body_rules) => validate_body(&doc.body, body_rules, &mut diagnostics),
@@ -163,6 +166,7 @@ fn validate_unassigned(
                 }
                 _ => d.to_string(),
             },
+            UnassignedReason::Html => html_block_message(el),
             UnassignedReason::NotAllowedHere => {
                 let kind = kind_name(el);
                 let mut message = format!(
@@ -210,6 +214,39 @@ fn validate_unassigned(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Raw HTML (ADR-062)
+// ---------------------------------------------------------------------------
+
+/// One error per HTML block in `elements` (the body). HTML blocks in
+/// `unassigned` are reported by `validate_unassigned`, with the same message
+/// after its position prefix.
+fn validate_html(
+    elements: &im::Vector<Spanned<ContentElement>>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    for spanned in elements {
+        if matches!(spanned.node, ContentElement::HtmlBlock { .. }) {
+            diagnostics.push(ValidationDiagnostic {
+                severity: Severity::Error,
+                message: html_block_message(&spanned.node),
+                slot: None,
+                // Store-built documents carry zero spans.
+                span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
+            });
+        }
+    }
+}
+
+/// The error message for an HTML block.
+fn html_block_message(el: &ContentElement) -> String {
+    format!(
+        "{}: raw HTML is not allowed in content; it is kept in the file, but this page \
+         cannot be published until it is removed",
+        describe_element(el)
+    )
+}
+
 /// The name of the nearest slot with an element before byte `at`, if any.
 fn preceding_slot(doc: &Document, at: usize) -> Option<SlotName> {
     doc.preamble
@@ -245,7 +282,7 @@ fn kind_name(el: &ContentElement) -> &'static str {
         ContentElement::Separator => "separator",
         ContentElement::CodeBlock { .. } => "code block",
         ContentElement::Table { .. } => "table",
-        ContentElement::RawHtml { .. } => "HTML block",
+        ContentElement::HtmlBlock { .. } => "HTML block",
         ContentElement::Blockquote { .. } => "blockquote",
         ContentElement::List { .. } => "list",
         ContentElement::LinkExpression { .. } => "link expression",
@@ -1124,6 +1161,50 @@ mod tests {
             assert_eq!(d[0].severity, Severity::Error, "{md:?}");
             assert_eq!(d[0].slot, None, "{md:?}");
         }
+    }
+
+    // ── Raw HTML (ADR-062) ───────────────────────────────────────────────
+
+    const HTML_MESSAGE_TAIL: &str = ": raw HTML is not allowed in content; it is kept in the file, \
+                                     but this page cannot be published until it is removed";
+
+    #[test]
+    fn html_block_in_the_body_is_an_error_with_a_span() {
+        let g = summary_grammar(true);
+        let src = "# Title\n\nOne.\n\n----\n\nText.\n\n<div class=\"x\">\nhi\n</div>\n";
+        let d = diagnostics_for(src, &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(d[0].slot, None);
+        assert_eq!(
+            d[0].message,
+            format!("HTML block `<div class=\"x\"> hi </div>`{HTML_MESSAGE_TAIL}")
+        );
+        let span = d[0].span.expect("body HTML block has a span");
+        assert_eq!(src[span.start..span.end].trim_end(), "<div class=\"x\">\nhi\n</div>");
+        assert_eq!(crate::parser::byte_to_position(src, span.start).0, 8, "line (0-based)");
+    }
+
+    #[test]
+    fn html_block_in_the_preamble_is_an_error_not_a_not_allowed_here() {
+        let g = summary_grammar(true);
+        let src = "# Title\n\n<div>x</div>\n\nOne.\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &g).expect("parses");
+        // HTML does not shift the title/summary assignment.
+        assert_eq!(doc.preamble[0].elements.len(), 1);
+        assert_eq!(doc.preamble[1].elements.len(), 1);
+        let d = validate(&doc, &g).diagnostics;
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(
+            d[0].message,
+            format!("after slot 'title': HTML block `<div>x</div>`{HTML_MESSAGE_TAIL}")
+        );
+        assert!(!d[0].message.contains("not allowed here"), "{}", d[0].message);
+        assert!(!d[0].message.contains("does not allow"), "{}", d[0].message);
+        let span = d[0].span.expect("unassigned HTML block has a span");
+        assert_eq!(src[span.start..span.end].trim_end(), "<div>x</div>");
+        assert_eq!(crate::parser::byte_to_position(src, span.start).0, 2, "line (0-based)");
     }
 
     #[test]

@@ -1441,6 +1441,107 @@ mod tests {
         }
     }
 
+    // ── HTML blocks (ADR-062 D4) ──────────────────────────────────────────────
+
+    const HTML_SCHEMA_SRC: &str = "# Title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n";
+    const HTML_DOC_SRC: &str = "# Title\n\n----\n\nBefore.\n\n<div class=\"x\">\nsecret\n</div>\n\nAfter.\n";
+
+    /// A store holding `HTML_DOC_SRC` (body: paragraph, html-block, paragraph)
+    /// plus the document root and the grammar.
+    fn make_html_doc_store() -> (Arc<RwLock<NodeStore>>, node_store::NodeId, schema::Grammar) {
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+
+        let grammar = schema::parse_schema(HTML_SCHEMA_SRC).expect("schema parses");
+        let doc = content::parse_and_assign(HTML_DOC_SRC, &grammar).expect("doc parses");
+        assert!(!content::validate(&doc, &grammar).is_valid(), "the HTML block is an Error");
+        let meta = DocumentMeta {
+            url: "/post/html".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/html.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut raw_store = NodeStore::new();
+        let root = document_to_store(&doc, &mut raw_store, Some(&meta));
+        (Arc::new(RwLock::new(raw_store)), root, grammar)
+    }
+
+    fn html_body_block(root_env: &RootEnv) -> Value {
+        let block = crate::eval_str_with_root(
+            r#"(ned/body-at (ned/doc-by-path "content/post/html.md") 1)"#,
+            root_env,
+        )
+        .unwrap();
+        let kind = crate::eval_str_with_root(
+            r#"(ned/kind-of (ned/body-at (ned/doc-by-path "content/post/html.md") 1))"#,
+            root_env,
+        )
+        .unwrap();
+        assert!(
+            matches!(&kind, Value::List(items) if matches!(items.as_slice(), [Value::Text(k)] if k == "html-block")),
+            "body index 1 is the HTML block: {kind:?}"
+        );
+        block
+    }
+
+    fn saved_and_validity(
+        store: &Arc<RwLock<NodeStore>>,
+        root: node_store::NodeId,
+        grammar: &schema::Grammar,
+    ) -> (String, bool) {
+        let st = store.read().unwrap();
+        let saved = node_store_bridge::content_bridge::serialize_from_store(&st, root)
+            .expect("document serializes");
+        let doc = content::parse_and_assign(&saved, grammar).expect("saved file parses");
+        let valid = content::validate(&doc, grammar).is_valid();
+        (saved, valid)
+    }
+
+    #[test]
+    fn delete_html_block_removes_it_and_validates_clean() {
+        let (store, root, grammar) = make_html_doc_store();
+        let root_env = setup_with_prelude(store.clone());
+        let block = html_body_block(&root_env);
+        call(&root_env, "ned/delete", vec![block]).unwrap();
+        let (saved, valid) = saved_and_validity(&store, root, &grammar);
+        assert!(!saved.contains("<div") && !saved.contains("secret"), "{saved}");
+        assert!(saved.contains("Before.") && saved.contains("After."), "{saved}");
+        assert!(valid, "no HTML left, so no Error: {saved}");
+    }
+
+    #[test]
+    fn replace_html_block_with_a_paragraph_succeeds() {
+        let (store, root, grammar) = make_html_doc_store();
+        let root_env = setup_with_prelude(store.clone());
+        let block = html_body_block(&root_env);
+        let grammar_value = call(
+            &root_env,
+            "ned/parse-grammar",
+            vec![Value::Text(HTML_SCHEMA_SRC.to_string())],
+        )
+        .unwrap();
+        let trees = call(
+            &root_env,
+            "ned/parse-body",
+            vec![Value::Text("Replaced.\n".to_string()), grammar_value],
+        )
+        .unwrap();
+        call(&root_env, "ned/replace", vec![block, trees]).unwrap();
+        let (saved, valid) = saved_and_validity(&store, root, &grammar);
+        assert!(!saved.contains("<div"), "{saved}");
+        assert!(saved.contains("Before.\n\nReplaced.\n\nAfter."), "{saved}");
+        assert!(valid, "{saved}");
+    }
+
+    #[test]
+    fn html_block_suggestion_payload_is_rejected() {
+        use node_store_bridge::content_bridge::{tree_to_block, BlockDecodeError};
+        let tree = NodeTree::element("html-block").with_child(NodeTree::text("<div>x</div>"));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind("html-block".to_string()))
+        );
+    }
+
     #[test]
     fn parse_body_valid_input_always_succeeds() {
         // pulldown_cmark is very permissive; document that any valid markdown succeeds

@@ -528,7 +528,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
             ContentElement::Separator => {
                 format!("<span {attr_slot}=\"body\" hidden></span>")
             }
-            ContentElement::RawHtml { .. } => {
+            ContentElement::HtmlBlock { .. } => {
                 // Never rendered (ADR-062 D2): a placeholder that is not a slot.
                 format!(
                     "<div class=\"{}\">{}</div>",
@@ -1344,7 +1344,7 @@ mod tests {
 
     #[test]
     fn body_html_block_renders_only_the_placeholder() {
-        let block = spanned(ContentElement::RawHtml { html: "<div>secret</div>".to_string() });
+        let block = spanned(ContentElement::HtmlBlock { source: "<div>secret</div>".to_string() });
         let html = render_body_html(&im::vector![block], None);
         assert!(!html.contains("secret"), "HTML block source must not be rendered; got: {html}");
         assert!(html.contains("presemble-html-removed"), "expected the placeholder class; got: {html}");

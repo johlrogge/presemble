@@ -9,12 +9,12 @@ use crate::serializer::serialize_element;
 
 impl ContentElement {
     /// The text of a single-text block, or `None` for kinds that do not carry
-    /// exactly one editable text value (Image, Table, Separator, LinkExpression).
+    /// exactly one editable text value (Image, Table, Separator,
+    /// LinkExpression, and HtmlBlock, which cannot be text-edited: ADR-062 D4).
     ///
     /// - Heading, Paragraph, Link, Blockquote → `text`
     /// - List → `source`
     /// - CodeBlock → `code`
-    /// - RawHtml → `html`
     pub fn text(&self) -> Option<&str> {
         match self {
             ContentElement::Heading { text, .. }
@@ -23,10 +23,10 @@ impl ContentElement {
             | ContentElement::Blockquote { text } => Some(text),
             ContentElement::List { source } => Some(source),
             ContentElement::CodeBlock { code, .. } => Some(code),
-            ContentElement::RawHtml { html } => Some(html),
             ContentElement::Image { .. }
             | ContentElement::Table { .. }
             | ContentElement::Separator
+            | ContentElement::HtmlBlock { .. }
             | ContentElement::LinkExpression { .. } => None,
         }
     }
@@ -52,10 +52,10 @@ impl ContentElement {
                 language: language.clone(),
                 code: text,
             }),
-            ContentElement::RawHtml { .. } => Some(ContentElement::RawHtml { html: text }),
             ContentElement::Image { .. }
             | ContentElement::Table { .. }
             | ContentElement::Separator
+            | ContentElement::HtmlBlock { .. }
             | ContentElement::LinkExpression { .. } => None,
         }
     }
@@ -189,16 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn text_and_with_text_cover_list_blockquote_raw_html_paragraph() {
+    fn text_and_with_text_cover_list_blockquote_paragraph() {
         let cases = [
             ContentElement::List {
                 source: "- a".to_string(),
             },
             ContentElement::Blockquote {
                 text: "q".to_string(),
-            },
-            ContentElement::RawHtml {
-                html: "<b>x</b>".to_string(),
             },
             paragraph("p"),
         ];
@@ -225,6 +222,10 @@ mod tests {
                 text: LinkText::Empty,
                 target: LinkTarget::PathRef("x".to_string()),
                 slot: None,
+            },
+            // HTML blocks cannot be text-edited (ADR-062 D4).
+            ContentElement::HtmlBlock {
+                source: "<b>x</b>".to_string(),
             },
         ];
         for el in cases {
@@ -287,14 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn raw_html_is_rejected_until_parser_emits_it() {
-        // The parser does not emit `RawHtml` yet (Event::Html is dropped), so a
-        // serialized RawHtml block reads back as zero blocks. A future parser
-        // fix will flip this test to `Ok(())`.
-        let el = ContentElement::RawHtml {
-            html: "<div>\nhello\n</div>".into(),
+    fn html_block_round_trips() {
+        let el = ContentElement::HtmlBlock {
+            source: "<div>\nhello\n</div>".into(),
         };
-        assert_eq!(check_block_round_trip(&el), Err(RoundTripError::BlockCount(0)));
+        assert_eq!(check_block_round_trip(&el), Ok(()));
     }
 
     // ── round trip: rejections ──────────────────────────────────────────────

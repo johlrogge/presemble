@@ -630,6 +630,81 @@ fn slot_marker_survives_a_save() {
     );
 }
 
+// ── HTML blocks (ADR-062) ───────────────────────────────────────────────────
+
+fn html(source: &str) -> ContentElement {
+    ContentElement::HtmlBlock { source: source.to_string() }
+}
+
+/// Every CommonMark HTML block type is kept as one `HtmlBlock` holding its
+/// trimmed source, and written back byte for byte.
+#[test]
+fn html_blocks_round_trip_byte_exactly() {
+    let blocks = [
+        // Type 1.
+        "<script>\nlet x = 1;\n</script>",
+        "<style>\np { color: red; }\n</style>",
+        "<pre>\n  a\n\n  b\n</pre>",
+        // Type 3.
+        "<?php echo 1; ?>",
+        // Type 4.
+        "<!DOCTYPE html>",
+        // Type 5.
+        "<![CDATA[x]]>",
+        // Type 6.
+        "<div class=\"note\">\n<p>y</p>\n</div>",
+        "<details><summary>s</summary>\nbody\n</details>",
+        "<iframe src=\"https://x\"></iframe>",
+        "</div>",
+        "<hr/>",
+        // Type 7.
+        "<custom-el a=\"1\">",
+        "<img src=\"a.png\">",
+        // A comment followed by more HTML is not comment-only.
+        "<!-- c --> <b>after</b>",
+    ];
+    let mut failures = Vec::new();
+    for block in blocks {
+        let src = format!("{block}\n");
+        let parsed = parse_blocks(&src);
+        if parsed != vec![html(block)] {
+            failures.push(format!("{block:?} parsed as {parsed:?}"));
+            continue;
+        }
+        let out = serialize_document(&body_only(&parsed));
+        if out != src {
+            failures.push(format!("{block:?} was written as {out:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "HTML blocks did not round-trip:\n{}", failures.join("\n"));
+}
+
+/// A blank line ends a type-6 block, so markdown between an opening and a
+/// closing tag is a separate element.
+#[test]
+fn markdown_between_html_tags_is_three_elements() {
+    let src = "<div>\n\n*md*\n\n</div>\n";
+    let parsed = parse_blocks(src);
+    assert_eq!(
+        parsed,
+        vec![html("<div>"), ContentElement::Paragraph { text: "*md*".to_string() }, html("</div>")]
+    );
+    assert_eq!(serialize_document(&body_only(&parsed)), src);
+}
+
+/// A type-6 block interrupts a paragraph; a type-7 tag does not.
+#[test]
+fn html_block_and_paragraph_interplay() {
+    assert_eq!(
+        parse_blocks("A paragraph line\n<div>x</div>\n"),
+        vec![ContentElement::Paragraph { text: "A paragraph line".to_string() }, html("<div>x</div>")]
+    );
+    assert_eq!(
+        parse_blocks("A paragraph line\n<custom-el a=\"1\">\n"),
+        vec![ContentElement::Paragraph { text: "A paragraph line\n<custom-el a=\"1\">".to_string() }]
+    );
+}
+
 // ── Markdown as found on disk ───────────────────────────────────────────────
 
 fn parse_blocks(md: &str) -> Vec<ContentElement> {
@@ -693,12 +768,8 @@ fn from_disk_corpus_is_written_unchanged() {
 ///
 /// Link expressions written in canonical form (ADR-058) are included:
 /// `example-sites/blog/content/author/default.md` has one in its preamble.
-///
-/// Excluded: `site/content/guide/user-guide.md` and
-/// `site/content/feature/the-presemble-repl.md`. Their tables have inline
-/// code in cells, which the parser stores as `<code>…</code>` HTML; written
-/// back verbatim, that HTML reads back as plain text, so the cell changes.
-/// Table cells are not canonicalised yet (ADR-057 open questions 5/6).
+/// Table cells store their markdown source (ADR-062), so pages whose tables
+/// have inline code in cells round-trip too.
 const REPOSITORY_MARKDOWN: &[(&str, &str)] = &[
     (
         "fixtures/blog-site/content/article/hello-world.md",
@@ -750,6 +821,11 @@ const REPOSITORY_MARKDOWN: &[(&str, &str)] = &[
         include_str!("../../../site/content/feature/site-wizard.md"),
     ),
     ("site/content/author/johlrogge.md", include_str!("../../../site/content/author/johlrogge.md")),
+    ("site/content/guide/user-guide.md", include_str!("../../../site/content/guide/user-guide.md")),
+    (
+        "site/content/feature/the-presemble-repl.md",
+        include_str!("../../../site/content/feature/the-presemble-repl.md"),
+    ),
     ("site/content/post/index.md", include_str!("../../../site/content/post/index.md")),
     (
         "example-sites/blog/content/author/default.md",

@@ -10,7 +10,8 @@ Accepted
    exactly one node of the kind its mutation requires:
    - SetText, SearchReplace → one Text node that is the **only child** of a
      single-text block (heading, paragraph, link, blockquote, list,
-     code-block, raw-html).
+     code-block). `raw-html` was listed here; ADR-062 renamed it `html-block`
+     and D4 removed it from text editing.
    - Replace, Delete, InsertBefore, InsertAfter → one block (direct child of
      a slot or of body).
    - InsertChild → one container (a slot or body element).

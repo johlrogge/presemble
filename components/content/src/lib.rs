@@ -3,6 +3,7 @@ mod block;
 mod diff;
 mod document;
 mod error;
+pub mod html;
 mod link_expression;
 mod parser;
 mod serializer;

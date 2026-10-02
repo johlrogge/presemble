@@ -137,10 +137,11 @@ fn body_element_kind(el: &content::ContentElement) -> Option<String> {
         Image { .. } => "image".to_string(),
         CodeBlock { .. } => "code-block".to_string(),
         Table { .. } => "table".to_string(),
-        RawHtml { .. } => "raw-html".to_string(),
         Blockquote { .. } => "blockquote".to_string(),
         List { .. } => "list".to_string(),
-        Separator | Link { .. } | LinkExpression { .. } => return None,
+        // An HTML block renders as a placeholder that is not a slot
+        // (ADR-062 D2), so the browser has no element to anchor to.
+        Separator | Link { .. } | LinkExpression { .. } | HtmlBlock { .. } => return None,
     })
 }
 

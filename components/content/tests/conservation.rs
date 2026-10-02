@@ -26,9 +26,10 @@
 //! Section 0 mixes headings, paragraphs, plain links, images, lists, link
 //! expressions (unmarked; marked for a link slot; marked naming no slot;
 //! marked naming a non-link slot), every form of marker misuse, blocks no slot
-//! takes (code block, table, blockquote) and paragraphs near the
+//! takes (code block, table, blockquote, HTML blocks) and paragraphs near the
 //! marker shape (an inline image, `text {#x}`, a marker on its own line). It
-//! is optionally followed by `----` and body elements, marker misuse included.
+//! is optionally followed by `----` and body elements, marker misuse and HTML
+//! blocks included.
 //!
 //! Excluded, as documented on `link_expression_target` and
 //! `ordering_limits_are_pinned` in `serializer.rs`:
@@ -37,8 +38,12 @@
 //!   expressions, and link expressions are whole top-level paragraphs;
 //! - L10: lists alternate kinds within section 0 and within the body, so no
 //!   two same-kind lists can become adjacent on save;
-//! - L12: HTML blocks (`<div>…</div>`, `<!-- … -->`) produce no element and
-//!   are lost on save; see `raw_html_blocks_are_dropped_l12` in parser.rs;
+//! - L12 (comments only): comment-only HTML (`<!-- … -->`) produces no
+//!   element and is lost on save until it becomes trivia (ADR-062); see
+//!   `html_comments_are_dropped_l12` in parser.rs. HTML blocks are in the
+//!   domain;
+//! - L14: HTML blocks of types 1–5 always have their end condition, so none
+//!   runs to the end of the file;
 //! - a leading link followed by text with no marker (`[a](/x) trailing`), a
 //!   pinned limit for inline segments (S-A).
 
@@ -135,6 +140,16 @@ const OTHER_BLOCKS: &[&str] = &[
     "| a | b |\n|---|---|\n| 1 | 2 |",
     "> A quote.",
 ];
+/// HTML blocks (ADR-062): never slotted, always an Error, kept verbatim.
+/// Every type 1–5 block has its end condition (limit L14).
+const HTML_BLOCKS: &[&str] = &[
+    "<div class=\"note\">\n<p>y</p>\n</div>",
+    "<script>\nlet x = 1;\n</script>",
+    "<details><summary>s</summary>t</details>",
+    "<custom-el a=\"1\">",
+    "<!-- c --> <b>after</b>",
+    "<hr/>",
+];
 /// Paragraphs near the marker shape. `text {#x}` is not marker-shaped and
 /// stays a normal paragraph.
 const MARKERISH_PARAGRAPHS: &[&str] = &[
@@ -163,7 +178,7 @@ fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String {
 }
 
 fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String {
-    match rng.below(24) {
+    match rng.below(26) {
         0..=2 => rng.pick(HEADINGS).to_string(),
         3..=5 => rng.pick(PARAGRAPHS).to_string(),
         6..=7 => rng.pick(LINKS).to_string(),
@@ -175,17 +190,19 @@ fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> Str
         16 => rng.pick(MARKED_FOR_NON_LINK_SLOT).to_string(),
         17..=19 => rng.pick(MARKER_MISUSE).to_string(),
         20..=21 => rng.pick(OTHER_BLOCKS).to_string(),
+        22..=23 => rng.pick(HTML_BLOCKS).to_string(),
         _ => rng.pick(MARKERISH_PARAGRAPHS).to_string(),
     }
 }
 
 fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String {
-    match rng.below(10) {
+    match rng.below(11) {
         0..=1 => rng.pick(BODY_HEADINGS).to_string(),
         2..=4 => rng.pick(PARAGRAPHS).to_string(),
         5 => gen_list(rng, previous_ordered),
         6 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
         7 => rng.pick(LINKS).to_string(),
+        8 => rng.pick(HTML_BLOCKS).to_string(),
         _ => rng.pick(MARKER_MISUSE).to_string(),
     }
 }
@@ -360,9 +377,14 @@ fn generator_exercises_unassigned_bound_and_body() {
     let mut body_marker_paragraphs = 0;
     let mut no_separator_unassigned = 0;
     let mut unassigned_other_blocks = 0;
+    let mut unassigned_html = 0;
+    let mut body_html = 0;
+    let is_html = |e: &schema::Spanned<ContentElement>| matches!(e.node, ContentElement::HtmlBlock { .. });
     for seed in SEEDS {
         let doc = assign(&gen_source(seed), &grammar);
         unassigned += doc.unassigned.len();
+        unassigned_html += doc.unassigned.iter().filter(|e| is_html(e)).count();
+        body_html += doc.body.iter().filter(|e| is_html(e)).count();
         unassigned_other_blocks += doc
             .unassigned
             .iter()
@@ -400,6 +422,8 @@ fn generator_exercises_unassigned_bound_and_body() {
         unassigned_other_blocks > 100,
         "too few unassigned code blocks, tables and blockquotes: {unassigned_other_blocks}"
     );
+    assert!(unassigned_html > 100, "too few unassigned HTML blocks: {unassigned_html}");
+    assert!(body_html > 50, "too few body HTML blocks: {body_html}");
 }
 
 /// `text {#x}` is not marker-shaped: it stays a normal paragraph, also after

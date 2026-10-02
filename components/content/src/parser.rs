@@ -237,6 +237,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             text: String,
             byte_range: std::ops::Range<usize>,
         },
+        /// A top-level HTML block (ADR-062); its `Html` events are ignored
+        /// and its trimmed source is kept.
+        HtmlBlock {
+            byte_range: std::ops::Range<usize>,
+        },
         List {
             byte_range: std::ops::Range<usize>,
             depth: u32,
@@ -510,6 +515,27 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
 
+            // Only a top-level HTML block becomes an element. Inside a
+            // blockquote the HTML is not captured (limit L13); lists and link
+            // expressions consume their events at the top of the loop.
+            Event::Start(Tag::HtmlBlock) if matches!(state, State::Idle) => {
+                state = State::HtmlBlock { byte_range: range };
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                if let State::HtmlBlock { byte_range } = state {
+                    let source = input.get(byte_range.clone()).map(str::trim).unwrap_or_default();
+                    // Comment-only HTML is not content; Step 4 keeps it as
+                    // trivia (limit L12 for comments).
+                    if !crate::html::is_comment_only(source) {
+                        elements.push_back(Spanned {
+                            node: ContentElement::HtmlBlock { source: source.to_string() },
+                            span: Span::from(byte_range),
+                        });
+                    }
+                    state = State::Idle;
+                }
+            }
+
             Event::Start(Tag::List(_)) => {
                 // Everything up to the matching end is consumed by the list
                 // capture at the top of the loop.
@@ -598,10 +624,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // Table cells are read from their source range. List and
-                    // link-expression events never reach here (consumed at
-                    // the top of the loop).
+                    // Table cells and HTML blocks are read from their source
+                    // range. List and link-expression events never reach here
+                    // (consumed at the top of the loop).
                     State::Table { .. }
+                    | State::HtmlBlock { .. }
                     | State::List { .. }
                     | State::LinkExpression { .. }
                     | State::Idle => {}
@@ -616,10 +643,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // Table cells are read from their source range. List and
-                    // link-expression events never reach here (consumed at
-                    // the top of the loop).
+                    // Table cells and HTML blocks are read from their source
+                    // range. List and link-expression events never reach here
+                    // (consumed at the top of the loop).
                     State::Table { .. }
+                    | State::HtmlBlock { .. }
                     | State::List { .. }
                     | State::LinkExpression { .. }
                     | State::Idle => {}
@@ -753,14 +781,41 @@ mod tests {
         );
     }
 
-    /// Known limit L12 (ADR-060 P1 exception): HTML blocks are not parsed and
-    /// are lost on save. The raw-HTML package must flip this test.
+    /// ADR-062: an HTML block is kept as a forbidden `HtmlBlock` element that
+    /// holds its trimmed source and spans the whole block.
     #[test]
-    fn raw_html_blocks_are_dropped_l12() {
-        let div = parse_document("<div>x</div>\n").unwrap();
-        assert_element_count(&div, 0);
-        let comment = parse_document("<!-- note -->\n").unwrap();
-        assert_element_count(&comment, 0);
+    fn html_block_is_kept_as_forbidden_element() {
+        let src = "Before.\n\n<div class=\"x\">\n  y\n</div>\n\nAfter.\n";
+        let doc = parse_document(src).unwrap();
+        assert_element_count(&doc, 3);
+        let block = &doc.elements[1];
+        assert_eq!(
+            block.node,
+            ContentElement::HtmlBlock { source: "<div class=\"x\">\n  y\n</div>".to_string() }
+        );
+        assert_eq!(src[block.span.start..block.span.end].trim_end(), "<div class=\"x\">\n  y\n</div>");
+    }
+
+    /// Known limit L12, comments half: comment-only HTML is still dropped
+    /// until it becomes trivia (ADR-062, Step 4).
+    #[test]
+    fn html_comments_are_dropped_l12() {
+        assert_element_count(&parse_document("<!-- note -->\n").unwrap(), 0);
+        assert_element_count(&parse_document("<!--\nmulti\n\nline\n-->\n").unwrap(), 0);
+        assert_element_count(&parse_document("<!-- a -->\n<!-- b -->\n").unwrap(), 0);
+        let doc = parse_document("A.\n\n<!-- note -->\n\nB.\n").unwrap();
+        assert_element_count(&doc, 2);
+    }
+
+    /// HTML inside a blockquote is not captured as an element (limit L13).
+    #[test]
+    fn html_inside_a_blockquote_is_not_an_element() {
+        let doc = parse_document("> <div>\n> x\n> </div>\n").unwrap();
+        assert!(
+            doc.elements.iter().all(|e| !matches!(e.node, ContentElement::HtmlBlock { .. })),
+            "{:#?}",
+            doc.elements
+        );
     }
 
     // ── Headings ────────────────────────────────────────────────────────────
@@ -1250,7 +1305,7 @@ headings
 
     #[test]
     fn body_paragraph_with_bold_parses_as_paragraph_not_html() {
-        // Body paragraphs with inline markdown must parse as Paragraph, not RawHtml.
+        // Body paragraphs with inline markdown must parse as Paragraph, not HtmlBlock.
         // Inline markdown rendering happens in the renderer, not the parser.
         let input = "# Title\n\nSummary.\n\n----\n\nThis has **bold** text.\n";
         let doc = parse_document(input).unwrap();

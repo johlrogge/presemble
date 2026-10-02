@@ -892,7 +892,7 @@ fn render_insert_native(
                                             children: table_children,
                                         }));
                                     }
-                                    "raw-html" => {
+                                    "html-block" => {
                                         // Never rendered (ADR-062 D2): a placeholder that is not a slot.
                                         body_nodes.push(Node::Element(Element {
                                             name: "div".to_string(),
@@ -3482,7 +3482,7 @@ mod tests {
 
     #[test]
     fn native_body_html_block_renders_only_the_placeholder() {
-        let html = render_native_body_block("raw-html", "<div>secret</div>", None);
+        let html = render_native_body_block("html-block", "<div>secret</div>", None);
         assert!(!html.contains("secret"), "HTML block source must not be rendered; got: {html}");
         assert!(html.contains("presemble-html-removed"), "expected the placeholder class; got: {html}");
         assert!(
