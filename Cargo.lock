@@ -1636,6 +1636,7 @@ name = "node_store_bridge"
 version = "0.35.0"
 dependencies = [
  "content",
+ "expressions",
  "im",
  "ned",
  "node_store",
@@ -2392,7 +2393,6 @@ name = "site_builder"
 version = "0.35.0"
 dependencies = [
  "content",
- "expressions",
  "mem_site_repository",
  "schema",
  "site_index",

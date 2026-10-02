@@ -1,24 +1,167 @@
 use std::collections::{HashMap, HashSet};
 
-use site_index::{Edge, SchemaStem, UrlPath};
+use site_index::{SchemaStem, UrlPath};
 
 /// URL path → DataGraph index for PathRef lookups.
 pub type UrlIndex = HashMap<UrlPath, template::DataGraph>;
 /// Schema stem → Vec of (url, DataGraph) for ThreadExpr lookups.
 pub type StemIndex = HashMap<SchemaStem, Vec<(UrlPath, template::DataGraph)>>;
-/// Maps a target URL to all edges pointing at it.
-pub type EdgeIndex = HashMap<UrlPath, Vec<Edge>>;
+/// Target URL → the URLs of the pages that declare a reference to it.
+///
+/// Every URL in the index is normalised with [`normalise_url`].
+pub type LinksToIndex = HashMap<String, HashSet<String>>;
+
+// ── Shared link-operation semantics (ADR-058) ────────────────────────────────
+
+/// An item a thread expression operates on: a page with a URL and named
+/// fields. Implemented by the DataGraph adapter here and by the NodeStore
+/// adapter in `node_store_bridge::store_pipeline`.
+pub trait ThreadItem {
+    /// The page's URL. Contract: normalised with [`normalise_url`], so it
+    /// compares directly with the URLs in a [`LinksToIndex`].
+    fn url(&self) -> &str;
+    /// The display text of field `field`, if the page has one.
+    fn field_text(&self, field: &str) -> Option<String>;
+}
+
+/// Normalise a reference or page URL for comparison: add a leading `/` when
+/// missing (`author/a` → `/author/a`). Used everywhere a reference is
+/// compared with a page URL.
+pub fn normalise_url(s: &str) -> String {
+    if s.starts_with('/') {
+        s.to_string()
+    } else {
+        format!("/{s}")
+    }
+}
+
+/// The page a link destination declares a reference to, normalised, or
+/// `None` when it is not a page reference: anything with a scheme (`://`,
+/// `mailto:`), a protocol-relative `//…` URL, an `#…` anchor, or a thread
+/// expression (`->>…`). A leading `:` (PathRef spelling) is stripped.
+pub fn page_reference(dest: &str) -> Option<String> {
+    let dest = dest.trim();
+    if dest.is_empty()
+        || dest.contains("://")
+        || dest.starts_with("mailto:")
+        || dest.starts_with("//")
+        || dest.starts_with('#')
+        || dest.starts_with("->>")
+    {
+        return None;
+    }
+    let path = dest.strip_prefix(':').unwrap_or(dest);
+    if path.is_empty() {
+        return None;
+    }
+    Some(normalise_url(path))
+}
+
+/// Apply thread-expression operations to `items`, in order.
+///
+/// - `sort-by`: stable, on [`SortKey`] (integer when the value parses as one,
+///   otherwise text; a missing value sorts after every present value).
+///   `Descending` reverses the comparison.
+/// - `take`: truncates.
+/// - `filter`: keeps items whose `field_text` equals the value.
+/// - `refs-to`: keeps items whose URL declares a reference to the target
+///   (`links_to[target]`); `self` means `current_url`.
+///
+/// `items` arrive in base order (URL ascending, ADR-058 D2); the caller
+/// provides that order.
+pub fn apply_link_ops<T: ThreadItem>(
+    mut items: Vec<T>,
+    ops: &[content::LinkOp],
+    current_url: &str,
+    links_to: &LinksToIndex,
+) -> Vec<T> {
+    for op in ops {
+        match op {
+            content::LinkOp::SortBy { field, direction } => {
+                let field = field.as_str();
+                let mut keyed: Vec<(SortKey, T)> =
+                    items.into_iter().map(|item| (sort_key_for(&item, field), item)).collect();
+                keyed.sort_by(|(a, _), (b, _)| match direction {
+                    content::SortDirection::Ascending => a.cmp(b),
+                    content::SortDirection::Descending => b.cmp(a),
+                });
+                items = keyed.into_iter().map(|(_, item)| item).collect();
+            }
+            content::LinkOp::Take(n) => items.truncate(*n),
+            content::LinkOp::Filter { field, value } => {
+                let field = field.as_str();
+                items.retain(|item| item.field_text(field).is_some_and(|t| t == *value));
+            }
+            content::LinkOp::RefsTo(target) => {
+                let target = match target {
+                    content::RefsToTarget::SelfRef => normalise_url(current_url),
+                    content::RefsToTarget::Url(u) => normalise_url(u),
+                };
+                match links_to.get(&target) {
+                    // `ThreadItem::url` is normalised, so no per-item allocation.
+                    Some(sources) => items.retain(|item| sources.contains(item.url())),
+                    None => items.clear(),
+                }
+            }
+        }
+    }
+    items
+}
+
+/// Sort key for a field value: numeric values compare numerically and come
+/// before text; missing values come last.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SortKey {
+    Numeric(i64),
+    Text(String),
+    Missing,
+}
+
+fn sort_key_for<T: ThreadItem>(item: &T, field: &str) -> SortKey {
+    match item.field_text(field) {
+        None => SortKey::Missing,
+        Some(text) => match text.parse::<i64>() {
+            Ok(n) => SortKey::Numeric(n),
+            Err(_) => SortKey::Text(text),
+        },
+    }
+}
+
+/// The DataGraph adapter: a page's URL and its materialised data.
+struct GraphItem {
+    url: String,
+    data: template::DataGraph,
+}
+
+impl ThreadItem for GraphItem {
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn field_text(&self, field: &str) -> Option<String> {
+        self.data.resolve(&[field]).and_then(|v| v.display_text())
+    }
+}
+
+/// The text of field `field` in `data`, as the thread operations read it.
+/// Exposed so other adapters can be checked for parity.
+pub fn graph_field_text(data: &template::DataGraph, field: &str) -> Option<String> {
+    GraphItem { url: String::new(), data: data.clone() }.field_text(field)
+}
 
 // ── Extracted evaluator (moved from publisher_cli) ───────────────────────────
 
 /// Evaluate a single link expression to a concrete `Value`.
+///
+/// A thread expression's items are taken from `stem_index` in URL order and
+/// passed through [`apply_link_ops`].
 pub fn evaluate_link_expression(
     text: &content::LinkText,
     target: &content::LinkTarget,
     url_index: &UrlIndex,
     stem_index: &StemIndex,
     current_url: &UrlPath,
-    edge_index: &EdgeIndex,
+    links_to: &LinksToIndex,
 ) -> template::Value {
     match target {
         content::LinkTarget::PathRef(path) => {
@@ -39,58 +182,27 @@ pub fn evaluate_link_expression(
         }
 
         content::LinkTarget::ThreadExpr { source, operations } => {
-            let items = stem_index
+            let mut items: Vec<GraphItem> = stem_index
                 .get(&SchemaStem::new(source.as_str()))
-                .cloned()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|(url, data)| GraphItem {
+                            url: normalise_url(url.as_str()),
+                            data: data.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
+            items.sort_by(|a, b| a.url.cmp(&b.url));
 
-            // Build initial list of (url, DataGraph) pairs
-            let mut result: Vec<(UrlPath, template::DataGraph)> = items;
-
-            // Apply operations in order
-            for op in operations {
-                match op {
-                    content::LinkOp::SortBy { field, descending } => {
-                        let field = field.as_str();
-                        let desc = *descending;
-                        result.sort_by(|(_, a), (_, b)| {
-                            let ak = sort_key_for(a, field);
-                            let bk = sort_key_for(b, field);
-                            let ord = ak.cmp(&bk);
-                            if desc { ord.reverse() } else { ord }
-                        });
-                    }
-                    content::LinkOp::Take(n) => {
-                        result.truncate(*n);
-                    }
-                    content::LinkOp::Filter { field, value } => {
-                        let field_ref = field.as_str();
-                        result.retain(|(_, data)| {
-                            data.resolve(&[field_ref])
-                                .and_then(|v| v.display_text())
-                                .map(|t| t == *value)
-                                .unwrap_or(false)
-                        });
-                    }
-                    content::LinkOp::RefsTo(refs_target) => {
-                        let target_url = match refs_target {
-                            content::RefsToTarget::SelfRef => current_url.clone(),
-                            content::RefsToTarget::Url(u) => UrlPath::new(u),
-                        };
-                        let sources: HashSet<UrlPath> = edge_index
-                            .get(&target_url)
-                            .map(|edges| edges.iter().map(|e| e.source.clone()).collect())
-                            .unwrap_or_default();
-                        result.retain(|(url, _)| sources.contains(url));
-                    }
-                }
-            }
+            let result = apply_link_ops(items, operations, current_url.as_str(), links_to);
 
             // Convert to Value::List of Records (with href injected)
             let values: Vec<template::Value> = result
                 .into_iter()
-                .map(|(url, mut data)| {
-                    data.insert("href", template::Value::Text(url.as_str().to_string()));
+                .map(|GraphItem { url, mut data }| {
+                    data.insert("href", template::Value::Text(url));
                     template::Value::Record(data)
                 })
                 .collect();
@@ -98,141 +210,6 @@ pub fn evaluate_link_expression(
             template::Value::List(values)
         }
     }
-}
-
-/// Resolve all `Value::LinkExpression` entries in a single `DataGraph`.
-/// Also resolves `LinkExpression` values inside `Value::List` items.
-pub fn resolve_link_expressions_in_graph(
-    graph: &mut template::DataGraph,
-    url_index: &UrlIndex,
-    stem_index: &StemIndex,
-    current_url: &UrlPath,
-    edge_index: &EdgeIndex,
-) {
-    // Collect all top-level keys first (avoids borrow conflicts)
-    let keys: Vec<String> = graph.iter().map(|(k, _)| k.clone()).collect();
-
-    for key in keys {
-        let resolved = match graph.resolve(&[key.as_str()]) {
-            Some(template::Value::LinkExpression { text, target }) => {
-                let text = text.clone();
-                let target = target.clone();
-                Some(evaluate_link_expression(
-                    &text,
-                    &target,
-                    url_index,
-                    stem_index,
-                    current_url,
-                    edge_index,
-                ))
-            }
-            Some(template::Value::List(items)) => {
-                // Resolve any LinkExpression items inside a list
-                let new_items: Vec<template::Value> = items
-                    .iter()
-                    .flat_map(|item| match item {
-                        template::Value::LinkExpression { text, target } => {
-                            let resolved = evaluate_link_expression(
-                                text,
-                                target,
-                                url_index,
-                                stem_index,
-                                current_url,
-                                edge_index,
-                            );
-                            // A ThreadExpr inside a list may expand to a List — flatten it
-                            match resolved {
-                                template::Value::List(inner) => inner,
-                                other => vec![other],
-                            }
-                        }
-                        other => vec![other.clone()],
-                    })
-                    .collect();
-                Some(template::Value::List(new_items))
-            }
-            _ => None,
-        };
-
-        if let Some(value) = resolved {
-            graph.insert(key, value);
-        }
-    }
-}
-
-/// Build an edge index (target → edges) from a list of edges.
-pub fn build_edge_index(edges: &[Edge]) -> EdgeIndex {
-    let mut index: EdgeIndex = HashMap::new();
-    for edge in edges {
-        index.entry(edge.target.clone()).or_default().push(edge.clone());
-    }
-    index
-}
-
-/// Extract edges from a DataGraph by walking all `Value::LinkExpression` entries
-/// that are `PathRef` (i.e. direct links from `source_url` to target URLs).
-pub fn extract_edges(source_url: &UrlPath, graph: &template::DataGraph) -> Vec<Edge> {
-    let mut edges = Vec::new();
-    for (_, value) in graph.iter() {
-        collect_edges_from_value(source_url, value, &mut edges);
-    }
-    edges
-}
-
-fn collect_edges_from_value(
-    source_url: &UrlPath,
-    value: &template::Value,
-    edges: &mut Vec<Edge>,
-) {
-    match value {
-        template::Value::LinkExpression {
-            target: content::LinkTarget::PathRef(path),
-            ..
-        } => {
-            edges.push(Edge { source: source_url.clone(), target: UrlPath::new(path) });
-        }
-        template::Value::List(items) => {
-            for item in items {
-                collect_edges_from_value(source_url, item, edges);
-            }
-        }
-        template::Value::Record(inner) => {
-            // A resolved link expression becomes a Record with an "href" field.
-            // Extract the edge from href without recursing further into the record,
-            // to avoid treating every nested record as a potential edge.
-            if let Some(template::Value::Text(href)) = inner.resolve(&["href"]) {
-                edges.push(Edge { source: source_url.clone(), target: UrlPath::new(href.as_str()) });
-            } else {
-                for (_, v) in inner.iter() {
-                    collect_edges_from_value(source_url, v, edges);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Build UrlIndex, StemIndex, and EdgeIndex from a SiteGraph in one pass.
-pub fn build_indexes_from_graph(graph: &site_index::SiteGraph) -> (UrlIndex, StemIndex, EdgeIndex) {
-    let url_index: UrlIndex = graph
-        .iter_pages_by_kind(site_index::PageKind::Item)
-        .filter_map(|n| n.page_data().map(|pd| (n.url_path.clone(), pd.data.clone())))
-        .collect();
-
-    let mut stem_index: StemIndex = std::collections::HashMap::new();
-    let mut all_edges = Vec::new();
-    for node in graph.iter_pages_by_kind(site_index::PageKind::Item) {
-        if let Some(pd) = node.page_data() {
-            stem_index
-                .entry(pd.schema_stem.clone())
-                .or_default()
-                .push((node.url_path.clone(), pd.data.clone()));
-            all_edges.extend(extract_edges(&node.url_path, &pd.data));
-        }
-    }
-    let edge_index = build_edge_index(&all_edges);
-
-    (url_index, stem_index, edge_index)
 }
 
 /// Inject collection data into a page's data graph.
@@ -265,101 +242,185 @@ pub fn inject_collections(
     }
 }
 
-/// Produce a sort key for a DataGraph field.
-/// Returns a `SortKey` enum that compares numeric values numerically
-/// and falls back to string comparison.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum SortKey {
-    Numeric(i64),
-    Text(String),
-    Missing,
-}
-
-fn sort_key_for(data: &template::DataGraph, field: &str) -> SortKey {
-    match data.resolve(&[field]).and_then(|v| v.display_text()) {
-        None => SortKey::Missing,
-        Some(text) => {
-            if let Ok(n) = text.parse::<i64>() {
-                SortKey::Numeric(n)
-            } else {
-                SortKey::Text(text)
-            }
-        }
-    }
-}
-
-/// Resolve cross-content references in a single DataGraph.
-///
-/// When a `Value::Record` has an `href` that matches a page in `url_index`,
-/// merge the referenced page's data fields into the record (preserving `href`
-/// and `text`). This enriches link slots with the target page's title,
-/// summary, etc.
-///
-/// Also handles records nested inside `Value::List` items (multi-occurrence
-/// link slots).
-pub fn resolve_cross_references(
-    graph: &mut template::DataGraph,
-    url_index: &UrlIndex,
-) {
-    // Top-level Records with href matching a built page
-    let to_resolve: Vec<(String, UrlPath)> = graph
-        .iter()
-        .filter_map(|(key, value)| {
-            if let template::Value::Record(sub) = value
-                && let Some(template::Value::Text(href)) = sub.resolve(&["href"])
-            {
-                let url = UrlPath::new(href);
-                if url_index.contains_key(&url) {
-                    return Some((key.clone(), url));
-                }
-            }
-            None
-        })
-        .collect();
-
-    for (key, url) in to_resolve {
-        if let Some(referenced) = url_index.get(&url)
-            && let Some(template::Value::Record(sub)) = graph.resolve_mut(&[&key])
-        {
-            sub.merge_from(referenced, &["href", "text"]);
-        }
-    }
-
-    // Also resolve records inside lists (multi-occurrence link slots)
-    let list_keys: Vec<String> = graph
-        .iter()
-        .filter_map(|(key, value)| {
-            if matches!(value, template::Value::List(_)) { Some(key.clone()) } else { None }
-        })
-        .collect();
-
-    for key in list_keys {
-        if let Some(template::Value::List(items)) = graph.resolve_mut(&[&key]) {
-            for item in items.iter_mut() {
-                if let template::Value::Record(sub) = item {
-                    let url = sub.resolve(&["href"]).and_then(|v| {
-                        if let template::Value::Text(s) = v {
-                            Some(UrlPath::new(s.as_str()))
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(url) = url
-                        && let Some(referenced) = url_index.get(&url)
-                    {
-                        sub.merge_from(referenced, &["href", "text"]);
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use content::{Keyword, LinkOp, RefsToTarget, SortDirection};
+
+    // ── apply_link_ops ───────────────────────────────────────────────────────
+
+    #[derive(Debug, Clone)]
+    struct Item {
+        url: String,
+        fields: Vec<(&'static str, &'static str)>,
+    }
+
+    impl ThreadItem for Item {
+        fn url(&self) -> &str {
+            &self.url
+        }
+        fn field_text(&self, field: &str) -> Option<String> {
+            self.fields.iter().find(|(k, _)| *k == field).map(|(_, v)| v.to_string())
+        }
+    }
+
+    fn item(url: &str, fields: &[(&'static str, &'static str)]) -> Item {
+        Item { url: url.to_string(), fields: fields.to_vec() }
+    }
+
+    fn kw(s: &str) -> Keyword {
+        Keyword::new(s).unwrap()
+    }
+
+    fn sort(field: &str, direction: SortDirection) -> LinkOp {
+        LinkOp::SortBy { field: kw(field), direction }
+    }
+
+    fn urls(items: &[Item]) -> Vec<&str> {
+        items.iter().map(|i| i.url.as_str()).collect()
+    }
+
+    fn posts() -> Vec<Item> {
+        vec![
+            item("/post/p1", &[("published", "2026-01-10"), ("category", "notes"), ("n", "10")]),
+            item("/post/p2", &[("published", "2026-02-10"), ("category", "news"), ("n", "9")]),
+            item("/post/p3", &[("published", "2026-03-10"), ("category", "news")]),
+        ]
+    }
+
+    fn links_to(edges: &[(&str, &str)]) -> LinksToIndex {
+        let mut index = LinksToIndex::new();
+        for (source, target) in edges {
+            index.entry(target.to_string()).or_default().insert(source.to_string());
+        }
+        index
+    }
+
+    #[test]
+    fn no_ops_keeps_base_order() {
+        let out = apply_link_ops(posts(), &[], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p1", "/post/p2", "/post/p3"]);
+    }
+
+    #[test]
+    fn sort_by_ascending_and_descending() {
+        let desc = apply_link_ops(posts(), &[sort("published", SortDirection::Descending)], "/", &LinksToIndex::new());
+        assert_eq!(urls(&desc), vec!["/post/p3", "/post/p2", "/post/p1"]);
+        let asc = apply_link_ops(desc, &[sort("published", SortDirection::Ascending)], "/", &LinksToIndex::new());
+        assert_eq!(urls(&asc), vec!["/post/p1", "/post/p2", "/post/p3"]);
+    }
+
+    #[test]
+    fn sort_by_is_stable_on_equal_keys() {
+        let out = apply_link_ops(posts(), &[sort("category", SortDirection::Ascending)], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p2", "/post/p3", "/post/p1"]);
+        let out = apply_link_ops(posts(), &[sort("category", SortDirection::Descending)], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p1", "/post/p2", "/post/p3"]);
+    }
+
+    #[test]
+    fn sort_by_compares_integers_numerically_and_puts_missing_last() {
+        let out = apply_link_ops(posts(), &[sort("n", SortDirection::Ascending)], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p2", "/post/p1", "/post/p3"]);
+    }
+
+    #[test]
+    fn take_truncates() {
+        let out = apply_link_ops(posts(), &[LinkOp::Take(2)], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p1", "/post/p2"]);
+        let out = apply_link_ops(posts(), &[LinkOp::Take(10)], "/", &LinksToIndex::new());
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn filter_keeps_equal_field_text() {
+        let op = LinkOp::Filter { field: kw("category"), value: "news".to_string() };
+        let out = apply_link_ops(posts(), &[op], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p2", "/post/p3"]);
+        let op = LinkOp::Filter { field: kw("missing"), value: String::new() };
+        assert!(apply_link_ops(posts(), &[op], "/", &LinksToIndex::new()).is_empty());
+    }
+
+    #[test]
+    fn refs_to_self_uses_current_url() {
+        let index = links_to(&[("/post/p1", "/author/a"), ("/post/p3", "/author/a"), ("/post/p2", "/author/b")]);
+        let op = LinkOp::RefsTo(RefsToTarget::SelfRef);
+        let out = apply_link_ops(posts(), std::slice::from_ref(&op), "/author/a", &index);
+        assert_eq!(urls(&out), vec!["/post/p1", "/post/p3"]);
+        let out = apply_link_ops(posts(), &[op], "/author/nobody", &index);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn refs_to_url_ignores_current_url_and_normalises() {
+        let index = links_to(&[("/post/p2", "/author/b")]);
+        let op = LinkOp::RefsTo(RefsToTarget::Url("author/b".to_string()));
+        let out = apply_link_ops(posts(), &[op], "/unrelated", &index);
+        assert_eq!(urls(&out), vec!["/post/p2"]);
+    }
+
+    #[test]
+    fn ops_apply_in_order() {
+        let filter = LinkOp::Filter { field: kw("category"), value: "news".to_string() };
+        // take then filter: p1, p2 → p2
+        let out = apply_link_ops(posts(), &[LinkOp::Take(2), filter.clone()], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p2"]);
+        // filter then take: p2, p3 → p2, p3
+        let out = apply_link_ops(posts(), &[filter, LinkOp::Take(2)], "/", &LinksToIndex::new());
+        assert_eq!(urls(&out), vec!["/post/p2", "/post/p3"]);
+        // sort desc then take 2
+        let out = apply_link_ops(
+            posts(),
+            &[sort("published", SortDirection::Descending), LinkOp::Take(2)],
+            "/",
+            &LinksToIndex::new(),
+        );
+        assert_eq!(urls(&out), vec!["/post/p3", "/post/p2"]);
+        // take 2 then sort desc
+        let out = apply_link_ops(
+            posts(),
+            &[LinkOp::Take(2), sort("published", SortDirection::Descending)],
+            "/",
+            &LinksToIndex::new(),
+        );
+        assert_eq!(urls(&out), vec!["/post/p2", "/post/p1"]);
+    }
+
+    #[test]
+    fn page_reference_keeps_only_page_paths() {
+        assert_eq!(page_reference("/author/a").as_deref(), Some("/author/a"));
+        assert_eq!(page_reference("author/a").as_deref(), Some("/author/a"));
+        assert_eq!(page_reference(":author/a").as_deref(), Some("/author/a"));
+        assert_eq!(page_reference(":/author/a").as_deref(), Some("/author/a"));
+        for not_a_page in [
+            "https://example.com",
+            "http://x.org/a",
+            "ftp://x.org",
+            "mailto:a@b.c",
+            "//cdn.example.com/x",
+            "#top",
+            "->> :post",
+            "",
+            ":",
+        ] {
+            assert_eq!(page_reference(not_a_page), None, "{not_a_page:?}");
+        }
+    }
+
+    #[test]
+    fn refs_to_with_no_sources_keeps_nothing() {
+        let op = LinkOp::RefsTo(RefsToTarget::Url("/nobody".to_string()));
+        assert!(apply_link_ops(posts(), &[op], "/", &LinksToIndex::new()).is_empty());
+    }
+
+    #[test]
+    fn normalise_url_adds_a_leading_slash() {
+        assert_eq!(normalise_url("author/a"), "/author/a");
+        assert_eq!(normalise_url("/author/a"), "/author/a");
+        assert_eq!(normalise_url(""), "/");
+    }
 
     // ── evaluate_link_expression ─────────────────────────────────────────────
 
@@ -374,15 +435,13 @@ mod tests {
         let text = content::LinkText::Static("Read more".to_string());
         let target = content::LinkTarget::PathRef("/post/hello".to_string());
 
-        let edge_index = EdgeIndex::new();
-        let current_url = UrlPath::new("/");
         let result = evaluate_link_expression(
             &text,
             &target,
             &url_index,
             &stem_index,
-            &current_url,
-            &edge_index,
+            &UrlPath::new("/"),
+            &LinksToIndex::new(),
         );
         assert!(matches!(result, template::Value::Record(_)));
         if let template::Value::Record(r) = result {
@@ -397,265 +456,143 @@ mod tests {
 
     #[test]
     fn evaluate_link_expression_path_ref_missing() {
-        let url_index: UrlIndex = HashMap::new();
-        let stem_index: StemIndex = HashMap::new();
-
-        let text = content::LinkText::Empty;
-        let target = content::LinkTarget::PathRef("/nonexistent".to_string());
-
-        let edge_index = EdgeIndex::new();
-        let current_url = UrlPath::new("/");
         let result = evaluate_link_expression(
-            &text,
-            &target,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
+            &content::LinkText::Empty,
+            &content::LinkTarget::PathRef("/nonexistent".to_string()),
+            &UrlIndex::new(),
+            &StemIndex::new(),
+            &UrlPath::new("/"),
+            &LinksToIndex::new(),
         );
         assert!(matches!(result, template::Value::Absent));
     }
-
-    #[test]
-    fn evaluate_link_expression_thread_expr_returns_list() {
-        let url_index: UrlIndex = HashMap::new();
-        let mut stem_index: StemIndex = HashMap::new();
-
-        let mut d1 = template::DataGraph::new();
-        d1.insert("title", template::Value::Text("Alpha".to_string()));
-        let mut d2 = template::DataGraph::new();
-        d2.insert("title", template::Value::Text("Beta".to_string()));
-        stem_index.insert(
-            SchemaStem::new("post"),
-            vec![
-                (UrlPath::new("/post/alpha"), d1),
-                (UrlPath::new("/post/beta"), d2),
-            ],
-        );
-
-        let text = content::LinkText::Empty;
-        let target = content::LinkTarget::ThreadExpr {
-            source: content::Keyword::new("post").unwrap(),
-            operations: vec![],
-        };
-
-        let edge_index = EdgeIndex::new();
-        let current_url = UrlPath::new("/");
-        let result = evaluate_link_expression(
-            &text,
-            &target,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        );
-        assert!(matches!(result, template::Value::List(_)));
-        if let template::Value::List(items) = result {
-            assert_eq!(items.len(), 2);
-        }
-    }
-
-    // ── resolve_link_expressions_in_graph ───────────────────────────────────
-
-    #[test]
-    fn resolve_link_expressions_in_graph_replaces_path_ref() {
-        let mut url_index: UrlIndex = HashMap::new();
-        let mut data = template::DataGraph::new();
-        data.insert("title", template::Value::Text("Hello".to_string()));
-        url_index.insert(site_index::UrlPath::new("/post/hello"), data);
-        let stem_index: StemIndex = HashMap::new();
-
-        let mut graph = template::DataGraph::new();
-        graph.insert(
-            "link",
-            template::Value::LinkExpression {
-                text: content::LinkText::Static("Read more".to_string()),
-                target: content::LinkTarget::PathRef("/post/hello".to_string()),
-            },
-        );
-
-        let edge_index = EdgeIndex::new();
-        let current_url = UrlPath::new("/");
-        resolve_link_expressions_in_graph(
-            &mut graph,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        );
-
-        assert!(
-            matches!(graph.resolve(&["link"]), Some(template::Value::Record(_))),
-            "expected LinkExpression to be resolved to a Record"
-        );
-    }
-
-    #[test]
-    fn resolve_link_expressions_in_graph_leaves_non_link_values() {
-        let url_index: UrlIndex = HashMap::new();
-        let stem_index: StemIndex = HashMap::new();
-
-        let mut graph = template::DataGraph::new();
-        graph.insert("title", template::Value::Text("Static title".to_string()));
-
-        let edge_index = EdgeIndex::new();
-        let current_url = UrlPath::new("/");
-        resolve_link_expressions_in_graph(
-            &mut graph,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        );
-
-        assert!(
-            matches!(graph.resolve(&["title"]), Some(template::Value::Text(s)) if s == "Static title"),
-            "non-link values should be unchanged"
-        );
-    }
-
-    // ── refs_to tests ────────────────────────────────────────────────────────
 
     fn make_post_stem_index() -> StemIndex {
         let mut stem_index: StemIndex = HashMap::new();
         let mut d1 = template::DataGraph::new();
         d1.insert("title", template::Value::Text("Post A".to_string()));
+        d1.insert("published", template::Value::Text("1".to_string()));
         let mut d2 = template::DataGraph::new();
         d2.insert("title", template::Value::Text("Post B".to_string()));
+        d2.insert("published", template::Value::Text("3".to_string()));
         let mut d3 = template::DataGraph::new();
         d3.insert("title", template::Value::Text("Post C".to_string()));
+        d3.insert("published", template::Value::Text("2".to_string()));
+        // Deliberately not in URL order: the evaluator sorts by URL first.
         stem_index.insert(
             SchemaStem::new("post"),
             vec![
+                (UrlPath::new("/post/c"), d3),
                 (UrlPath::new("/post/a"), d1),
                 (UrlPath::new("/post/b"), d2),
-                (UrlPath::new("/post/c"), d3),
             ],
         );
         stem_index
     }
 
-    #[test]
-    fn refs_to_self_filters_by_incoming_edges() {
-        // /post/a and /post/b link to /author/alice; /post/c does not
-        let edges = vec![
-            Edge { source: UrlPath::new("/post/a"), target: UrlPath::new("/author/alice") },
-            Edge { source: UrlPath::new("/post/b"), target: UrlPath::new("/author/alice") },
-            Edge { source: UrlPath::new("/post/c"), target: UrlPath::new("/author/bob") },
-        ];
-        let edge_index = build_edge_index(&edges);
-        let url_index: UrlIndex = HashMap::new();
-        let stem_index = make_post_stem_index();
-        let current_url = UrlPath::new("/author/alice");
-
-        let text = content::LinkText::Empty;
-        let target = content::LinkTarget::ThreadExpr {
-            source: content::Keyword::new("post").unwrap(),
-            operations: vec![content::LinkOp::RefsTo(content::RefsToTarget::SelfRef)],
-        };
-
-        let result = evaluate_link_expression(
-            &text,
-            &target,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        );
-
-        assert!(matches!(result, template::Value::List(_)));
-        if let template::Value::List(items) = result {
-            assert_eq!(items.len(), 2, "expected 2 posts linking to /author/alice");
-            let hrefs: Vec<_> = items
+    fn hrefs(value: &template::Value) -> Vec<String> {
+        match value {
+            template::Value::List(items) => items
                 .iter()
-                .filter_map(|item| {
-                    if let template::Value::Record(r) = item {
-                        r.resolve(&["href"]).and_then(|v| v.display_text())
-                    } else {
-                        None
-                    }
+                .filter_map(|item| match item {
+                    template::Value::Record(r) => r.resolve(&["href"]).and_then(|v| v.display_text()),
+                    _ => None,
                 })
-                .collect();
-            assert!(hrefs.contains(&"/post/a".to_string()));
-            assert!(hrefs.contains(&"/post/b".to_string()));
+                .collect(),
+            other => panic!("expected List, got {other:?}"),
         }
     }
 
-    #[test]
-    fn refs_to_url_filters_by_target() {
-        // Same edges, but current_url is something unrelated — use explicit URL
-        let edges = vec![
-            Edge { source: UrlPath::new("/post/a"), target: UrlPath::new("/author/alice") },
-            Edge { source: UrlPath::new("/post/b"), target: UrlPath::new("/author/alice") },
-            Edge { source: UrlPath::new("/post/c"), target: UrlPath::new("/author/bob") },
-        ];
-        let edge_index = build_edge_index(&edges);
-        let url_index: UrlIndex = HashMap::new();
-        let stem_index = make_post_stem_index();
-        // current_url is unrelated — should not affect result since we use Url variant
-        let current_url = UrlPath::new("/unrelated/page");
+    fn thread(ops: Vec<LinkOp>) -> content::LinkTarget {
+        content::LinkTarget::ThreadExpr { source: kw("post"), operations: ops }
+    }
 
-        let text = content::LinkText::Empty;
-        let target = content::LinkTarget::ThreadExpr {
-            source: content::Keyword::new("post").unwrap(),
-            operations: vec![content::LinkOp::RefsTo(content::RefsToTarget::Url(
-                "/author/alice".to_string(),
-            ))],
-        };
+    #[test]
+    fn evaluate_link_expression_thread_expr_returns_list_in_url_order() {
+        let result = evaluate_link_expression(
+            &content::LinkText::Empty,
+            &thread(vec![]),
+            &UrlIndex::new(),
+            &make_post_stem_index(),
+            &UrlPath::new("/"),
+            &LinksToIndex::new(),
+        );
+        assert_eq!(hrefs(&result), vec!["/post/a", "/post/b", "/post/c"]);
+    }
+
+    #[test]
+    fn evaluate_link_expression_applies_sort_and_take() {
+        let result = evaluate_link_expression(
+            &content::LinkText::Empty,
+            &thread(vec![sort("published", SortDirection::Descending), LinkOp::Take(2)]),
+            &UrlIndex::new(),
+            &make_post_stem_index(),
+            &UrlPath::new("/"),
+            &LinksToIndex::new(),
+        );
+        assert_eq!(hrefs(&result), vec!["/post/b", "/post/c"]);
+    }
+
+    #[test]
+    fn evaluate_link_expression_applies_filter() {
+        let result = evaluate_link_expression(
+            &content::LinkText::Empty,
+            &thread(vec![LinkOp::Filter { field: kw("title"), value: "Post C".to_string() }]),
+            &UrlIndex::new(),
+            &make_post_stem_index(),
+            &UrlPath::new("/"),
+            &LinksToIndex::new(),
+        );
+        assert_eq!(hrefs(&result), vec!["/post/c"]);
+    }
+
+    #[test]
+    fn evaluate_link_expression_refs_to_self_and_url() {
+        let index = links_to(&[
+            ("/post/a", "/author/alice"),
+            ("/post/b", "/author/alice"),
+            ("/post/c", "/author/bob"),
+        ]);
+        let result = evaluate_link_expression(
+            &content::LinkText::Empty,
+            &thread(vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]),
+            &UrlIndex::new(),
+            &make_post_stem_index(),
+            &UrlPath::new("/author/alice"),
+            &index,
+        );
+        assert_eq!(hrefs(&result), vec!["/post/a", "/post/b"]);
 
         let result = evaluate_link_expression(
-            &text,
-            &target,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
+            &content::LinkText::Empty,
+            &thread(vec![LinkOp::RefsTo(RefsToTarget::Url("/author/bob".to_string()))]),
+            &UrlIndex::new(),
+            &make_post_stem_index(),
+            &UrlPath::new("/author/alice"),
+            &index,
         );
-
-        assert!(matches!(result, template::Value::List(_)));
-        if let template::Value::List(items) = result {
-            assert_eq!(items.len(), 2, "expected 2 posts linking to /author/alice");
-        }
-    }
-
-    #[test]
-    fn refs_to_self_no_incoming_edges_returns_empty() {
-        let edge_index = EdgeIndex::new();
-        let url_index: UrlIndex = HashMap::new();
-        let stem_index = make_post_stem_index();
-        let current_url = UrlPath::new("/author/nobody");
-
-        let text = content::LinkText::Empty;
-        let target = content::LinkTarget::ThreadExpr {
-            source: content::Keyword::new("post").unwrap(),
-            operations: vec![content::LinkOp::RefsTo(content::RefsToTarget::SelfRef)],
-        };
+        assert_eq!(hrefs(&result), vec!["/post/c"]);
 
         let result = evaluate_link_expression(
-            &text,
-            &target,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
+            &content::LinkText::Empty,
+            &thread(vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]),
+            &UrlIndex::new(),
+            &make_post_stem_index(),
+            &UrlPath::new("/author/nobody"),
+            &index,
         );
-
-        assert!(matches!(result, template::Value::List(ref v) if v.is_empty()));
+        assert!(hrefs(&result).is_empty());
     }
 
     #[test]
-    fn build_edge_index_groups_edges_by_target() {
-        let edges = vec![
-            Edge { source: UrlPath::new("/post/a"), target: UrlPath::new("/author/alice") },
-            Edge { source: UrlPath::new("/post/b"), target: UrlPath::new("/author/alice") },
-            Edge { source: UrlPath::new("/post/c"), target: UrlPath::new("/author/bob") },
-        ];
-        let index = build_edge_index(&edges);
-        assert_eq!(index.get(&UrlPath::new("/author/alice")).map(|v| v.len()), Some(2));
-        assert_eq!(index.get(&UrlPath::new("/author/bob")).map(|v| v.len()), Some(1));
+    fn graph_field_text_reads_display_text() {
+        let mut data = template::DataGraph::new();
+        data.insert("title", template::Value::Text("Hello".to_string()));
+        assert_eq!(graph_field_text(&data, "title").as_deref(), Some("Hello"));
+        assert_eq!(graph_field_text(&data, "missing"), None);
     }
 
-    // ── build_indexes_from_graph ─────────────────────────────────────────────
+    // ── inject_collections ───────────────────────────────────────────────────
 
     fn make_item_site_node(stem: &str, url: &str, data: template::DataGraph) -> site_index::SiteNode {
         use std::collections::HashSet;
@@ -675,69 +612,6 @@ mod tests {
             }),
         }
     }
-
-    #[test]
-    fn build_indexes_from_graph_populates_all_three_indexes() {
-        let mut graph = site_index::SiteGraph::new();
-
-        let mut post_data = template::DataGraph::new();
-        post_data.insert("title", template::Value::Text("Post One".to_string()));
-        graph.insert(make_item_site_node("post", "/post/one", post_data));
-
-        let mut author_data = template::DataGraph::new();
-        author_data.insert("name", template::Value::Text("Alice".to_string()));
-        // Add a PathRef link expression so we can verify edge_index
-        author_data.insert(
-            "featured",
-            template::Value::LinkExpression {
-                text: content::LinkText::Empty,
-                target: content::LinkTarget::PathRef("/post/one".to_string()),
-            },
-        );
-        graph.insert(make_item_site_node("author", "/author/alice", author_data));
-
-        let (url_index, stem_index, edge_index) = build_indexes_from_graph(&graph);
-
-        // url_index: both pages present
-        assert!(url_index.contains_key(&UrlPath::new("/post/one")), "url_index missing /post/one");
-        assert!(
-            url_index.contains_key(&UrlPath::new("/author/alice")),
-            "url_index missing /author/alice"
-        );
-
-        // stem_index: two distinct stems, each with one entry
-        assert!(
-            stem_index.contains_key(&site_index::SchemaStem::new("post")),
-            "stem_index missing 'post'"
-        );
-        assert!(
-            stem_index.contains_key(&site_index::SchemaStem::new("author")),
-            "stem_index missing 'author'"
-        );
-        let post_entries = stem_index.get(&site_index::SchemaStem::new("post")).unwrap();
-        assert_eq!(post_entries.len(), 1, "expected 1 post entry");
-        let author_entries = stem_index.get(&site_index::SchemaStem::new("author")).unwrap();
-        assert_eq!(author_entries.len(), 1, "expected 1 author entry");
-
-        // edge_index: /author/alice → /post/one edge captured
-        let edges_to_post_one = edge_index.get(&UrlPath::new("/post/one"));
-        assert!(edges_to_post_one.is_some(), "edge_index missing target /post/one");
-        let edges = edges_to_post_one.unwrap();
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].source, UrlPath::new("/author/alice"));
-        assert_eq!(edges[0].target, UrlPath::new("/post/one"));
-    }
-
-    #[test]
-    fn build_indexes_from_graph_empty_graph_returns_empty_indexes() {
-        let graph = site_index::SiteGraph::new();
-        let (url_index, stem_index, edge_index) = build_indexes_from_graph(&graph);
-        assert!(url_index.is_empty());
-        assert!(stem_index.is_empty());
-        assert!(edge_index.is_empty());
-    }
-
-    // ── inject_collections ───────────────────────────────────────────────────
 
     #[test]
     fn inject_collections_inserts_lists_for_each_stem() {
@@ -793,24 +667,5 @@ mod tests {
             matches!(page_data.resolve(&["post"]), Some(template::Value::Record(_))),
             "inject_collections should not overwrite existing 'post' key"
         );
-    }
-
-    #[test]
-    fn extract_edges_finds_path_ref_link_expressions() {
-        let mut graph = template::DataGraph::new();
-        graph.insert(
-            "author",
-            template::Value::LinkExpression {
-                text: content::LinkText::Empty,
-                target: content::LinkTarget::PathRef("/author/alice".to_string()),
-            },
-        );
-        graph.insert("title", template::Value::Text("Some post".to_string()));
-
-        let source = UrlPath::new("/post/hello");
-        let edges = extract_edges(&source, &graph);
-        assert_eq!(edges.len(), 1);
-        assert_eq!(edges[0].source, source);
-        assert_eq!(edges[0].target, UrlPath::new("/author/alice"));
     }
 }

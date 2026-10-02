@@ -1004,11 +1004,10 @@ mod tests {
             let target = content::parse_link_target(code)
                 .map_err(|e| format!("parse error: {e}"))?;
             let text = content::LinkText::Empty;
-            let (url_index, stem_index, _) = conductor.build_expression_indexes_from_store_pub();
-            let edge_index = expressions::EdgeIndex::new();
+            let (url_index, stem_index, links_to) = conductor.build_expression_indexes_from_store_pub();
             let current_url = site_index::UrlPath::new("/");
             return Ok(expressions::evaluate_link_expression(
-                &text, &target, &url_index, &stem_index, &current_url, &edge_index,
+                &text, &target, &url_index, &stem_index, &current_url, &links_to,
             ));
         }
         if code.starts_with("(get-content") {
@@ -1449,17 +1448,23 @@ mod tests {
             .build();
         let cond = Arc::new(conductor::Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap());
 
-        // Build document with a link-expression targeting /author/alice
+        // Build document with a link-expression targeting /author/alice in a
+        // preamble slot (a declared reference), and one targeting
+        // /author/bob in the body (not counted until ADR-059).
+        let path_ref = |url: &str| Spanned {
+            node: content::ContentElement::LinkExpression {
+                text: content::LinkText::Empty,
+                target: content::LinkTarget::PathRef(url.to_string()),
+                slot: None,
+            },
+            span: schema::Span { start: 0, end: 0 },
+        };
         let doc_with_link = content::Document {
-            preamble: im::vector![],
-            body: im::vector![Spanned {
-                node: content::ContentElement::LinkExpression {
-                    text: content::LinkText::Empty,
-                    target: content::LinkTarget::PathRef("/author/alice".to_string()),
-                    slot: None,
-                },
-                span: schema::Span { start: 0, end: 0 },
+            preamble: im::vector![content::DocumentSlot {
+                name: schema::SlotName::new("author"),
+                elements: im::vector![path_ref("/author/alice")],
             }],
+            body: im::vector![path_ref("/author/bob")],
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
@@ -1526,6 +1531,18 @@ mod tests {
         } else {
             panic!("expected List from refs-to");
         }
+    }
+
+    /// Package G: only declared references count; a body link expression is
+    /// not one until ADR-059 (inline segments).
+    #[test]
+    fn refs_to_ignores_body_link_expressions() {
+        let cond = linked_conductor();
+        let result = eval_with_conductor(r#"(refs-to "/author/bob")"#, &cond).unwrap();
+        assert!(
+            matches!(result, template::Value::List(ref v) if v.is_empty()),
+            "a body PathRef is not a declared reference: {result:?}"
+        );
     }
 
     #[test]

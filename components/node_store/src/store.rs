@@ -97,6 +97,11 @@ impl NodeStore {
         self.names.resolve(name)
     }
 
+    /// The Name for `s` if it has been interned, without interning it.
+    pub fn lookup_name(&self, s: &str) -> Option<Name> {
+        self.names.lookup(s)
+    }
+
     // --- Node lifecycle ---
 
     pub fn add_node(&mut self, node: Node) -> NodeId {
@@ -423,6 +428,55 @@ impl NodeStore {
 
         // Reverse index
         self.edges_to.entry(child).or_default().push_back(rev);
+    }
+
+    /// Replace the Child edges of `id` with `children`, in order.
+    /// Other edge kinds are kept; both edge indexes stay consistent.
+    pub fn set_children(&mut self, id: NodeId, children: &[NodeId]) {
+        self.record_touched(id);
+        for old in self.children(id) {
+            self.remove_child_edge(id, old);
+        }
+        for (index, &child) in children.iter().enumerate() {
+            self.insert_child_at(id, index, child);
+        }
+    }
+
+    /// Remove every Reference edge named `name` from `from`.
+    /// Updates both forward and reverse indexes.
+    pub fn remove_reference(&mut self, from: NodeId, name: Name) {
+        self.record_touched(from);
+        let targets: Vec<NodeId> = self
+            .references(from)
+            .into_iter()
+            .filter(|(n, _)| *n == name)
+            .map(|(_, t)| t)
+            .collect();
+        if let Some(fwd) = self.edges_from.get_mut(&from) {
+            fwd.retain(|e| !matches!(e, Edge::Reference { name: n, .. } if *n == name));
+        }
+        for target in targets {
+            if let Some(rev) = self.edges_to.get_mut(&target) {
+                rev.retain(|re| {
+                    !(re.source == from
+                        && matches!(re.edge, Edge::Reference { name: n, .. } if n == name))
+                });
+            }
+        }
+    }
+
+    /// The sources of `Derived { name }` edges pointing at `id`, read from the
+    /// reverse index.
+    pub fn derived_sources(&self, id: NodeId, name: Name) -> Vec<NodeId> {
+        self.edges_to
+            .get(&id)
+            .map(|rev| {
+                rev.iter()
+                    .filter(|re| matches!(re.edge, Edge::Derived { name: n, .. } if n == name))
+                    .map(|re| re.source)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Clear all nodes and edges.
@@ -965,6 +1019,111 @@ mod tests {
         let clone_log = clone.take_journal().unwrap();
         assert_eq!(ids(&clone_log.created), vec![b, c]);
         assert_eq!(ids(&clone_log.touched), vec![a]);
+    }
+
+    // --- set_children / remove_reference / derived_sources ---
+
+    #[test]
+    fn set_children_replaces_child_edges_in_order_and_keeps_other_edges() {
+        let mut store = NodeStore::new();
+        let attr = store.intern("kind");
+        let list = store.add_node(Node::Collection);
+        let value = store.add_node(Node::Text("v".to_string()));
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        let c = store.add_node(Node::Text("c".to_string()));
+        store.add_edge(list, Edge::Attribute { name: attr, value });
+        store.add_edge(list, Edge::Child(a));
+        store.add_edge(list, Edge::Child(b));
+
+        store.set_children(list, &[c, a]);
+
+        assert_eq!(store.children(list), vec![c, a]);
+        assert_eq!(store.attributes(list), vec![(attr, value)]);
+        assert_eq!(store.parents(a), vec![list]);
+        assert_eq!(store.parents(b), vec![]);
+        assert_eq!(store.parents(c), vec![list]);
+        assert_eq!(store.edge_count(), 3);
+    }
+
+    #[test]
+    fn set_children_to_empty_removes_all_children() {
+        let mut store = NodeStore::new();
+        let list = store.add_node(Node::Collection);
+        let a = store.add_node(Node::Text("a".to_string()));
+        store.add_edge(list, Edge::Child(a));
+        store.set_children(list, &[]);
+        assert!(store.children(list).is_empty());
+        assert!(store.parents(a).is_empty());
+    }
+
+    #[test]
+    fn journal_set_children_records_parent_touched() {
+        let mut store = NodeStore::new();
+        let list = store.add_node(Node::Collection);
+        let a = store.add_node(Node::Text("a".to_string()));
+        store.start_journal();
+        store.set_children(list, &[a]);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![list]);
+        assert!(log.created.is_empty());
+    }
+
+    #[test]
+    fn remove_reference_removes_only_the_named_references() {
+        let mut store = NodeStore::new();
+        let author = store.intern("author");
+        let other = store.intern("other");
+        let page = store.add_node(Node::Text("page".to_string()));
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        store.add_edge(page, Edge::Reference { name: author, target: a });
+        store.add_edge(page, Edge::Reference { name: other, target: a });
+        store.add_edge(page, Edge::Reference { name: author, target: b });
+
+        store.remove_reference(page, author);
+
+        assert_eq!(store.references(page), vec![(other, a)]);
+        // Reverse index: removing `a` now touches only the remaining edge.
+        store.remove_node(a);
+        assert!(store.references(page).is_empty());
+        store.remove_node(b);
+        assert_eq!(store.edge_count(), 0);
+    }
+
+    #[test]
+    fn journal_remove_reference_records_source_touched() {
+        let mut store = NodeStore::new();
+        let link = store.intern("link");
+        let a = store.add_node(Node::Text("a".to_string()));
+        let b = store.add_node(Node::Text("b".to_string()));
+        store.add_edge(a, Edge::Reference { name: link, target: b });
+        store.start_journal();
+        store.remove_reference(a, link);
+        let log = store.take_journal().unwrap();
+        assert_eq!(ids(&log.touched), vec![a]);
+    }
+
+    #[test]
+    fn derived_sources_reads_the_reverse_index_by_name() {
+        let mut store = NodeStore::new();
+        let over = store.intern("over");
+        let query = store.intern("query");
+        let stem = store.add_node(Node::Text("stem".to_string()));
+        let q1 = store.add_node(Node::Text("q1".to_string()));
+        let q2 = store.add_node(Node::Text("q2".to_string()));
+        let page = store.add_node(Node::Text("page".to_string()));
+        store.add_edge(q1, Edge::Derived { name: over, target: stem });
+        store.add_edge(q2, Edge::Derived { name: over, target: stem });
+        store.add_edge(page, Edge::Derived { name: query, target: stem });
+        store.add_edge(page, Edge::Child(stem));
+
+        assert_eq!(store.derived_sources(stem, over), vec![q1, q2]);
+        assert_eq!(store.derived_sources(stem, query), vec![page]);
+
+        store.remove_node(q1);
+        assert_eq!(store.derived_sources(stem, over), vec![q2]);
+        assert!(store.derived_sources(q2, over).is_empty());
     }
 
     // --- Owners ---

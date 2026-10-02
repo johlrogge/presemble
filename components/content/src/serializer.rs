@@ -1,4 +1,6 @@
-use crate::document::{ContentElement, Document, LinkOp, LinkTarget, LinkText, RefsToTarget};
+use crate::document::{
+    ContentElement, Document, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection,
+};
 use crate::parser::read_link_expression_paragraph;
 use schema::Spanned;
 
@@ -158,8 +160,11 @@ fn link_expression_target(target: &LinkTarget) -> String {
 /// One operation of a thread expression in canonical form.
 fn link_op(op: &LinkOp) -> String {
     match op {
-        LinkOp::SortBy { field, descending } => {
-            let dir = if *descending { ":desc" } else { ":asc" };
+        LinkOp::SortBy { field, direction } => {
+            let dir = match direction {
+                SortDirection::Ascending => ":asc",
+                SortDirection::Descending => ":desc",
+            };
             format!("(sort-by :{field} {dir})")
         }
         LinkOp::Take(n) => format!("(take {n})"),
@@ -1346,7 +1351,9 @@ headings
     }
 
     fn sort_by(field: &str, descending: bool) -> LinkOp {
-        LinkOp::SortBy { field: kw(field), descending }
+        let direction =
+            if descending { SortDirection::Descending } else { SortDirection::Ascending };
+        LinkOp::SortBy { field: kw(field), direction }
     }
 
     fn filter(field: &str, value: &str) -> LinkOp {

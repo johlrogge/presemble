@@ -21,6 +21,11 @@ impl NameInterner {
         Name(id)
     }
 
+    /// The Name for `s` if it has been interned, without interning it.
+    pub fn lookup(&self, s: &str) -> Option<Name> {
+        self.to_id.get(s).map(|&id| Name(id))
+    }
+
     /// Panics if name not in interner (internal invariant).
     pub fn resolve(&self, name: Name) -> &str {
         self.to_name
@@ -54,6 +59,15 @@ mod tests {
         let a = interner.intern("foo");
         let b = interner.intern("foo");
         assert_eq!(a, b);
+        assert_eq!(interner.len(), 1);
+    }
+
+    #[test]
+    fn lookup_finds_only_interned_names() {
+        let mut interner = NameInterner::default();
+        assert_eq!(interner.lookup("foo"), None);
+        let a = interner.intern("foo");
+        assert_eq!(interner.lookup("foo"), Some(a));
         assert_eq!(interner.len(), 1);
     }
 

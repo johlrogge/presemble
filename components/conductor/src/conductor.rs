@@ -170,6 +170,24 @@ pub struct Conductor {
     ned_suggestions: RwLock<HashMap<editorial_types::SuggestionId, editorial_types::NedSuggestion>>,
     // Self-write tracker: suppresses watcher events for files the conductor wrote itself.
     self_write_tracker: crate::self_write_tracker::SelfWriteTracker,
+    // Lookup index stem → stem node (`store_pipeline::create_stem_node`). Not
+    // dependency data: the dependencies are the `Derived` edges in the store.
+    // Reset whenever the store is repopulated.
+    stem_nodes: RwLock<HashMap<String, node_store::NodeId>>,
+}
+
+/// A document whose content changed, as input to
+/// [`Conductor::propagate_document_changes`].
+pub(crate) struct DocChange {
+    /// The page URL.
+    pub url: String,
+    /// The schema stem.
+    pub stem: String,
+    /// The live document root.
+    pub doc_root: node_store::NodeId,
+    /// The root this document replaced, when it was re-ingested. The retired
+    /// root keeps its stored preamble fingerprint.
+    pub previous_root: Option<node_store::NodeId>,
 }
 
 /// Extract the title from a document's preamble in the NodeStore.
@@ -211,32 +229,6 @@ enum SlotShape {
     NonText,
     /// Slot node not present in the preamble at all.
     Missing,
-}
-
-/// Recursively walk a node tree collecting link expression edges.
-fn collect_edges_from_node(
-    store: &node_store::NodeStore,
-    node: node_store::NodeId,
-    source_url: &str,
-    edges: &mut Vec<site_index::Edge>,
-) {
-    if let Some(node_store::Node::Element(name)) = store.get(node)
-        && store.resolve_name(*name) == "link-expression"
-        && let Some(target_node) = node_store_bridge::content_bridge::find_child_by_name(store, node, "link-target")
-        && let Some(kind) = node_store_bridge::content_bridge::find_attr_text(store, target_node, "kind")
-        && kind == "path-ref"
-        && let Some(target_url) = node_store_bridge::content_bridge::find_attr_text(store, target_node, "value")
-    {
-        edges.push(site_index::Edge {
-            source: site_index::UrlPath::new(source_url),
-            target: site_index::UrlPath::new(&target_url),
-        });
-    }
-
-    // Recurse into children
-    for child in store.children(node) {
-        collect_edges_from_node(store, child, source_url, edges);
-    }
 }
 
 impl Conductor {
@@ -288,6 +280,7 @@ impl Conductor {
             self_write_tracker: crate::self_write_tracker::SelfWriteTracker::new(
                 std::time::Duration::from_secs(5),
             ),
+            stem_nodes: RwLock::new(HashMap::new()),
         };
 
         // One-shot cleanup: delete any legacy sug-*.json files left over from
@@ -555,6 +548,273 @@ impl Conductor {
         *self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner()) = semantic_index;
         *self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner()) = stem_index;
         *self.path_to_doc_root.write().unwrap_or_else(|e| e.into_inner()) = path_index;
+
+        // Query nodes, stem nodes and preamble fingerprints for the fresh store.
+        self.establish_derived_state();
+    }
+
+    /// The parsed grammar for a page: the schema under
+    /// `schema_cache_key(stem, slug)`, falling back to the stem's item schema
+    /// (as `populate_node_store` does). Parsed on demand.
+    pub(crate) fn grammar_for_page(&self, stem: &str, slug: &str) -> Option<schema::Grammar> {
+        let key = site_index::schema_cache_key(stem, slug);
+        let src = self.schema_source(&key).or_else(|| self.schema_source(stem))?;
+        schema::parse_schema(&src).ok()
+    }
+
+    /// `(stem, slug)` of the page whose document root is `doc_root`, read from
+    /// its `stem` and `file` attributes. `None` for a root without a file
+    /// (the synthetic root index).
+    fn page_identity(
+        store: &node_store::NodeStore,
+        doc_root: node_store::NodeId,
+    ) -> Option<(String, String)> {
+        let stem = node_store_bridge::content_bridge::find_attr_text(store, doc_root, "stem")?;
+        let file = node_store_bridge::content_bridge::find_attr_text(store, doc_root, "file")?;
+        let slug = Path::new(&file).file_stem()?.to_str()?.to_string();
+        Some((stem, slug))
+    }
+
+    /// Snapshot of the live URL indexes, for building a `ThreadContext`.
+    fn index_snapshots(
+        &self,
+    ) -> (HashMap<String, node_store::NodeId>, HashMap<String, node_store::NodeId>) {
+        let sem = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let roots = self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).clone();
+        (sem, roots)
+    }
+
+    /// Resolve the link expressions of page `url` against `ctx`
+    /// (`store_pipeline::resolve_page_link_expressions`), with the page's
+    /// grammar. `grammars` memoises parsed grammars within one call site.
+    fn resolve_page(
+        &self,
+        store: &mut node_store::NodeStore,
+        ctx: &node_store_bridge::store_pipeline::ThreadContext,
+        url: &str,
+        grammars: &mut HashMap<(String, String), Option<schema::Grammar>>,
+    ) {
+        let (Some(&sem), Some(&root)) = (ctx.url_to_semantic.get(url), ctx.url_to_root.get(url))
+        else {
+            return;
+        };
+        let Some((stem, slug)) = Self::page_identity(store, root) else {
+            return;
+        };
+        let key = (stem.clone(), site_index::schema_cache_key(&stem, &slug));
+        let grammar = grammars
+            .entry(key)
+            .or_insert_with(|| self.grammar_for_page(&stem, &slug));
+        if let Some(grammar) = grammar {
+            node_store_bridge::store_pipeline::resolve_page_link_expressions(
+                store, sem, root, url, grammar, ctx,
+            );
+        }
+    }
+
+    /// The stem node for `stem`, created (and indexed) if missing.
+    fn ensure_stem_node(
+        &self,
+        store: &mut node_store::NodeStore,
+        stem: &str,
+    ) -> node_store::NodeId {
+        let mut stem_nodes = self.stem_nodes.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(&node) = stem_nodes.get(stem)
+            && store.get(node).is_some()
+        {
+            return node;
+        }
+        let node = node_store_bridge::store_pipeline::create_stem_node(store, stem);
+        stem_nodes.insert(stem.to_string(), node);
+        node
+    }
+
+    /// Build the derived state for a freshly populated store: stem nodes, the
+    /// thread context, every page's resolved link expressions with their
+    /// query nodes, and every document's preamble fingerprint.
+    fn establish_derived_state(&self) {
+        let (url_to_semantic, url_to_root) = self.index_snapshots();
+        let schema_stems: Vec<String> = self
+            .schema_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .filter(|k| !k.contains('/') && *k != "index")
+            .cloned()
+            .collect();
+
+        let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+        self.stem_nodes.write().unwrap_or_else(|e| e.into_inner()).clear();
+        // Every document stem, schema stem and thread source gets a stem
+        // node, so every query node has exactly one `over` edge.
+        let mut stems: std::collections::BTreeSet<String> = schema_stems.into_iter().collect();
+        for &root in url_to_root.values() {
+            if let Some(stem) = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem") {
+                stems.insert(stem);
+            }
+            stems.extend(
+                node_store_bridge::store_pipeline::preamble_threads(&store, root)
+                    .into_iter()
+                    .map(|t| t.source),
+            );
+        }
+        for stem in &stems {
+            self.ensure_stem_node(&mut store, stem);
+        }
+        let stem_nodes = self.stem_nodes.read().unwrap_or_else(|e| e.into_inner()).clone();
+
+        for &root in url_to_root.values() {
+            let fp = node_store_bridge::store_pipeline::preamble_fingerprint(&store, root);
+            node_store_bridge::store_pipeline::store_fingerprint(&mut store, root, fp);
+        }
+
+        let mut urls: Vec<String> = url_to_semantic.keys().cloned().collect();
+        urls.sort();
+        let ctx = node_store_bridge::store_pipeline::ThreadContext::build(
+            &store,
+            url_to_semantic,
+            url_to_root,
+            stem_nodes,
+        );
+        let mut grammars = HashMap::new();
+        for url in &urls {
+            self.resolve_page(&mut store, &ctx, url, &mut grammars);
+        }
+    }
+
+    /// Propagate document changes through the link-expression queries.
+    ///
+    /// Returns the URLs to render: every changed document, plus each page
+    /// whose link-expression result changes or contains a changed document.
+    /// Resolves (store mutation) but does not render.
+    ///
+    /// For each change X:
+    /// 1. X's preamble fingerprint is computed and stored (no context needed).
+    ///    A body-only edit (X existed and the fingerprint is unchanged)
+    ///    affects no query.
+    /// 2. The thread context is built, in full, only when some change needs
+    ///    it: its preamble changed, or it has thread expressions of its own
+    ///    (a re-ingested root's thread slots must be re-resolved).
+    /// 3. X is always rendered; when it needs the context, its own queries
+    ///    are resolved first.
+    /// 4. When X's preamble changed, every query over X's stem is checked;
+    ///    its page is re-resolved and rendered when the result changed or X
+    ///    is in the old or new result (D3a).
+    pub(crate) fn propagate_document_changes(
+        &self,
+        changes: &[DocChange],
+    ) -> std::collections::BTreeSet<String> {
+        use node_store_bridge::store_pipeline as sp;
+
+        let mut render = std::collections::BTreeSet::new();
+        let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+
+        // 1. Fingerprints first; they need no context.
+        struct Pending<'a> {
+            change: &'a DocChange,
+            preamble_changed: bool,
+            needs_ctx: bool,
+        }
+        let mut pending = Vec::with_capacity(changes.len());
+        for change in changes {
+            render.insert(change.url.clone());
+            let old_fp = sp::fingerprint_of(&store, change.previous_root.unwrap_or(change.doc_root));
+            let new_fp = sp::preamble_fingerprint(&store, change.doc_root);
+            sp::store_fingerprint(&mut store, change.doc_root, new_fp);
+            let preamble_changed = old_fp != Some(new_fp);
+            let threads = sp::preamble_threads(&store, change.doc_root);
+            for thread in &threads {
+                self.ensure_stem_node(&mut store, &thread.source);
+            }
+            self.ensure_stem_node(&mut store, &change.stem);
+            let needs_ctx = preamble_changed || !threads.is_empty();
+            pending.push(Pending { change, preamble_changed, needs_ctx });
+        }
+
+        // 2. The context, only if some change needs it.
+        if !pending.iter().any(|p| p.needs_ctx) {
+            return render;
+        }
+        let (url_to_semantic, url_to_root) = self.index_snapshots();
+        let stem_nodes = self.stem_nodes.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let ctx = sp::ThreadContext::build(&store, url_to_semantic, url_to_root, stem_nodes);
+
+        let mut grammars = HashMap::new();
+        let mut to_resolve = std::collections::BTreeSet::new();
+        for p in pending.iter().filter(|p| p.needs_ctx) {
+            // 3. X's own queries.
+            self.resolve_page(&mut store, &ctx, &p.change.url, &mut grammars);
+            if !p.preamble_changed {
+                // Body-only edit: nothing a query reads has changed.
+                continue;
+            }
+
+            // 4. Queries over X's stem.
+            let x_url = sp::normalise_url(&p.change.url);
+            let Some(&stem_node) = ctx.stem_nodes.get(&p.change.stem) else {
+                continue;
+            };
+            for q in sp::queries_over(&store, stem_node) {
+                let old = sp::query_result(&store, q);
+                let Some((page, thread)) = sp::query_thread(&store, &ctx, q) else {
+                    continue;
+                };
+                let has_take =
+                    thread.ops.iter().any(|op| matches!(op, content::LinkOp::Take(_)));
+                // D3a, the conservative interim rule: when X is in the
+                // result, its page re-renders even if the result is
+                // unchanged. The goal is that a change to a referenced page
+                // triggers a more thorough analysis (which fields P's
+                // template reads) that may or may not result in a re-render;
+                // the D3a rule is the conservative interim.
+                let affected = if has_take {
+                    let new = sp::reevaluate_query(&store, &ctx, q);
+                    new.as_ref() != Some(&old)
+                        || old.contains(&x_url)
+                        || new.as_ref().is_some_and(|n| n.contains(&x_url))
+                } else {
+                    // Without `take` the result is the candidates that pass
+                    // the filters (`filter`, `refs-to`), in a stable sort
+                    // order. X's edit changes neither whether any other item
+                    // passes (X's own references feed `refs-to` only through
+                    // X itself, as a source) nor the relative order of any two
+                    // other items. So "the result changed" implies X is in the
+                    // old or the new result: in the old one (stored) or
+                    // admitted now (`thread_admits` on X alone).
+                    old.contains(&x_url) || sp::thread_admits(&store, &ctx, &thread, &page, &x_url)
+                };
+                if affected {
+                    to_resolve.insert(page);
+                }
+            }
+        }
+        for page in to_resolve {
+            self.resolve_page(&mut store, &ctx, &page, &mut grammars);
+            render.insert(page);
+        }
+        render
+    }
+
+    /// The stored result of every link-expression query, keyed by
+    /// `(page, slot)`. A local value for before/after comparisons; not stored.
+    pub(crate) fn snapshot_query_results(&self) -> node_store_bridge::store_pipeline::QueryResults {
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let stem_nodes = self.stem_nodes.read().unwrap_or_else(|e| e.into_inner());
+        node_store_bridge::store_pipeline::snapshot_query_results(&store, stem_nodes.values())
+    }
+
+    /// The declared-reference index over every document in the store
+    /// (`store_pipeline::links_to_index`).
+    pub fn links_to(&self) -> expressions::LinksToIndex {
+        let docs: Vec<(String, node_store::NodeId)> = self
+            .url_to_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(u, &r)| (u.clone(), r))
+            .collect();
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        node_store_bridge::store_pipeline::links_to_index(&store, &docs)
     }
 
     fn walk_and_store_templates(dir: &std::path::Path, store: &mut node_store::NodeStore) {
@@ -835,17 +1095,17 @@ impl Conductor {
         urls
     }
 
-    /// Build the expression indexes (UrlIndex, StemIndex, EdgeIndex) from the NodeStore.
-    /// This is the NodeStore equivalent of `expressions::build_indexes_from_graph`.
+    /// Build the expression indexes (UrlIndex, StemIndex, LinksToIndex) from
+    /// the NodeStore, for evaluating link expressions at the REPL.
     pub fn build_expression_indexes_from_store_pub(
         &self,
-    ) -> (expressions::UrlIndex, expressions::StemIndex, expressions::EdgeIndex) {
+    ) -> (expressions::UrlIndex, expressions::StemIndex, expressions::LinksToIndex) {
         self.build_expression_indexes_from_store()
     }
 
     fn build_expression_indexes_from_store(
         &self,
-    ) -> (expressions::UrlIndex, expressions::StemIndex, expressions::EdgeIndex) {
+    ) -> (expressions::UrlIndex, expressions::StemIndex, expressions::LinksToIndex) {
         // Collect all (stem, url, root) tuples for item documents without holding locks
         let items: Vec<(String, String, node_store::NodeId)> = {
             let stem_to_roots = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
@@ -871,25 +1131,21 @@ impl Conductor {
         // Materialize DataGraphs — each call acquires its own locks
         let mut url_index: expressions::UrlIndex = std::collections::HashMap::new();
         let mut stem_index: expressions::StemIndex = std::collections::HashMap::new();
-        let mut all_edges = Vec::new();
 
         for (stem_str, url, root) in &items {
             if let Some(data) = self.datagraph_for_document(*root) {
                 let url_path = site_index::UrlPath::new(url);
                 let schema_stem = site_index::SchemaStem::new(stem_str);
 
-                all_edges.extend(expressions::extract_edges(&url_path, &data));
                 url_index.insert(url_path.clone(), data.clone());
                 stem_index.entry(schema_stem).or_default().push((url_path, data));
             }
         }
 
-        let edge_index = expressions::build_edge_index(&all_edges);
-        (url_index, stem_index, edge_index)
+        (url_index, stem_index, self.links_to())
     }
 
     /// Get cached NodeStore-native indexes for incremental page rebuilds.
-    #[allow(dead_code)]
     fn cached_node_indexes(
         &self,
     ) -> (
@@ -937,14 +1193,10 @@ impl Conductor {
                     )
                 };
 
+                // Link expressions are already resolved (establish_derived_state
+                // at the end of populate_node_store); this pass only renders.
                 let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
                 for (_url, sem_root) in &semantic_pairs {
-                    node_store_bridge::store_pipeline::resolve_link_expressions_in_store(
-                        &mut store,
-                        *sem_root,
-                        &node_url_index,
-                        &node_stem_index,
-                    );
                     node_store_bridge::store_pipeline::resolve_cross_references_in_store(
                         &mut store,
                         *sem_root,
@@ -1185,94 +1437,42 @@ impl Conductor {
         self.query_items_from_store(stem)
     }
 
-    /// Return all edges pointing TO the given URL path.
-    ///
-    /// Walks every item page's data graph looking for `Value::LinkExpression`
-    /// entries with a `PathRef` target that matches `target_url`.
+    /// Return all edges pointing TO the given URL path: one per page that
+    /// declares a reference to it (`store_pipeline::links_to_index`), sorted
+    /// by source.
     pub fn query_edges_to(&self, target_url: &str) -> Vec<site_index::Edge> {
-        let target = site_index::UrlPath::new(target_url);
-        self.collect_all_edges()
+        let target = node_store_bridge::store_pipeline::normalise_url(target_url);
+        let mut sources: Vec<String> =
+            self.links_to().remove(&target).unwrap_or_default().into_iter().collect();
+        sources.sort();
+        sources
             .into_iter()
-            .filter(|e| e.target == target)
+            .map(|source| site_index::Edge {
+                source: site_index::UrlPath::new(&source),
+                target: site_index::UrlPath::new(&target),
+            })
             .collect()
     }
 
-    /// Return all edges originating FROM the given URL path.
-    ///
-    /// Walks every item page's data graph looking for `Value::LinkExpression`
-    /// entries with a `PathRef` target originating from `source_url`.
+    /// Return all edges originating FROM the given URL path: one per page it
+    /// declares a reference to (`store_pipeline::links_to_index`), sorted by
+    /// target.
     pub fn query_edges_from(&self, source_url: &str) -> Vec<site_index::Edge> {
-        let source = site_index::UrlPath::new(source_url);
-        self.collect_all_edges()
+        let source = node_store_bridge::store_pipeline::normalise_url(source_url);
+        let mut targets: Vec<String> = self
+            .links_to()
             .into_iter()
-            .filter(|e| e.source == source)
+            .filter(|(_, sources)| sources.contains(&source))
+            .map(|(target, _)| target)
+            .collect();
+        targets.sort();
+        targets
+            .into_iter()
+            .map(|target| site_index::Edge {
+                source: site_index::UrlPath::new(&source),
+                target: site_index::UrlPath::new(&target),
+            })
             .collect()
-    }
-
-    /// Collect all edges from semantic content and raw content.
-    /// Semantic content has resolved link expressions (preamble slots).
-    /// Raw content walk catches body link expressions (PathRef only).
-    fn collect_all_edges(&self) -> Vec<site_index::Edge> {
-        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let url_to_semantic = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
-        let url_to_root = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
-
-        let mut edges = Vec::new();
-
-        // Source 1: Semantic content edges (Reference + ConsistsOf)
-        // Reference edges are cross-document links (resolved path-ref, thread-expr).
-        // ConsistsOf edges are structural parts (synthesized link records with href).
-        let root_to_url: HashMap<node_store::NodeId, &String> = url_to_root.iter()
-            .map(|(url, &root)| (root, url))
-            .collect();
-        let sem_to_url: HashMap<node_store::NodeId, &String> = url_to_semantic.iter()
-            .map(|(url, &sem)| (sem, url))
-            .collect();
-        for (source_url, &sem_id) in url_to_semantic.iter() {
-            // Check Reference edges (cross-document links)
-            for (_, target) in store.references(sem_id) {
-                // Direct reference (may point to doc root or semantic root after rewiring)
-                if let Some(target_url) = root_to_url.get(&target).or_else(|| sem_to_url.get(&target)) {
-                    edges.push(site_index::Edge {
-                        source: site_index::UrlPath::new(source_url),
-                        target: site_index::UrlPath::new(target_url.as_str()),
-                    });
-                }
-                // Link element with href matching a known page URL
-                if let Some(href) = node_store_bridge::content_bridge::find_attr_text(&store, target, "href")
-                    && url_to_root.contains_key(&href)
-                {
-                    edges.push(site_index::Edge {
-                        source: site_index::UrlPath::new(source_url),
-                        target: site_index::UrlPath::new(&href),
-                    });
-                }
-            }
-            // Check ConsistsOf edges (structural parts with href, e.g. synthesized link)
-            for (_, part) in store.consists_of(sem_id) {
-                if let Some(href) = node_store_bridge::content_bridge::find_attr_text(&store, part, "href")
-                    && href != *source_url  // skip self-references (synthesized link record)
-                    && url_to_root.contains_key(&href)
-                {
-                    edges.push(site_index::Edge {
-                        source: site_index::UrlPath::new(source_url),
-                        target: site_index::UrlPath::new(&href),
-                    });
-                }
-            }
-        }
-
-        // Source 2: Raw NodeStore walk for body PathRef link expressions
-        for (url, &root) in url_to_root.iter() {
-            collect_edges_from_node(&store, root, url, &mut edges);
-        }
-
-        // Deduplicate
-        edges.sort_by(|a, b| {
-            (a.source.as_str(), a.target.as_str()).cmp(&(b.source.as_str(), b.target.as_str()))
-        });
-        edges.dedup_by(|a, b| a.source == b.source && a.target == b.target);
-        edges
     }
 
     /// Get in-memory document text, falling back to disk.
@@ -1357,14 +1557,15 @@ impl Conductor {
         stems
     }
 
-    /// Rebuild a single content page reading from the already-mutated NodeStore.
+    /// Render one page to the output directory from the NodeStore.
     ///
     /// `doc_root` is the document root NodeId (from `url_to_root` / `doc_root_for_path`).
-    /// The store must already contain up-to-date content for this document; this
-    /// function does NOT re-ingest source text.
+    /// The store must already contain up-to-date, resolved content for this
+    /// page (see `propagate_document_changes`); this function neither
+    /// re-ingests source text nor evaluates link expressions.
     ///
-    /// Returns the list of URL paths that were rebuilt, or an error string.
-    pub(crate) fn rebuild_page_from_store(&self, doc_root: node_store::NodeId) -> Result<Vec<String>, String> {
+    /// Returns the list of URL paths that were rendered, or an error string.
+    pub(crate) fn render_page_output(&self, doc_root: node_store::NodeId) -> Result<Vec<String>, String> {
         // Read stem, url, and file from the document root's attributes
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
         let stem = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "stem")
@@ -1395,9 +1596,6 @@ impl Conductor {
         {
             let (node_url_index, node_stem_index) = self.cached_node_indexes();
             let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
-            node_store_bridge::store_pipeline::resolve_link_expressions_in_store(
-                &mut store, sem_root, &node_url_index, &node_stem_index,
-            );
             node_store_bridge::store_pipeline::resolve_cross_references_in_store(
                 &mut store, sem_root, &node_url_index,
             );
@@ -1465,35 +1663,60 @@ impl Conductor {
         Ok(vec![url_path])
     }
 
-    /// Rebuild pages for a batch of content file paths (relative to site root).
+    /// Rebuild pages for a batch of content file paths (relative to site root)
+    /// whose nodes were mutated in place (NED, `EditSlot`, `EditBodyElement`,
+    /// suggestion accept).
     ///
-    /// For each path, looks up the document root via `path_to_doc_root` and calls
-    /// `rebuild_page_from_store`. Unknown paths are silently skipped.
+    /// Each path's document is a change for `propagate_document_changes`
+    /// (with no previous root: the fingerprint stored on the live root is the
+    /// old value); every URL it returns is rendered once. Unknown paths are
+    /// silently skipped.
     ///
     /// Returns `(rebuilt_urls, failed_urls)`.
     pub(crate) fn rebuild_pages_for_modified_nodes(
         &self,
         paths: &[PathBuf],
     ) -> (Vec<String>, Vec<String>) {
+        let mut changes = Vec::new();
+        let mut path_of_url: HashMap<String, &PathBuf> = HashMap::new();
+        {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            for path in paths {
+                let Some(root) = self.doc_root_for_path(path) else {
+                    continue; // not in store — skip silently
+                };
+                let url = node_store_bridge::content_bridge::find_attr_text(&store, root, "url");
+                let stem = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem");
+                if let (Some(url), Some(stem)) = (url, stem) {
+                    path_of_url.insert(url.clone(), path);
+                    changes.push(DocChange { url, stem, doc_root: root, previous_root: None });
+                }
+            }
+        }
+
+        let urls = self.propagate_document_changes(&changes);
         let mut rebuilt = Vec::new();
         let mut failed = Vec::new();
-
-        for path in paths {
-            let root = match self.doc_root_for_path(path) {
-                Some(r) => r,
-                None => continue, // not in store — skip silently
-            };
-            match self.rebuild_page_from_store(root) {
+        for url in urls {
+            match self.render_url(&url) {
                 Ok(urls) => rebuilt.extend(urls),
                 Err(e) => {
-                    eprintln!("conductor: rebuild failed for {}: {e}", path.display());
-                    // Use the path stem as a best-effort URL for reporting
-                    let url = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    failed.push(url);
+                    // A changed document is reported by its path stem (best
+                    // effort, as before); a dependent page by its URL.
+                    let reported = match path_of_url.get(&url) {
+                        Some(path) => {
+                            eprintln!("conductor: rebuild failed for {}: {e}", path.display());
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                                .to_string()
+                        }
+                        None => {
+                            eprintln!("conductor: rebuild failed for {url}: {e}");
+                            url
+                        }
+                    };
+                    failed.push(reported);
                 }
             }
         }
@@ -1501,13 +1724,25 @@ impl Conductor {
         (rebuilt, failed)
     }
 
+    /// Render the page at `url` (`render_page_output`).
+    fn render_url(&self, url: &str) -> Result<Vec<String>, String> {
+        let root = self
+            .document_by_url(url)
+            .ok_or_else(|| format!("no doc root for {url}"))?;
+        self.render_page_output(root)
+    }
+
     /// Rebuild a single content page from in-memory text.
     ///
-    /// This is a thin wrapper around `rebuild_page_from_store` that first
-    /// re-ingests `text` into the NodeStore via `update_document_in_store`.
+    /// Re-ingests `text` into the NodeStore via `update_document_in_store`,
+    /// propagates the change (`propagate_document_changes`) and renders every
+    /// page it returns: the page itself plus the pages whose link-expression
+    /// output changes or contains it.
     ///
-    /// Returns the list of URL paths that were rebuilt, or an error string.
-    /// Errors here are non-fatal: the caller logs and continues.
+    /// Returns the list of URL paths that were rebuilt, or an error string
+    /// when the page itself fails. A dependent page that fails to render is
+    /// logged and left out. Errors here are non-fatal: the caller logs and
+    /// continues.
     fn rebuild_page(&self, content_path: &Path, text: &str) -> Result<Vec<String>, String> {
         // Classify file to get schema stem
         let stem = match self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(content_path) {
@@ -1531,6 +1766,14 @@ impl Conductor {
             .unwrap_or("unknown");
         let url_path = site_index::url_for_stem_slug(&stem, slug);
 
+        // The root this re-ingest supersedes (it keeps its fingerprint).
+        let previous_root = self
+            .path_to_doc_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(Path::new(&site_index::content_file_path(&stem, slug)))
+            .copied();
+
         // Update document in NodeStore (incremental — re-parses and creates semantic content)
         self.update_document_in_store(&url_path, &stem, slug, text, &grammar)?;
 
@@ -1543,7 +1786,21 @@ impl Conductor {
             .copied()
             .ok_or_else(|| format!("no doc root for {url_path} after update"))?;
 
-        self.rebuild_page_from_store(doc_root)
+        let urls = self.propagate_document_changes(&[DocChange {
+            url: url_path.clone(),
+            stem,
+            doc_root,
+            previous_root,
+        }]);
+
+        let mut rebuilt = self.render_page_output(doc_root)?;
+        for url in urls.into_iter().filter(|u| *u != url_path) {
+            match self.render_url(&url) {
+                Ok(pages) => rebuilt.extend(pages),
+                Err(e) => eprintln!("conductor: rebuild failed for dependent page {url}: {e}"),
+            }
+        }
+        Ok(rebuilt)
     }
 
     /// Re-parse a single document and update its semantic content in the NodeStore.
@@ -2557,6 +2814,9 @@ impl Conductor {
                 if let Err(e) = self.build_full_graph() {
                     eprintln!("conductor: full graph rebuild failed: {e}");
                 }
+                // A full re-render (D9). The snapshot comparison CreateContent
+                // uses (`snapshot_query_results` before and after the
+                // repopulate) is the basis for a minimal FileChanged later.
                 self.populate_node_store();
 
                 // 5. Detect stylesheet changes (for reload signalling)
@@ -2635,6 +2895,10 @@ impl Conductor {
                     .build();
                 match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
                     Ok((path, url)) => {
+                        // Link-expression results before the repopulate, to
+                        // find the pages the new document changes.
+                        let results_before = self.snapshot_query_results();
+
                         // Refresh schema cache, site index, and rebuild graph for the new content
                         self.refresh_schema_cache();
                         self.refresh_site_index();
@@ -2642,6 +2906,28 @@ impl Conductor {
                         self.populate_node_store();
 
                         let mut rebuilt_pages: Vec<String> = vec![];
+
+                        // Render the pages whose link-expression results
+                        // changed (the new page itself is rendered below).
+                        let results_after = self.snapshot_query_results();
+                        let changed_pages: std::collections::BTreeSet<String> = results_after
+                            .iter()
+                            .filter(|(key, urls)| results_before.get(*key) != Some(*urls))
+                            .map(|((page, _), _)| page.clone())
+                            .chain(
+                                results_before
+                                    .keys()
+                                    .filter(|key| !results_after.contains_key(*key))
+                                    .map(|(page, _)| page.clone()),
+                            )
+                            .filter(|page| *page != url)
+                            .collect();
+                        for page in changed_pages {
+                            match self.render_url(&page) {
+                                Ok(mut pages) => rebuilt_pages.append(&mut pages),
+                                Err(e) => eprintln!("conductor: rebuild failed for {page}: {e}"),
+                            }
+                        }
 
                         // Rebuild the new content page itself
                         if let Some(text) = self.document_text(&path) {
@@ -3200,158 +3486,48 @@ impl Conductor {
 }
 
 #[cfg(test)]
-mod link_resolution_tests {
-    use super::*;
-
-    /// Verify that `expressions::resolve_link_expressions_in_graph` resolves a PathRef link
-    /// expression to a record from the url_index.
-    #[test]
-    fn resolve_path_ref_replaces_link_expression_with_record() {
-        let mut graph = template::DataGraph::new();
-
-        // A link expression targeting /post/hello
-        let link_expr = template::Value::LinkExpression {
-            text: content::LinkText::Static("Hello Post".to_string()),
-            target: content::LinkTarget::PathRef("/post/hello".to_string()),
-        };
-        graph.insert("highlight", link_expr);
-
-        // Build url_index with the target page
-        let mut target_data = template::DataGraph::new();
-        target_data.insert("title", template::Value::Text("Hello Post Title".to_string()));
-        let mut url_index: expressions::UrlIndex = HashMap::new();
-        url_index.insert(site_index::UrlPath::new("/post/hello"), target_data);
-        let stem_index: expressions::StemIndex = HashMap::new();
-        let edge_index = expressions::build_edge_index(&[]);
-        let current_url = site_index::UrlPath::new("/");
-
-        expressions::resolve_link_expressions_in_graph(
-            &mut graph,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        );
-
-        // After resolution, "highlight" should be a Record with title and href
-        match graph.resolve(&["highlight"]) {
-            Some(template::Value::Record(rec)) => {
-                assert!(
-                    matches!(rec.resolve(&["title"]), Some(template::Value::Text(t)) if t == "Hello Post Title"),
-                    "resolved record should contain title"
-                );
-                assert!(
-                    matches!(rec.resolve(&["href"]), Some(template::Value::Text(h)) if h == "/post/hello"),
-                    "resolved record should contain href"
-                );
-            }
-            other => panic!("expected Record after resolution, got {other:?}"),
-        }
-    }
-
-    /// Verify that `expressions::resolve_link_expressions_in_graph` resolves a ThreadExpr
-    /// to a list of records from the stem_index.
-    #[test]
-    fn resolve_thread_expr_produces_list() {
-        let mut graph = template::DataGraph::new();
-
-        // A thread expression collecting all "post" items
-        let link_expr = template::Value::LinkExpression {
-            text: content::LinkText::Empty,
-            target: content::LinkTarget::ThreadExpr {
-                source: content::Keyword::new("post").unwrap(),
-                operations: vec![],
-            },
-        };
-        graph.insert("posts", link_expr);
-
-        // Build stem_index with two post items
-        let mut post1 = template::DataGraph::new();
-        post1.insert("title", template::Value::Text("Post One".to_string()));
-        let mut post2 = template::DataGraph::new();
-        post2.insert("title", template::Value::Text("Post Two".to_string()));
-
-        let url_index: expressions::UrlIndex = HashMap::new();
-        let mut stem_index: expressions::StemIndex = HashMap::new();
-        stem_index.insert(
-            site_index::SchemaStem::new("post"),
-            vec![
-                (site_index::UrlPath::new("/post/one"), post1),
-                (site_index::UrlPath::new("/post/two"), post2),
-            ],
-        );
-        let edge_index = expressions::build_edge_index(&[]);
-        let current_url = site_index::UrlPath::new("/");
-
-        expressions::resolve_link_expressions_in_graph(
-            &mut graph,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        );
-
-        match graph.resolve(&["posts"]) {
-            Some(template::Value::List(items)) => {
-                assert_eq!(items.len(), 2, "expected 2 items in resolved list");
-            }
-            other => panic!("expected List after resolution, got {other:?}"),
-        }
-    }
-
-    /// Verify that link expressions with unknown paths resolve to Absent.
-    #[test]
-    fn resolve_unknown_path_ref_becomes_absent() {
-        let mut graph = template::DataGraph::new();
-        graph.insert(
-            "link",
-            template::Value::LinkExpression {
-                text: content::LinkText::Empty,
-                target: content::LinkTarget::PathRef("/not/found".to_string()),
-            },
-        );
-
-        let url_index: expressions::UrlIndex = HashMap::new();
-        let stem_index: expressions::StemIndex = HashMap::new();
-        let edge_index = expressions::build_edge_index(&[]);
-        let current_url = site_index::UrlPath::new("/");
-
-        expressions::resolve_link_expressions_in_graph(
-            &mut graph,
-            &url_index,
-            &stem_index,
-            &current_url,
-            &edge_index,
-        );
-
-        assert!(
-            matches!(graph.resolve(&["link"]), Some(template::Value::Absent) | None),
-            "unknown path ref should resolve to Absent"
-        );
-    }
-}
-
-#[cfg(test)]
 mod query_edges_tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Where the test document's PathRef link expression sits.
+    #[derive(Clone, Copy)]
+    enum Placement {
+        PreambleSlot,
+        Body,
+    }
+
     /// Build a conductor with a document in the NodeStore that contains a
     /// link-expression with a path-ref target.
-    fn make_conductor_with_link_expression(source_url: &str, target_url: &str) -> Conductor {
+    fn make_conductor_with_link_expression(
+        source_url: &str,
+        target_url: &str,
+        placement: Placement,
+    ) -> Conductor {
         let repo = site_repository::SiteRepository::builder().build();
         let conductor = Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap();
 
+        let link = schema::Spanned {
+            node: content::ContentElement::LinkExpression {
+                text: content::LinkText::Empty,
+                target: content::LinkTarget::PathRef(target_url.to_string()),
+                slot: None,
+            },
+            span: schema::Span { start: 0, end: 0 },
+        };
+        let (preamble, body) = match placement {
+            Placement::PreambleSlot => (
+                im::vector![content::DocumentSlot {
+                    name: schema::SlotName::new("author"),
+                    elements: im::vector![link],
+                }],
+                im::vector![],
+            ),
+            Placement::Body => (im::vector![], im::vector![link]),
+        };
         let doc = content::Document {
-            preamble: im::vector![],
-            body: im::vector![schema::Spanned {
-                node: content::ContentElement::LinkExpression {
-                    text: content::LinkText::Empty,
-                    target: content::LinkTarget::PathRef(target_url.to_string()),
-                    slot: None,
-                },
-                span: schema::Span { start: 0, end: 0 },
-            }],
+            preamble,
+            body,
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
@@ -3409,9 +3585,32 @@ mod query_edges_tests {
         conductor
     }
 
+    /// REPL expectation change (package G): only declared references count,
+    /// and body references wait for ADR-059, so a body PathRef is no edge.
+    #[test]
+    fn query_edges_ignore_body_path_refs() {
+        let conductor =
+            make_conductor_with_link_expression("/post/alpha", "/author/alice", Placement::Body);
+        assert!(conductor.query_edges_to("/author/alice").is_empty());
+        assert!(conductor.query_edges_from("/post/alpha").is_empty());
+    }
+
+    #[test]
+    fn query_edges_normalise_path_ref_targets() {
+        let conductor =
+            make_conductor_with_link_expression("/post/alpha", "author/alice", Placement::PreambleSlot);
+        let edges = conductor.query_edges_to("/author/alice");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, site_index::UrlPath::new("/author/alice"));
+    }
+
     #[test]
     fn query_edges_to_finds_path_ref_link_expressions() {
-        let conductor = make_conductor_with_link_expression("/post/alpha", "/author/alice");
+        let conductor = make_conductor_with_link_expression(
+            "/post/alpha",
+            "/author/alice",
+            Placement::PreambleSlot,
+        );
 
         let edges = conductor.query_edges_to("/author/alice");
         assert_eq!(
@@ -3426,7 +3625,11 @@ mod query_edges_tests {
 
     #[test]
     fn query_edges_from_finds_path_ref_link_expressions() {
-        let conductor = make_conductor_with_link_expression("/post/alpha", "/author/alice");
+        let conductor = make_conductor_with_link_expression(
+            "/post/alpha",
+            "/author/alice",
+            Placement::PreambleSlot,
+        );
 
         let edges = conductor.query_edges_from("/post/alpha");
         assert_eq!(
@@ -7115,7 +7318,6 @@ mod link_expression_pipeline_tests {
     }
 
     #[test]
-    #[ignore = "enabled by package G"]
     fn full_build_applies_link_expression_operations() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
@@ -7174,5 +7376,487 @@ mod link_expression_pipeline_tests {
             vec![("title".to_string(), 1), ("latest".to_string(), 1), ("news".to_string(), 1)],
             "each link expression must land in its own slot"
         );
+    }
+
+    // ── Helpers for the pins and incremental tests ───────────────────────────
+
+    use std::collections::BTreeSet;
+
+    fn write(tmp: &tempfile::TempDir, rel: &str, text: &str) {
+        std::fs::write(tmp.path().join(rel), text).unwrap();
+    }
+
+    /// A post whose author slot is replaced by `author_lines` (verbatim).
+    fn post_with(title: &str, published: &str, category: &str, author_lines: &str) -> String {
+        format!("# {title}\n\n{published}\n\n{category}\n\n{author_lines}\n\n----\n\nBody of {title}.\n")
+    }
+
+    fn set(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn pages_of(result: &CommandResult) -> BTreeSet<String> {
+        result
+            .events
+            .iter()
+            .flat_map(|ev| match ev {
+                ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
+                _ => vec![],
+            })
+            .collect()
+    }
+
+    fn document_changed(conductor: &Conductor, tmp: &tempfile::TempDir, rel: &str, text: &str) -> BTreeSet<String> {
+        let result = conductor.handle_command(Command::DocumentChanged {
+            path: tmp.path().join(rel).to_string_lossy().into_owned(),
+            text: text.to_string(),
+        });
+        assert!(
+            !result.events.iter().any(|e| matches!(e, ConductorEvent::BuildFailed { .. })),
+            "build failed: {:?}",
+            result.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>()
+        );
+        pages_of(&result)
+    }
+
+    fn count(list: &[String], url: &str) -> usize {
+        list.iter().filter(|u| *u == url).count()
+    }
+
+    /// The unassigned elements of the page at `url`.
+    fn unassigned(conductor: &Conductor, url: &str) -> Vec<content::ContentElement> {
+        let root = conductor.document_by_url(url).unwrap_or_else(|| panic!("no doc {url}"));
+        let store = conductor.node_store.read().unwrap();
+        node_store_bridge::content_bridge::store_to_document(&store, root)
+            .unwrap()
+            .unassigned
+            .iter()
+            .map(|s| s.node.clone())
+            .collect()
+    }
+
+    // ── U1–U5: every declared reference counts ───────────────────────────────
+
+    /// U1: p5 links `/author/a` from its author slot and also has an
+    /// unassigned paragraph (an Error). No publishability filter applies.
+    #[test]
+    fn u1_unpublishable_post_counts_for_refs_to() {
+        let tmp = build_site();
+        write(&tmp, "content/post/p5.md", &post_with("Post five", "2025-06-01", "notes", "[a](/author/a)\n\nStray paragraph."));
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            unassigned(&conductor, "/post/p5"),
+            vec![content::ContentElement::Paragraph { text: "Stray paragraph.".to_string() }]
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3", "/post/p5"])
+        );
+    }
+
+    /// U2: p6's only link to `/author/a` is an unassigned PathRef whose
+    /// marker binds no slot.
+    #[test]
+    fn u2_unassigned_bad_marker_path_ref_counts() {
+        let tmp = build_site();
+        write(&tmp, "content/post/p6.md", &post_with("Post six", "2025-06-02", "notes", "[A](:author/a) {#nope}"));
+        let conductor = make_conductor(&tmp);
+        assert!(
+            matches!(
+                unassigned(&conductor, "/post/p6").as_slice(),
+                [content::ContentElement::LinkExpression {
+                    target: content::LinkTarget::PathRef(_),
+                    ..
+                }]
+            ),
+            "{:?}",
+            unassigned(&conductor, "/post/p6")
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3", "/post/p6"])
+        );
+    }
+
+    /// U3: p7's only link is an unassigned marker-shaped paragraph.
+    #[test]
+    fn u3_unassigned_marker_shaped_paragraph_counts() {
+        let tmp = build_site();
+        write(&tmp, "content/post/p7.md", &post_with("Post seven", "2025-12-01", "notes", "[A](/author/a) {#nope}"));
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            unassigned(&conductor, "/post/p7"),
+            vec![content::ContentElement::Paragraph { text: "[A](/author/a) {#nope}".to_string() }]
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3", "/post/p7"])
+        );
+    }
+
+    /// U4: after p6 and p7 are fixed (the link moved into the author slot),
+    /// each appears exactly once.
+    #[test]
+    fn u4_fixed_posts_appear_exactly_once() {
+        let tmp = build_site();
+        // p6: the marked PathRef now names the author slot.
+        write(&tmp, "content/post/p6.md", &post_with("Post six", "2025-06-02", "notes", "[A](:author/a) {#author}"));
+        // p7: a plain link fills the author slot by position (plain links
+        // take no marker).
+        write(&tmp, "content/post/p7.md", &post_with("Post seven", "2025-12-01", "notes", "[A](/author/a)"));
+        let conductor = make_conductor(&tmp);
+        assert!(unassigned(&conductor, "/post/p6").is_empty());
+        assert!(unassigned(&conductor, "/post/p7").is_empty());
+        let posts = slot_urls(&conductor, "/author/a", "posts");
+        assert_eq!(posts, urls(&["/post/p1", "/post/p3", "/post/p6", "/post/p7"]));
+        assert_eq!(count(&posts, "/post/p6"), 1);
+        assert_eq!(count(&posts, "/post/p7"), 1);
+    }
+
+    /// U5: p8's only link to `/author/a` is in an ordinary unassigned
+    /// paragraph.
+    #[test]
+    fn u5_link_in_ordinary_unassigned_paragraph_counts() {
+        let tmp = build_site();
+        write(&tmp, "content/post/p8.md", &post_with("Post eight", "2025-06-03", "notes", "See [A](/author/a) for more."));
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            unassigned(&conductor, "/post/p8"),
+            vec![content::ContentElement::Paragraph { text: "See [A](/author/a) for more.".to_string() }]
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3", "/post/p8"])
+        );
+    }
+
+    /// Body references do not count yet (ADR-059).
+    #[test]
+    fn body_links_do_not_count() {
+        let tmp = build_site();
+        write(
+            &tmp,
+            "content/post/p9.md",
+            "# Post nine\n\n2025-06-04\n\nnotes\n\n[b](/author/b)\n\n----\n\nSee [A](/author/a).\n",
+        );
+        let conductor = make_conductor(&tmp);
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2", "/post/p9"]));
+    }
+
+    // ── Parity: DataGraph and store adapters read the same field text ───────
+
+    #[test]
+    fn datagraph_and_store_adapters_agree_on_field_text() {
+        use expressions::ThreadItem;
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        for url in ["/post/p1", "/post/p2", "/post/p3"] {
+            let root = conductor.document_by_url(url).unwrap();
+            let sem = conductor.semantic_content_by_url(url).unwrap();
+            let data = conductor.datagraph_for_document(root).unwrap();
+            let store = conductor.node_store.read().unwrap();
+            let item = node_store_bridge::store_pipeline::SemItem {
+                store: &store,
+                sem_root: sem,
+                url: url.to_string(),
+            };
+            for field in ["title", "published", "category"] {
+                let from_graph = expressions::graph_field_text(&data, field);
+                assert!(from_graph.is_some(), "{url} {field}");
+                assert_eq!(item.field_text(field), from_graph, "{url} {field}");
+            }
+        }
+    }
+
+    // ── Derived state ────────────────────────────────────────────────────────
+
+    #[test]
+    fn full_build_records_query_nodes_and_fingerprints() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let snapshot = conductor.snapshot_query_results();
+        let key = |p: &str, s: &str| (p.to_string(), s.to_string());
+        assert_eq!(snapshot.get(&key("/page/home", "latest")), Some(&urls(&["/post/p3", "/post/p2"])));
+        assert_eq!(snapshot.get(&key("/page/home", "news")), Some(&urls(&["/post/p2", "/post/p3"])));
+        assert_eq!(snapshot.get(&key("/author/a", "posts")), Some(&urls(&["/post/p1", "/post/p3"])));
+        assert_eq!(snapshot.get(&key("/author/b", "posts")), Some(&urls(&["/post/p2"])));
+        assert_eq!(snapshot.len(), 4);
+        let store = conductor.node_store.read().unwrap();
+        for url in ["/post/p1", "/author/a", "/page/home"] {
+            let root = conductor.document_by_url(url).unwrap();
+            assert_eq!(
+                node_store_bridge::store_pipeline::fingerprint_of(&store, root),
+                Some(node_store_bridge::store_pipeline::preamble_fingerprint(&store, root)),
+                "{url}"
+            );
+        }
+    }
+
+    /// Re-ingesting a page with queries replaces its query nodes: one per
+    /// thread expression, recorded against the live semantic root.
+    #[test]
+    fn reingested_page_keeps_one_query_node_per_expression() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        for _ in 0..2 {
+            assert_eq!(
+                document_changed(&conductor, &tmp, "content/page/home.md", HOME),
+                set(&["/page/home"])
+            );
+        }
+        let snapshot = conductor.snapshot_query_results();
+        assert_eq!(snapshot.len(), 4);
+        let store = conductor.node_store.read().unwrap();
+        let stem_node = conductor.stem_nodes.read().unwrap()["post"];
+        let queries = node_store_bridge::store_pipeline::queries_over(&store, stem_node);
+        assert_eq!(queries.len(), 4, "{queries:?}");
+        drop(store);
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
+    }
+
+    // ── Incremental propagation (step 9) ─────────────────────────────────────
+
+    /// 1: a body-only edit re-renders only that document.
+    #[test]
+    fn incremental_body_only_edit_renders_only_the_document() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let text = post("Post one", "a", "2026-01-10", "notes").replace("Body of Post one.", "A new body.");
+        assert_eq!(document_changed(&conductor, &tmp, "content/post/p1.md", &text), set(&["/post/p1"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
+    }
+
+    /// 2: a sort key change re-renders the page whose result changes and the
+    /// page whose result contains the document.
+    #[test]
+    fn incremental_published_change_via_document_changed() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let text = post("Post one", "a", "2026-04-01", "notes");
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/post/p1.md", &text),
+            set(&["/post/p1", "/page/home", "/author/a"])
+        );
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+    }
+
+    /// 3: the same edit through NED `EditSlot`.
+    #[test]
+    fn incremental_published_change_via_edit_slot() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let result = conductor.handle_command(Command::EditSlot {
+            file: "content/post/p1.md".to_string(),
+            slot: "published".to_string(),
+            value: "2026-04-01".to_string(),
+        });
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert_eq!(pages_of(&result), set(&["/post/p1", "/page/home", "/author/a"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p1", "/post/p3"]));
+    }
+
+    /// 4: a title change re-renders every page whose result contains it.
+    #[test]
+    fn incremental_title_change() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let text = post("Post three renamed", "a", "2026-03-10", "news");
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/post/p3.md", &text),
+            set(&["/post/p3", "/page/home", "/author/a"])
+        );
+    }
+
+    /// 5: changing the author moves the post between author pages.
+    #[test]
+    fn incremental_author_change() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let text = post("Post one", "b", "2026-01-10", "notes");
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/post/p1.md", &text),
+            set(&["/post/p1", "/author/a", "/author/b"])
+        );
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p1", "/post/p2"]));
+    }
+
+    /// 6a/6b: create a post (scaffold), then fill it in.
+    #[test]
+    fn incremental_create_then_fill() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+
+        // 6a: the empty scaffold has no `published`, which sorts first under
+        // `:desc`, so `latest` changes.
+        let result = conductor.handle_command(Command::CreateContent {
+            stem: "post".to_string(),
+            slug: "p4".to_string(),
+        });
+        assert!(matches!(result.response, Response::ContentCreated(_)), "{:?}", result.response);
+        assert_eq!(pages_of(&result), set(&["/post/p4", "/page/home"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p4", "/post/p3"]));
+
+        // 6b
+        let text = post("Post four", "b", "2026-05-01", "notes");
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/post/p4.md", &text),
+            set(&["/post/p4", "/page/home", "/author/b"])
+        );
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p4", "/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2", "/post/p4"]));
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+    }
+
+    /// 7: removing a post is a full rebuild (D9); the results reflect it.
+    #[test]
+    fn file_removed_full_rebuild() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let p2 = tmp.path().join("content/post/p2.md");
+        std::fs::remove_file(&p2).unwrap();
+        conductor.handle_command(Command::FileChanged {
+            paths: vec![p2.to_string_lossy().into_owned()],
+        });
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p1"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p3"]));
+        assert!(slot_urls(&conductor, "/author/b", "posts").is_empty());
+    }
+
+    /// B1: external URLs, anchors and `:path` text in running prose are not
+    /// page references.
+    #[test]
+    fn external_links_are_not_page_references() {
+        let tmp = build_site();
+        write(&tmp, "content/author/c.md", "# Author C\n\n[Site](https://example.com)\n\n----\n\nAbout C.\n");
+        write(
+            &tmp,
+            "content/post/p10.md",
+            &post_with("Post ten", "2025-06-05", "notes", "See [x](https://x.org) and [a](:author/a)."),
+        );
+        let conductor = make_conductor(&tmp);
+        assert!(conductor.query_edges_from("/author/c").is_empty());
+        let targets: Vec<String> = conductor
+            .query_edges_from("/post/p10")
+            .into_iter()
+            .map(|e| e.target.as_str().to_string())
+            .collect();
+        assert_eq!(targets, urls(&["/author/a"]));
+    }
+
+    /// B2: a body-only edit of a page with queries renders only that page
+    /// and keeps its results and query nodes.
+    #[test]
+    fn body_only_edit_of_a_page_with_queries() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let text = AUTHOR_A.replace("About A.", "All about A.");
+        assert_eq!(document_changed(&conductor, &tmp, "content/author/a.md", &text), set(&["/author/a"]));
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+        let store = conductor.node_store.read().unwrap();
+        let post_stem = conductor.stem_nodes.read().unwrap()["post"];
+        assert_eq!(node_store_bridge::store_pipeline::queries_over(&store, post_stem).len(), 4);
+    }
+
+    fn queries_over_stem(conductor: &Conductor, stem: &str) -> usize {
+        let store = conductor.node_store.read().unwrap();
+        let node = conductor.stem_nodes.read().unwrap()[stem];
+        node_store_bridge::store_pipeline::queries_over(&store, node).len()
+    }
+
+    /// B4: removing a thread expression removes its query node.
+    #[test]
+    fn removing_a_thread_removes_its_query() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let text = HOME.replace("[In the news](->> :post (filter :category \"news\")) {#news}\n\n", "");
+        assert_eq!(document_changed(&conductor, &tmp, "content/page/home.md", &text), set(&["/page/home"]));
+        let snapshot = conductor.snapshot_query_results();
+        assert_eq!(snapshot.len(), 3, "{snapshot:?}");
+        assert!(!snapshot.contains_key(&("/page/home".to_string(), "news".to_string())));
+        assert_eq!(queries_over_stem(&conductor, "post"), 3);
+    }
+
+    /// B4: changing a thread's source moves its query to the new stem node.
+    #[test]
+    fn changing_a_thread_source_moves_its_query() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let text = HOME.replace(
+            "[In the news](->> :post (filter :category \"news\")) {#news}",
+            "[In the news](->> :author (sort-by :name)) {#news}",
+        );
+        document_changed(&conductor, &tmp, "content/page/home.md", &text);
+        assert_eq!(queries_over_stem(&conductor, "post"), 3);
+        assert_eq!(queries_over_stem(&conductor, "author"), 1);
+        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/author/a", "/author/b"]));
+    }
+
+    /// Replace the text of the first Text node under `slot`'s first element of
+    /// `url` (or its `attr` attribute), in place.
+    fn edit_in_place(conductor: &Conductor, url: &str, slot: &str, attr: Option<&str>, value: &str) {
+        let root = conductor.document_by_url(url).unwrap();
+        let mut store = conductor.node_store.write().unwrap();
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble").unwrap();
+        let slot_node = store
+            .children(preamble)
+            .into_iter()
+            .find(|&s| {
+                node_store_bridge::content_bridge::find_attr_text(&store, s, "name").as_deref() == Some(slot)
+            })
+            .unwrap();
+        let block = store.children(slot_node)[0];
+        let text = match attr {
+            Some(attr) => store
+                .attributes(block)
+                .into_iter()
+                .find(|(n, _)| store.resolve_name(*n) == attr)
+                .map(|(_, v)| v)
+                .unwrap(),
+            None => store.children(block)[0],
+        };
+        store.replace_node(text, node_store::Node::Text(value.to_string()));
+    }
+
+    /// B4: a batch of in-place edits renders the exact union of affected pages.
+    #[test]
+    fn modified_nodes_batch_renders_the_union() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_in_place(&conductor, "/post/p1", "author", Some("href"), "/author/b");
+        edit_in_place(&conductor, "/post/p3", "published", None, "2026-04-01");
+        let (rebuilt, failed) = conductor.rebuild_pages_for_modified_nodes(&[
+            PathBuf::from("content/post/p1.md"),
+            PathBuf::from("content/post/p3.md"),
+        ]);
+        assert!(failed.is_empty(), "{failed:?}");
+        let rebuilt: BTreeSet<String> = rebuilt.into_iter().collect();
+        assert_eq!(rebuilt, set(&["/post/p1", "/post/p3", "/page/home", "/author/a", "/author/b"]));
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p1", "/post/p2"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
+    }
+
+    /// 8: fixing U3's p7 (moving its link into the author slot) keeps it in
+    /// A's posts exactly once and re-renders p7 and A (D3a: p7's preamble
+    /// changed and p7 is in A's result).
+    #[test]
+    fn incremental_fixing_an_unassigned_reference() {
+        let tmp = build_site();
+        write(&tmp, "content/post/p7.md", &post_with("Post seven", "2025-12-01", "notes", "[A](/author/a) {#nope}"));
+        let conductor = make_conductor(&tmp);
+        assert_eq!(count(&slot_urls(&conductor, "/author/a", "posts"), "/post/p7"), 1);
+        let fixed = post_with("Post seven", "2025-12-01", "notes", "[A](/author/a)");
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/post/p7.md", &fixed),
+            set(&["/post/p7", "/author/a"])
+        );
+        let posts = slot_urls(&conductor, "/author/a", "posts");
+        assert_eq!(count(&posts, "/post/p7"), 1, "{posts:?}");
+        assert_eq!(posts, urls(&["/post/p1", "/post/p3", "/post/p7"]));
     }
 }

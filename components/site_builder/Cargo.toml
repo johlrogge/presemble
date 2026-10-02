@@ -8,7 +8,6 @@ interface = "site_builder"
 
 [dependencies]
 content = { workspace = true }
-expressions = { workspace = true }
 schema = { workspace = true }
 site_index = { workspace = true }
 site_repository = { workspace = true }

@@ -20,7 +20,7 @@
 
 use std::fmt;
 
-use crate::document::{Keyword, LinkOp, LinkTarget, RefsToTarget};
+use crate::document::{Keyword, LinkOp, LinkTarget, RefsToTarget, SortDirection};
 use crate::parser::{diagnose_marker_paragraph, is_marker_paragraph};
 
 /// Why a link-expression destination does not match the grammar.
@@ -501,16 +501,16 @@ impl Cursor<'_> {
             "sort-by" => {
                 self.require_ws()?;
                 let field = self.keyword()?;
-                let mut descending = false;
+                let mut direction = SortDirection::Ascending;
                 if self.ws() {
                     let at = self.pos;
-                    descending = match self.word() {
-                        ":asc" => false,
-                        ":desc" => true,
+                    direction = match self.word() {
+                        ":asc" => SortDirection::Ascending,
+                        ":desc" => SortDirection::Descending,
                         _ => return Err(LinkExpressionError::ExpectedDirection { at }),
                     };
                 }
-                LinkOp::SortBy { field, descending }
+                LinkOp::SortBy { field, direction }
             }
             "take" => {
                 self.require_ws()?;
@@ -578,15 +578,15 @@ mod tests {
     fn sort_by_defaults_to_ascending() {
         assert_eq!(
             ops("->> :post (sort-by :title)"),
-            vec![LinkOp::SortBy { field: kw("title"), descending: false }]
+            vec![LinkOp::SortBy { field: kw("title"), direction: SortDirection::Ascending }]
         );
         assert_eq!(
             ops("->> :post (sort-by :title :asc)"),
-            vec![LinkOp::SortBy { field: kw("title"), descending: false }]
+            vec![LinkOp::SortBy { field: kw("title"), direction: SortDirection::Ascending }]
         );
         assert_eq!(
             ops("->> :post (sort-by :title :desc)"),
-            vec![LinkOp::SortBy { field: kw("title"), descending: true }]
+            vec![LinkOp::SortBy { field: kw("title"), direction: SortDirection::Descending }]
         );
     }
 

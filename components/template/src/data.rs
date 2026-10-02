@@ -1046,7 +1046,7 @@ mod tests {
                 operations: vec![
                     content::LinkOp::SortBy {
                         field: content::Keyword::new("published").unwrap(),
-                        descending: true,
+                        direction: content::SortDirection::Descending,
                     },
                     content::LinkOp::Take(4),
                 ],

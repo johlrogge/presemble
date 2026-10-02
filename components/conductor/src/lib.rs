@@ -1003,10 +1003,10 @@ mod tests {
         );
     }
 
-    // ── Phase B4: rebuild_page_from_store ─────────────────────────────────────
+    // ── Phase B4: render_page_output ──────────────────────────────────────────
 
     /// Build a two-post conductor that uses a simple HTML template (no evaluator forms),
-    /// so that `rebuild_page_from_store` can actually render without a parse error.
+    /// so that `render_page_output` can actually render without a parse error.
     fn two_post_conductor_html_template() -> (tempfile::TempDir, Conductor) {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1041,12 +1041,12 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_page_from_store_returns_url_for_known_document() {
+    fn render_page_output_returns_url_for_known_document() {
         let (_dir, conductor) = two_post_conductor_html_template();
         let doc_root = conductor
             .document_by_url("/post/first")
             .expect("document_by_url should return Some for /post/first");
-        let result = conductor.rebuild_page_from_store(doc_root);
+        let result = conductor.render_page_output(doc_root);
         match result {
             Ok(urls) => {
                 assert!(
@@ -1054,7 +1054,7 @@ mod tests {
                     "rebuilt URLs should contain /post/first, got: {urls:?}"
                 );
             }
-            Err(e) => panic!("rebuild_page_from_store returned error: {e}"),
+            Err(e) => panic!("render_page_output returned error: {e}"),
         }
     }
 

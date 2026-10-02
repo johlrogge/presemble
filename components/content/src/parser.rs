@@ -164,6 +164,20 @@ fn read_pulldown_link_expression(expr: &str) -> Option<(LinkText, LinkTarget)> {
     Some((parse_link_text(&text), target))
 }
 
+/// The inline link destinations in a paragraph source, in order.
+///
+/// The paragraph is scanned with pulldown-cmark; every link's destination is
+/// returned as written. Image destinations are left out. Used to count the
+/// references in paragraphs that fill no slot (ADR-058 §8).
+pub fn paragraph_link_destinations(source: &str) -> Vec<String> {
+    Parser::new_ext(source, PARSER_OPTIONS)
+        .filter_map(|event| match event {
+            Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Parse a markdown content document and return a `FlatDocument` with source byte spans.
 ///
 /// Each element in `doc.elements` is a `Spanned<ContentElement>` carrying both
@@ -1336,7 +1350,7 @@ headings
                             operations[0],
                             crate::document::LinkOp::SortBy {
                                 field: kw("published"),
-                                descending: true,
+                                direction: crate::document::SortDirection::Descending,
                             }
                         );
                         assert_eq!(operations[1], crate::document::LinkOp::Take(4));
@@ -1610,7 +1624,13 @@ headings
             vec![thread_expr(
                 LinkText::Empty,
                 "post",
-                vec![LinkOp::SortBy { field: kw("title"), descending: true }, LinkOp::Take(4)]
+                vec![
+                    LinkOp::SortBy {
+                        field: kw("title"),
+                        direction: crate::document::SortDirection::Descending,
+                    },
+                    LinkOp::Take(4),
+                ]
             )]
         );
     }
@@ -1877,7 +1897,7 @@ headings
                     operations[0],
                     crate::document::LinkOp::SortBy {
                         field: kw("published"),
-                        descending: false,
+                        direction: crate::document::SortDirection::Ascending,
                     }
                 );
             }
@@ -1914,5 +1934,38 @@ headings
             super::parse_link_text("(str title)"),
             crate::document::LinkText::Static("(str title)".to_string())
         );
+    }
+
+    // ── paragraph_link_destinations ─────────────────────────────────────────
+
+    #[test]
+    fn paragraph_link_destinations_marker_shaped() {
+        assert_eq!(paragraph_link_destinations("[A](/author/a) {#nope}"), vec!["/author/a"]);
+    }
+
+    #[test]
+    fn paragraph_link_destinations_running_text() {
+        assert_eq!(
+            paragraph_link_destinations("Some text [A](/author/a) more"),
+            vec!["/author/a"]
+        );
+    }
+
+    #[test]
+    fn paragraph_link_destinations_in_order() {
+        assert_eq!(
+            paragraph_link_destinations("[B](/author/b) and [A](/author/a)"),
+            vec!["/author/b", "/author/a"]
+        );
+    }
+
+    #[test]
+    fn paragraph_link_destinations_image_alone_is_empty() {
+        assert!(paragraph_link_destinations("![alt](/images/a.png)").is_empty());
+    }
+
+    #[test]
+    fn paragraph_link_destinations_plain_text_is_empty() {
+        assert!(paragraph_link_destinations("Just some plain text.").is_empty());
     }
 }

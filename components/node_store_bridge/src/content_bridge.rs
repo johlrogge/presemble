@@ -1,5 +1,6 @@
 use content::{
     ContentElement, Document, DocumentSlot, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget,
+    SortDirection,
 };
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
@@ -280,10 +281,14 @@ fn link_target_to_store(target: &LinkTarget, store: &mut NodeStore, parent: Node
 
 fn link_op_to_store(op: &LinkOp, store: &mut NodeStore, parent: NodeId) {
     match op {
-        LinkOp::SortBy { field, descending } => {
+        LinkOp::SortBy { field, direction } => {
             let node = add_child_element(store, parent, "sort-by");
             add_text_attr(store, node, "field", field.as_str());
-            add_bool_attr(store, node, "descending", *descending);
+            let direction = match direction {
+                SortDirection::Ascending => "asc",
+                SortDirection::Descending => "desc",
+            };
+            add_text_attr(store, node, "direction", direction);
         }
         LinkOp::Take(n) => {
             let node = add_child_element(store, parent, "take");
@@ -298,9 +303,10 @@ fn link_op_to_store(op: &LinkOp, store: &mut NodeStore, parent: NodeId) {
             let node = add_child_element(store, parent, "refs-to");
             match refs_to_target {
                 RefsToTarget::SelfRef => {
-                    add_text_attr(store, node, "target", "self");
+                    add_text_attr(store, node, "target-kind", "self");
                 }
                 RefsToTarget::Url(s) => {
+                    add_text_attr(store, node, "target-kind", "url");
                     add_text_attr(store, node, "target", s);
                 }
             }
@@ -685,7 +691,7 @@ fn link_text_from_node(store: &NodeStore, node: NodeId) -> Result<LinkText, Bloc
     }
 }
 
-fn link_target_from_node(store: &NodeStore, node: NodeId) -> Result<LinkTarget, BlockDecodeError> {
+pub(crate) fn link_target_from_node(store: &NodeStore, node: NodeId) -> Result<LinkTarget, BlockDecodeError> {
     const KIND: &str = "link-target";
     let kind = try_attr_text(store, node, KIND, "kind")?;
     match kind.as_str() {
@@ -716,13 +722,18 @@ fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Option<LinkOp>, 
     let op = match kind {
         "sort-by" => {
             let field = try_attr_keyword(store, node, kind, "field")?;
-            let descending = find_attr_bool(store, node, "descending").ok_or_else(|| {
-                BlockDecodeError::MissingAttribute {
-                    kind: kind.to_string(),
-                    attr: "descending".to_string(),
+            let direction = match try_attr_text(store, node, kind, "direction")?.as_str() {
+                "asc" => SortDirection::Ascending,
+                "desc" => SortDirection::Descending,
+                other => {
+                    return Err(BlockDecodeError::InvalidAttribute {
+                        kind: kind.to_string(),
+                        attr: "direction".to_string(),
+                        value: other.to_string(),
+                    });
                 }
-            })?;
-            LinkOp::SortBy { field, descending }
+            };
+            LinkOp::SortBy { field, direction }
         }
         "take" => {
             let value = find_attr_int(store, node, "value").ok_or_else(|| {
@@ -743,14 +754,17 @@ fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Option<LinkOp>, 
             let value = try_attr_text(store, node, kind, "value")?;
             LinkOp::Filter { field, value }
         }
-        "refs-to" => {
-            let target = try_attr_text(store, node, kind, "target")?;
-            if target == "self" {
-                LinkOp::RefsTo(RefsToTarget::SelfRef)
-            } else {
-                LinkOp::RefsTo(RefsToTarget::Url(target))
+        "refs-to" => match try_attr_text(store, node, kind, "target-kind")?.as_str() {
+            "self" => LinkOp::RefsTo(RefsToTarget::SelfRef),
+            "url" => LinkOp::RefsTo(RefsToTarget::Url(try_attr_text(store, node, kind, "target")?)),
+            other => {
+                return Err(BlockDecodeError::InvalidAttribute {
+                    kind: kind.to_string(),
+                    attr: "target-kind".to_string(),
+                    value: other.to_string(),
+                });
             }
-        }
+        },
         _ => return Ok(None),
     };
     Ok(Some(op))
@@ -759,7 +773,7 @@ fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Option<LinkOp>, 
 // ── semantic content ─────────────────────────────────────────────────────────
 
 /// Find a slot node by name within the preamble.
-fn find_slot_by_name(store: &NodeStore, preamble: NodeId, slot_name: &str) -> Option<NodeId> {
+pub(crate) fn find_slot_by_name(store: &NodeStore, preamble: NodeId, slot_name: &str) -> Option<NodeId> {
     for child_id in store.children(preamble) {
         if let Some(Node::Element(name)) = store.get(child_id)
             && store.resolve_name(*name) == "slot"
@@ -782,60 +796,102 @@ fn is_resolved_link(store: &NodeStore, node: NodeId) -> bool {
     matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link")
 }
 
-/// Resolve a link-expression node and create Reference edges on the semantic content node.
-/// PathRef → direct reference to the target document root.
-/// ThreadExpr → references to all item documents matching the stem.
-/// Collect resolved link targets from a link-expression node.
-/// Returns NodeIds of the resolved targets (document roots from url_to_root).
-fn collect_link_targets(
+/// What a link element in a preamble slot points at.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SlotElementTarget {
+    /// A `link` block or a `PathRef` link expression: one page, by its
+    /// normalised URL. `raw` is the destination as written (an href, or a
+    /// PathRef value). `plain_link` is true for a `link` block.
+    Url { url: String, raw: String, plain_link: bool },
+    /// A thread expression over the items of `source`.
+    Thread { source: String, ops: Vec<LinkOp> },
+}
+
+/// The target of a link element (`link` or `link-expression`), or `None` for
+/// any other node. URLs are normalised (`store_pipeline::normalise_url`).
+pub(crate) fn slot_element_target(store: &NodeStore, el: NodeId) -> Option<SlotElementTarget> {
+    if is_resolved_link(store, el) {
+        let href = find_attr_text(store, el, "href")?;
+        return Some(SlotElementTarget::Url {
+            url: crate::store_pipeline::normalise_url(&href),
+            raw: href,
+            plain_link: true,
+        });
+    }
+    if !is_link_expression(store, el) {
+        return None;
+    }
+    let target_node = find_child_by_name(store, el, "link-target")?;
+    match find_attr_text(store, target_node, "kind")?.as_str() {
+        "path-ref" => {
+            let value = find_attr_text(store, target_node, "value")?;
+            Some(SlotElementTarget::Url {
+                url: crate::store_pipeline::normalise_url(&value),
+                raw: value,
+                plain_link: false,
+            })
+        }
+        "thread-expr" => {
+            let source = find_attr_text(store, target_node, "source")?;
+            // Operations that do not decode are dropped; the store is
+            // well-formed by construction (ADR-057 §4).
+            let ops = match link_target_from_node(store, target_node) {
+                Ok(LinkTarget::ThreadExpr { operations, .. }) => operations,
+                _ => Vec::new(),
+            };
+            Some(SlotElementTarget::Thread { source, ops })
+        }
+        _ => None,
+    }
+}
+
+/// The NodeIds a link element in a preamble slot of `page_url` resolves to.
+///
+/// - a `link` block → the target page (skipped when it links to `page_url`);
+/// - a `PathRef` → the target page;
+/// - a thread expression → with `ctx`, the evaluated result
+///   (`store_pipeline::evaluate_thread`); without, every item document of the
+///   source stem (populate pass 2, before the context exists).
+///
+/// A page resolves to its semantic root when known, else its document root.
+pub(crate) fn element_link_targets(
     store: &NodeStore,
-    link_expr: NodeId,
-    _slot_name: &str,
+    target: &SlotElementTarget,
+    page_url: &str,
     stem_to_roots: &std::collections::HashMap<String, Vec<NodeId>>,
     url_to_root: &std::collections::HashMap<String, NodeId>,
     url_to_semantic: Option<&std::collections::HashMap<String, NodeId>>,
+    ctx: Option<&crate::store_pipeline::ThreadContext>,
 ) -> Vec<NodeId> {
-    let target_node = match find_child_by_name(store, link_expr, "link-target") {
-        Some(t) => t,
-        None => return Vec::new(),
-    };
-    let kind = match find_attr_text(store, target_node, "kind") {
-        Some(k) => k,
-        None => return Vec::new(),
-    };
-
-    match kind.as_str() {
-        "path-ref" => {
-            if let Some(target_url) = find_attr_text(store, target_node, "value") {
-                // Prefer semantic root (has named fields for templates)
-                if let Some(&sem) = url_to_semantic.and_then(|m| m.get(&target_url)) {
-                    vec![sem]
-                } else if let Some(&root) = url_to_root.get(&target_url) {
-                    vec![root]
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
+    match target {
+        SlotElementTarget::Url { url, plain_link, .. } => {
+            if *plain_link && *url == crate::store_pipeline::normalise_url(page_url) {
+                return Vec::new();
             }
+            url_to_semantic
+                .and_then(|m| m.get(url))
+                .or_else(|| url_to_root.get(url))
+                .map(|&id| vec![id])
+                .unwrap_or_default()
         }
-        "thread-expr" => {
-            if let Some(stem) = find_attr_text(store, target_node, "source")
-                && let Some(roots) = stem_to_roots.get(&stem)
-            {
-                roots
-                    .iter()
-                    .filter(|&&root| {
-                        find_attr_text(store, root, "page-kind")
-                            .is_some_and(|pk| pk == "item")
-                    })
-                    .copied()
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        }
-        _ => Vec::new(),
+        SlotElementTarget::Thread { source, ops } => match ctx {
+            Some(ctx) => crate::store_pipeline::evaluate_thread(store, ctx, source, ops, page_url)
+                .into_iter()
+                .map(|(_, sem)| sem)
+                .collect(),
+            None => stem_to_roots
+                .get(source)
+                .map(|roots| {
+                    roots
+                        .iter()
+                        .filter(|&&root| {
+                            find_attr_text(store, root, "page-kind").is_some_and(|pk| pk == "item")
+                        })
+                        .copied()
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
     }
 }
 
@@ -898,25 +954,21 @@ pub fn create_semantic_content(
                 let mut link_targets: Vec<NodeId> = Vec::new();
                 let mut has_link_exprs = false;
                 for &child in &children {
-                    if is_link_expression(store, child) {
+                    if is_link_expression(store, child) || is_resolved_link(store, child) {
                         has_link_exprs = true;
-                        let targets = collect_link_targets(
-                            store, child, &slot_name,
-                            stem_to_roots, url_to_root, url_to_semantic,
-                        );
-                        link_targets.extend(targets);
-                    } else if is_resolved_link(store, child) {
-                        // Resolved link element (ContentElement::Link) — look up target by href.
-                        // Prefer semantic root (has named fields). Skip self-references.
-                        has_link_exprs = true;
-                        if let Some(href) = find_attr_text(store, child, "href")
-                            && href != meta.url
-                        {
-                            if let Some(&sem) = url_to_semantic.and_then(|m| m.get(&href)) {
-                                link_targets.push(sem);
-                            } else if let Some(&root) = url_to_root.get(&href) {
-                                link_targets.push(root);
-                            }
+                        // Link blocks skip self-references; thread expressions
+                        // take every item here and are evaluated later
+                        // (`store_pipeline::resolve_page_link_expressions`).
+                        if let Some(target) = slot_element_target(store, child) {
+                            link_targets.extend(element_link_targets(
+                                store,
+                                &target,
+                                &meta.url,
+                                stem_to_roots,
+                                url_to_root,
+                                url_to_semantic,
+                                None,
+                            ));
                         }
                     }
                 }
@@ -1447,7 +1499,11 @@ mod tests {
                     operations: vec![
                         LinkOp::SortBy {
                             field: Keyword::new("published").unwrap(),
-                            descending: true,
+                            direction: SortDirection::Descending,
+                        },
+                        LinkOp::SortBy {
+                            field: Keyword::new("title").unwrap(),
+                            direction: SortDirection::Ascending,
                         },
                         LinkOp::Take(4),
                         LinkOp::Filter {
@@ -1456,6 +1512,7 @@ mod tests {
                         },
                         LinkOp::RefsTo(RefsToTarget::SelfRef),
                         LinkOp::RefsTo(RefsToTarget::Url("https://example.com".to_string())),
+                        LinkOp::RefsTo(RefsToTarget::Url("self".to_string())),
                     ],
                 },
                 slot: None,
@@ -2287,13 +2344,91 @@ mod tests {
         let mut store = NodeStore::new();
         let op = make_element(&mut store, "sort-by");
         add_text_attr(&mut store, op, "field", "a b");
-        add_bool_attr(&mut store, op, "descending", false);
+        add_text_attr(&mut store, op, "direction", "asc");
         assert_eq!(
             link_op_from_node(&store, op),
             Err(BlockDecodeError::InvalidAttribute {
                 kind: "sort-by".to_string(),
                 attr: "field".to_string(),
                 value: "a b".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn sort_by_direction_is_encoded_as_text() {
+        for (direction, text) in
+            [(SortDirection::Ascending, "asc"), (SortDirection::Descending, "desc")]
+        {
+            let mut store = NodeStore::new();
+            let parent = make_element(&mut store, "link-target");
+            let op = LinkOp::SortBy { field: Keyword::new("title").unwrap(), direction };
+            link_op_to_store(&op, &mut store, parent);
+            let node = store.children(parent)[0];
+            assert_eq!(find_attr_text(&store, node, "direction").as_deref(), Some(text));
+            assert_eq!(link_op_from_node(&store, node), Ok(Some(op)));
+        }
+    }
+
+    #[test]
+    fn sort_by_with_missing_or_unknown_direction_is_a_decode_error() {
+        let mut store = NodeStore::new();
+        let op = make_element(&mut store, "sort-by");
+        add_text_attr(&mut store, op, "field", "title");
+        assert_eq!(
+            link_op_from_node(&store, op),
+            Err(BlockDecodeError::MissingAttribute {
+                kind: "sort-by".to_string(),
+                attr: "direction".to_string(),
+            })
+        );
+        add_text_attr(&mut store, op, "direction", "up");
+        assert_eq!(
+            link_op_from_node(&store, op),
+            Err(BlockDecodeError::InvalidAttribute {
+                kind: "sort-by".to_string(),
+                attr: "direction".to_string(),
+                value: "up".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn refs_to_self_and_url_self_stay_distinct_in_the_store() {
+        let self_ref = LinkOp::RefsTo(RefsToTarget::SelfRef);
+        let url_self = LinkOp::RefsTo(RefsToTarget::Url("self".to_string()));
+        let mut store = NodeStore::new();
+        let parent = make_element(&mut store, "link-target");
+        link_op_to_store(&self_ref, &mut store, parent);
+        link_op_to_store(&url_self, &mut store, parent);
+        let nodes = store.children(parent);
+        assert_eq!(find_attr_text(&store, nodes[0], "target-kind").as_deref(), Some("self"));
+        assert_eq!(find_attr_text(&store, nodes[0], "target"), None);
+        assert_eq!(find_attr_text(&store, nodes[1], "target-kind").as_deref(), Some("url"));
+        assert_eq!(find_attr_text(&store, nodes[1], "target").as_deref(), Some("self"));
+        assert_eq!(link_op_from_node(&store, nodes[0]), Ok(Some(self_ref)));
+        assert_eq!(link_op_from_node(&store, nodes[1]), Ok(Some(url_self)));
+    }
+
+    #[test]
+    fn refs_to_with_missing_or_unknown_target_kind_is_a_decode_error() {
+        let mut store = NodeStore::new();
+        let op = make_element(&mut store, "refs-to");
+        add_text_attr(&mut store, op, "target", "self");
+        assert_eq!(
+            link_op_from_node(&store, op),
+            Err(BlockDecodeError::MissingAttribute {
+                kind: "refs-to".to_string(),
+                attr: "target-kind".to_string(),
+            })
+        );
+        add_text_attr(&mut store, op, "target-kind", "page");
+        assert_eq!(
+            link_op_from_node(&store, op),
+            Err(BlockDecodeError::InvalidAttribute {
+                kind: "refs-to".to_string(),
+                attr: "target-kind".to_string(),
+                value: "page".to_string(),
             })
         );
     }

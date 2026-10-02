@@ -269,7 +269,11 @@ fn gen_link_op(rng: &mut Rng) -> LinkOp {
     match rng.below(4) {
         0 => LinkOp::SortBy {
             field: keyword(rng.pick(DOMAIN.link_fields)),
-            descending: rng.chance(50),
+            direction: if rng.chance(50) {
+                content::SortDirection::Descending
+            } else {
+                content::SortDirection::Ascending
+            },
         },
         1 => LinkOp::Take(rng.below(20)),
         2 => LinkOp::Filter {

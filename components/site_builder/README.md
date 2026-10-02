@@ -11,8 +11,8 @@ Extracts the three shared graph-building phases that previously existed in dupli
 | Function | Phase | Description |
 |---|---|---|
 | `build_graph(repo, output_dir, source_attachment)` | 1a, 1b, 1c | Builds item pages, collection pages, and legacy root fallback. Returns a `GraphBuildResult` with the `SiteGraph` and per-page diagnostics. |
-| `resolve_link_expressions(graph)` | 1.5 | Evaluates Presemble Lisp link expressions in every page's data graph. |
-| `resolve_cross_references(graph)` | 2 | Resolves cross-content link references (e.g. `post.author.name`). |
+
+Link expressions are evaluated in the NodeStore pipeline (`node_store_bridge::store_pipeline`, ADR-058 "Evaluation and invalidation"), not on the `SiteGraph`.
 
 The `SourceAttachment` enum controls whether markdown source text is embedded in data graph nodes. The conductor passes `Attach` (needed for browser editing); the CLI passes `Omit`.
 

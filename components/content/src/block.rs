@@ -400,7 +400,7 @@ mod tests {
                         LinkOp::RefsTo(RefsToTarget::SelfRef),
                         LinkOp::SortBy {
                             field: crate::document::Keyword::new("published").unwrap(),
-                            descending: false,
+                            direction: crate::document::SortDirection::Ascending,
                         },
                         LinkOp::Take(4),
                     ],

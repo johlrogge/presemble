@@ -28,7 +28,12 @@ ADR-030 introduced link expressions in content and left their markdown syntax op
 5. Legacy spellings are read and rewritten in canonical form: `[t]((->> ...))`, `[t](<(-\>\> ...)>)` and `%20`-encoded destinations. They map to the same closed grammar, so they add no expressive power.
 6. PathRef (`[t](:path)`) is unchanged.
 7. An expression-like destination inside running text (`a [x](:y) b`, `a [x](->> :p) b`) is not a link expression and gets a diagnostic.
-8. `(refs-to self)` matches every page that references the current page. A reference is a reference wherever it appears: preamble link slots, PathRef expressions, and links in body text. Publishing relies on the complete set of references, so none may be ignored. Until inline links are modelled as typed references (ADR-059, inline segments), only preamble link slots and PathRef expressions are tracked; body links are added when that lands.
+8. `(refs-to self)` matches every page that references the current page. A reference is a reference wherever it appears: preamble link slots, PathRef expressions, and links in body text. Publishing relies on the complete set of references, so none may be ignored.
+   - References from every parsed page count, publishable or not. Schema validity gates publishing, not referring (ADR-060 §5).
+   - References in `preamble > unassigned` (ADR-060 P1) count: link hrefs, PathRef expressions, and the inline links in any paragraph there.
+   - Images never count. Thread expressions never count, in a slot or in `unassigned`: they compute references, they do not declare them.
+   - Body and inline references are pending ADR-059 (inline segments); until inline links are modelled as typed references, only the preamble is read.
+   - Known gap: a page that fails to parse is not in the store, so its references are skipped.
 9. **Explicit slot markers.** A link expression may end with a slot marker,
    `[label](->> ...) {#slot}`, the same `{#name}` syntax schemas use. A marked
    expression fills the preamble link slot `slot` wherever it appears in the
@@ -44,6 +49,22 @@ ADR-030 introduced link expressions in content and left their markdown syntax op
    expressions only (thread, PathRef and legacy spellings); extending them to other preamble elements awaits inline
    segments (ADR-059).
 
+## Evaluation and invalidation
+
+- **One implementation of the operations.** `expressions::apply_link_ops` applies `sort-by`, `take`, `filter` and `refs-to` in order over items that expose a URL and field text (`ThreadItem`). The store pipeline (`node_store_bridge::store_pipeline`) and the REPL both use it. Items arrive in base order, URL ascending.
+- **Declared references only.** `store_pipeline::links_to_index` is the only edge collector. It reads the declared references of decision 8; expression results and synthesised links are not edges. `refs-to` in link expressions and the REPL `refs-to` / `refs-from` primitives read the same index.
+- **Query nodes.** Every thread expression in a preamble slot of page P has a `link-query` node Q holding its last result URLs. `Derived` edges record the dependency: `P_sem --query--> Q --over--> stem-items(S)`, where `stem-items(S)` stands for the item set of the source stem S. These edges are ephemeral: they are rebuilt with the store and never serialized. Thread expressions in `unassigned` get no query node.
+- **Propagation.** A change to document X re-renders X, plus every page P whose query result changes, or whose old or new result contains X. The second half is the D3a rule: the goal is that a change to a referenced page triggers a more thorough analysis (which fields P's template reads) that may or may not result in a re-render; the D3a rule is the conservative interim.
+- **Body-only edits.** Each document stores a preamble fingerprint: a hash of its canonical serialization with the body emptied, which covers slots, `unassigned`, hrefs and markers. When the fingerprint is unchanged, the edit is body-only and re-renders X alone.
+- **Known limits.**
+  - D3a: a page re-renders whenever X is in its result, even if it reads nothing that changed.
+  - D7: a page that displays data from a page it links to (not through a link expression) is not re-rendered when that page changes.
+  - D9: an external file change (`FileChanged`) is a full rebuild. Comparing the stored query results before and after the repopulate, as `CreateContent` already does, is the basis for a minimal one later.
+  - A body-only edit of X does not re-render pages whose templates show X's body or an excerpt of it (the D3a family: what P's template reads is not analysed yet).
+  - An unassigned paragraph that contains an image loses its link syntax when parsed (a save-path gap), so the links in it are not counted.
+  - Stored fingerprints, like query nodes, exist in memory only; they are recomputed whenever the store is repopulated.
+- **Destinations.** Only page references count: `expressions::page_reference` drops destinations with a scheme (`://`, `mailto:`), protocol-relative `//…` URLs, `#…` anchors and expressions, strips a leading `:` and normalises the rest.
+
 ## Alternatives considered
 
 - `[t]((->> ...))` as canonical: looks like "paste any expression here" and invites arbitrary evaluation.
@@ -55,7 +76,7 @@ ADR-030 introduced link expressions in content and left their markdown syntax op
 
 - The documented syntax becomes real; the example blog's author page works.
 - Values may contain spaces and quotes (string escapes); sources and fields are validated keywords.
-- Operations must actually be applied in the build pipeline. They have been ignored since the conductor became the sole build path (07c4865).
+- Operations must actually be applied in the build pipeline. They had been ignored since the conductor became the sole build path (07c4865); see "Evaluation and invalidation".
 - A paragraph whose text would read back as a link expression is escaped on write (`\[`).
 - ADR-030's open question on syntax is resolved; its `(-> /post ...)` sketch is superseded.
 - Open: a PathRef in a slot and a Link block to the same page both expose target data; revisit whether both are needed.

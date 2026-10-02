@@ -154,11 +154,20 @@ pub enum LinkTarget {
     },
 }
 
+/// The direction of a `sort-by` operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SortDirection {
+    /// `:asc` (the default)
+    Ascending,
+    /// `:desc`
+    Descending,
+}
+
 /// An operation in a threaded link expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkOp {
     /// (sort-by :field :asc/:desc)
-    SortBy { field: Keyword, descending: bool },
+    SortBy { field: Keyword, direction: SortDirection },
     /// (take n)
     Take(usize),
     /// (filter :field "value")
@@ -215,7 +224,7 @@ mod tests {
     fn link_expression_thread_expr_with_ops() {
         let kw = |s: &str| Keyword::new(s).unwrap();
         let ops = vec![
-            LinkOp::SortBy { field: kw("published"), descending: true },
+            LinkOp::SortBy { field: kw("published"), direction: SortDirection::Descending },
             LinkOp::Take(4),
             LinkOp::Filter { field: kw("category"), value: "news".to_string() },
         ];

@@ -382,38 +382,6 @@ pub fn build_graph(
     GraphBuildResult { graph, diagnostics, parse_errors }
 }
 
-/// Resolve all link expressions in every page's data graph.
-pub fn resolve_link_expressions(graph: &mut site_index::SiteGraph) {
-    let (url_index, stem_index, edge_index) = expressions::build_indexes_from_graph(graph);
-    let urls: Vec<site_index::UrlPath> = graph.iter().map(|n| n.url_path.clone()).collect();
-    for url in &urls {
-        if let Some(node) = graph.get_mut(url)
-            && let Some(pd) = node.page_data_mut()
-        {
-            expressions::resolve_link_expressions_in_graph(
-                &mut pd.data,
-                &url_index,
-                &stem_index,
-                url,
-                &edge_index,
-            );
-        }
-    }
-}
-
-/// Resolve all cross-content references in every page's data graph.
-pub fn resolve_cross_references(graph: &mut site_index::SiteGraph) {
-    let (url_index, _, _) = expressions::build_indexes_from_graph(graph);
-    let urls: Vec<site_index::UrlPath> = graph.iter().map(|n| n.url_path.clone()).collect();
-    for url in &urls {
-        if let Some(node) = graph.get_mut(url)
-            && let Some(pd) = node.page_data_mut()
-        {
-            expressions::resolve_cross_references(&mut pd.data, &url_index);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,17 +471,5 @@ mod tests {
         // Either the parse fails and gets recorded, or the content happens to be valid
         // In any case the graph should not panic
         let _ = result;
-    }
-
-    #[test]
-    fn resolve_link_expressions_does_not_panic_on_empty_graph() {
-        let mut graph = SiteGraph::new();
-        resolve_link_expressions(&mut graph);
-    }
-
-    #[test]
-    fn resolve_cross_references_does_not_panic_on_empty_graph() {
-        let mut graph = SiteGraph::new();
-        resolve_cross_references(&mut graph);
     }
 }

@@ -19,14 +19,17 @@ pub use block::{check_block_round_trip, RoundTripError};
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{
     ContentElement, Document, DocumentSlot, FlatDocument, Keyword, KeywordError, LinkOp,
-    LinkTarget, LinkText, RefsToTarget,
+    LinkTarget, LinkText, RefsToTarget, SortDirection,
 };
 pub use error::ContentError;
 pub use link_expression::{
     diagnose_paragraph, parse_thread, recognise_paragraph, Candidate, LinkExpressionDiagnostic,
     LinkExpressionError,
 };
-pub use parser::{byte_to_position, parse_and_assign, parse_document, parse_link_target, parse_link_text};
+pub use parser::{
+    byte_to_position, paragraph_link_destinations, parse_and_assign, parse_document,
+    parse_link_target, parse_link_text,
+};
 pub use serializer::serialize_document;
 pub use slot_assignment::{assign_slots, unassigned_reason, UnassignedReason};
 pub use transform::{
