@@ -21,7 +21,9 @@ pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
 }
 
 /// The pulldown-cmark options content documents are parsed with.
-const PARSER_OPTIONS: Options = Options::ENABLE_TABLES;
+/// The pulldown-cmark options content is parsed with. Renderers that parse
+/// content markdown use the same options so they read it the same way.
+pub const MARKDOWN_OPTIONS: Options = Options::ENABLE_TABLES;
 
 /// Read a paragraph source that is, as a whole, a link expression with an
 /// optional trailing slot marker (ADR-058, decision 9).
@@ -133,7 +135,7 @@ pub(crate) fn diagnose_marker_paragraph(source: &str) -> LinkExpressionDiagnosti
 /// Read `expr` as pulldown reads a paragraph that is exactly one link whose
 /// destination is a link expression (`:path` or a legacy spelling).
 fn read_pulldown_link_expression(expr: &str) -> Option<(LinkText, LinkTarget)> {
-    let mut events = Parser::new_ext(expr, PARSER_OPTIONS).into_offset_iter();
+    let mut events = Parser::new_ext(expr, MARKDOWN_OPTIONS).into_offset_iter();
     if !matches!(events.next(), Some((Event::Start(Tag::Paragraph), _))) {
         return None;
     }
@@ -170,7 +172,7 @@ fn read_pulldown_link_expression(expr: &str) -> Option<(LinkText, LinkTarget)> {
 /// returned as written. Image destinations are left out. Used to count the
 /// references in paragraphs that fill no slot (ADR-058 §8).
 pub fn paragraph_link_destinations(source: &str) -> Vec<String> {
-    Parser::new_ext(source, PARSER_OPTIONS)
+    Parser::new_ext(source, MARKDOWN_OPTIONS)
         .filter_map(|event| match event {
             Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.to_string()),
             _ => None,
@@ -185,7 +187,7 @@ pub fn paragraph_link_destinations(source: &str) -> Vec<String> {
 ///
 /// For the structured slotted form, use [`parse_and_assign`] instead.
 pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
-    let event_iter = Parser::new_ext(input, PARSER_OPTIONS).into_offset_iter();
+    let event_iter = Parser::new_ext(input, MARKDOWN_OPTIONS).into_offset_iter();
     let mut elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
 
     enum State {
@@ -223,11 +225,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             code: String,
             byte_range: std::ops::Range<usize>,
         },
+        /// Cells keep their trimmed markdown source (ADR-062); header cells
+        /// sit directly in `TableHead`, with no `TableRow`.
         Table {
             headers: Vec<String>,
             rows: Vec<Vec<String>>,
             current_row: Vec<String>,
-            current_cell: String,
             byte_range: std::ops::Range<usize>,
         },
         Blockquote {
@@ -545,7 +548,6 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     headers: Vec::new(),
                     rows: Vec::new(),
                     current_row: Vec::new(),
-                    current_cell: String::new(),
                     byte_range: range,
                 };
             }
@@ -557,8 +559,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::Start(Tag::TableRow) | Event::Start(Tag::TableCell) => {}
             Event::End(TagEnd::TableCell) => {
-                if let State::Table { ref mut current_row, ref mut current_cell, .. } = state {
-                    let cell = std::mem::take(current_cell).trim().to_string();
+                // The cell's range covers its padding but not the pipes.
+                if let State::Table { ref mut current_row, .. } = state {
+                    let cell = input.get(range).map(|s| s.trim().to_string()).unwrap_or_default();
                     current_row.push(cell);
                 }
             }
@@ -594,35 +597,32 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
-                    State::Table { current_cell, .. } => current_cell.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // List and link-expression events never reach here
-                    // (consumed at the top of the loop).
-                    State::List { .. } | State::LinkExpression { .. } | State::Idle => {}
+                    // Table cells are read from their source range. List and
+                    // link-expression events never reach here (consumed at
+                    // the top of the loop).
+                    State::Table { .. }
+                    | State::List { .. }
+                    | State::LinkExpression { .. }
+                    | State::Idle => {}
                 }
             }
             Event::Code(text) => {
                 let s = text.as_ref();
-                let escaped = s
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;")
-                    .replace('"', "&quot;");
                 match &mut state {
                     State::Heading { text: buf, .. } => buf.push_str(s),
                     State::Paragraph { text: buf, .. } => buf.push_str(s),
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
-                    State::Table { current_cell, .. } => {
-                        current_cell.push_str("<code>");
-                        current_cell.push_str(&escaped);
-                        current_cell.push_str("</code>");
-                    }
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // List and link-expression events never reach here
-                    // (consumed at the top of the loop).
-                    State::List { .. } | State::LinkExpression { .. } | State::Idle => {}
+                    // Table cells are read from their source range. List and
+                    // link-expression events never reach here (consumed at
+                    // the top of the loop).
+                    State::Table { .. }
+                    | State::List { .. }
+                    | State::LinkExpression { .. }
+                    | State::Idle => {}
                 }
             }
 
@@ -1093,22 +1093,74 @@ Body paragraph."#;
         match &table.node {
             ContentElement::Table { headers: _, rows } => {
                 assert_eq!(rows.len(), 1, "expected one body row");
-                let cell = &rows[0][0];
-                assert!(
-                    cell.contains("<code>"),
-                    "cell with inline code should contain <code> tag; got: {cell}"
-                );
-                assert!(
-                    cell.contains("cargo test"),
-                    "cell should contain code content; got: {cell}"
-                );
-                assert!(
-                    cell.contains("</code>"),
-                    "cell should close <code> tag; got: {cell}"
-                );
+                // Cells keep their trimmed markdown source (ADR-062).
+                assert_eq!(rows[0], vec!["`cargo test`".to_string(), "Run tests".to_string()]);
             }
             _ => unreachable!(),
         }
+    }
+
+    fn only_table(input: &str) -> (Vec<String>, Vec<Vec<String>>) {
+        let doc = parse_document(input).expect("table markdown should parse");
+        match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
+            [ContentElement::Table { headers, rows }] => (headers.clone(), rows.clone()),
+            other => panic!("expected exactly one Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_cells_store_trimmed_markdown_source() {
+        let (headers, rows) = only_table(
+            "| **H** | `a\\|b` |\n|---|---|\n|  \\<x>  | <b>y</b> &amp; _z_ |\n",
+        );
+        assert_eq!(headers, vec!["**H**".to_string(), "`a\\|b`".to_string()]);
+        assert_eq!(rows, vec![vec!["\\<x>".to_string(), "<b>y</b> &amp; _z_".to_string()]]);
+    }
+
+    #[test]
+    fn table_cell_source_round_trips_byte_exactly() {
+        let input = "| A | B |\n| --- | --- |\n| `a\\|b` | \\<x> |";
+        let doc = parse_document(input).expect("parses");
+        let el = &doc.elements[0].node;
+        assert_eq!(crate::serializer::serialize_element(el), input);
+        assert_eq!(&parse_document(input).unwrap().elements[0].node, el);
+    }
+
+    #[test]
+    fn pulldown_table_cells_are_pinned() {
+        // Header cells sit directly in TableHead (no TableRow); a cell's
+        // range covers its padding but not the pipes.
+        let md = "| h |\n|---|\n| `a\\|b` |\n";
+        let got: Vec<String> = Parser::new_ext(md, MARKDOWN_OPTIONS)
+            .into_offset_iter()
+            .map(|(e, r)| format!("{e:?} {:?}", &md[r]))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                format!("Start(Table([None])) {md:?}"),
+                "Start(TableHead) \"| h |\\n\"".to_string(),
+                "Start(TableCell) \" h \"".to_string(),
+                "Text(Borrowed(\"h\")) \"h\"".to_string(),
+                "End(TableCell) \" h \"".to_string(),
+                "End(TableHead) \"| h |\\n\"".to_string(),
+                "Start(TableRow) \"| `a\\\\|b` |\\n\"".to_string(),
+                "Start(TableCell) \" `a\\\\|b` \"".to_string(),
+                "Code(Boxed(\"a|b\")) \"`a\\\\|b`\"".to_string(),
+                "End(TableCell) \" `a\\\\|b` \"".to_string(),
+                "End(TableRow) \"| `a\\\\|b` |\\n\"".to_string(),
+                format!("End(Table) {md:?}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn excess_table_cells_are_dropped_l16() {
+        // GFM drops cells beyond the header's column count. An unescaped `|`
+        // inside a code span splits the cell, so content is lost on save
+        // (ADR-062 L16).
+        let (_, rows) = only_table("| A | B |\n|---|---|\n| `a|b` | c |\n");
+        assert_eq!(rows, vec![vec!["`a".to_string(), "b`".to_string()]]);
     }
 
     // ── byte_to_position ─────────────────────────────────────────────────────
@@ -1492,7 +1544,7 @@ headings
     }
 
     fn pulldown_events(md: &str) -> String {
-        format!("{:?}", Parser::new_ext(md, super::PARSER_OPTIONS).collect::<Vec<_>>())
+        format!("{:?}", Parser::new_ext(md, super::MARKDOWN_OPTIONS).collect::<Vec<_>>())
     }
 
     fn thread_expr(

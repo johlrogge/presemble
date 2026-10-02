@@ -564,7 +564,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
             ContentElement::Table { headers, rows } => {
                 let header_cells = headers
                     .iter()
-                    .map(|h| format!("<th>{}</th>", crate::dom::html_escape_text(h)))
+                    .map(|h| format!("<th>{}</th>", crate::markdown_html::safe_table_cell_html(h)))
                     .collect::<Vec<_>>()
                     .join("");
                 let body_rows = rows
@@ -572,7 +572,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
                     .map(|row| {
                         let cells = row
                             .iter()
-                            .map(|c| format!("<td>{}</td>", c))
+                            .map(|c| format!("<td>{}</td>", crate::markdown_html::safe_table_cell_html(c)))
                             .collect::<Vec<_>>()
                             .join("");
                         format!("<tr>{}</tr>", cells)
@@ -1353,6 +1353,44 @@ mod tests {
             "expected the placeholder message; got: {html}"
         );
         assert!(!html.contains("data-presemble-slot"), "placeholder must not be a slot; got: {html}");
+    }
+
+    fn render_table(headers: &[&str], rows: &[&[&str]]) -> String {
+        let table = spanned(ContentElement::Table {
+            headers: headers.iter().map(|s| s.to_string()).collect(),
+            rows: rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect(),
+        });
+        render_body_html(&im::vector![table], None)
+    }
+
+    #[test]
+    fn body_table_block_marker_cells_render_as_literal_text() {
+        let cells = ["-", "+", "#", "1.", "> q", "***"];
+        let html = render_table(&cells, &[&cells]);
+        for tag in ["<ul", "<ol", "<h1", "<blockquote", "<hr", "<li"] {
+            assert!(!html.contains(tag), "unexpected {tag}; got: {html}");
+        }
+        for expected in ["-", "+", "#", "1.", "&gt; q", "***"] {
+            assert!(html.contains(&format!("<th>{expected}</th>")), "th {expected}; got: {html}");
+            assert!(html.contains(&format!("<td>{expected}</td>")), "td {expected}; got: {html}");
+        }
+    }
+
+    #[test]
+    fn body_table_cells_render_inline_markdown_and_escape_html() {
+        let html = render_table(&["`a\\|b`", "**b**"], &[&["\\<script>", "<b>x</b>"]]);
+        assert!(html.contains("<th><code>a|b</code></th>"), "got: {html}");
+        assert!(html.contains("<th><strong>b</strong></th>"), "got: {html}");
+        assert!(html.contains("<td>&lt;script&gt;</td>"), "got: {html}");
+        assert!(html.contains("<td>&lt;b&gt;x&lt;/b&gt;</td>"), "got: {html}");
+        assert!(!html.contains("<script") && !html.contains("<b>"), "got: {html}");
+    }
+
+    #[test]
+    fn body_table_cell_with_unescaped_pipe_renders_in_full() {
+        let html = render_table(&["a | b"], &[&["a | b"]]);
+        assert!(html.contains("<th>a | b</th>"), "got: {html}");
+        assert!(html.contains("<td>a | b</td>"), "got: {html}");
     }
 
     #[test]

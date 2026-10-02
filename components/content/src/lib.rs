@@ -28,7 +28,7 @@ pub use link_expression::{
 };
 pub use parser::{
     byte_to_position, paragraph_link_destinations, parse_and_assign, parse_document,
-    parse_link_target, parse_link_text,
+    parse_link_target, parse_link_text, MARKDOWN_OPTIONS,
 };
 pub use serializer::serialize_document;
 pub use slot_assignment::{assign_slots, unassigned_reason, UnassignedReason};

@@ -102,6 +102,10 @@ comments are stripped and are not an Error.
     is reported.
   - **L15:** inline HTML in link text, image alt text and image-bearing
     paragraphs is still dropped, until ADR-059 (inline segments).
+  - **L16:** GFM drops table cells beyond the header's column count. An
+    unescaped `|` inside a code span splits the cell (`` `a|b` `` reads as
+    `` `a `` and `` b` ``), so the cells pushed past the last column are lost
+    on save. Write `` `a\|b` `` instead.
 - An HTML comment between two same-kind lists keeps them separate, because the
   comment is trivia of the second list. Follow-up: when a save would put two
   same-kind lists next to each other with no comment between them (L10), the

@@ -819,7 +819,7 @@ fn render_insert_native(
                                             children: vec![Node::Element(Element {
                                                 name: "code".to_string(),
                                                 attrs: code_attrs,
-                                                children: vec![Node::Text(crate::dom::html_escape_text(&code))],
+                                                children: vec![Node::Text(code)],
                                             })],
                                         }));
                                     }
@@ -847,7 +847,8 @@ fn render_insert_native(
                                             for h in store.children(headers_id) {
                                                 if let Some(node_store::Node::Text(t)) = store.get(h) {
                                                     header_cells.push(Node::Element(Element {
-                                                        name: "th".to_string(), attrs: vec![], children: vec![Node::Text(t.clone())],
+                                                        name: "th".to_string(), attrs: vec![],
+                                                        children: parse_html_fragment(&crate::markdown_html::safe_table_cell_html(t)),
                                                     }));
                                                 }
                                             }
@@ -858,14 +859,20 @@ fn render_insert_native(
                                                 })],
                                             }));
                                         }
+                                        // Rows sit under `rows`: `table > rows > row > Text*`
+                                        // (the shape `content_bridge` builds and decodes).
+                                        let row_ids = store.children(child_id).into_iter().filter(|&c| {
+                                            matches!(store.get(c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "rows")
+                                        }).flat_map(|rows_id| store.children(rows_id));
                                         let mut body_rows = Vec::new();
-                                        for row_id in store.children(child_id) {
+                                        for row_id in row_ids {
                                             if matches!(store.get(row_id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "row") {
                                                 let mut cells = Vec::new();
                                                 for cell in store.children(row_id) {
                                                     if let Some(node_store::Node::Text(t)) = store.get(cell) {
                                                         cells.push(Node::Element(Element {
-                                                            name: "td".to_string(), attrs: vec![], children: vec![Node::Text(t.clone())],
+                                                            name: "td".to_string(), attrs: vec![],
+                                                            children: parse_html_fragment(&crate::markdown_html::safe_table_cell_html(t)),
                                                         }));
                                                     }
                                                 }
@@ -3492,6 +3499,94 @@ mod tests {
         assert!(html.contains("<em>i</em>"), "expected em; got: {html}");
         assert!(html.contains("<code>x&lt;y</code>"), "expected code span; got: {html}");
         assert!(html.contains(r#"<a href="/a">here</a>"#), "expected link; got: {html}");
+    }
+
+    /// Render a body with one table through the native NodeStore path, using
+    /// the store shape `content_bridge` builds: `table > headers > Text*` and
+    /// `table > rows > row > Text*`.
+    fn render_native_table(headers: &[&str], rows: &[&[&str]]) -> String {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let body_name = store.intern("body");
+        let body = store.add_node(node_store::Node::Element(body_name));
+        let table_name = store.intern("table");
+        let table = store.add_node(node_store::Node::Element(table_name));
+        let headers_name = store.intern("headers");
+        let headers_node = store.add_node(node_store::Node::Element(headers_name));
+        store.add_edge(table, node_store::Edge::Child(headers_node));
+        for h in headers {
+            let t = store.add_node(node_store::Node::Text((*h).into()));
+            store.add_edge(headers_node, node_store::Edge::Child(t));
+        }
+        let rows_name = store.intern("rows");
+        let rows_node = store.add_node(node_store::Node::Element(rows_name));
+        store.add_edge(table, node_store::Edge::Child(rows_node));
+        let row_name = store.intern("row");
+        for row in rows {
+            let row_node = store.add_node(node_store::Node::Element(row_name));
+            store.add_edge(rows_node, node_store::Edge::Child(row_node));
+            for cell in *row {
+                let t = store.add_node(node_store::Node::Text((*cell).into()));
+                store.add_edge(row_node, node_store::Edge::Child(t));
+            }
+        }
+        store.add_edge(body, node_store::Edge::Child(table));
+        let body_co_name = store.intern("body");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+
+        let graph = NodeStoreGraphView { store, root };
+        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
+    }
+
+    #[test]
+    fn native_table_renders_body_rows() {
+        let html = render_native_table(&["H"], &[&["one"], &["two"]]);
+        assert!(html.contains("<td>one</td>") && html.contains("<td>two</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn native_table_block_marker_cells_render_as_literal_text() {
+        let cells = ["-", "+", "#", "1.", "> q", "***"];
+        let row: Vec<&str> = cells.to_vec();
+        let html = render_native_table(&cells, &[&row]);
+        for tag in ["<ul", "<ol", "<h1", "<blockquote", "<hr", "<li"] {
+            assert!(!html.contains(tag), "unexpected {tag}; got: {html}");
+        }
+        for expected in ["-", "+", "#", "1.", "&gt; q", "***"] {
+            assert!(html.contains(&format!("<th>{expected}</th>")), "th {expected}; got: {html}");
+            assert!(html.contains(&format!("<td>{expected}</td>")), "td {expected}; got: {html}");
+        }
+    }
+
+    #[test]
+    fn native_table_cells_render_inline_markdown_and_escape_html() {
+        let html = render_native_table(
+            &["`a\\|b`", "**b**"],
+            &[&["\\<script>", "<b>x</b>"]],
+        );
+        assert!(html.contains("<th><code>a|b</code></th>"), "got: {html}");
+        assert!(html.contains("<th><strong>b</strong></th>"), "got: {html}");
+        assert!(html.contains("<td>&lt;script&gt;</td>"), "got: {html}");
+        assert!(html.contains("<td>&lt;b&gt;x&lt;/b&gt;</td>"), "got: {html}");
+        assert!(!html.contains("<script") && !html.contains("<b>"), "got: {html}");
+    }
+
+    #[test]
+    fn native_table_cell_with_unescaped_pipe_renders_in_full() {
+        let html = render_native_table(&["a | b"], &[&["a | b"]]);
+        assert!(html.contains("<th>a | b</th>"), "got: {html}");
+        assert!(html.contains("<td>a | b</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn native_body_code_block_is_escaped_once() {
+        let html = render_native_body_block("code-block", "x<y", None);
+        assert!(html.contains("<code>x&lt;y</code>"), "expected single escaping; got: {html}");
+        assert!(!html.contains("&amp;lt;"), "must not double-escape; got: {html}");
     }
 
     #[test]
