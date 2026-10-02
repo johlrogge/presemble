@@ -1456,6 +1456,7 @@ mod tests {
                 node: content::ContentElement::LinkExpression {
                     text: content::LinkText::Empty,
                     target: content::LinkTarget::PathRef("/author/alice".to_string()),
+                    slot: None,
                 },
                 span: schema::Span { start: 0, end: 0 },
             }],

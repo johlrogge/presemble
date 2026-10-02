@@ -224,6 +224,7 @@ mod tests {
             ContentElement::LinkExpression {
                 text: LinkText::Empty,
                 target: LinkTarget::PathRef("x".to_string()),
+                slot: None,
             },
         ];
         for el in cases {
@@ -385,9 +386,10 @@ mod tests {
             ContentElement::LinkExpression {
                 text: LinkText::Empty,
                 target: LinkTarget::PathRef("fragments/header".to_string()),
+                slot: None,
             },
             ContentElement::LinkExpression {
-                text: LinkText::Binding("posts".to_string()),
+                text: LinkText::Label("posts".to_string()),
                 target: LinkTarget::ThreadExpr {
                     source: crate::document::Keyword::new("post").unwrap(),
                     operations: vec![
@@ -403,6 +405,15 @@ mod tests {
                         LinkOp::Take(4),
                     ],
                 },
+                slot: None,
+            },
+            ContentElement::LinkExpression {
+                text: LinkText::Label("Latest posts".to_string()),
+                target: LinkTarget::ThreadExpr {
+                    source: crate::document::Keyword::new("post").unwrap(),
+                    operations: vec![LinkOp::Take(4)],
+                },
+                slot: Some(crate::document::Keyword::new("latest").unwrap()),
             },
         ];
         for el in cases {

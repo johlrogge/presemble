@@ -15,16 +15,104 @@ use schema::{Element, Grammar, Slot, Span, Spanned};
 ///
 /// If no separator is present, `body` will be empty and `has_separator` will
 /// be `false`.
+///
+/// ## Explicit slot markers (ADR-058, decision 9)
+///
+/// A link expression may end with a slot marker,
+/// `[label](->> ...) {#slot}`. A marked expression fills the preamble link
+/// slot `slot` wherever it appears before the separator; the label is display
+/// text only and never names a slot. A pre-pass takes these bound elements
+/// out; positional assignment then runs on what remains, as if they were not
+/// there: they neither consume the positional cursor nor end another slot's
+/// run. Positional matching for a slot takes at most `max - bound_count`
+/// elements; bound elements are always assigned, even past the slot's maximum
+/// (the validator reports the excess). Within a slot, bound and positional
+/// elements are merged in source order (`span.start`).
+///
+/// Unmarked expressions, and all other preamble elements, are assigned by
+/// position. A marker that names no slot, or a slot whose element is not a
+/// link, does not bind: the element is assigned by position, so it is never
+/// dropped, and the validator reports the marker.
 pub fn assign_slots(
     elements: &im::Vector<Spanned<ContentElement>>,
     grammar: &Grammar,
+) -> Document {
+    // Pre-pass: take bound link expressions out of the preamble region.
+    let preamble_end = elements
+        .iter()
+        .position(|e| matches!(e.node, ContentElement::Separator))
+        .unwrap_or(elements.len());
+    let mut bound: Vec<Vec<Spanned<ContentElement>>> = vec![Vec::new(); grammar.preamble.len()];
+    let mut remaining: im::Vector<Spanned<ContentElement>> = im::Vector::new();
+    for (i, element) in elements.iter().enumerate() {
+        match bound_slot_index(&element.node, grammar) {
+            Some(slot_index) if i < preamble_end => bound[slot_index].push(element.clone()),
+            _ => remaining.push_back(element.clone()),
+        }
+    }
+
+    let mut document = assign_positionally(&remaining, grammar, |slot_index| bound[slot_index].len());
+
+    // Merge bound elements into their slots, in source order.
+    for (slot_index, slot) in grammar.preamble.iter().enumerate() {
+        let bound_elements = std::mem::take(&mut bound[slot_index]);
+        if bound_elements.is_empty() {
+            continue;
+        }
+        match document.preamble.iter().position(|s| s.name == slot.name) {
+            Some(at) => {
+                let doc_slot = &mut document.preamble[at];
+                let mut merged: Vec<Spanned<ContentElement>> =
+                    doc_slot.elements.iter().cloned().collect();
+                merged.extend(bound_elements);
+                merged.sort_by_key(|e| e.span.start);
+                doc_slot.elements = merged.into_iter().collect();
+            }
+            // Positional assignment stops at an early separator, so the
+            // preamble is a prefix of the grammar's slots. Appending the
+            // missing bound slots in grammar order keeps schema order.
+            None => document.preamble.push_back(DocumentSlot {
+                name: slot.name.clone(),
+                elements: bound_elements.into_iter().collect(),
+            }),
+        }
+    }
+
+    document
+}
+
+/// The index of the grammar preamble slot that `element` is bound to, if any.
+///
+/// An element binds only if it is a link expression with a slot marker
+/// `{#name}` and `name` names (exactly, case-sensitively) a preamble slot
+/// whose element is a link. The label is never consulted.
+///
+/// Slot names outside the keyword charset (`SlotName` is not validated) can
+/// never be bound: no marker can spell them. This is not an error; such slots
+/// are filled by position only.
+pub(crate) fn bound_slot_index(element: &ContentElement, grammar: &Grammar) -> Option<usize> {
+    let ContentElement::LinkExpression { slot: Some(name), .. } = element else {
+        return None;
+    };
+    grammar.preamble.iter().position(|s| {
+        s.name.as_str() == name.as_str() && matches!(s.element, Element::Link { .. })
+    })
+}
+
+/// Positional slot assignment. `bound_count(i)` is the number of bound
+/// elements already reserved for grammar preamble slot `i`; positional
+/// matching takes at most `max - bound_count` (saturating) for that slot.
+fn assign_positionally(
+    elements: &im::Vector<Spanned<ContentElement>>,
+    grammar: &Grammar,
+    bound_count: impl Fn(usize) -> usize,
 ) -> Document {
     let mut cursor = 0usize;
     let mut preamble: im::Vector<DocumentSlot> = im::Vector::new();
     let mut has_separator = false;
     let mut separator_span: Option<Span> = None;
 
-    'slots: for slot in &grammar.preamble {
+    'slots: for (slot_index, slot) in grammar.preamble.iter().enumerate() {
         // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
         while cursor < elements.len() {
             if let ContentElement::Paragraph { text } = &elements[cursor].node
@@ -46,7 +134,7 @@ pub fn assign_slots(
             break 'slots;
         }
 
-        let max = slot.max_count();
+        let max = slot.max_count().saturating_sub(bound_count(slot_index));
         let mut slot_elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
         let mut count = 0usize;
 
@@ -146,7 +234,7 @@ fn is_annotation_paragraph(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::ContentElement;
+    use crate::document::{ContentElement, LinkText};
     use crate::parser::parse_document;
     use schema::{parse_schema, Span};
 
@@ -533,6 +621,220 @@ headings
             matches!(&flat[0].node, ContentElement::Heading { level, .. } if level.value() == 1),
             "first flat element should be H1 heading"
         );
+    }
+
+    // ── Tests: bound link expressions (ADR-058, decision 9) ─────────────────
+
+    /// A page grammar with adjacent link slots `latest` and `news`.
+    fn page_grammar(news_occurs: &str) -> Grammar {
+        let schema_src = format!(
+            "# Page title {{#title}}\noccurs\n: exactly once\n\n\
+             [<name>](/post/<name>) {{#latest}}\noccurs\n: *\n\n\
+             [<name>](/post/<name>) {{#news}}\noccurs\n: {news_occurs}\n\n\
+             ----\n\nBody.\n"
+        );
+        parse_schema(&schema_src).expect("page schema should parse")
+    }
+
+    fn assign_page(src: &str, news_occurs: &str) -> Document {
+        let flat = parse_document(src).expect("document should parse");
+        assign_slots(&flat.elements, &page_grammar(news_occurs))
+    }
+
+    fn slot_counts(doc: &Document) -> Vec<(String, usize)> {
+        doc.preamble
+            .iter()
+            .map(|s| (s.name.as_str().to_string(), s.elements.len()))
+            .collect()
+    }
+
+    /// A short label per element of slot `name`: the link text of link
+    /// expressions and plain links.
+    fn slot_labels(doc: &Document, name: &str) -> Vec<String> {
+        let slot = doc
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == name)
+            .unwrap_or_else(|| panic!("no slot {name}"));
+        slot.elements
+            .iter()
+            .map(|e| match &e.node {
+                ContentElement::LinkExpression { text: LinkText::Label(b), .. } => b.clone(),
+                ContentElement::LinkExpression { text: LinkText::Static(s), .. } => s.clone(),
+                ContentElement::LinkExpression { text: LinkText::Empty, .. } => String::new(),
+                ContentElement::Link { text, .. } => text.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn counts(list: &[(&str, usize)]) -> Vec<(String, usize)> {
+        list.iter().map(|(n, c)| (n.to_string(), *c)).collect()
+    }
+
+    #[test]
+    fn bound_expressions_fill_adjacent_star_slots_separately() {
+        let doc = assign_page(
+            "# Home\n\n[Latest posts](->> :post (take 2)) {#latest}\n\n\
+             [In the news](->> :post) {#news}\n\n----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 1)]));
+        assert_eq!(slot_labels(&doc, "latest"), vec!["Latest posts"]);
+        assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
+    }
+
+    #[test]
+    fn bound_expressions_out_of_schema_order() {
+        let doc = assign_page(
+            "# Home\n\n[In the news](->> :post) {#news}\n\n\
+             [Latest posts](->> :post (take 2)) {#latest}\n\n----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 1)]));
+        assert_eq!(slot_labels(&doc, "latest"), vec!["Latest posts"]);
+        assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
+        assert_eq!(doc.body.len(), 1);
+    }
+
+    #[test]
+    fn marked_path_ref_binds_out_of_schema_order() {
+        let doc = assign_page(
+            "# Home\n\n[In the news](:fragments/news) {#news}\n\n\
+             [Latest posts](->> :post (take 2)) {#latest}\n\n----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 1)]));
+        assert_eq!(slot_labels(&doc, "latest"), vec!["Latest posts"]);
+        assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
+        assert_eq!(doc.body.len(), 1);
+    }
+
+    #[test]
+    fn bound_expression_does_not_split_an_untagged_run() {
+        let doc = assign_page(
+            "# Home\n\n[a](/post/a)\n\n[In the news](->> :post) {#news}\n\n[b](/post/b)\n\n\
+             ----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(slot_labels(&doc, "latest"), vec!["a", "b"]);
+        assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
+    }
+
+    #[test]
+    fn bound_and_positional_elements_merge_in_source_order() {
+        // `latest` gets a bound expression and a plain link (positional).
+        let doc = assign_page(
+            "# Home\n\n[Latest posts](->> :post) {#latest}\n\n[a](/post/a)\n\n----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(slot_labels(&doc, "latest"), vec!["Latest posts", "a"]);
+    }
+
+    #[test]
+    fn duplicate_bindings_are_all_assigned_beyond_max() {
+        let doc = assign_page(
+            "# Home\n\n[One](->> :post) {#news}\n\n[Two](->> :feature) {#news}\n\n\
+             ----\n\nBody.\n",
+            "0..1",
+        );
+        assert_eq!(slot_labels(&doc, "news"), vec!["One", "Two"]);
+        // The separator directly after the title ends positional assignment
+        // (unchanged behaviour), so `latest` is not in the preamble at all.
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("news", 2)]));
+    }
+
+    #[test]
+    fn positional_capacity_is_reduced_by_bound_count() {
+        // `news` holds at most 1; the bound expression takes it, so the plain
+        // link after `latest` cannot fall into `news` positionally.
+        // Two plain links after the title: one fills `latest` (0..1), the
+        // second would go to `news` positionally but `news` is full.
+        let flat = parse_document(
+            "# Home\n\n[a](/post/a)\n\n[b](/post/b)\n\n[In the news](->> :post) {#news}\n\n\
+             ----\n\nBody.\n",
+        )
+        .unwrap();
+        let grammar = parse_schema(
+            "# Page title {#title}\noccurs\n: exactly once\n\n\
+             [<name>](/post/<name>) {#latest}\noccurs\n: 0..1\n\n\
+             [<name>](/post/<name>) {#news}\noccurs\n: 0..1\n\n----\n\nBody.\n",
+        )
+        .unwrap();
+        let doc = assign_slots(&flat.elements, &grammar);
+        assert_eq!(slot_labels(&doc, "latest"), vec!["a"]);
+        assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
+    }
+
+    #[test]
+    fn marker_naming_no_slot_falls_back_to_position() {
+        let doc = assign_page("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
+        assert_eq!(slot_labels(&doc, "latest"), vec!["In the news"]);
+    }
+
+    #[test]
+    fn marker_naming_a_non_link_slot_falls_back_to_position() {
+        let doc = assign_page("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
+        assert_eq!(slot_labels(&doc, "title").len(), 1, "title keeps its heading");
+        assert_eq!(slot_labels(&doc, "latest"), vec!["Posts"]);
+    }
+
+    #[test]
+    fn label_equal_to_a_slot_name_is_positional() {
+        // The label never names a slot: `[news]` without a marker goes to
+        // `latest`, the next slot by position.
+        let doc = assign_page(
+            "# Home\n\n[news](->> :post)\n\n[latest](->> :post (take 2))\n\n----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(slot_labels(&doc, "latest"), vec!["news", "latest"]);
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 2)]));
+    }
+
+    #[test]
+    fn bound_slot_index_ignores_the_label() {
+        let grammar = page_grammar("*");
+        let unmarked = ContentElement::LinkExpression {
+            text: LinkText::Label("news".to_string()),
+            target: crate::document::LinkTarget::PathRef("p".to_string()),
+            slot: None,
+        };
+        assert_eq!(bound_slot_index(&unmarked, &grammar), None);
+        let marked = ContentElement::LinkExpression {
+            text: LinkText::Label("latest".to_string()),
+            target: crate::document::LinkTarget::PathRef("p".to_string()),
+            slot: Some(crate::document::Keyword::new("news").unwrap()),
+        };
+        assert_eq!(bound_slot_index(&marked, &grammar), Some(2));
+    }
+
+    #[test]
+    fn bound_expression_after_separator_stays_in_body() {
+        let doc = assign_page("# Home\n\n----\n\n[In the news](->> :post) {#news}\n", "*");
+        assert!(doc.has_separator);
+        // Unchanged: the separator right after the title ends the preamble.
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1)]));
+        assert_eq!(doc.body.len(), 1);
+        assert!(matches!(doc.body[0].node, ContentElement::LinkExpression { .. }));
+    }
+
+    #[test]
+    fn bound_slot_after_early_separator_is_appended_in_schema_order() {
+        // Positional assignment stops at the separator after `title`, so
+        // `latest` is absent (unchanged); the bound `news` slot is appended.
+        let doc = assign_page("# Home\n\n[In the news](->> :post) {#news}\n\n----\n\nBody.\n", "*");
+        assert!(doc.has_separator);
+        assert!(doc.separator_span.is_some());
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("news", 1)]));
+        assert_eq!(doc.body.len(), 1);
+    }
+
+    #[test]
+    fn separator_handling_is_unchanged_without_bindings() {
+        let doc = assign_page("# Home\n\n[a](/post/a)\n\n----\n\nBody.\n\nMore.\n", "*");
+        assert!(doc.has_separator);
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1)]));
+        assert_eq!(doc.body.len(), 2);
     }
 
     #[test]

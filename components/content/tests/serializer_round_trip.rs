@@ -40,13 +40,15 @@
 //! `serializer.rs`:
 //!
 //! - L2: `%20` in `PathRef` paths (decoded on the legacy pulldown path);
-//! - L5: `Static`/`Binding` text that is empty, `Binding` text starting with
+//! - L5: `Static`/`Label` text that is empty, `Label` text starting with
 //!   `(` and `Static` text not starting with `(`;
 //! - L6: link text with inline markup, `[`, `]` or newlines;
 //! - L7: plain `Link` hrefs starting with `:`, `->` or `(->` (the `hrefs` pool
 //!   has none);
 //! - L8: link expressions anywhere but a whole top-level paragraph (the
 //!   generator only writes blocks).
+//!
+//! Both target kinds get slot markers (`{#slot}`, ADR-058 decision 9).
 //!
 //! Sources and fields are `Keyword`s, so they cannot be malformed (old L4).
 //!
@@ -136,8 +138,10 @@ struct Domain {
     link_fields: &'static [&'static str],
     /// Link expression `filter` values and `refs-to` URLs.
     link_values: &'static [&'static str],
-    /// `LinkText::Binding` names: not starting with `(` (limit L5).
-    link_bindings: &'static [&'static str],
+    /// `LinkText::Label` labels: not starting with `(` (limit L5).
+    link_labels: &'static [&'static str],
+    /// Slot markers on thread expressions (`None` = no marker).
+    link_slots: &'static [Option<&'static str>],
     /// `LinkText::Static` expressions: starting with `(` (limit L5).
     link_statics: &'static [&'static str],
     /// Inline markup for list items (lists store their source verbatim).
@@ -188,7 +192,8 @@ const DOMAIN: Domain = Domain {
     link_values: &[
         "news", "/a/b", "self", "x&amp;y", "a\\b", "a b", "say \"hi\"", "a%20b", "(x)",
     ],
-    link_bindings: &["posts", "hdr", "items", "x1", "latest"],
+    link_labels: &["posts", "hdr", "items", "x1", "latest", "Latest posts", "In the news"],
+    link_slots: &[None, Some("latest"), Some("news"), Some("a-b_1")],
     link_statics: &["(str title)", "(x)"],
     inline_markup: &["`c`", "*em*", "[a](/x)", "![i](/p.png)"],
 };
@@ -283,7 +288,7 @@ fn gen_link_expression(rng: &mut Rng) -> ContentElement {
     let text = match rng.below(3) {
         0 => LinkText::Empty,
         1 => LinkText::Static(rng.pick(DOMAIN.link_statics).to_string()),
-        _ => LinkText::Binding(rng.pick(DOMAIN.link_bindings).to_string()),
+        _ => LinkText::Label(rng.pick(DOMAIN.link_labels).to_string()),
     };
     let target = if rng.chance(40) {
         LinkTarget::PathRef(rng.pick(DOMAIN.link_paths).to_string())
@@ -292,7 +297,8 @@ fn gen_link_expression(rng: &mut Rng) -> ContentElement {
         let operations = (0..rng.below(5)).map(|_| gen_link_op(rng)).collect();
         LinkTarget::ThreadExpr { source, operations }
     };
-    ContentElement::LinkExpression { text, target }
+    let slot = DOMAIN.link_slots[rng.below(DOMAIN.link_slots.len())].map(keyword);
+    ContentElement::LinkExpression { text, target, slot }
 }
 
 /// A list of 1-4 items, each words or inline markup (links and images
@@ -558,6 +564,68 @@ fn generator_exercises_every_block_kind_and_opener() {
     assert!(escaped_definitions > 20, "too few definitions escaped: {escaped_definitions}");
 }
 
+// ── Bound link expressions (ADR-058, decision 9) ────────────────────────────
+
+fn page_grammar() -> schema::Grammar {
+    schema::parse_schema(
+        "# Page title {#title}\noccurs\n: exactly once\n\n\
+         [<name>](/post/<name>) {#latest}\noccurs\n: *\n\n\
+         [<name>](/post/<name>) {#news}\noccurs\n: *\n\n\
+         ----\n\nBody.\n",
+    )
+    .expect("page schema parses")
+}
+
+/// A link expression marked for a slot (`{#slot}`) may appear anywhere in the
+/// preamble. Saving writes slots in schema order, so an out-of-order marked
+/// expression moves to its slot's position, keeping its marker: a
+/// canonicalisation, and a fixed point from then on.
+#[test]
+fn out_of_order_bound_expressions_serialise_in_schema_order() {
+    let grammar = page_grammar();
+    let source = "# Home\n\n[In the news](->> :post) {#news}\n\n\
+                  [Latest posts](->> :post (take 2)) {#latest}\n\n----\n\nWelcome.\n";
+    let first = serialize_document(&content::parse_and_assign(source, &grammar).expect("parses"));
+    assert_eq!(
+        first,
+        "# Home\n\n[Latest posts](->> :post (take 2)) {#latest}\n\n\
+         [In the news](->> :post) {#news}\n\n----\n\nWelcome.\n"
+    );
+    let second = serialize_document(&content::parse_and_assign(&first, &grammar).expect("parses"));
+    assert_eq!(second, first, "parse → serialise must be a fixed point");
+}
+
+/// A slot marker survives a save, and parse → serialize → parse is a fixed
+/// point (the marked expression stays in its slot).
+#[test]
+fn slot_marker_survives_a_save() {
+    let grammar = page_grammar();
+    let source = "# Home\n\n[Latest posts](->> :post (take 4)) {#latest}\n\n\
+                  [In the news](->> :post) {#news}\n\n----\n\nWelcome.\n";
+    let first = content::parse_and_assign(source, &grammar).expect("parses");
+    let saved = serialize_document(&first);
+    assert_eq!(saved, source);
+    let second = content::parse_and_assign(&saved, &grammar).expect("parses");
+    let nodes = |doc: &Document| -> Vec<(String, Vec<ContentElement>)> {
+        doc.preamble
+            .iter()
+            .map(|s| {
+                (s.name.as_str().to_string(), s.elements.iter().map(|e| e.node.clone()).collect())
+            })
+            .collect()
+    };
+    assert_eq!(nodes(&second), nodes(&first));
+    assert_eq!(serialize_document(&second), saved);
+    let news = &first.preamble.iter().find(|s| s.name.as_str() == "news").expect("news").elements;
+    assert!(
+        matches!(
+            &news[0].node,
+            ContentElement::LinkExpression { slot: Some(k), .. } if k.as_str() == "news"
+        ),
+        "{news:?}"
+    );
+}
+
 // ── Markdown as found on disk ───────────────────────────────────────────────
 
 fn parse_blocks(md: &str) -> Vec<ContentElement> {
@@ -601,6 +669,8 @@ fn from_disk_corpus_is_written_unchanged() {
         "```a\\b\nx\n```",
         // A link expression in canonical form (ADR-058).
         "[posts](->> :post (take 4))",
+        // A marked link expression (ADR-058, decision 9).
+        "[Latest posts](->> :post (take 4)) {#latest}",
         // A list whose item contains a link stays one list.
         "- see [docs](/d)\n- b",
     ];

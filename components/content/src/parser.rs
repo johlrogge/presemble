@@ -1,6 +1,6 @@
-use crate::document::{ContentElement, Document, FlatDocument, LinkTarget, LinkText};
+use crate::document::{ContentElement, Document, FlatDocument, Keyword, LinkTarget, LinkText};
 use crate::error::ContentError;
-use crate::link_expression::{parse_destination, recognise_paragraph};
+use crate::link_expression::{parse_destination, recognise_paragraph, split_marker};
 use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use schema::{Grammar, HeadingLevel, Span, Spanned};
@@ -18,6 +18,66 @@ pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
     (line, character)
 }
 
+/// The pulldown-cmark options content documents are parsed with.
+const PARSER_OPTIONS: Options = Options::ENABLE_TABLES;
+
+/// Read a paragraph source that is, as a whole, a link expression with an
+/// optional trailing slot marker (ADR-058, decision 9).
+///
+/// The raw thread form is read by [`recognise_paragraph`]. Otherwise a marker
+/// is split off and the expression part is read the same way pulldown reads
+/// an unmarked paragraph, which covers `PathRef` and the legacy spellings.
+pub(crate) fn read_link_expression_paragraph(
+    source: &str,
+) -> Option<(LinkText, LinkTarget, Option<Keyword>)> {
+    let source = source.trim();
+    if let Some(c) = recognise_paragraph(source)
+        && let Ok(target) = parse_link_target(c.dest)
+    {
+        // A recognised marker's name is a valid keyword.
+        let slot = c.slot.and_then(|name| Keyword::new(name).ok());
+        return Some((parse_link_text(c.text), target, slot));
+    }
+    let (expression, name) = split_marker(source)?;
+    let keyword = Keyword::new(name).ok()?;
+    let (text, target) = read_pulldown_link_expression(expression)?;
+    Some((text, target, Some(keyword)))
+}
+
+/// Read `expr` as pulldown reads a paragraph that is exactly one link whose
+/// destination is a link expression (`:path` or a legacy spelling).
+fn read_pulldown_link_expression(expr: &str) -> Option<(LinkText, LinkTarget)> {
+    let mut events = Parser::new_ext(expr, PARSER_OPTIONS).into_offset_iter();
+    if !matches!(events.next(), Some((Event::Start(Tag::Paragraph), _))) {
+        return None;
+    }
+    let dest_url = match events.next() {
+        Some((Event::Start(Tag::Link { dest_url, .. }), range)) if range == (0..expr.len()) => {
+            dest_url
+        }
+        _ => return None,
+    };
+    // Built as `State::Link` builds its text.
+    let mut text = String::new();
+    loop {
+        match events.next()? {
+            (Event::End(TagEnd::Link), _) => break,
+            (Event::Text(s), _) | (Event::Code(s), _) => text.push_str(&s),
+            _ => {}
+        }
+    }
+    if !matches!(events.next(), Some((Event::End(TagEnd::Paragraph), _))) || events.next().is_some()
+    {
+        return None;
+    }
+    if !is_link_expression(&dest_url) {
+        return None;
+    }
+    // `%20` is decoded for the legacy spelling, as in `parse_document`.
+    let target = parse_link_target(&dest_url.replace("%20", " ")).ok()?;
+    Some((parse_link_text(&text), target))
+}
+
 /// Parse a markdown content document and return a `FlatDocument` with source byte spans.
 ///
 /// Each element in `doc.elements` is a `Spanned<ContentElement>` carrying both
@@ -25,7 +85,7 @@ pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
 ///
 /// For the structured slotted form, use [`parse_and_assign`] instead.
 pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
-    let event_iter = Parser::new_ext(input, Options::ENABLE_TABLES).into_offset_iter();
+    let event_iter = Parser::new_ext(input, PARSER_OPTIONS).into_offset_iter();
     let mut elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
 
     enum State {
@@ -79,6 +139,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         LinkExpression {
             text: LinkText,
             target: LinkTarget,
+            slot: Option<Keyword>,
             byte_range: std::ops::Range<usize>,
         },
     }
@@ -91,11 +152,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         // irrelevant.
         if matches!(state, State::LinkExpression { .. }) {
             if matches!(event, Event::End(TagEnd::Paragraph))
-                && let State::LinkExpression { text, target, byte_range } =
+                && let State::LinkExpression { text, target, slot, byte_range } =
                     std::mem::replace(&mut state, State::Idle)
             {
                 elements.push_back(Spanned {
-                    node: ContentElement::LinkExpression { text, target },
+                    node: ContentElement::LinkExpression { text, target, slot },
                     span: Span::from(byte_range),
                 });
             }
@@ -154,12 +215,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 // expression (ADR-058). If it does not parse it stays a
                 // paragraph; the validator reports it.
                 let link_expression = matches!(state, State::Idle)
-                    .then(|| input.get(range.clone()).map(str::trim))
+                    .then(|| input.get(range.clone()))
                     .flatten()
-                    .and_then(recognise_paragraph)
-                    .and_then(|c| Some((parse_link_text(c.text), parse_link_target(c.dest).ok()?)));
-                if let Some((text, target)) = link_expression {
-                    state = State::LinkExpression { text, target, byte_range: range };
+                    .and_then(read_link_expression_paragraph);
+                if let Some((text, target, slot)) = link_expression {
+                    state = State::LinkExpression { text, target, slot, byte_range: range };
                 } else if !matches!(state, State::Blockquote { .. }) {
                     // If we're inside a blockquote, the inner paragraph events
                     // are suppressed — raw source captures the content.
@@ -285,7 +345,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                         // `%20` is decoded only here, for the legacy spelling.
                         let decoded = href.replace("%20", " ");
                         match parse_link_target(&decoded) {
-                            Ok(target) => ContentElement::LinkExpression { text: link_text, target },
+                            // Legacy spellings never carry a slot marker.
+                            Ok(target) => ContentElement::LinkExpression {
+                                text: link_text,
+                                target,
+                                slot: None,
+                            },
                             Err(_) => ContentElement::Link { text, href },
                         }
                     } else {
@@ -507,14 +572,14 @@ pub(crate) fn is_link_expression(href: &str) -> bool {
 ///
 /// - Empty string → `LinkText::Empty`
 /// - Starts with `(` → `LinkText::Static(text)` (expression text, deferred)
-/// - Otherwise → `LinkText::Binding(text)` (the text is a binding name)
+/// - Otherwise → `LinkText::Label(text)` (display text only)
 pub fn parse_link_text(text: &str) -> LinkText {
     if text.is_empty() {
         LinkText::Empty
     } else if text.starts_with('(') {
         LinkText::Static(text.to_string())
     } else {
-        LinkText::Binding(text.to_string())
+        LinkText::Label(text.to_string())
     }
 }
 
@@ -1117,7 +1182,7 @@ headings
             .find(|e| matches!(e.node, ContentElement::LinkExpression { .. }))
             .expect("expected a LinkExpression element");
         match &expr.node {
-            ContentElement::LinkExpression { text, target } => {
+            ContentElement::LinkExpression { text, target, .. } => {
                 assert_eq!(*text, crate::document::LinkText::Empty);
                 assert_eq!(
                     *target,
@@ -1143,7 +1208,7 @@ headings
             .find(|e| matches!(e.node, ContentElement::LinkExpression { .. }))
             .expect("expected a LinkExpression element");
         match &expr.node {
-            ContentElement::LinkExpression { text, target } => {
+            ContentElement::LinkExpression { text, target, .. } => {
                 assert_eq!(*text, crate::document::LinkText::Empty);
                 match target {
                     crate::document::LinkTarget::ThreadExpr { source, operations } => {
@@ -1166,8 +1231,8 @@ headings
     }
 
     #[test]
-    fn parse_binding_name() {
-        // [posts]((->>%20:post%20(take%204))) -> LinkText::Binding("posts")
+    fn parse_label() {
+        // [posts]((->>%20:post%20(take%204))) -> LinkText::Label("posts")
         // %20 encodes spaces so the href is a valid CommonMark bare link destination.
         let doc = parse_document("[posts]((->>%20:post%20(take%204)))").unwrap();
         let expr = doc
@@ -1177,7 +1242,7 @@ headings
             .expect("expected a LinkExpression element");
         match &expr.node {
             ContentElement::LinkExpression { text, .. } => {
-                assert_eq!(*text, crate::document::LinkText::Binding("posts".to_string()));
+                assert_eq!(*text, crate::document::LinkText::Label("posts".to_string()));
             }
             _ => unreachable!(),
         }
@@ -1295,7 +1360,7 @@ headings
     }
 
     fn pulldown_events(md: &str) -> String {
-        format!("{:?}", Parser::new_ext(md, Options::ENABLE_TABLES).collect::<Vec<_>>())
+        format!("{:?}", Parser::new_ext(md, super::PARSER_OPTIONS).collect::<Vec<_>>())
     }
 
     fn thread_expr(
@@ -1306,11 +1371,21 @@ headings
         ContentElement::LinkExpression {
             text,
             target: LinkTarget::ThreadExpr { source: kw(source), operations },
+            slot: None,
         }
     }
 
-    fn binding(name: &str) -> LinkText {
-        LinkText::Binding(name.to_string())
+    fn marked(element: ContentElement, slot: &str) -> ContentElement {
+        match element {
+            ContentElement::LinkExpression { text, target, .. } => {
+                ContentElement::LinkExpression { text, target, slot: Some(kw(slot)) }
+            }
+            other => other,
+        }
+    }
+
+    fn label(name: &str) -> LinkText {
+        LinkText::Label(name.to_string())
     }
 
     /// pulldown-cmark 0.12 does not read a destination with raw spaces as a
@@ -1349,14 +1424,14 @@ headings
         use crate::document::LinkOp;
         assert_eq!(
             nodes("[x](->> :post (take 4))"),
-            vec![thread_expr(binding("x"), "post", vec![LinkOp::Take(4)])]
+            vec![thread_expr(label("x"), "post", vec![LinkOp::Take(4)])]
         );
-        assert_eq!(nodes("[x](->> :post)"), vec![thread_expr(binding("x"), "post", vec![])]);
+        assert_eq!(nodes("[x](->> :post)"), vec![thread_expr(label("x"), "post", vec![])]);
         assert_eq!(
             nodes("[x]((->> :post (take 4)))"),
-            vec![thread_expr(binding("x"), "post", vec![LinkOp::Take(4)])]
+            vec![thread_expr(label("x"), "post", vec![LinkOp::Take(4)])]
         );
-        assert_eq!(nodes("[x]((->> :post))"), vec![thread_expr(binding("x"), "post", vec![])]);
+        assert_eq!(nodes("[x]((->> :post))"), vec![thread_expr(label("x"), "post", vec![])]);
         // Malformed: not a link expression; pulldown's bare link remains.
         assert_eq!(
             nodes("[x](->>)"),
@@ -1365,11 +1440,11 @@ headings
     }
 
     #[test]
-    fn refs_to_self_binding_parses() {
+    fn refs_to_self_label_parses() {
         use crate::document::{LinkOp, RefsToTarget};
         assert_eq!(
             nodes("[posts](->> :post (refs-to self))"),
-            vec![thread_expr(binding("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
+            vec![thread_expr(label("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
         );
     }
 
@@ -1403,7 +1478,7 @@ headings
         let got: Vec<_> = posts.elements.iter().map(|e| e.node.clone()).collect();
         assert_eq!(
             got,
-            vec![thread_expr(binding("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
+            vec![thread_expr(label("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
         );
     }
 
@@ -1459,10 +1534,79 @@ headings
     #[test]
     fn legacy_spellings_parse() {
         use crate::document::LinkOp;
-        let expected = vec![thread_expr(binding("p"), "post", vec![LinkOp::Take(4)])];
+        let expected = vec![thread_expr(label("p"), "post", vec![LinkOp::Take(4)])];
         assert_eq!(nodes("[p]((->> :post (take 4)))"), expected);
         assert_eq!(nodes("[p](<(-\\>\\> :post (take 4))>)"), expected);
         assert_eq!(nodes("[p]((->>%20:post%20(take%204)))"), expected);
+    }
+
+    // ── Slot markers (ADR-058, decision 9) ──────────────────────────────────
+
+    #[test]
+    fn slot_marker_is_parsed_onto_the_link_expression() {
+        use crate::document::LinkOp;
+        assert_eq!(
+            nodes("[Latest posts](->> :post (take 4)) {#latest}"),
+            vec![marked(
+                thread_expr(label("Latest posts"), "post", vec![LinkOp::Take(4)]),
+                "latest"
+            )]
+        );
+        assert_eq!(
+            nodes("[x](->> :post)\t\t{#news}"),
+            vec![marked(thread_expr(label("x"), "post", vec![]), "news")]
+        );
+    }
+
+    #[test]
+    fn invalid_slot_marker_stays_a_paragraph() {
+        assert_eq!(
+            nodes("[x](->> :post) {#a b}"),
+            vec![ContentElement::Paragraph { text: "[x](->> :post) {#a b}".to_string() }]
+        );
+    }
+
+    #[test]
+    fn marker_on_its_own_line_is_not_a_link_expression() {
+        let got = nodes("[x](->> :post)\n{#news}");
+        assert!(
+            !got.iter().any(|n| matches!(n, ContentElement::LinkExpression { .. })),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn bare_marker_paragraph_after_a_link_expression_is_unchanged() {
+        // A separate `{#x}` paragraph is an annotation paragraph, as before;
+        // it does not mark the link expression above it.
+        assert_eq!(
+            nodes("[x](->> :post)\n\n{#news}"),
+            vec![
+                thread_expr(label("x"), "post", vec![]),
+                ContentElement::Paragraph { text: "{#news}".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn marker_after_a_path_ref_or_legacy_spelling_is_parsed() {
+        use crate::document::LinkOp;
+        let path_ref = |p: &str, text: &str| {
+            marked(
+                ContentElement::LinkExpression {
+                    text: label(text),
+                    target: LinkTarget::PathRef(p.to_string()),
+                    slot: None,
+                },
+                "news",
+            )
+        };
+        assert_eq!(nodes("[x](:fragments/header) {#news}"), vec![path_ref("fragments/header", "x")]);
+        assert_eq!(nodes("[x](<:a b>) {#news}"), vec![path_ref("a b", "x")]);
+        assert_eq!(nodes("[x](:a\\&amp;b) {#news}"), vec![path_ref("a&amp;b", "x")]);
+        let legacy = vec![marked(thread_expr(label("p"), "post", vec![LinkOp::Take(4)]), "news")];
+        assert_eq!(nodes("[p](<(-\\>\\> :post (take 4))>) {#news}"), legacy);
+        assert_eq!(nodes("[p]((->>%20:post%20(take%204))) {#news}"), legacy);
     }
 
     // ── parse_link_target unit tests ─────────────────────────────────────────

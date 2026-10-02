@@ -3348,6 +3348,7 @@ mod query_edges_tests {
                 node: content::ContentElement::LinkExpression {
                     text: content::LinkText::Empty,
                     target: content::LinkTarget::PathRef(target_url.to_string()),
+                    slot: None,
                 },
                 span: schema::Span { start: 0, end: 0 },
             }],
@@ -6965,6 +6966,153 @@ mod body_idx_to_structural_tests {
         assert!(
             body_idx_to_structural(&doc, "content/post/x.md", 99).is_none(),
             "out-of-range index should return None"
+        );
+    }
+}
+
+/// Package G, step 0: link-expression operations take effect in conductor
+/// builds. Fixture: three posts, two authors, one `page/home`.
+#[cfg(test)]
+mod link_expression_pipeline_tests {
+    use super::*;
+
+    const POST_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\n\
+        Published date. {#published}\noccurs\n: exactly once\n\n\
+        Category. {#category}\noccurs\n: exactly once\n\n\
+        [<name>](/author/<name>) {#author}\noccurs\n: exactly once\ntype\n: link(author)\n\n\
+        ----\n\nBody.\n";
+    const AUTHOR_SCHEMA: &str = "# Author name {#name}\noccurs\n: exactly once\n\n\
+        [<name>](/post/<name>) {#posts}\noccurs\n: *\ntype\n: link(post)\n\n\
+        ----\n\nBody.\n";
+    const PAGE_SCHEMA: &str = "# Page title {#title}\noccurs\n: exactly once\n\n\
+        [<name>](/post/<name>) {#latest}\noccurs\n: *\ntype\n: link(post)\n\n\
+        [<name>](/post/<name>) {#news}\noccurs\n: *\ntype\n: link(post)\n\n\
+        ----\n\nBody.\n";
+
+    fn post(title: &str, author: &str, published: &str, category: &str) -> String {
+        format!(
+            "# {title}\n\n{published}\n\n{category}\n\n[{author}](/author/{author})\n\n----\n\nBody of {title}.\n"
+        )
+    }
+
+    const AUTHOR_A: &str =
+        "# Author A\n\n[Posts](->> :post (refs-to self)) {#posts}\n\n----\n\nAbout A.\n";
+    const AUTHOR_B: &str =
+        "# Author B\n\n[Posts](->> :post (refs-to self)) {#posts}\n\n----\n\nAbout B.\n";
+    const HOME: &str = "# Home\n\n\
+        [Latest posts](->> :post (sort-by :published :desc) (take 2)) {#latest}\n\n\
+        [In the news](->> :post (filter :category \"news\")) {#news}\n\n----\n\nWelcome.\n";
+
+    pub(super) fn build_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for stem in ["post", "author", "page"] {
+            std::fs::create_dir_all(root.join(format!("schemas/{stem}"))).unwrap();
+            std::fs::create_dir_all(root.join(format!("templates/{stem}"))).unwrap();
+            std::fs::create_dir_all(root.join(format!("content/{stem}"))).unwrap();
+            std::fs::write(root.join(format!("templates/{stem}/item.hiccup")), "[:div]").unwrap();
+        }
+        std::fs::write(root.join("schemas/post/item.md"), POST_SCHEMA).unwrap();
+        std::fs::write(root.join("schemas/author/item.md"), AUTHOR_SCHEMA).unwrap();
+        std::fs::write(root.join("schemas/page/item.md"), PAGE_SCHEMA).unwrap();
+        std::fs::write(root.join("content/post/p1.md"), post("Post one", "a", "2026-01-10", "notes")).unwrap();
+        std::fs::write(root.join("content/post/p2.md"), post("Post two", "b", "2026-02-10", "news")).unwrap();
+        std::fs::write(root.join("content/post/p3.md"), post("Post three", "a", "2026-03-10", "news")).unwrap();
+        std::fs::write(root.join("content/author/a.md"), AUTHOR_A).unwrap();
+        std::fs::write(root.join("content/author/b.md"), AUTHOR_B).unwrap();
+        std::fs::write(root.join("content/page/home.md"), HOME).unwrap();
+        tmp
+    }
+
+    pub(super) fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    /// The URLs held by semantic slot `slot` of `page`, in order.
+    pub(super) fn slot_urls(conductor: &Conductor, page: &str, slot: &str) -> Vec<String> {
+        let sem = conductor.semantic_content_by_url(page).unwrap_or_else(|| panic!("no sem for {page}"));
+        let store = conductor.node_store.read().unwrap();
+        let url_of = |id| {
+            node_store_bridge::content_bridge::find_attr_text(&store, id, "url").unwrap_or_default()
+        };
+        let mut out = Vec::new();
+        for (name, target) in store.consists_of(sem).into_iter().chain(store.references(sem)) {
+            if store.resolve_name(name) != slot {
+                continue;
+            }
+            if matches!(store.get(target), Some(node_store::Node::Collection)) {
+                out.extend(store.children(target).into_iter().map(url_of));
+            } else {
+                out.push(url_of(target));
+            }
+        }
+        out
+    }
+
+    fn urls(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    #[ignore = "enabled by package G"]
+    fn full_build_applies_link_expression_operations() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2"]));
+    }
+
+    /// Pin: how the two PathRef spellings read back, and whether they match
+    /// the `url_to_semantic` key `/author/a` without and with a leading-slash
+    /// normalisation applied to both sides.
+    #[test]
+    fn path_ref_spellings_against_url_to_semantic() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let normalise = |u: &str| if u.starts_with('/') { u.to_string() } else { format!("/{u}") };
+        let keys: Vec<String> = conductor
+            .url_to_semantic
+            .read()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for (src, expected_value) in [("[](:author/a)", "author/a"), ("[](:/author/a)", "/author/a")] {
+            let flat = content::parse_document(src).expect("parse");
+            let value = match &flat.elements[0].node {
+                content::ContentElement::LinkExpression {
+                    target: content::LinkTarget::PathRef(v),
+                    ..
+                } => v.clone(),
+                other => panic!("{src}: expected PathRef, got {other:?}"),
+            };
+            assert_eq!(value, expected_value, "{src}");
+            let raw_match = keys.contains(&value);
+            let normalised_match = keys.iter().any(|k| normalise(k) == normalise(&value));
+            eprintln!("PIN {src}: value={value:?} raw_match={raw_match} normalised_match={normalised_match}");
+            assert!(normalised_match, "{src} must match /author/a after normalisation");
+        }
+    }
+
+    #[test]
+    fn page_slots_are_assigned_separately() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let root = conductor.document_by_url("/page/home").expect("home");
+        let store = conductor.node_store.read().unwrap();
+        let doc = node_store_bridge::content_bridge::store_to_document(&store, root).unwrap();
+        let counts: Vec<(String, usize)> = doc
+            .preamble
+            .iter()
+            .map(|s| (s.name.as_str().to_string(), s.elements.len()))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![("title".to_string(), 1), ("latest".to_string(), 1), ("news".to_string(), 1)],
+            "each link expression must land in its own slot"
         );
     }
 }

@@ -151,20 +151,25 @@ pub fn parse_destination(dest: &str) -> Result<LinkTarget, LinkExpressionError> 
 }
 
 /// A paragraph that has the shape of a link expression: a single line
-/// `[text](dest)` with nothing before or after it.
+/// `[text](dest)`, optionally followed by a slot marker `{#slot}`, with
+/// nothing else before or after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Candidate<'a> {
     pub text: &'a str,
     pub dest: &'a str,
+    /// The slot marker's name (a valid [`Keyword`]), if a marker is present.
+    pub slot: Option<&'a str>,
 }
 
 /// Recognise a paragraph whose (trimmed) source is a single line
-/// `[text](dest)` where:
+/// `[text](dest)`, optionally followed by one or more spaces or tabs and a
+/// slot marker `{#slot}` (ADR-058, decision 9), where:
 ///
 /// - `text` contains no `[`, `]` or newline;
 /// - `dest` starts with `->>`, `->`, `(->>` or `(->`;
 /// - the parentheses in `dest` never close more than they opened (parentheses
-///   inside quoted strings do not count), so the final `)` is the outer one.
+///   inside quoted strings do not count), so the final `)` is the outer one;
+/// - the marker's name, if present, is a valid [`Keyword`].
 ///
 /// Whether `dest` parses is not checked here.
 pub fn recognise_paragraph(source: &str) -> Option<Candidate<'_>> {
@@ -172,6 +177,31 @@ pub fn recognise_paragraph(source: &str) -> Option<Candidate<'_>> {
     if line.contains('\n') {
         return None;
     }
+    match split_marker(line) {
+        Some((expression, name)) => {
+            let candidate = recognise_expression(expression)?;
+            Keyword::is_valid(name).then_some(Candidate { slot: Some(name), ..candidate })
+        }
+        None => recognise_expression(line),
+    }
+}
+
+/// Split a trailing slot marker off `line`: `(expression, name)` when `line`
+/// ends with `}` and its last `{#` that follows a space or tab starts the
+/// marker, and the text before the marker (whitespace trimmed) ends with `)`.
+/// The name is not validated.
+pub(crate) fn split_marker(line: &str) -> Option<(&str, &str)> {
+    let body = line.strip_suffix('}')?;
+    let at = body
+        .rmatch_indices("{#")
+        .map(|(at, _)| at)
+        .find(|&at| body[..at].ends_with([' ', '\t']))?;
+    let expression = body[..at].trim_end_matches([' ', '\t']);
+    expression.ends_with(')').then_some((expression, &body[at + 2..]))
+}
+
+/// Recognise `[text](dest)` (no marker) on a single trimmed line.
+fn recognise_expression(line: &str) -> Option<Candidate<'_>> {
     let after_open = line.strip_prefix('[')?;
     let close = after_open.find(']')?;
     let text = &after_open[..close];
@@ -182,7 +212,7 @@ pub fn recognise_paragraph(source: &str) -> Option<Candidate<'_>> {
     if !(dest.starts_with("->") || dest.starts_with("(->")) {
         return None;
     }
-    parens_never_negative(dest).then_some(Candidate { text, dest })
+    parens_never_negative(dest).then_some(Candidate { text, dest, slot: None })
 }
 
 /// Whether the depth of parentheses in `dest` (outside quoted strings) never
@@ -224,6 +254,12 @@ pub enum LinkExpressionDiagnostic {
     /// A link expression appears inside running text instead of standing
     /// alone as a whole paragraph.
     MustStandAlone,
+    /// A link expression is followed by a slot marker whose name is not a
+    /// valid keyword (`{#a b}`); the paragraph is not a link expression.
+    InvalidSlotMarker(String),
+    /// A link expression's slot marker `{#name}` is on the line after it, in
+    /// the same paragraph.
+    MarkerOnOwnLine(String),
 }
 
 impl fmt::Display for LinkExpressionDiagnostic {
@@ -234,6 +270,15 @@ impl fmt::Display for LinkExpressionDiagnostic {
             }
             Self::Malformed(e) => write!(f, "malformed link expression: {e}"),
             Self::MustStandAlone => write!(f, "link expressions must stand alone (ADR-058)"),
+            Self::InvalidSlotMarker(name) => write!(
+                f,
+                "invalid slot marker `{{#{name}}}` on a link expression: \
+                 use only letters, digits, `_` and `-`"
+            ),
+            Self::MarkerOnOwnLine(name) => write!(
+                f,
+                "`{{#{name}}}`: put the slot marker on the same line as the link expression"
+            ),
         }
     }
 }
@@ -256,9 +301,29 @@ pub fn diagnose_paragraph(source: &str) -> Option<LinkExpressionDiagnostic> {
     {
         return None;
     }
+    if !trimmed.contains('\n')
+        && let Some((expression, name)) = split_marker(trimmed)
+        && recognise_expression(expression).is_some()
+    {
+        // A candidate whose only fault is the marker's name.
+        return Some(LinkExpressionDiagnostic::InvalidSlotMarker(name.to_string()));
+    }
+    if let Some((first, second)) = trimmed.split_once('\n')
+        && !second.contains('\n')
+        && recognise_paragraph(first).is_some()
+        && let Some(name) = bare_marker(second)
+    {
+        return Some(LinkExpressionDiagnostic::MarkerOnOwnLine(name.to_string()));
+    }
     let prose = without_code_spans(trimmed);
     (prose.contains("](->>") || prose.contains("]((->>"))
         .then_some(LinkExpressionDiagnostic::MustStandAlone)
+}
+
+/// The name in a line that is only a slot marker `{#name}`.
+fn bare_marker(line: &str) -> Option<&str> {
+    let name = line.trim().strip_prefix("{#")?.strip_suffix('}')?;
+    (!name.contains('}')).then_some(name)
 }
 
 /// `s` with inline code spans removed, so syntax quoted in documentation
@@ -700,7 +765,7 @@ mod tests {
 
     #[test]
     fn recognises_whole_paragraph_candidates() {
-        let c = |text, dest| Some(Candidate { text, dest });
+        let c = |text, dest| Some(Candidate { text, dest, slot: None });
         assert_eq!(recognise_paragraph("[x](->> :post (take 4))"), c("x", "->> :post (take 4)"));
         assert_eq!(recognise_paragraph("  [](->> :post)  "), c("", "->> :post"));
         assert_eq!(recognise_paragraph("[x]((->> :post))"), c("x", "(->> :post)"));
@@ -765,5 +830,96 @@ mod tests {
             diagnose_paragraph("unclosed ` then [x](->> :post)"),
             Some(LinkExpressionDiagnostic::MustStandAlone)
         );
+    }
+
+    // ── Slot markers (ADR-058, decision 9) ──────────────────────────────────
+
+    #[test]
+    fn recognises_a_slot_marker_after_spaces_or_tabs() {
+        let marked = |text, dest, slot| Some(Candidate { text, dest, slot: Some(slot) });
+        assert_eq!(
+            recognise_paragraph("[Latest posts](->> :post (take 4)) {#latest}"),
+            marked("Latest posts", "->> :post (take 4)", "latest")
+        );
+        assert_eq!(
+            recognise_paragraph("[x](->> :post)   {#news}"),
+            marked("x", "->> :post", "news")
+        );
+        assert_eq!(
+            recognise_paragraph("[x](->> :post)\t{#a-b_1}"),
+            marked("x", "->> :post", "a-b_1")
+        );
+        assert_eq!(
+            recognise_paragraph("  [x](->> :post) \t {#news}  "),
+            marked("x", "->> :post", "news")
+        );
+        // A marker on a malformed expression: still a candidate, so the
+        // destination is diagnosed.
+        assert_eq!(
+            recognise_paragraph("[x](->> :post (map :t)) {#news}"),
+            marked("x", "->> :post (map :t)", "news")
+        );
+        // `{#` inside a quoted value is not the marker.
+        assert_eq!(
+            recognise_paragraph(r#"[x](->> :p (filter :f "a {#b}")) {#news}"#),
+            marked("x", r#"->> :p (filter :f "a {#b}")"#, "news")
+        );
+    }
+
+    #[test]
+    fn rejects_markers_that_do_not_follow_the_rules() {
+        for s in [
+            // No whitespace before the marker.
+            "[x](->> :post){#news}",
+            // Invalid marker names.
+            "[x](->> :post) {#a b}",
+            "[x](->> :post) {#}",
+            "[x](->> :post) {#a}b}",
+            // Text after the marker.
+            "[x](->> :post) {#news} more",
+            // Marker on its own line.
+            "[x](->> :post)\n{#news}",
+            // Not a link expression before the marker.
+            "text {#news}",
+            "[x](/a/b) {#news}",
+            // The raw recogniser does not take legacy or PathRef spellings;
+            // the parser reads those through pulldown.
+            "[x](<(-\\>\\> :post)>) {#news}",
+        ] {
+            assert_eq!(recognise_paragraph(s), None, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn diagnoses_invalid_and_misplaced_markers() {
+        assert_eq!(diagnose_paragraph("[x](->> :post) {#news}"), None);
+        assert_eq!(
+            diagnose_paragraph("[x](->> :post) {#a b}"),
+            Some(LinkExpressionDiagnostic::InvalidSlotMarker("a b".to_string()))
+        );
+        assert_eq!(
+            diagnose_paragraph("[x](->> :post (map :t)) {#news}"),
+            Some(LinkExpressionDiagnostic::Malformed(E::UnknownOp("map".to_string())))
+        );
+        let own_line = diagnose_paragraph("[x](->> :post)\n{#news}");
+        assert_eq!(
+            own_line,
+            Some(LinkExpressionDiagnostic::MarkerOnOwnLine("news".to_string()))
+        );
+        assert!(
+            own_line
+                .unwrap()
+                .to_string()
+                .contains("put the slot marker on the same line as the link expression")
+        );
+        // Escaped (literal) paragraphs with markers are not diagnosed.
+        assert_eq!(diagnose_paragraph("\\[x](->> :post) {#news}"), None);
+        let all = [
+            LinkExpressionDiagnostic::InvalidSlotMarker("a b".to_string()),
+            LinkExpressionDiagnostic::MarkerOnOwnLine("news".to_string()),
+        ];
+        for d in all {
+            assert!(!d.to_string().is_empty(), "{d:?}");
+        }
     }
 }

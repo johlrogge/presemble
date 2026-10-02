@@ -776,12 +776,26 @@ A link expression must be a whole paragraph on its own line, with nothing before
 
 A link expression only takes effect in a preamble slot, above the `----` separator. In the body it is ignored and reported with a diagnostic asking you to move it above `----`.
 
+### Choosing the slot with a slot marker
+
+By default a link expression fills the next preamble slot by position, like any other preamble element. To put it in a specific link slot, end the line with a slot marker, the same `{#name}` syntax schemas use:
+
+```markdown
+[Latest posts](->> :post (sort-by :published :desc) (take 4)) {#latest}
+
+[In the news](->> :post (filter :category "news")) {#news}
+```
+
+A marked expression fills the named link slot wherever it appears in the preamble, so two adjacent slots that both accept any number of links each get their own expression. The text in brackets is display text only; it never chooses the slot. The marker goes on the same line as the link expression, after at least one space; a marker on the next line is reported. When the file is saved, markers are kept and slots are written in schema order. This works for every link-expression spelling, including `[text](:path)`.
+
+If a marker names no slot, or names a slot that is not a link slot, the expression is placed by position as if it had no marker, and a diagnostic reports the marker. If an unmarked expression's text equals the name of a link slot it did not land in, for example `[news](->> :post)` placed in `latest`, a hint suggests adding the marker: `[news](->> :post) {#news}`.
+
 ### Reverse references with `refs-to self`
 
 Any content file can populate a slot with all pages that link to it by using `(refs-to self)` in a link expression:
 
 ```markdown
-[posts](->> :post (refs-to self))
+[Posts](->> :post (refs-to self)) {#posts}
 ```
 
 This queries the site graph's edge index at build time and returns all posts whose link slots point to the current page's URL. The schema for the receiving page declares the slot with a link type and unbounded occurrence:

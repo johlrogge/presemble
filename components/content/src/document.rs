@@ -21,7 +21,8 @@ pub struct DocumentSlot {
 ///
 /// Produced by [`crate::assign_slots`] or [`crate::parse_and_assign`]. The
 /// preamble slots are ordered according to the grammar declaration order;
-/// `body` contains all elements after the separator (if any).
+/// `body` contains all elements after the separator (if any). The preamble is
+/// in grammar order; slots may be absent.
 #[derive(Debug, Clone)]
 pub struct Document {
     pub preamble: im::Vector<DocumentSlot>,
@@ -74,10 +75,13 @@ pub enum ContentElement {
     Blockquote { text: String },
     /// A list (ordered or unordered) stored as raw markdown source.
     List { source: String },
-    /// A link expression: [text](target) with optional binding and threaded ops.
+    /// A link expression: `[text](target)`, optionally followed by a slot
+    /// marker `{#slot}` (ADR-058, decision 9).
     LinkExpression {
         text: LinkText,
         target: LinkTarget,
+        /// The preamble link slot this expression is marked for, if any.
+        slot: Option<Keyword>,
     },
 }
 
@@ -172,8 +176,8 @@ pub enum LinkText {
     Empty,
     /// [Read more] — static label
     Static(String),
-    /// [name] — binding name (result stored under this key)
-    Binding(String),
+    /// [Latest posts] — display label; never names a slot (ADR-058, decision 9)
+    Label(String),
 }
 
 #[cfg(test)]
@@ -194,6 +198,7 @@ mod tests {
         let elem = ContentElement::LinkExpression {
             text: LinkText::Static("Read more".to_string()),
             target: LinkTarget::PathRef("/fragments/header".to_string()),
+            slot: None,
         };
         let cloned = elem.clone();
         assert_eq!(elem, cloned);
@@ -208,11 +213,12 @@ mod tests {
             LinkOp::Filter { field: kw("category"), value: "news".to_string() },
         ];
         let elem = ContentElement::LinkExpression {
-            text: LinkText::Binding("posts".to_string()),
+            text: LinkText::Label("posts".to_string()),
             target: LinkTarget::ThreadExpr {
                 source: kw("post"),
                 operations: ops,
             },
+            slot: Some(kw("latest")),
         };
         let cloned = elem.clone();
         assert_eq!(elem, cloned);
@@ -236,7 +242,7 @@ mod tests {
     #[test]
     fn link_text_variants_are_distinct() {
         assert_ne!(LinkText::Empty, LinkText::Static("x".to_string()));
-        assert_ne!(LinkText::Static("a".to_string()), LinkText::Binding("a".to_string()));
+        assert_ne!(LinkText::Static("a".to_string()), LinkText::Label("a".to_string()));
         assert_eq!(LinkText::Empty, LinkText::Empty);
     }
 

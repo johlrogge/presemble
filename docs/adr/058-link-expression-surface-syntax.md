@@ -29,6 +29,20 @@ ADR-030 introduced link expressions in content and left their markdown syntax op
 6. PathRef (`[t](:path)`) is unchanged.
 7. An expression-like destination inside running text (`a [x](:y) b`, `a [x](->> :p) b`) is not a link expression and gets a diagnostic.
 8. `(refs-to self)` matches every page that references the current page. A reference is a reference wherever it appears: preamble link slots, PathRef expressions, and links in body text. Publishing relies on the complete set of references, so none may be ignored. Until inline links are modelled as typed references (ADR-059, inline segments), only preamble link slots and PathRef expressions are tracked; body links are added when that lands.
+9. **Explicit slot markers.** A link expression may end with a slot marker,
+   `[label](->> ...) {#slot}`, the same `{#name}` syntax schemas use. A marked
+   expression fills the preamble link slot `slot` wherever it appears in the
+   preamble; the label is display text only and never names a slot. Marked
+   expressions are invisible to positional assignment: they neither consume the
+   positional cursor nor end another slot's run, and they are always placed
+   (exceeding `occurs` is a validation error). Unmarked expressions, and all
+   other preamble elements, are assigned by position. A marker that names no
+   link slot is not slotted and is reported (kept, never dropped; see the
+   unplaced-element rule). A label that equals a link slot name without a
+   marker gets a hint to add the marker. Markers are written back on save;
+   slots are written in schema order. Markers are recognised on link
+   expressions only (thread, PathRef and legacy spellings); extending them to other preamble elements awaits inline
+   segments (ADR-059).
 
 ## Alternatives considered
 

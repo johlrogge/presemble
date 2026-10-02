@@ -1,5 +1,5 @@
 use crate::document::{ContentElement, Document, LinkOp, LinkTarget, LinkText, RefsToTarget};
-use crate::link_expression::{parse_destination, recognise_paragraph};
+use crate::parser::read_link_expression_paragraph;
 use schema::Spanned;
 
 /// Serialize a Document back to canonical markdown.
@@ -85,13 +85,17 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         ContentElement::List { source } => source.clone(),
-        ContentElement::LinkExpression { text, target } => {
+        ContentElement::LinkExpression { text, target, slot } => {
             let text_part = match text {
                 LinkText::Empty => "",
                 LinkText::Static(s) => s.as_str(),
-                LinkText::Binding(b) => b.as_str(),
+                LinkText::Label(l) => l.as_str(),
             };
-            format!("[{text_part}]({})", link_expression_target(target))
+            let expression = format!("[{text_part}]({})", link_expression_target(target));
+            match slot {
+                Some(slot) => format!("{expression} {{#{slot}}}"),
+                None => expression,
+            }
         }
     }
 }
@@ -112,9 +116,9 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
 /// - L2: `%20` is decoded only when reading the legacy pulldown-link spelling
 ///   (a `PathRef` such as `[p](:a%20b)` reads back with a literal space);
 ///   thread-expression strings keep `%20` as written.
-/// - L5: `Static("")` and `Binding("")` read back as `Empty`; `Binding` text
+/// - L5: `Static("")` and `Label("")` read back as `Empty`; `Label` text
 ///   starting with `(` reads back as `Static`; `Static` text not starting with
-///   `(` reads back as `Binding` (`parse_link_text`).
+///   `(` reads back as `Label` (`parse_link_text`).
 /// - L6: link text containing inline markup, `[`, `]` or a newline is out of
 ///   scope (no escaping inside `[...]`).
 /// - L7: a plain `Link` whose href starts with `:`, `->` or `(->` reads back
@@ -255,10 +259,10 @@ fn escape_continuation_line(line: &str, header: Option<&str>) -> String {
     }
 }
 
-/// Whether `text` would be read back as a link expression (ADR-058): a
-/// whole-paragraph candidate whose destination parses.
+/// Whether `text` would be read back as a link expression (ADR-058), with
+/// or without a slot marker, in any spelling.
 fn reads_as_link_expression(text: &str) -> bool {
-    recognise_paragraph(text).is_some_and(|c| parse_destination(c.dest).is_ok())
+    read_link_expression_paragraph(text).is_some()
 }
 
 /// Whether `text` (leading whitespace removed) starts with `[label]:`, which
@@ -1310,7 +1314,11 @@ headings
     // ── Link expressions (C1-link) ───────────────────────────────────────────
 
     fn link_expr(text: LinkText, target: LinkTarget) -> ContentElement {
-        ContentElement::LinkExpression { text, target }
+        ContentElement::LinkExpression { text, target, slot: None }
+    }
+
+    fn marked_expr(text: LinkText, target: LinkTarget, slot: &str) -> ContentElement {
+        ContentElement::LinkExpression { text, target, slot: Some(kw(slot)) }
     }
 
     fn kw(s: &str) -> crate::document::Keyword {
@@ -1321,8 +1329,8 @@ headings
         LinkTarget::ThreadExpr { source: kw(source), operations }
     }
 
-    fn binding(b: &str) -> LinkText {
-        LinkText::Binding(b.to_string())
+    fn label(b: &str) -> LinkText {
+        LinkText::Label(b.to_string())
     }
 
     fn sort_by(field: &str, descending: bool) -> LinkOp {
@@ -1344,14 +1352,14 @@ headings
         let path = |p: &str| LinkTarget::PathRef(p.to_string());
         let cases = [
             (link_expr(LinkText::Empty, path("fragments/header")), "[](:fragments/header)"),
-            (link_expr(binding("hdr"), path("fragments/header")), "[hdr](:fragments/header)"),
+            (link_expr(label("hdr"), path("fragments/header")), "[hdr](:fragments/header)"),
             (
                 link_expr(LinkText::Static("(str title)".to_string()), path("fragments/header")),
                 "[(str title)](:fragments/header)",
             ),
-            (link_expr(binding("x"), path("a b")), "[x](<:a b>)"),
-            (link_expr(binding("x"), path("a&amp;b")), "[x](:a\\&amp;b)"),
-            (link_expr(binding("x"), path("a\\")), "[x](:a\\\\)"),
+            (link_expr(label("x"), path("a b")), "[x](<:a b>)"),
+            (link_expr(label("x"), path("a&amp;b")), "[x](:a\\&amp;b)"),
+            (link_expr(label("x"), path("a\\")), "[x](:a\\\\)"),
         ];
         for (el, expected) in cases {
             assert_link_round_trip(&el, expected);
@@ -1360,7 +1368,7 @@ headings
 
     #[test]
     fn link_expression_ops_round_trip() {
-        let posts = |ops: Vec<LinkOp>| link_expr(binding("posts"), thread("post", ops));
+        let posts = |ops: Vec<LinkOp>| link_expr(label("posts"), thread("post", ops));
         let url = |u: &str| LinkOp::RefsTo(RefsToTarget::Url(u.to_string()));
         let cases = [
             (posts(vec![]), "[posts](->> :post)"),
@@ -1419,11 +1427,67 @@ headings
                 LinkText::Static("(str title)".to_string()),
                 "[(str title)](->> :post (sort-by :published :desc) (take 3))",
             ),
-            (binding("posts"), "[posts](->> :post (sort-by :published :desc) (take 3))"),
+            (label("posts"), "[posts](->> :post (sort-by :published :desc) (take 3))"),
         ];
         for (text, expected) in cases {
             assert_link_round_trip(&link_expr(text, thread("post", ops())), expected);
         }
+    }
+
+    #[test]
+    fn slot_marker_round_trips() {
+        let cases = [
+            (
+                marked_expr(label("Latest posts"), thread("post", vec![LinkOp::Take(4)]), "latest"),
+                "[Latest posts](->> :post (take 4)) {#latest}",
+            ),
+            (marked_expr(LinkText::Empty, thread("post", vec![]), "news"), "[](->> :post) {#news}"),
+            (
+                marked_expr(LinkText::Static("(str title)".to_string()), thread("post", vec![]), "a-b_1"),
+                "[(str title)](->> :post) {#a-b_1}",
+            ),
+        ];
+        for (el, expected) in cases {
+            assert_link_round_trip(&el, expected);
+        }
+        // Tabs and runs of spaces before the marker canonicalise to one space.
+        let write_back = |md: &str| serialize_element(&reparse_one(md));
+        assert_eq!(write_back("[x](->> :post)\t \t{#news}"), "[x](->> :post) {#news}");
+    }
+
+    #[test]
+    fn marked_path_ref_round_trips() {
+        let path = |p: &str| LinkTarget::PathRef(p.to_string());
+        let cases = [
+            (marked_expr(label("x"), path("p"), "news"), "[x](:p) {#news}"),
+            (marked_expr(label("x"), path("a b"), "news"), "[x](<:a b>) {#news}"),
+            (marked_expr(label("x"), path("a&amp;b"), "news"), "[x](:a\\&amp;b) {#news}"),
+        ];
+        for (el, expected) in cases {
+            assert_link_round_trip(&el, expected);
+        }
+    }
+
+    #[test]
+    fn paragraph_that_reads_as_marked_path_ref_is_escaped() {
+        let text = "[x](:p) {#news}";
+        let out = serialize_element(&para(text));
+        assert_eq!(out, format!("\\{text}"));
+        assert_eq!(reparse_one(&out), para(&out));
+        assert_eq!(serialize_element(&para(&out)), out);
+    }
+
+    #[test]
+    fn paragraph_that_reads_as_marked_link_expression_is_escaped() {
+        let text = "[p](->> :post) {#news}";
+        let out = serialize_element(&para(text));
+        assert_eq!(out, format!("\\{text}"));
+        assert_eq!(reparse_one(&out), para(&out));
+        assert_eq!(serialize_element(&para(&out)), out);
+        // An invalid marker is not a link expression: left alone.
+        let invalid = "[p](->> :post) {#a b}";
+        assert_eq!(serialize_element(&para(invalid)), invalid);
+        assert_eq!(reparse_one(invalid), para(invalid));
     }
 
     #[test]
@@ -1435,6 +1499,13 @@ headings
             "[p]((->>%20:post%20(take%204)))",
         ] {
             assert_eq!(write_back(legacy), "[p](->> :post (take 4))", "{legacy:?}");
+        }
+        for legacy in [
+            "[p]((->> :post (take 4))) {#news}",
+            "[p](<(-\\>\\> :post (take 4))>) {#news}",
+            "[p]((->>%20:post%20(take%204))) {#news}",
+        ] {
+            assert_eq!(write_back(legacy), "[p](->> :post (take 4)) {#news}", "{legacy:?}");
         }
     }
 
@@ -1461,7 +1532,7 @@ headings
         );
         assert_eq!(
             blocks("[posts](<(-\\>\\> :post (take 4))>)"),
-            vec![link_expr(binding("posts"), thread("post", vec![LinkOp::Take(4)]))]
+            vec![link_expr(label("posts"), thread("post", vec![LinkOp::Take(4)]))]
         );
     }
 
@@ -1479,14 +1550,14 @@ headings
         assert_eq!(write_back("[p](:a%20b)"), "[p](<:a b>)");
 
         // L3 is gone: a filter value with whitespace round-trips.
-        let el = link_expr(binding("p"), thread("post", vec![filter("f", "a b")]));
+        let el = link_expr(label("p"), thread("post", vec![filter("f", "a b")]));
         assert_eq!(reparse_one(&serialize_element(&el)), el);
 
-        // L5: `Static` text not starting with `(` reads back as `Binding`.
+        // L5: `Static` text not starting with `(` reads back as `Label`.
         let el = link_expr(LinkText::Static("x".to_string()), LinkTarget::PathRef("p".to_string()));
         assert_eq!(
             reparse_one(&serialize_element(&el)),
-            link_expr(binding("x"), LinkTarget::PathRef("p".to_string()))
+            link_expr(label("x"), LinkTarget::PathRef("p".to_string()))
         );
 
         // L8: only a whole top-level paragraph is a link expression.

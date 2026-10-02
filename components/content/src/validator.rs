@@ -1,4 +1,4 @@
-use crate::document::{ContentElement, Document};
+use crate::document::{ContentElement, Document, Keyword, LinkText};
 use crate::link_expression::{diagnose_paragraph, parse_destination, LinkExpressionDiagnostic};
 use crate::parse_list_items;
 use crate::parser::is_link_expression;
@@ -109,9 +109,9 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 
     // ── Link expressions (ADR-058) ─────────────────────────────────────────
     for slot in &doc.preamble {
-        validate_link_expressions(&slot.elements, Some(&slot.name), &mut diagnostics);
+        validate_link_expressions(&slot.elements, Some(&slot.name), grammar, &mut diagnostics);
     }
-    validate_link_expressions(&doc.body, None, &mut diagnostics);
+    validate_link_expressions(&doc.body, None, grammar, &mut diagnostics);
 
     ValidationResult { diagnostics }
 }
@@ -121,10 +121,13 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 // ---------------------------------------------------------------------------
 
 /// Report link expressions that will not take effect: malformed ones, ones
-/// inside running text, and ones in the body (`slot` is `None`).
+/// inside running text, ones in the body (`slot` is `None`), slot markers
+/// that did not bind, and labels that look like a missing marker (ADR-058,
+/// decision 9).
 fn validate_link_expressions(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: Option<&SlotName>,
+    grammar: &Grammar,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     let mut push = |severity: Severity, message: String| {
@@ -140,7 +143,11 @@ fn validate_link_expressions(
                 Some(d @ LinkExpressionDiagnostic::Malformed(_)) => {
                     push(Severity::Error, d.to_string());
                 }
-                Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
+                Some(
+                    d @ (LinkExpressionDiagnostic::MustStandAlone
+                    | LinkExpressionDiagnostic::InvalidSlotMarker(_)
+                    | LinkExpressionDiagnostic::MarkerOnOwnLine(_)),
+                ) => {
                     push(Severity::Warning, d.to_string());
                 }
                 None => {}
@@ -159,7 +166,51 @@ fn validate_link_expressions(
                         .to_string(),
                 );
             }
+            ContentElement::LinkExpression { text, slot: marker, .. } => {
+                if let Some(slot_name) = slot
+                    && let Some(message) = slot_marker_message(text, marker.as_ref(), slot_name, grammar)
+                {
+                    push(Severity::Warning, message);
+                }
+            }
             _ => {}
+        }
+    }
+}
+
+/// The warning for a preamble link expression that sits in `slot`
+/// (ADR-058, decision 9), if any:
+///
+/// 1. its marker `{#name}` names no slot;
+/// 2. its marker names a slot that is not a link slot;
+/// 3. it has no marker, its label equals the name of a link slot, and it is
+///    not in that slot (a hint to add the marker).
+///
+/// In cases 1 and 2 the element was placed by position. All are warnings for
+/// now; checks 1 and 2 become errors with the unplaced-element rule.
+fn slot_marker_message(
+    text: &LinkText,
+    marker: Option<&Keyword>,
+    slot: &SlotName,
+    grammar: &Grammar,
+) -> Option<String> {
+    let named = |name: &str| grammar.preamble.iter().find(|s| s.name.as_str() == name);
+    match marker {
+        Some(name) => match named(name.as_str()) {
+            None => Some(format!("`{{#{name}}}` does not name a slot; placed by position")),
+            Some(target) if !matches!(target.element, Element::Link { .. }) => Some(format!(
+                "`{{#{name}}}` names slot `{name}`, which is not a link slot; placed by position"
+            )),
+            // Names a link slot: slot assignment placed it there.
+            Some(_) => None,
+        },
+        None => {
+            let LinkText::Label(label) = text else {
+                return None;
+            };
+            let target = named(label)?;
+            (matches!(target.element, Element::Link { .. }) && target.name != *slot)
+                .then(|| format!("did you mean `[{label}](…) {{#{label}}}`?"))
         }
     }
 }
@@ -347,7 +398,9 @@ fn check_occurs_count_paragraphs(
     }
 }
 
-/// Validate links in a slot's elements. Returns count of links.
+/// Validate links in a slot's elements. Returns count of links, link
+/// expressions included (bound expressions can exceed the slot's maximum;
+/// ADR-058, decision 9).
 fn validate_links(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: &Slot,
@@ -355,7 +408,9 @@ fn validate_links(
 ) -> usize {
     let count = elements
         .iter()
-        .filter(|s| matches!(s.node, ContentElement::Link { .. }))
+        .filter(|s| {
+            matches!(s.node, ContentElement::Link { .. } | ContentElement::LinkExpression { .. })
+        })
         .count();
 
     if count == 0 && expected_count_for_slot(slot).min() > 0 {
@@ -755,6 +810,124 @@ mod tests {
     #[test]
     fn quoted_link_expression_syntax_is_not_diagnosed() {
         assert!(link_diagnostics("# T\n\n----\n\nWrite `[p](->> :post)` alone.\n").is_empty());
+    }
+
+    // ── Link text binds the slot (ADR-058, decision 9) ───────────────────
+
+    fn page_grammar(news_occurs: &str) -> Grammar {
+        parse_schema(&format!(
+            "# Page title {{#title}}\noccurs\n: exactly once\n\n\
+             [<name>](/post/<name>) {{#latest}}\noccurs\n: *\n\n\
+             [<name>](/post/<name>) {{#news}}\noccurs\n: {news_occurs}\n\n\
+             ----\n\nBody.\n"
+        ))
+        .expect("page schema parses")
+    }
+
+    fn page_diagnostics(doc_input: &str, news_occurs: &str) -> Vec<ValidationDiagnostic> {
+        let grammar = page_grammar(news_occurs);
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        validate(&doc, &grammar).diagnostics
+    }
+
+    #[test]
+    fn marker_that_names_no_slot_warns() {
+        let d = page_diagnostics("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("latest"));
+        assert!(
+            d[0].message.contains("`{#newz}` does not name a slot; placed by position"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn marker_that_names_a_non_link_slot_warns() {
+        let d = page_diagnostics("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(
+            d[0].message.contains(
+                "`{#title}` names slot `title`, which is not a link slot; placed by position"
+            ),
+            "{}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn bound_expressions_validate_cleanly() {
+        let d = page_diagnostics(
+            "# Home\n\n[In the news](->> :post) {#news}\n\n\
+             [Latest posts](->> :post (take 2)) {#latest}\n\n----\n\nBody.\n",
+            "*",
+        );
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn free_text_label_does_not_warn() {
+        let d = page_diagnostics("# Home\n\n[Latest posts](->> :post)\n\n----\n\nBody.\n", "*");
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn label_equal_to_another_link_slot_gets_a_marker_hint() {
+        // `[news]` without a marker is placed in `latest` by position.
+        let d = page_diagnostics("# Home\n\n[news](->> :post)\n\n----\n\nBody.\n", "*");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("latest"));
+        assert!(
+            d[0].message.contains("did you mean `[news](…) {#news}`?"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn label_equal_to_its_own_slot_does_not_warn() {
+        let d = page_diagnostics("# Home\n\n[latest](->> :post)\n\n----\n\nBody.\n", "*");
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn label_equal_to_a_non_link_slot_does_not_warn() {
+        let d = page_diagnostics("# Home\n\n[title](->> :post)\n\n----\n\nBody.\n", "*");
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn invalid_and_misplaced_markers_are_reported() {
+        let d = link_diagnostics("# T\n\n[x](->> :post) {#a b}\n\n----\n\nBody.\n");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(d[0].message.contains("invalid slot marker `{#a b}`"), "{}", d[0].message);
+
+        let d = link_diagnostics("# T\n\n[x](->> :post)\n{#posts}\n\n----\n\nBody.\n");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(
+            d[0].message
+                .contains("put the slot marker on the same line as the link expression"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn duplicate_bindings_exceed_max_cardinality() {
+        let d = page_diagnostics(
+            "# Home\n\n[One](->> :post) {#news}\n\n[Two](->> :feature) {#news}\n\n\
+             ----\n\nBody.\n",
+            "0..1",
+        );
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("news"));
+        assert!(d[0].message.contains("found 2"), "{}", d[0].message);
     }
 
     #[test]

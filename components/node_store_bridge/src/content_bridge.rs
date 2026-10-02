@@ -232,8 +232,11 @@ pub(crate) fn content_element_to_store(
             add_child_text(store, node, source);
             node
         }
-        ContentElement::LinkExpression { text, target } => {
+        ContentElement::LinkExpression { text, target, slot } => {
             let node = make_element(store, "link-expression");
+            if let Some(slot) = slot {
+                add_text_attr(store, node, "slot", slot.as_str());
+            }
             link_text_to_store(text, store, node);
             link_target_to_store(target, store, node);
             node
@@ -251,8 +254,8 @@ fn link_text_to_store(text: &LinkText, store: &mut NodeStore, parent: NodeId) {
             add_text_attr(store, node, "kind", "static");
             add_text_attr(store, node, "value", s);
         }
-        LinkText::Binding(s) => {
-            add_text_attr(store, node, "kind", "binding");
+        LinkText::Label(s) => {
+            add_text_attr(store, node, "kind", "label");
             add_text_attr(store, node, "value", s);
         }
     }
@@ -604,7 +607,11 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
             let target_node = try_child_by_name(store, id, kind, "link-target")?;
             let text = link_text_from_node(store, text_node)?;
             let target = link_target_from_node(store, target_node)?;
-            Ok(ContentElement::LinkExpression { text, target })
+            let slot = match find_attr_text(store, id, "slot") {
+                Some(_) => Some(try_attr_keyword(store, id, kind, "slot")?),
+                None => None,
+            };
+            Ok(ContentElement::LinkExpression { text, target, slot })
         }
         _ => Err(BlockDecodeError::UnknownKind(tag)),
     }
@@ -660,7 +667,7 @@ fn link_text_from_node(store: &NodeStore, node: NodeId) -> Result<LinkText, Bloc
     match kind.as_str() {
         "empty" => Ok(LinkText::Empty),
         "static" => Ok(LinkText::Static(try_attr_text(store, node, KIND, "value")?)),
-        "binding" => Ok(LinkText::Binding(try_attr_text(store, node, KIND, "value")?)),
+        "label" => Ok(LinkText::Label(try_attr_text(store, node, KIND, "value")?)),
         other => Err(BlockDecodeError::InvalidAttribute {
             kind: KIND.to_string(),
             attr: "kind".to_string(),
@@ -1284,13 +1291,23 @@ mod tests {
             ContentElement::LinkExpression {
                 text: LinkText::Empty,
                 target: LinkTarget::PathRef("/fragments/header".to_string()),
+                slot: None,
             },
             ContentElement::LinkExpression {
                 text: LinkText::Static("Read more".to_string()),
                 target: LinkTarget::PathRef("/posts/intro".to_string()),
+                slot: None,
             },
             ContentElement::LinkExpression {
-                text: LinkText::Binding("posts".to_string()),
+                text: LinkText::Label("Latest posts".to_string()),
+                target: LinkTarget::ThreadExpr {
+                    source: Keyword::new("post").unwrap(),
+                    operations: vec![LinkOp::Take(4)],
+                },
+                slot: Some(Keyword::new("latest").unwrap()),
+            },
+            ContentElement::LinkExpression {
+                text: LinkText::Label("posts".to_string()),
                 target: LinkTarget::ThreadExpr {
                     source: Keyword::new("post").unwrap(),
                     operations: vec![
@@ -1307,6 +1324,7 @@ mod tests {
                         LinkOp::RefsTo(RefsToTarget::Url("https://example.com".to_string())),
                     ],
                 },
+                slot: None,
             },
         ];
 
@@ -1319,6 +1337,31 @@ mod tests {
 
         let recovered = round_trip(&doc);
         compare_documents(&doc, &recovered);
+    }
+
+    #[test]
+    fn link_expression_store_encoding_has_slot_attr_and_label_kind() {
+        let marked = ContentElement::LinkExpression {
+            text: LinkText::Label("Latest posts".to_string()),
+            target: LinkTarget::PathRef("p".to_string()),
+            slot: Some(Keyword::new("latest").unwrap()),
+        };
+        let mut store = NodeStore::new();
+        let node = block_to_store(&marked, &mut store);
+        assert_eq!(find_attr_text(&store, node, "slot").as_deref(), Some("latest"));
+        let text_node = try_child_by_name(&store, node, "link-expression", "link-text").unwrap();
+        assert_eq!(find_attr_text(&store, text_node, "kind").as_deref(), Some("label"));
+        assert_eq!(block_from_node(&store, node).unwrap(), marked);
+
+        let unmarked = ContentElement::LinkExpression {
+            text: LinkText::Label("posts".to_string()),
+            target: LinkTarget::PathRef("p".to_string()),
+            slot: None,
+        };
+        let mut store = NodeStore::new();
+        let node = block_to_store(&unmarked, &mut store);
+        assert_eq!(find_attr_text(&store, node, "slot"), None);
+        assert_eq!(block_from_node(&store, node).unwrap(), unmarked);
     }
 
     // ── test 4: Table ────────────────────────────────────────────────────────
@@ -2130,11 +2173,12 @@ mod tests {
             ContentElement::Blockquote { text: "Q".to_string() },
             ContentElement::List { source: "- a".to_string() },
             ContentElement::LinkExpression {
-                text: LinkText::Binding("posts".to_string()),
+                text: LinkText::Label("posts".to_string()),
                 target: LinkTarget::ThreadExpr {
                     source: Keyword::new("post").unwrap(),
                     operations: vec![LinkOp::Take(3)],
                 },
+                slot: Some(Keyword::new("posts").unwrap()),
             },
         ];
         for el in elements {
@@ -2173,6 +2217,7 @@ mod tests {
             ContentElement::LinkExpression {
                 text: LinkText::Empty,
                 target: LinkTarget::PathRef("p".to_string()),
+                slot: None,
             },
         ];
         let mut store = NodeStore::new();

@@ -127,7 +127,7 @@ impl Value {
             Value::Suggestion { .. } => None,
             Value::LinkExpression { text, .. } => match text {
                 content::LinkText::Static(s) => Some(s.clone()),
-                content::LinkText::Binding(b) => Some(b.clone()),
+                content::LinkText::Label(l) => Some(l.clone()),
                 content::LinkText::Empty => None,
             },
             Value::Integer(n) => Some(n.to_string()),
@@ -291,7 +291,7 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
                             record.insert("href", Value::Text(href.clone()));
                             Some(Value::Record(record))
                         }
-                        ContentElement::LinkExpression { text, target } => {
+                        ContentElement::LinkExpression { text, target, .. } => {
                             Some(Value::LinkExpression {
                                 text: text.clone(),
                                 target: target.clone(),
@@ -546,12 +546,12 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
                 let html = render_inline_markdown(source);
                 format!("<div {attr_slot}=\"body\"{md_attr}>{html}</div>")
             }
-            ContentElement::LinkExpression { text, target } => {
+            ContentElement::LinkExpression { text, target, .. } => {
                 use content::{LinkTarget, LinkText};
                 let display_text = match text {
                     LinkText::Empty => String::new(),
                     LinkText::Static(s) => crate::dom::html_escape_text(s),
-                    LinkText::Binding(b) => crate::dom::html_escape_text(b),
+                    LinkText::Label(l) => crate::dom::html_escape_text(l),
                 };
                 let href = match target {
                     LinkTarget::PathRef(path) => crate::dom::html_escape_text(path),
@@ -1000,7 +1000,7 @@ mod tests {
         use im::vector;
 
         let related_expr = ContentElement::LinkExpression {
-            text: LinkText::Binding("posts".to_string()),
+            text: LinkText::Label("posts".to_string()),
             target: LinkTarget::ThreadExpr {
                 source: content::Keyword::new("post").unwrap(),
                 operations: vec![
@@ -1011,6 +1011,7 @@ mod tests {
                     content::LinkOp::Take(4),
                 ],
             },
+            slot: None,
         };
 
         let doc = Document {
@@ -1037,7 +1038,7 @@ mod tests {
         // The "related" slot should contain a Value::LinkExpression.
         match graph.resolve(&["related"]) {
             Some(Value::LinkExpression { text, target }) => {
-                assert_eq!(*text, LinkText::Binding("posts".to_string()));
+                assert_eq!(*text, LinkText::Label("posts".to_string()));
                 assert!(
                     matches!(target, LinkTarget::ThreadExpr { source, .. } if source.as_str() == "post"),
                     "expected ThreadExpr with source 'post', got {target:?}"
@@ -1048,10 +1049,10 @@ mod tests {
     }
 
     #[test]
-    fn link_expression_display_text_returns_binding_name() {
+    fn link_expression_display_text_returns_label() {
         use content::{LinkTarget, LinkText};
         let v = Value::LinkExpression {
-            text: LinkText::Binding("posts".to_string()),
+            text: LinkText::Label("posts".to_string()),
             target: LinkTarget::PathRef("/posts".to_string()),
         };
         assert_eq!(v.display_text(), Some("posts".to_string()));
