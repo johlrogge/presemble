@@ -33,6 +33,53 @@ ssh-config := env_var('HOME') / ".metadev/projects/presemble/.ssh/config"
 default:
     @just --list
 
+# --- local development ---
+
+# Output lands in <parent-of-dir>/output/<dir-name>/. On failure the CLI prints
+# the count ("N pages built, M failed") followed by one "error:" line per page
+# message on stderr.
+# Build a site with the dev profile; exits non-zero if any page fails.
+site-build dir="site":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    log="$(mktemp)"
+    trap 'rm -f "$log"' EXIT
+    cargo polylith cargo --profile dev run --bin presemble -- build {{ dir }} 2>&1 | tee "$log"
+    status=${PIPESTATUS[0]}
+    if summary="$(grep -E '[1-9][0-9]* failed' "$log")"; then
+        echo "site-build: {{ dir }} has failed pages:${summary}" >&2
+        exit 1
+    fi
+    exit "$status"
+
+# No build output is written into the repo; the temp path is printed and the
+# output lands under <tmp>/output/<name>/.
+# Build example-sites/<name> in a fresh temp dir.
+site-build-example name="blog":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -d example-sites/{{ name }} || { echo "missing example-sites/{{ name }}"; exit 1; }
+    tmp="$(mktemp -d -t presemble-example-{{ name }}.XXXXXX)"
+    site="$tmp/{{ name }}"
+    cp -r example-sites/{{ name }} "$site"
+    # Same as SiteTemplate::scaffold (hiccup): example sites keep templates in templates/hiccup/.
+    if [ -d "$site/templates/hiccup" ]; then
+      cp -r "$site/templates/hiccup/." "$site/templates/"
+      rm -rf "$site/templates/hiccup"
+    fi
+    rm -rf "$site/templates/html"
+    echo "Temp site: $site" >&2
+    {{ just_executable() }} --justfile {{ justfile() }} site-build "$site"
+    echo "Temp output: $tmp/output/{{ name }}"
+
+# Run the smoketest (tools/smoketest.sh) against the given polylith profile.
+smoketest profile="dev":
+    ./tools/smoketest.sh {{ profile }}
+
+# Run workspace tests (dev profile). Prefer the rust-codebase MCP `cargo_test`.
+test:
+    cargo polylith cargo --profile dev test
+
 # --- conductor (openstack module) ---
 
 # Preview changes to the conductor box / network. The Caddy basic_auth hash is
