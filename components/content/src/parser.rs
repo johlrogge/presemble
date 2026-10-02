@@ -78,6 +78,34 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     let mut state = State::Idle;
 
     for (event, range) in event_iter {
+        // A list is captured as raw source: every event inside it (links,
+        // images, headings, code, tables, nested lists, ...) is consumed here
+        // so none of them can replace the list state and lose its content.
+        if let State::List { byte_range, depth } = &mut state {
+            let nesting = match event {
+                Event::Start(Tag::List(_)) => Nesting::Opens,
+                Event::End(TagEnd::List(_)) => Nesting::Closes,
+                _ => Nesting::Inside,
+            };
+            let closed = capture_closes(depth, nesting);
+            if closed {
+                // Extract raw markdown source for the list block.
+                let start = byte_range.start;
+                let end = range.end;
+                let source = input.get(start..end)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if !source.is_empty() {
+                    elements.push_back(Spanned {
+                        node: ContentElement::List { source },
+                        span: Span { start, end },
+                    });
+                }
+                state = State::Idle;
+            }
+            continue;
+        }
+
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let heading_level = convert_heading_level(level)?;
@@ -98,9 +126,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Start(Tag::Paragraph) => {
-                // If we're inside a blockquote or list, the inner paragraph events
+                // If we're inside a blockquote, the inner paragraph events
                 // are suppressed — raw source captures the content.
-                if !matches!(state, State::Blockquote { .. } | State::List { .. }) {
+                if !matches!(state, State::Blockquote { .. }) {
                     state = State::Paragraph {
                         text: String::new(),
                         images: Vec::new(),
@@ -255,38 +283,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Start(Tag::List(_)) => {
-                // Track list nesting depth — only the outermost list emits an element.
-                match &mut state {
-                    State::List { depth, .. } => *depth += 1,
-                    _ => {
-                        state = State::List {
-                            byte_range: range,
-                            depth: 1,
-                        };
-                    }
-                }
+                // Everything up to the matching end is consumed by the list
+                // capture at the top of the loop.
+                state = State::List {
+                    byte_range: range,
+                    depth: 1,
+                };
             }
-            Event::End(TagEnd::List(_)) => {
-                if let State::List { byte_range, depth } = &mut state {
-                    *depth -= 1;
-                    if *depth == 0 {
-                        // Extract raw markdown source for the list block.
-                        let end = range.end;
-                        let source = input.get(byte_range.start..end)
-                            .map(|s| s.trim().to_string())
-                            .unwrap_or_default();
-                        if !source.is_empty() {
-                            elements.push_back(Spanned {
-                                node: ContentElement::List { source },
-                                span: Span { start: byte_range.start, end },
-                            });
-                        }
-                        state = State::Idle;
-                    }
-                }
-            }
-            // List items and their content are captured via the raw source approach above.
-            Event::Start(Tag::Item) | Event::End(TagEnd::Item) => {}
 
             Event::Start(Tag::CodeBlock(kind)) => {
                 let language = match &kind {
@@ -368,8 +371,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Table { current_cell, .. } => current_cell.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    State::List { .. } => {} // Raw source captures list content
-                    State::Idle => {}
+                    // List events never reach here (consumed by the list capture).
+                    State::List { .. } | State::Idle => {}
                 }
             }
             Event::Code(text) => {
@@ -391,8 +394,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                         current_cell.push_str("</code>");
                     }
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    State::List { .. } => {} // Raw source captures list content
-                    State::Idle => {}
+                    // List events never reach here (consumed by the list capture).
+                    State::List { .. } | State::Idle => {}
                 }
             }
 
@@ -420,6 +423,36 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
 pub fn parse_and_assign(input: &str, grammar: &Grammar) -> Result<Document, ContentError> {
     let flat = parse_document(input)?;
     Ok(assign_slots(&flat.elements, grammar))
+}
+
+/// How an event inside a raw-source capture relates to the captured kind.
+enum Nesting {
+    /// The event starts another construct of the captured kind.
+    Opens,
+    /// The event ends a construct of the captured kind.
+    Closes,
+    /// Any other event inside the capture.
+    Inside,
+}
+
+/// Advance the nesting depth of a construct captured as raw source (a list,
+/// later a blockquote) by one event.
+///
+/// Returns `true` when the event closes the outermost construct, i.e. the
+/// capture is complete.
+fn capture_closes(depth: &mut u32, nesting: Nesting) -> bool {
+    match nesting {
+        Nesting::Opens => {
+            *depth += 1;
+            false
+        }
+        Nesting::Closes => {
+            debug_assert!(*depth > 0, "capture closed more constructs than it opened");
+            *depth -= 1;
+            *depth == 0
+        }
+        Nesting::Inside => false,
+    }
 }
 
 /// Return true when the href should be treated as a link expression (not a plain URL).
@@ -1270,6 +1303,85 @@ headings
         assert!(
             !doc.elements.iter().any(|e| matches!(e.node, ContentElement::LinkExpression { .. })),
             "plain link should not produce a LinkExpression"
+        );
+    }
+
+    // ── Lists capture their whole source ────────────────────────────────────
+
+    fn assert_single_list(input: &str) {
+        let doc = parse_document(input).unwrap();
+        let nodes: Vec<_> = doc.elements.iter().map(|e| e.node.clone()).collect();
+        assert_eq!(
+            nodes,
+            vec![ContentElement::List { source: input.to_string() }],
+            "input {input:?} should be exactly one List"
+        );
+    }
+
+    #[test]
+    fn nested_list_stays_one_list() {
+        assert_single_list("- a\n  - b\n    - [c](/c)\n- d");
+    }
+
+    #[test]
+    fn loose_list_stays_one_list() {
+        assert_single_list("- a\n\n- b\n\n  more");
+    }
+
+    #[test]
+    fn capture_ends_at_outer_list_end() {
+        let doc = parse_document("- a\n  - b\n\nafter").unwrap();
+        let nodes: Vec<_> = doc.elements.iter().map(|e| e.node.clone()).collect();
+        assert_eq!(
+            nodes,
+            vec![
+                ContentElement::List { source: "- a\n  - b".to_string() },
+                ContentElement::Paragraph { text: "after".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn list_item_starting_with_link_stays_a_list() {
+        assert_single_list("- see [docs](/d)\n- b");
+    }
+
+    #[test]
+    fn list_item_with_image_stays_a_list() {
+        assert_single_list("- ![i](/p.png)");
+    }
+
+    #[test]
+    fn list_item_with_heading_stays_a_list() {
+        assert_single_list("- # h");
+    }
+
+    #[test]
+    fn list_item_with_blockquote_stays_a_list() {
+        assert_single_list("- > q");
+    }
+
+    #[test]
+    fn list_item_with_code_block_stays_a_list() {
+        assert_single_list("- a\n\n  ```\n  c\n  ```");
+    }
+
+    #[test]
+    fn list_item_with_table_stays_a_list() {
+        assert_single_list("1. x\n\n   | a | b |\n   |---|---|");
+    }
+
+    #[test]
+    fn getting_started_keeps_list_with_links() {
+        let input = include_str!("../../../site/content/guide/getting-started.md");
+        let doc = parse_document(input).unwrap();
+        assert!(
+            doc.elements.iter().any(|e| matches!(
+                &e.node,
+                ContentElement::List { source } if source.contains("[schemas](/feature/schemas-as-contracts)")
+            )),
+            "expected a List containing the schemas link; got {:#?}",
+            doc.elements
         );
     }
 

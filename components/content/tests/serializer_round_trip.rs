@@ -27,8 +27,10 @@
 //! It DOES include leading block openers (also behind 1-3 spaces), closing
 //! `#` runs in headings, table header/delimiter rows and link reference
 //! definition lookalikes in paragraphs, code with backtick/tilde runs and odd
-//! language strings, and hrefs with spaces, parentheses, angle brackets,
-//! backslashes and entities.
+//! language strings, hrefs with spaces, parentheses, angle brackets,
+//! backslashes and entities, and lists whose items contain inline markup
+//! (code, emphasis, links, images). Directly adjacent lists use different
+//! marker kinds, since same-kind lists would merge into one.
 //!
 //! Link expressions are generated with `PathRef` and `ThreadExpr` targets
 //! (0-4 ops of every kind) and must read back exactly. Excluded are the known
@@ -136,6 +138,8 @@ struct Domain {
     link_bindings: &'static [&'static str],
     /// `LinkText::Static` expressions: starting with `(` (limit L5).
     link_statics: &'static [&'static str],
+    /// Inline markup for list items (lists store their source verbatim).
+    inline_markup: &'static [&'static str],
 }
 
 const DOMAIN: Domain = Domain {
@@ -182,6 +186,7 @@ const DOMAIN: Domain = Domain {
     link_values: &["news", "/a/b", "self", "x&amp;y", "a\\b"],
     link_bindings: &["posts", "hdr", "items", "x1", "latest"],
     link_statics: &["(str title)", "(x)"],
+    inline_markup: &["`c`", "*em*", "[a](/x)", "![i](/p.png)"],
 };
 
 // ── Generators ──────────────────────────────────────────────────────────────
@@ -282,8 +287,55 @@ fn gen_link_expression(rng: &mut Rng) -> ContentElement {
     ContentElement::LinkExpression { text, target }
 }
 
-fn gen_block(rng: &mut Rng) -> ContentElement {
-    match rng.below(9) {
+/// A list of 1-4 items, each words or inline markup (links and images
+/// included). A list is stored as its source, so it must read back exactly.
+///
+/// All items share one marker: changing between `- ` and `1. ` starts a new
+/// list. `avoid_ordered` is the marker kind of a directly preceding list, if
+/// any; adjacent lists of the same kind would merge into one, so the other
+/// kind is used.
+fn gen_list(rng: &mut Rng, avoid_ordered: Option<bool>) -> ContentElement {
+    let ordered = match avoid_ordered {
+        Some(previous) => !previous,
+        None => rng.chance(50),
+    };
+    let marker = if ordered { "1. " } else { "- " };
+    // `--` is left out: an item like `- --` is a thematic break, not a list.
+    let words: Vec<&str> = DOMAIN.words.iter().copied().filter(|w| *w != "--").collect();
+    let n = 1 + rng.below(4);
+    let source = (0..n)
+        .map(|_| {
+            let tokens = 1 + rng.below(3);
+            let text = (0..tokens)
+                .map(|_| {
+                    if rng.chance(40) {
+                        rng.pick(DOMAIN.inline_markup)
+                    } else {
+                        rng.pick(&words)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{marker}{text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ContentElement::List { source }
+}
+
+/// Whether `block` is an ordered list (`Some(true)`), a bullet list
+/// (`Some(false)`) or not a list (`None`).
+fn list_kind(block: &ContentElement) -> Option<bool> {
+    match block {
+        ContentElement::List { source } => Some(source.starts_with("1. ")),
+        _ => None,
+    }
+}
+
+/// `previous_list` is the kind of a directly preceding list (see `gen_list`).
+fn gen_block(rng: &mut Rng, previous_list: Option<bool>) -> ContentElement {
+    match rng.below(10) {
+        9 => gen_list(rng, previous_list),
         0 => gen_heading(rng),
         1 => ContentElement::Paragraph { text: gen_paragraph_line(rng) },
         7 => gen_multiline_paragraph(rng),
@@ -312,15 +364,27 @@ fn spanned(node: ContentElement) -> Spanned<ContentElement> {
 
 fn gen_document(seed: u64) -> Document {
     let mut rng = Rng::new(seed);
+    // Kind of the previous block if it was a list, in serialized order.
+    let mut previous_list: Option<bool> = None;
+    let next_block = |rng: &mut Rng, previous_list: &mut Option<bool>| {
+        let block = gen_block(rng, *previous_list);
+        *previous_list = list_kind(&block);
+        spanned(block)
+    };
     let slots = rng.below(3);
     let preamble = (0..slots)
         .map(|i| DocumentSlot {
             name: SlotName::new(&format!("slot{i}")),
-            elements: (0..1 + rng.below(2)).map(|_| spanned(gen_block(&mut rng))).collect(),
+            elements: (0..1 + rng.below(2))
+                .map(|_| next_block(&mut rng, &mut previous_list))
+                .collect(),
         })
         .collect();
     let has_separator = rng.chance(60);
-    let body = (0..rng.below(6)).map(|_| spanned(gen_block(&mut rng))).collect();
+    if has_separator {
+        previous_list = None;
+    }
+    let body = (0..rng.below(6)).map(|_| next_block(&mut rng, &mut previous_list)).collect();
     Document { preamble, body, has_separator, separator_span: None }
 }
 
@@ -474,7 +538,7 @@ fn generator_exercises_every_block_kind_and_opener() {
             kinds.insert(std::mem::discriminant(&block));
         }
     }
-    assert_eq!(kinds.len(), 8, "expected 8 block kinds in the generated domain");
+    assert_eq!(kinds.len(), 9, "expected 9 block kinds in the generated domain");
     assert!(escaped_paragraphs > 50, "too few paragraphs needed escaping: {escaped_paragraphs}");
     assert!(multiline > 100, "too few multi-line paragraphs: {multiline}");
     assert!(escaped_later_lines > 30, "too few later lines escaped: {escaped_later_lines}");
@@ -530,6 +594,8 @@ fn from_disk_corpus_is_written_unchanged() {
         // A link expression in canonical form. Inside `<…>` the `>` of `->>`
         // must be escaped, or the line is not a link at all.
         "[posts](<(-\\>\\> :post (take 4))>)",
+        // A list whose item contains a link stays one list.
+        "- see [docs](/d)\n- b",
     ];
     let mut failures = Vec::new();
     for md in corpus {
