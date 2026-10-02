@@ -37,8 +37,8 @@ ADR-030 introduced link expressions in content and left their markdown syntax op
    positional cursor nor end another slot's run, and they are always placed
    (exceeding `occurs` is a validation error). Unmarked expressions, and all
    other preamble elements, are assigned by position. A marker that names no
-   link slot is not slotted and is reported (kept, never dropped; see the
-   unplaced-element rule). A label that equals a link slot name without a
+   link slot is not slotted: the expression is kept and saved, never
+   rendered, and reported as an error (ADR-060 §5). A label that equals a link slot name without a
    marker gets a hint to add the marker. Markers are written back on save;
    slots are written in schema order. Markers are recognised on link
    expressions only (thread, PathRef and legacy spellings); extending them to other preamble elements awaits inline

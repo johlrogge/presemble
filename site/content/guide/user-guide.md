@@ -148,6 +148,10 @@ headings
 
 The body section is optional. Schemas without `----` have no free-form body.
 
+### Preamble and body
+
+The preamble (above `----`) only holds what the schema's slots allow, in order. Anything else there is kept and saved but not shown, and stops the page from publishing; on save it moves to just above `----`. The body below `----` is free content. To allow free paragraphs near the top, declare a paragraph slot with `occurs: *`.
+
 ### Body content types
 
 The body section supports the full range of markdown block and inline content:
@@ -788,7 +792,7 @@ By default a link expression fills the next preamble slot by position, like any 
 
 A marked expression fills the named link slot wherever it appears in the preamble, so two adjacent slots that both accept any number of links each get their own expression. The text in brackets is display text only; it never chooses the slot. The marker goes on the same line as the link expression, after at least one space; a marker on the next line is reported. When the file is saved, markers are kept and slots are written in schema order. This works for every link-expression spelling, including `[text](:path)`.
 
-If a marker names no slot, or names a slot that is not a link slot, the expression is placed by position as if it had no marker, and a diagnostic reports the marker. If an unmarked expression's text equals the name of a link slot it did not land in, for example `[news](->> :post)` placed in `latest`, a hint suggests adding the marker: `[news](->> :post) {#news}`.
+If a marker names no slot or a slot that is not a link slot, is invalid, is on its own line, follows a multi-line expression, or is on anything other than a link expression (an image, a plain link), the line is kept exactly as written but not used, and the page cannot be published until it is fixed. A line that is only `{#name}` is reported the same way. If an unmarked expression's text equals the name of a link slot it did not land in, for example `[news](->> :post)` placed in `latest`, a hint suggests adding the marker: `[news](->> :post) {#news}`.
 
 ### Reverse references with `refs-to self`
 
