@@ -230,7 +230,7 @@ member   := keyword                   ; a slot name, or `rest` in a Mixed sectio
 - In the general model, P1's `unassigned` is section 0's not-allowed container,
   so P2 renames it rather than reworking it.
 - Known exception: HTML blocks are not parsed yet (limit L12) and are lost on
-  save; a follow-up package makes them elements.
+  save; a follow-up package makes them elements. Resolved by ADR-062.
 
 **P2 (later package): sections.**
 
