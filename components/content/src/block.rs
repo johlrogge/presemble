@@ -389,15 +389,15 @@ mod tests {
             ContentElement::LinkExpression {
                 text: LinkText::Binding("posts".to_string()),
                 target: LinkTarget::ThreadExpr {
-                    source: "post".to_string(),
+                    source: crate::document::Keyword::new("post").unwrap(),
                     operations: vec![
                         LinkOp::Filter {
-                            field: "category".to_string(),
+                            field: crate::document::Keyword::new("category").unwrap(),
                             value: "news".to_string(),
                         },
                         LinkOp::RefsTo(RefsToTarget::SelfRef),
                         LinkOp::SortBy {
-                            field: "published".to_string(),
+                            field: crate::document::Keyword::new("published").unwrap(),
                             descending: false,
                         },
                         LinkOp::Take(4),

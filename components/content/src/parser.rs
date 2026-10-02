@@ -1,5 +1,6 @@
-use crate::document::{ContentElement, Document, FlatDocument, LinkOp, LinkTarget, LinkText, RefsToTarget};
+use crate::document::{ContentElement, Document, FlatDocument, LinkTarget, LinkText};
 use crate::error::ContentError;
+use crate::link_expression::{parse_destination, recognise_paragraph};
 use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use schema::{Grammar, HeadingLevel, Span, Spanned};
@@ -73,11 +74,34 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             byte_range: std::ops::Range<usize>,
             depth: u32,
         },
+        /// A whole top-level paragraph recognised from its source as a link
+        /// expression (ADR-058); every event up to its end is ignored.
+        LinkExpression {
+            text: LinkText,
+            target: LinkTarget,
+            byte_range: std::ops::Range<usize>,
+        },
     }
 
     let mut state = State::Idle;
 
     for (event, range) in event_iter {
+        // A link-expression paragraph was decided at its start; pulldown's
+        // reading of its content (text, a shortcut reference link, ...) is
+        // irrelevant.
+        if matches!(state, State::LinkExpression { .. }) {
+            if matches!(event, Event::End(TagEnd::Paragraph))
+                && let State::LinkExpression { text, target, byte_range } =
+                    std::mem::replace(&mut state, State::Idle)
+            {
+                elements.push_back(Spanned {
+                    node: ContentElement::LinkExpression { text, target },
+                    span: Span::from(byte_range),
+                });
+            }
+            continue;
+        }
+
         // A list is captured as raw source: every event inside it (links,
         // images, headings, code, tables, nested lists, ...) is consumed here
         // so none of them can replace the list state and lose its content.
@@ -126,9 +150,19 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Start(Tag::Paragraph) => {
-                // If we're inside a blockquote, the inner paragraph events
-                // are suppressed — raw source captures the content.
-                if !matches!(state, State::Blockquote { .. }) {
+                // A top-level paragraph whose whole source is a link
+                // expression (ADR-058). If it does not parse it stays a
+                // paragraph; the validator reports it.
+                let link_expression = matches!(state, State::Idle)
+                    .then(|| input.get(range.clone()).map(str::trim))
+                    .flatten()
+                    .and_then(recognise_paragraph)
+                    .and_then(|c| Some((parse_link_text(c.text), parse_link_target(c.dest).ok()?)));
+                if let Some((text, target)) = link_expression {
+                    state = State::LinkExpression { text, target, byte_range: range };
+                } else if !matches!(state, State::Blockquote { .. }) {
+                    // If we're inside a blockquote, the inner paragraph events
+                    // are suppressed — raw source captures the content.
                     state = State::Paragraph {
                         text: String::new(),
                         images: Vec::new(),
@@ -244,9 +278,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::End(TagEnd::Link) => {
                 if let State::Link { text, href, byte_range } = state {
+                    // Legacy spellings that pulldown reads as a link: `:path`,
+                    // `%20`-encoded and escaped angle-bracket destinations.
                     let node = if is_link_expression(&href) {
                         let link_text = parse_link_text(&text);
-                        match parse_link_target(&href) {
+                        // `%20` is decoded only here, for the legacy spelling.
+                        let decoded = href.replace("%20", " ");
+                        match parse_link_target(&decoded) {
                             Ok(target) => ContentElement::LinkExpression { text: link_text, target },
                             Err(_) => ContentElement::Link { text, href },
                         }
@@ -371,8 +409,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Table { current_cell, .. } => current_cell.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // List events never reach here (consumed by the list capture).
-                    State::List { .. } | State::Idle => {}
+                    // List and link-expression events never reach here
+                    // (consumed at the top of the loop).
+                    State::List { .. } | State::LinkExpression { .. } | State::Idle => {}
                 }
             }
             Event::Code(text) => {
@@ -394,8 +433,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                         current_cell.push_str("</code>");
                     }
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // List events never reach here (consumed by the list capture).
-                    State::List { .. } | State::Idle => {}
+                    // List and link-expression events never reach here
+                    // (consumed at the top of the loop).
+                    State::List { .. } | State::LinkExpression { .. } | State::Idle => {}
                 }
             }
 
@@ -456,8 +496,11 @@ fn capture_closes(depth: &mut u32, nesting: Nesting) -> bool {
 }
 
 /// Return true when the href should be treated as a link expression (not a plain URL).
-fn is_link_expression(href: &str) -> bool {
-    href.starts_with("(->>") || href.starts_with("(->") || href.starts_with(':')
+///
+/// `->` (without `>`) is accepted here so that it is parsed and rejected
+/// (`ThreadFirst`) rather than silently treated as a URL.
+pub(crate) fn is_link_expression(href: &str) -> bool {
+    href.starts_with("->") || href.starts_with("(->") || href.starts_with(':')
 }
 
 /// Parse the text part of a link expression `[text](target)`.
@@ -477,161 +520,17 @@ pub fn parse_link_text(text: &str) -> LinkText {
 
 /// Parse the href of a link expression into a [`LinkTarget`].
 ///
-/// Recognises:
+/// Recognises (ADR-058, grammar in `link_expression.rs`):
 /// - `:keyword/path` → `LinkTarget::PathRef` (the leading `:` is stripped)
-/// - `(->> ...)` or `(-> ...)` → `LinkTarget::ThreadExpr`
+/// - `->> ...` → `LinkTarget::ThreadExpr`
+/// - `(->> ...)` → the outer parentheses stripped, then as above (legacy)
+/// - `->` / `(->` → rejected: thread-first is not accepted
 ///
-/// URL-encoded spaces (`%20`) are decoded before parsing, enabling valid
-/// CommonMark link destinations for expressions that contain spaces.
+/// `%20` is not decoded here; the legacy pulldown-link path decodes it before
+/// calling this.
 pub fn parse_link_target(href: &str) -> Result<LinkTarget, ContentError> {
-    // Decode %20 so callers can write valid CommonMark hrefs with spaces encoded.
-    let decoded;
-    let href = if href.contains("%20") {
-        decoded = href.replace("%20", " ");
-        &decoded
-    } else {
-        href
-    };
-
-    if let Some(path) = href.strip_prefix(':') {
-        // Simple keyword path reference — strip the leading `:`
-        return Ok(LinkTarget::PathRef(path.to_string()));
-    }
-
-    // Threaded expression: (->> ...) or (-> ...)
-    let inner = if href.starts_with("(->>") {
-        href.strip_prefix("(->>")
-            .and_then(|s| s.strip_suffix(')'))
-            .ok_or_else(|| ContentError::ParseError(format!("malformed thread expression: {href}")))?
-            .trim()
-    } else if href.starts_with("(->") {
-        href.strip_prefix("(->")
-            .and_then(|s| s.strip_suffix(')'))
-            .ok_or_else(|| ContentError::ParseError(format!("malformed thread expression: {href}")))?
-            .trim()
-    } else {
-        return Err(ContentError::ParseError(format!("unrecognised link expression: {href}")));
-    };
-
-    // Tokenise the inner content: first token is the source, then balanced `(...)` forms.
-    let mut tokens = split_expression_tokens(inner);
-    if tokens.is_empty() {
-        return Err(ContentError::ParseError("thread expression has no source".to_string()));
-    }
-
-    let raw_source = tokens.remove(0);
-    let source = raw_source.trim_start_matches(':').to_string();
-
-    let mut operations: Vec<LinkOp> = Vec::new();
-    for token in tokens {
-        let op = parse_link_op(token.trim())?;
-        operations.push(op);
-    }
-
-    Ok(LinkTarget::ThreadExpr { source, operations })
-}
-
-/// Split an expression body into tokens: bare words and balanced `(...)` groups.
-fn split_expression_tokens(s: &str) -> Vec<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    let mut depth = 0usize;
-    let mut current = String::new();
-
-    for ch in s.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-                if depth == 0 {
-                    let t = current.trim().to_string();
-                    if !t.is_empty() {
-                        tokens.push(t);
-                    }
-                    current = String::new();
-                }
-            }
-            ' ' | '\t' | '\n' if depth == 0 => {
-                let t = current.trim().to_string();
-                if !t.is_empty() {
-                    tokens.push(t);
-                }
-                current = String::new();
-            }
-            _ => current.push(ch),
-        }
-    }
-    let t = current.trim().to_string();
-    if !t.is_empty() {
-        tokens.push(t);
-    }
-    tokens
-}
-
-/// Parse a single operation group like `(sort-by :field :desc)` or `(take 4)`.
-fn parse_link_op(s: &str) -> Result<LinkOp, ContentError> {
-    // Strip surrounding parens.
-    let inner = s
-        .strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'))
-        .ok_or_else(|| ContentError::ParseError(format!("expected parenthesised op, got: {s}")))?
-        .trim();
-
-    let parts: Vec<&str> = inner.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err(ContentError::ParseError("empty operation".to_string()));
-    }
-
-    match parts[0] {
-        "sort-by" => {
-            let field = parts
-                .get(1)
-                .ok_or_else(|| ContentError::ParseError("sort-by requires a field".to_string()))?
-                .trim_start_matches(':')
-                .to_string();
-            let descending = parts
-                .get(2)
-                .map(|d| *d == ":desc")
-                .unwrap_or(false);
-            Ok(LinkOp::SortBy { field, descending })
-        }
-        "take" => {
-            let n: usize = parts
-                .get(1)
-                .ok_or_else(|| ContentError::ParseError("take requires a count".to_string()))?
-                .parse()
-                .map_err(|_| ContentError::ParseError(format!("take argument is not a number: {}", parts[1])))?;
-            Ok(LinkOp::Take(n))
-        }
-        "filter" => {
-            let field = parts
-                .get(1)
-                .ok_or_else(|| ContentError::ParseError("filter requires a field".to_string()))?
-                .trim_start_matches(':')
-                .to_string();
-            let value = parts
-                .get(2)
-                .ok_or_else(|| ContentError::ParseError("filter requires a value".to_string()))?
-                .trim_matches('"')
-                .to_string();
-            Ok(LinkOp::Filter { field, value })
-        }
-        "refs-to" => {
-            let arg = parts
-                .get(1)
-                .ok_or_else(|| ContentError::ParseError("refs-to requires an argument".to_string()))?;
-            let target = if *arg == "self" {
-                RefsToTarget::SelfRef
-            } else {
-                RefsToTarget::Url(arg.trim_matches('"').to_string())
-            };
-            Ok(LinkOp::RefsTo(target))
-        }
-        other => Err(ContentError::ParseError(format!("unknown link operation: {other}"))),
-    }
+    parse_destination(href)
+        .map_err(|e| ContentError::ParseError(format!("malformed link expression `{href}`: {e}")))
 }
 
 /// Convert a pulldown-cmark HeadingLevel to schema's HeadingLevel.
@@ -1248,12 +1147,12 @@ headings
                 assert_eq!(*text, crate::document::LinkText::Empty);
                 match target {
                     crate::document::LinkTarget::ThreadExpr { source, operations } => {
-                        assert_eq!(source, "post");
+                        assert_eq!(source.as_str(), "post");
                         assert_eq!(operations.len(), 2);
                         assert_eq!(
                             operations[0],
                             crate::document::LinkOp::SortBy {
-                                field: "published".to_string(),
+                                field: kw("published"),
                                 descending: true,
                             }
                         );
@@ -1385,6 +1284,187 @@ headings
         );
     }
 
+    // ── Link-expression surface syntax (ADR-058) ────────────────────────────
+
+    fn kw(s: &str) -> crate::document::Keyword {
+        crate::document::Keyword::new(s).unwrap()
+    }
+
+    fn nodes(md: &str) -> Vec<ContentElement> {
+        parse_document(md).unwrap().elements.iter().map(|e| e.node.clone()).collect()
+    }
+
+    fn pulldown_events(md: &str) -> String {
+        format!("{:?}", Parser::new_ext(md, Options::ENABLE_TABLES).collect::<Vec<_>>())
+    }
+
+    fn thread_expr(
+        text: crate::document::LinkText,
+        source: &str,
+        operations: Vec<crate::document::LinkOp>,
+    ) -> ContentElement {
+        ContentElement::LinkExpression {
+            text,
+            target: LinkTarget::ThreadExpr { source: kw(source), operations },
+        }
+    }
+
+    fn binding(name: &str) -> LinkText {
+        LinkText::Binding(name.to_string())
+    }
+
+    /// pulldown-cmark 0.12 does not read a destination with raw spaces as a
+    /// link: the raw form arrives as plain text, split at the brackets. This
+    /// is why link expressions are recognised from the paragraph source.
+    ///
+    /// Before ADR-058, `parse_document` therefore produced a `Paragraph` with
+    /// the line as text for the first four inputs (the documented syntax
+    /// never parsed from content), and `Link { text: "x", href: "->>" }` for
+    /// `[x](->>)`.
+    #[test]
+    fn pulldown_raw_link_expression_events_are_pinned() {
+        let text_events = |rest: &str| {
+            format!(
+                "[Start(Paragraph), Text(Borrowed(\"[\")), Text(Borrowed(\"x\")), \
+                 Text(Borrowed(\"]\")), Text(Borrowed({rest:?})), End(Paragraph)]"
+            )
+        };
+        assert_eq!(pulldown_events("[x](->> :post (take 4))"), text_events("(->> :post (take 4))"));
+        assert_eq!(pulldown_events("[x](->> :post)"), text_events("(->> :post)"));
+        // `((->> …))` is NOT a link with an empty href and a parenthesised
+        // title: it is plain text too.
+        assert_eq!(pulldown_events("[x]((->> :post (take 4)))"), text_events("((->> :post (take 4)))"));
+        assert_eq!(pulldown_events("[x]((->> :post))"), text_events("((->> :post))"));
+        // Without spaces the destination is a bare link destination.
+        assert_eq!(
+            pulldown_events("[x](->>)"),
+            "[Start(Paragraph), Start(Link { link_type: Inline, dest_url: Borrowed(\"->>\"), \
+             title: Borrowed(\"\"), id: Borrowed(\"\") }), Text(Borrowed(\"x\")), End(Link), \
+             End(Paragraph)]"
+        );
+    }
+
+    #[test]
+    fn raw_link_expression_paragraphs_parse() {
+        use crate::document::LinkOp;
+        assert_eq!(
+            nodes("[x](->> :post (take 4))"),
+            vec![thread_expr(binding("x"), "post", vec![LinkOp::Take(4)])]
+        );
+        assert_eq!(nodes("[x](->> :post)"), vec![thread_expr(binding("x"), "post", vec![])]);
+        assert_eq!(
+            nodes("[x]((->> :post (take 4)))"),
+            vec![thread_expr(binding("x"), "post", vec![LinkOp::Take(4)])]
+        );
+        assert_eq!(nodes("[x]((->> :post))"), vec![thread_expr(binding("x"), "post", vec![])]);
+        // Malformed: not a link expression; pulldown's bare link remains.
+        assert_eq!(
+            nodes("[x](->>)"),
+            vec![ContentElement::Link { text: "x".to_string(), href: "->>".to_string() }]
+        );
+    }
+
+    #[test]
+    fn refs_to_self_binding_parses() {
+        use crate::document::{LinkOp, RefsToTarget};
+        assert_eq!(
+            nodes("[posts](->> :post (refs-to self))"),
+            vec![thread_expr(binding("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
+        );
+    }
+
+    #[test]
+    fn link_expression_span_is_the_paragraph() {
+        let src = "# T\n\n  [p](->> :post)  \n";
+        let doc = parse_document(src).unwrap();
+        let span = doc.elements[1].span;
+        assert_eq!(&src[span.start..span.end].trim(), &"[p](->> :post)");
+    }
+
+    #[test]
+    fn author_preamble_link_expression_is_assigned_to_posts_slot() {
+        use crate::document::{LinkOp, RefsToTarget};
+        use schema::parse_schema;
+        // Shape of the example blog's author schema, with `posts` as a link
+        // slot.
+        let grammar = parse_schema(
+            "# Author name {#name}\noccurs\n: exactly once\n\n\
+             A short biography. {#bio}\noccurs\n: 1..3\n\n\
+             [posts](/post/<name>) {#posts}\noccurs\n: *\ntype\n: link(post)\n",
+        )
+        .expect("schema parses");
+        let src = "# Default Author\n\nA bio.\n\n[posts](->> :post (refs-to self))\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &grammar).unwrap();
+        let posts = doc
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == "posts")
+            .expect("posts slot");
+        let got: Vec<_> = posts.elements.iter().map(|e| e.node.clone()).collect();
+        assert_eq!(
+            got,
+            vec![thread_expr(binding("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
+        );
+    }
+
+    #[test]
+    fn bench_shape_parses() {
+        use crate::document::LinkOp;
+        let target_stem = "post";
+        let md = format!("[](->> :{target_stem} (sort-by :title :desc) (take 4))\n\n");
+        assert_eq!(
+            nodes(&md),
+            vec![thread_expr(
+                LinkText::Empty,
+                "post",
+                vec![LinkOp::SortBy { field: kw("title"), descending: true }, LinkOp::Take(4)]
+            )]
+        );
+    }
+
+    #[test]
+    fn link_expression_is_only_recognised_as_a_whole_top_level_paragraph() {
+        let not_expr = |md: &str| {
+            let got = nodes(md);
+            assert!(
+                !got.iter().any(|n| matches!(n, ContentElement::LinkExpression { .. })),
+                "{md:?}: {got:?}"
+            );
+        };
+        not_expr("see [x](->> :post) here");
+        not_expr("[x](->> :post) and more");
+        not_expr("a\n[x](->> :post)");
+        not_expr("> [x](->> :post)");
+        not_expr("- [x](->> :post)");
+    }
+
+    #[test]
+    fn unknown_op_stays_a_paragraph() {
+        assert_eq!(
+            nodes("[x](->> :post (map :title))"),
+            vec![ContentElement::Paragraph { text: "[x](->> :post (map :title))".to_string() }]
+        );
+    }
+
+    #[test]
+    fn thread_first_is_rejected() {
+        assert_eq!(
+            nodes("[x](-> :post)"),
+            vec![ContentElement::Paragraph { text: "[x](-> :post)".to_string() }]
+        );
+        assert!(super::parse_link_target("(-> :post)").is_err());
+        assert!(super::parse_link_target("-> :post").is_err());
+    }
+
+    #[test]
+    fn legacy_spellings_parse() {
+        use crate::document::LinkOp;
+        let expected = vec![thread_expr(binding("p"), "post", vec![LinkOp::Take(4)])];
+        assert_eq!(nodes("[p]((->> :post (take 4)))"), expected);
+        assert_eq!(nodes("[p](<(-\\>\\> :post (take 4))>)"), expected);
+        assert_eq!(nodes("[p]((->>%20:post%20(take%204)))"), expected);
+    }
+
     // ── parse_link_target unit tests ─────────────────────────────────────────
 
     #[test]
@@ -1398,11 +1478,11 @@ headings
         let target = super::parse_link_target("(->> :post (sort-by :published))").unwrap();
         match target {
             crate::document::LinkTarget::ThreadExpr { source, operations } => {
-                assert_eq!(source, "post");
+                assert_eq!(source.as_str(), "post");
                 assert_eq!(
                     operations[0],
                     crate::document::LinkOp::SortBy {
-                        field: "published".to_string(),
+                        field: kw("published"),
                         descending: false,
                     }
                 );
@@ -1420,7 +1500,7 @@ headings
                 assert_eq!(
                     operations[0],
                     crate::document::LinkOp::Filter {
-                        field: "category".to_string(),
+                        field: kw("category"),
                         value: "news".to_string(),
                     }
                 );

@@ -71,18 +71,18 @@ A link to another content item is a reference. A link with a query expression is
 
 A site about things worth reading.
 
+[recent](->> :post (sort-by :published :desc) (take 5))
+
+[featured](->> :feature (sort-by :published :desc) (take 3))
+
 ----
 
-## Recent writing {#recent}
+## About this site {#about}
 
-[](-> /post (select :all) (sort .published :desc) (take 5))
-
-## Featured {#featured}
-
-[](-> /feature (select :all) (sort .published :desc) (take 3))
+Written by people who read first.
 ```
 
-This separation matters. The homepage author decides *what* appears: which collections, in what order, with what framing. The template decides *how* it looks. Neither can override the other's responsibility.
+This separation matters. Each link expression is a paragraph of its own in the preamble, above the `----`; in the body it is ignored. The vocabulary is fixed and never run as code; expressions are resolved against the site graph. The homepage author decides *what* appears: which collections, in what order, with what framing. The template decides *how* it looks. Neither can override the other's responsibility.
 
 Content fulfils what schemas promise. The schema says "a homepage has a title, a summary, and a body." The content file satisfies that contract. The template receives a validated homepage tree and renders it. Every step is checked.
 

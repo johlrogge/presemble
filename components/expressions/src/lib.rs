@@ -39,7 +39,10 @@ pub fn evaluate_link_expression(
         }
 
         content::LinkTarget::ThreadExpr { source, operations } => {
-            let items = stem_index.get(&SchemaStem::new(source)).cloned().unwrap_or_default();
+            let items = stem_index
+                .get(&SchemaStem::new(source.as_str()))
+                .cloned()
+                .unwrap_or_default();
 
             // Build initial list of (url, DataGraph) pairs
             let mut result: Vec<(UrlPath, template::DataGraph)> = items;
@@ -48,11 +51,11 @@ pub fn evaluate_link_expression(
             for op in operations {
                 match op {
                     content::LinkOp::SortBy { field, descending } => {
-                        let field = field.clone();
+                        let field = field.as_str();
                         let desc = *descending;
                         result.sort_by(|(_, a), (_, b)| {
-                            let ak = sort_key_for(a, &field);
-                            let bk = sort_key_for(b, &field);
+                            let ak = sort_key_for(a, field);
+                            let bk = sort_key_for(b, field);
                             let ord = ak.cmp(&bk);
                             if desc { ord.reverse() } else { ord }
                         });
@@ -61,13 +64,11 @@ pub fn evaluate_link_expression(
                         result.truncate(*n);
                     }
                     content::LinkOp::Filter { field, value } => {
-                        let field = field.clone();
-                        let value = value.clone();
+                        let field_ref = field.as_str();
                         result.retain(|(_, data)| {
-                            let field_ref: &str = &field;
                             data.resolve(&[field_ref])
                                 .and_then(|v| v.display_text())
-                                .map(|t| t == value)
+                                .map(|t| t == *value)
                                 .unwrap_or(false)
                         });
                     }
@@ -434,7 +435,7 @@ mod tests {
 
         let text = content::LinkText::Empty;
         let target = content::LinkTarget::ThreadExpr {
-            source: "post".to_string(),
+            source: content::Keyword::new("post").unwrap(),
             operations: vec![],
         };
 
@@ -549,7 +550,7 @@ mod tests {
 
         let text = content::LinkText::Empty;
         let target = content::LinkTarget::ThreadExpr {
-            source: "post".to_string(),
+            source: content::Keyword::new("post").unwrap(),
             operations: vec![content::LinkOp::RefsTo(content::RefsToTarget::SelfRef)],
         };
 
@@ -596,7 +597,7 @@ mod tests {
 
         let text = content::LinkText::Empty;
         let target = content::LinkTarget::ThreadExpr {
-            source: "post".to_string(),
+            source: content::Keyword::new("post").unwrap(),
             operations: vec![content::LinkOp::RefsTo(content::RefsToTarget::Url(
                 "/author/alice".to_string(),
             ))],
@@ -626,7 +627,7 @@ mod tests {
 
         let text = content::LinkText::Empty;
         let target = content::LinkTarget::ThreadExpr {
-            source: "post".to_string(),
+            source: content::Keyword::new("post").unwrap(),
             operations: vec![content::LinkOp::RefsTo(content::RefsToTarget::SelfRef)],
         };
 

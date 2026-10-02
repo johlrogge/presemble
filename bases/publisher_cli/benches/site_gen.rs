@@ -6,7 +6,7 @@ pub struct BenchSiteConfig {
     pub schemas: usize,
     pub links_per_page: usize,
     /// Number of link expression slots per schema (in addition to regular `links_per_page` links).
-    /// Each slot gets a `(->> :typeN ...)` expression that queries a different collection.
+    /// Each slot gets a `->> :typeN ...` expression that queries a different collection.
     pub link_expressions: usize,
     pub body_bytes: usize,
 }
@@ -122,9 +122,9 @@ fn generate_content(
     for e in 0..config.link_expressions {
         let target_schema = (schema_idx + e + 1) % config.schemas.max(1);
         let target_stem = stem_name(target_schema);
-        // Angle-bracket form allows spaces in the link destination
+        // Canonical link-expression form (ADR-058): a whole paragraph.
         content.push_str(&format!(
-            "[](<(->> :{target_stem} (sort-by :title :desc) (take 4))>)\n\n"
+            "[](->> :{target_stem} (sort-by :title :desc) (take 4))\n\n"
         ));
     }
 

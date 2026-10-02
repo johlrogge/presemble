@@ -3259,7 +3259,7 @@ mod link_resolution_tests {
         let link_expr = template::Value::LinkExpression {
             text: content::LinkText::Empty,
             target: content::LinkTarget::ThreadExpr {
-                source: "post".to_string(),
+                source: content::Keyword::new("post").unwrap(),
                 operations: vec![],
             },
         };

@@ -33,20 +33,22 @@
 //! marker kinds, since same-kind lists would merge into one.
 //!
 //! Link expressions are generated with `PathRef` and `ThreadExpr` targets
-//! (0-4 ops of every kind) and must read back exactly. Excluded are the known
-//! limits documented on `link_expression_target` in `serializer.rs`:
+//! (0-4 ops of every kind) and must read back exactly. Thread expressions are
+//! written raw (`[t](->> :source op...)`, ADR-058); `filter` values and
+//! `refs-to` URLs include spaces, quotes, backslashes, parentheses and `%20`.
+//! Excluded are the known limits documented on `link_expression_target` in
+//! `serializer.rs`:
 //!
-//! - L1: `(-> …)` (the generator only builds values, which are always `->>`);
-//! - L2: `%20` in paths, values or URLs;
-//! - L3: `filter` values and `refs-to` URLs with whitespace, `"` or
-//!   unbalanced parentheses;
-//! - L4: sources and fields with whitespace or parentheses, or starting with
-//!   `:`;
+//! - L2: `%20` in `PathRef` paths (decoded on the legacy pulldown path);
 //! - L5: `Static`/`Binding` text that is empty, `Binding` text starting with
 //!   `(` and `Static` text not starting with `(`;
-//! - L6: link text with inline markup;
-//! - L7: plain `Link` hrefs starting with `:` or `(->` (the `hrefs` pool has
-//!   none).
+//! - L6: link text with inline markup, `[`, `]` or newlines;
+//! - L7: plain `Link` hrefs starting with `:`, `->` or `(->` (the `hrefs` pool
+//!   has none);
+//! - L8: link expressions anywhere but a whole top-level paragraph (the
+//!   generator only writes blocks).
+//!
+//! Sources and fields are `Keyword`s, so they cannot be malformed (old L4).
 //!
 //! Besides the generated documents, `from_disk_corpus_is_written_unchanged`
 //! and `repository_markdown_round_trips` check markdown as it is found on
@@ -62,8 +64,8 @@
 //! form. The properties themselves should not need to change.
 
 use content::{
-    parse_document, serialize_document, ContentElement, Document, DocumentSlot, LinkOp, LinkTarget,
-    LinkText, RefsToTarget,
+    parse_document, serialize_document, ContentElement, Document, DocumentSlot, Keyword, LinkOp,
+    LinkTarget, LinkText, RefsToTarget,
 };
 use schema::{HeadingLevel, SlotName, Span, Spanned};
 
@@ -115,7 +117,8 @@ struct Domain {
     indentation: &'static [&'static str],
     /// Table header and delimiter rows (paragraph lines only).
     table_lines: &'static [&'static str],
-    /// Lines that look like (parts of) link reference definitions.
+    /// Lines that look like (parts of) link reference definitions or, alone,
+    /// a link expression (both are escaped with a leading `\`).
     definition_lines: &'static [&'static str],
     /// Heading endings that look like a closing ATX sequence.
     heading_tails: &'static [&'static str],
@@ -131,8 +134,7 @@ struct Domain {
     link_sources: &'static [&'static str],
     /// Link expression op fields (`sort-by`, `filter`).
     link_fields: &'static [&'static str],
-    /// Link expression `filter` values and `refs-to` URLs: no whitespace,
-    /// quotes, parentheses or `%20` (limit L3).
+    /// Link expression `filter` values and `refs-to` URLs.
     link_values: &'static [&'static str],
     /// `LinkText::Binding` names: not starting with `(` (limit L5).
     link_bindings: &'static [&'static str],
@@ -164,7 +166,7 @@ const DOMAIN: Domain = Domain {
     ],
     definition_lines: &[
         "[a]: /x", "[a]:", "[b]: /y \"t\"", "[ ]: /x", "[a] : /x", "[a\\]b]: /z", "[a",
-        "b]: /x",
+        "b]: /x", "[p](->> :post)",
     ],
     heading_tails: &[" #", " ##", " ###", " ####### ", "#", "##"],
     code_lines: &[
@@ -183,7 +185,9 @@ const DOMAIN: Domain = Domain {
     link_paths: &["fragments/header", "a/b", "a b", "x&amp;y", "p\\", "(z)"],
     link_sources: &["post", "feature", "author"],
     link_fields: &["published", "category", "title"],
-    link_values: &["news", "/a/b", "self", "x&amp;y", "a\\b"],
+    link_values: &[
+        "news", "/a/b", "self", "x&amp;y", "a\\b", "a b", "say \"hi\"", "a%20b", "(x)",
+    ],
     link_bindings: &["posts", "hdr", "items", "x1", "latest"],
     link_statics: &["(str title)", "(x)"],
     inline_markup: &["`c`", "*em*", "[a](/x)", "![i](/p.png)"],
@@ -252,15 +256,19 @@ fn gen_code(rng: &mut Rng) -> ContentElement {
     ContentElement::CodeBlock { language, code }
 }
 
+fn keyword(s: &str) -> Keyword {
+    Keyword::new(s).expect("pool keywords are valid")
+}
+
 fn gen_link_op(rng: &mut Rng) -> LinkOp {
     match rng.below(4) {
         0 => LinkOp::SortBy {
-            field: rng.pick(DOMAIN.link_fields).to_string(),
+            field: keyword(rng.pick(DOMAIN.link_fields)),
             descending: rng.chance(50),
         },
         1 => LinkOp::Take(rng.below(20)),
         2 => LinkOp::Filter {
-            field: rng.pick(DOMAIN.link_fields).to_string(),
+            field: keyword(rng.pick(DOMAIN.link_fields)),
             value: rng.pick(DOMAIN.link_values).to_string(),
         },
         _ => LinkOp::RefsTo(if rng.chance(50) {
@@ -280,7 +288,7 @@ fn gen_link_expression(rng: &mut Rng) -> ContentElement {
     let target = if rng.chance(40) {
         LinkTarget::PathRef(rng.pick(DOMAIN.link_paths).to_string())
     } else {
-        let source = rng.pick(DOMAIN.link_sources).to_string();
+        let source = keyword(rng.pick(DOMAIN.link_sources));
         let operations = (0..rng.below(5)).map(|_| gen_link_op(rng)).collect();
         LinkTarget::ThreadExpr { source, operations }
     };
@@ -416,7 +424,7 @@ fn body_only(blocks: &[ContentElement]) -> Document {
 /// The block we expect to read back after serialize → parse.
 ///
 /// Tracked in ADR-057 open questions 5/6; paragraphs are source text until the
-/// inline-model cutover (staged plan: thin (ii) → ADR-058 Inlines): a text-only `Paragraph` stores its
+/// inline-model cutover (staged plan: thin (ii) → ADR-059 (inline segments)): a text-only `Paragraph` stores its
 /// raw markdown SOURCE span, not literal text (parser.rs, `End(Paragraph)`).
 /// So the backslash the serializer adds to keep `# x` a paragraph reads back
 /// as part of the text (`\# x`). The block kind is preserved and the result is
@@ -591,9 +599,8 @@ fn from_disk_corpus_is_written_unchanged() {
         "[t](/a\\b)",
         "```a&b\nx\n```",
         "```a\\b\nx\n```",
-        // A link expression in canonical form. Inside `<…>` the `>` of `->>`
-        // must be escaped, or the line is not a link at all.
-        "[posts](<(-\\>\\> :post (take 4))>)",
+        // A link expression in canonical form (ADR-058).
+        "[posts](->> :post (take 4))",
         // A list whose item contains a link stays one list.
         "- see [docs](/d)\n- b",
     ];
@@ -610,9 +617,8 @@ fn from_disk_corpus_is_written_unchanged() {
 /// Representative markdown files from the repository: parse → serialize →
 /// parse must give the same block list.
 ///
-/// No listed file needed excluding for link expressions written with raw
-/// spaces (the follow-up package for the `LinkExpression` arm); the ones in
-/// `site/content/index.md` sit inside fenced code.
+/// Link expressions written in canonical form (ADR-058) are included:
+/// `example-sites/blog/content/author/default.md` has one in its preamble.
 ///
 /// Excluded: `site/content/guide/user-guide.md` and
 /// `site/content/feature/the-presemble-repl.md`. Their tables have inline
@@ -671,6 +677,10 @@ const REPOSITORY_MARKDOWN: &[(&str, &str)] = &[
     ),
     ("site/content/author/johlrogge.md", include_str!("../../../site/content/author/johlrogge.md")),
     ("site/content/post/index.md", include_str!("../../../site/content/post/index.md")),
+    (
+        "example-sites/blog/content/author/default.md",
+        include_str!("../../../example-sites/blog/content/author/default.md"),
+    ),
 ];
 
 #[test]

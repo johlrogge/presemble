@@ -555,7 +555,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
                 };
                 let href = match target {
                     LinkTarget::PathRef(path) => crate::dom::html_escape_text(path),
-                    LinkTarget::ThreadExpr { source, .. } => crate::dom::html_escape_text(source),
+                    LinkTarget::ThreadExpr { source, .. } => crate::dom::html_escape_text(source.as_str()),
                 };
                 format!(
                     "<a {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
@@ -1002,9 +1002,12 @@ mod tests {
         let related_expr = ContentElement::LinkExpression {
             text: LinkText::Binding("posts".to_string()),
             target: LinkTarget::ThreadExpr {
-                source: "post".to_string(),
+                source: content::Keyword::new("post").unwrap(),
                 operations: vec![
-                    content::LinkOp::SortBy { field: "published".to_string(), descending: true },
+                    content::LinkOp::SortBy {
+                        field: content::Keyword::new("published").unwrap(),
+                        descending: true,
+                    },
                     content::LinkOp::Take(4),
                 ],
             },
@@ -1036,7 +1039,7 @@ mod tests {
             Some(Value::LinkExpression { text, target }) => {
                 assert_eq!(*text, LinkText::Binding("posts".to_string()));
                 assert!(
-                    matches!(target, LinkTarget::ThreadExpr { source, .. } if source == "post"),
+                    matches!(target, LinkTarget::ThreadExpr { source, .. } if source.as_str() == "post"),
                     "expected ThreadExpr with source 'post', got {target:?}"
                 );
             }

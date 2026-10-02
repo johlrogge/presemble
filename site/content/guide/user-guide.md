@@ -734,28 +734,47 @@ The local `byline` fragment is referenced as `self/byline` in the composition ex
 
 ## Link expressions in content
 
-Content files can include link expressions that assemble collections at build time. A link expression is a parenthesised threading form inside a link:
+Content files can include link expressions that assemble collections at build time. A link expression is a query written as the destination of a link:
 
 ```markdown
-[]((->> :post (sort-by :published :desc) (take 5)))
+[](->> :post (sort-by :published :desc) (take 5))
 ```
 
-The expression evaluates against the site graph. The result is a validated list satisfying the collection schema for that type. The template receives the assembled list ready to iterate.
+The expression is resolved against the site graph. The result is a validated list satisfying the collection schema for that type. The template receives the assembled list ready to iterate.
 
 Link expressions make content the place where assembly decisions live. The homepage content file decides which collections appear and in what order; the template decides how they look.
 
 ### Expression syntax
 
-Expressions use Presemble Lisp — a small EDN-based language with threading macros and built-in functions for the operations content assembly needs:
+A link expression starts with `->>` and a source collection, followed by any number of operations applied in order. The table shows the parenthesised form you can also type at the REPL; in a content file, drop the outer parentheses:
 
 | Expression | Effect |
 |---|---|
 | `(->> :post (sort-by :published :desc) (take 5))` | Latest 5 posts |
 | `(->> :feature (sort-by :title :asc))` | Features sorted by title |
-| `(->> :post (filter #(= :pinned (:status %))))` | Pinned posts only |
+| `(->> :post (filter :status "pinned"))` | Pinned posts only |
 | `(->> :post (refs-to self))` | All posts that link to the current page |
 
-Keywords act as accessor functions: `:title item` extracts the `:title` field from `item`.
+### Link expression reference
+
+Link expressions are a fixed query vocabulary, not general code: the destination is read by Presemble's own small grammar and never evaluated as Presemble Lisp. The complete grammar is:
+
+```
+thread  := '->>' WS ':' keyword (WS op)*
+op      := '(' 'sort-by' WS ':' keyword [WS (':asc' | ':desc')] ')'
+         | '(' 'take' WS digits ')'
+         | '(' 'filter' WS ':' keyword WS string ')'
+         | '(' 'refs-to' WS ('self' | string) ')'
+keyword := [A-Za-z0-9_-]+
+string  := '"' ( [^"\\] | '\\' ["\\] )* '"'
+WS      := [ \t]+
+```
+
+`sort-by` without a direction sorts ascending. Strings are double-quoted and may contain spaces; write a literal quote as `\"` and a backslash as `\\`. `(refs-to self)` means the current page, while `(refs-to "/author/alice")` names a page by URL. Only `->>` is accepted; `->` is reported with a suggestion to use `->>`.
+
+A link expression must be a whole paragraph on its own line, with nothing before or after it and not inside a list or blockquote. Write it without outer parentheses: `[posts](->> :post (take 4))`. Older spellings (`[posts]((->> :post (take 4)))`, `%20`-encoded or angle-bracket destinations) are still read and are written back in this form. A link expression inside running text has no effect and is reported as a diagnostic, as is a malformed one.
+
+A link expression only takes effect in a preamble slot, above the `----` separator. In the body it is ignored and reported with a diagnostic asking you to move it above `----`.
 
 ### Reverse references with `refs-to self`
 

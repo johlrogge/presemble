@@ -3,6 +3,7 @@ mod block;
 mod diff;
 mod document;
 mod error;
+mod link_expression;
 mod parser;
 mod serializer;
 mod slot_assignment;
@@ -16,8 +17,15 @@ pub use adapters::{
 };
 pub use block::{check_block_round_trip, RoundTripError};
 pub use diff::{diff, Change, DocumentDiff};
-pub use document::{ContentElement, Document, DocumentSlot, FlatDocument, LinkOp, LinkTarget, LinkText, RefsToTarget};
+pub use document::{
+    ContentElement, Document, DocumentSlot, FlatDocument, Keyword, KeywordError, LinkOp,
+    LinkTarget, LinkText, RefsToTarget,
+};
 pub use error::ContentError;
+pub use link_expression::{
+    diagnose_paragraph, parse_thread, recognise_paragraph, Candidate, LinkExpressionDiagnostic,
+    LinkExpressionError,
+};
 pub use parser::{byte_to_position, parse_and_assign, parse_document, parse_link_target, parse_link_text};
 pub use serializer::serialize_document;
 pub use slot_assignment::assign_slots;

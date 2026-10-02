@@ -46,7 +46,7 @@ occurs
 : *
 ```
 
-The publisher evaluates the expression, queries the edge index for all posts whose author link points to this author URL, and populates the slot with the resulting list. The template iterates it the same way as any collection.
+The publisher resolves the expression, queries the edge index for all posts whose author link points to this author URL, and populates the slot with the resulting list. The template iterates it the same way as any collection.
 
 The REPL exposes the same queries directly:
 

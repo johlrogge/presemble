@@ -1,5 +1,5 @@
 use content::{
-    ContentElement, Document, DocumentSlot, LinkOp, LinkTarget, LinkText, RefsToTarget,
+    ContentElement, Document, DocumentSlot, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget,
 };
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
@@ -267,7 +267,7 @@ fn link_target_to_store(target: &LinkTarget, store: &mut NodeStore, parent: Node
         }
         LinkTarget::ThreadExpr { source, operations } => {
             add_text_attr(store, node, "kind", "thread-expr");
-            add_text_attr(store, node, "source", source);
+            add_text_attr(store, node, "source", source.as_str());
             for op in operations {
                 link_op_to_store(op, store, node);
             }
@@ -279,7 +279,7 @@ fn link_op_to_store(op: &LinkOp, store: &mut NodeStore, parent: NodeId) {
     match op {
         LinkOp::SortBy { field, descending } => {
             let node = add_child_element(store, parent, "sort-by");
-            add_text_attr(store, node, "field", field);
+            add_text_attr(store, node, "field", field.as_str());
             add_bool_attr(store, node, "descending", *descending);
         }
         LinkOp::Take(n) => {
@@ -288,7 +288,7 @@ fn link_op_to_store(op: &LinkOp, store: &mut NodeStore, parent: NodeId) {
         }
         LinkOp::Filter { field, value } => {
             let node = add_child_element(store, parent, "filter");
-            add_text_attr(store, node, "field", field);
+            add_text_attr(store, node, "field", field.as_str());
             add_text_attr(store, node, "value", value);
         }
         LinkOp::RefsTo(refs_to_target) => {
@@ -482,6 +482,21 @@ fn try_attr_text(
     })
 }
 
+/// A required text attribute that must be a valid link-expression keyword.
+fn try_attr_keyword(
+    store: &NodeStore,
+    node: NodeId,
+    kind: &str,
+    attr: &str,
+) -> Result<Keyword, BlockDecodeError> {
+    let value = try_attr_text(store, node, kind, attr)?;
+    Keyword::new(&value).map_err(|_| BlockDecodeError::InvalidAttribute {
+        kind: kind.to_string(),
+        attr: attr.to_string(),
+        value,
+    })
+}
+
 fn try_child_text(store: &NodeStore, node: NodeId, kind: &str) -> Result<String, BlockDecodeError> {
     child_text(store, node).ok_or_else(|| BlockDecodeError::MissingTextChild {
         kind: kind.to_string(),
@@ -660,7 +675,7 @@ fn link_target_from_node(store: &NodeStore, node: NodeId) -> Result<LinkTarget, 
     match kind.as_str() {
         "path-ref" => Ok(LinkTarget::PathRef(try_attr_text(store, node, KIND, "value")?)),
         "thread-expr" => {
-            let source = try_attr_text(store, node, KIND, "source")?;
+            let source = try_attr_keyword(store, node, KIND, "source")?;
             let mut operations: Vec<LinkOp> = Vec::new();
             for child_id in store.children(node) {
                 if let Some(op) = link_op_from_node(store, child_id)? {
@@ -684,7 +699,7 @@ fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Option<LinkOp>, 
     let kind = tag.as_str();
     let op = match kind {
         "sort-by" => {
-            let field = try_attr_text(store, node, kind, "field")?;
+            let field = try_attr_keyword(store, node, kind, "field")?;
             let descending = find_attr_bool(store, node, "descending").ok_or_else(|| {
                 BlockDecodeError::MissingAttribute {
                     kind: kind.to_string(),
@@ -708,7 +723,7 @@ fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Option<LinkOp>, 
             LinkOp::Take(n)
         }
         "filter" => {
-            let field = try_attr_text(store, node, kind, "field")?;
+            let field = try_attr_keyword(store, node, kind, "field")?;
             let value = try_attr_text(store, node, kind, "value")?;
             LinkOp::Filter { field, value }
         }
@@ -1277,15 +1292,15 @@ mod tests {
             ContentElement::LinkExpression {
                 text: LinkText::Binding("posts".to_string()),
                 target: LinkTarget::ThreadExpr {
-                    source: ":post".to_string(),
+                    source: Keyword::new("post").unwrap(),
                     operations: vec![
                         LinkOp::SortBy {
-                            field: "published".to_string(),
+                            field: Keyword::new("published").unwrap(),
                             descending: true,
                         },
                         LinkOp::Take(4),
                         LinkOp::Filter {
-                            field: "category".to_string(),
+                            field: Keyword::new("category").unwrap(),
                             value: "news".to_string(),
                         },
                         LinkOp::RefsTo(RefsToTarget::SelfRef),
@@ -2070,6 +2085,35 @@ mod tests {
     }
 
     #[test]
+    fn link_target_with_invalid_keyword_is_a_decode_error() {
+        let mut store = NodeStore::new();
+        let target = make_element(&mut store, "link-target");
+        add_text_attr(&mut store, target, "kind", "thread-expr");
+        add_text_attr(&mut store, target, "source", ":post");
+        assert_eq!(
+            link_target_from_node(&store, target),
+            Err(BlockDecodeError::InvalidAttribute {
+                kind: "link-target".to_string(),
+                attr: "source".to_string(),
+                value: ":post".to_string(),
+            })
+        );
+
+        let mut store = NodeStore::new();
+        let op = make_element(&mut store, "sort-by");
+        add_text_attr(&mut store, op, "field", "a b");
+        add_bool_attr(&mut store, op, "descending", false);
+        assert_eq!(
+            link_op_from_node(&store, op),
+            Err(BlockDecodeError::InvalidAttribute {
+                kind: "sort-by".to_string(),
+                attr: "field".to_string(),
+                value: "a b".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn decode_encode_decode_is_stable() {
         let elements = vec![
             h(2, "Section"),
@@ -2088,7 +2132,7 @@ mod tests {
             ContentElement::LinkExpression {
                 text: LinkText::Binding("posts".to_string()),
                 target: LinkTarget::ThreadExpr {
-                    source: "post".to_string(),
+                    source: Keyword::new("post").unwrap(),
                     operations: vec![LinkOp::Take(3)],
                 },
             },

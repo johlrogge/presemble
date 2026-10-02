@@ -4,6 +4,6 @@ Default Author is the placeholder profile for a new blog. Replace this file with
 
 Update `content/author/default.md` with your details, or create a new author file and update your posts to link to it.
 
-----
-
 [posts](->> :post (refs-to self))
+
+----

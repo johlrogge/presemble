@@ -8,7 +8,7 @@ A short biography. {#bio}
 occurs
 : 1..3
 
-posts {#posts}
+[<name>](/post/<name>) {#posts}
 occurs
 : *
 type

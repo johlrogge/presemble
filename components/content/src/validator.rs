@@ -1,5 +1,7 @@
 use crate::document::{ContentElement, Document};
+use crate::link_expression::{diagnose_paragraph, parse_destination, LinkExpressionDiagnostic};
 use crate::parse_list_items;
+use crate::parser::is_link_expression;
 use schema::{
     AltRequirement, BodyRules, Constraint, ContentConstraint, CountRange, Element, Grammar,
     HeadingLevelRange, Slot, SlotName, Spanned,
@@ -105,7 +107,61 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
         validate_body(&doc.body, body_rules, &mut diagnostics);
     }
 
+    // ── Link expressions (ADR-058) ─────────────────────────────────────────
+    for slot in &doc.preamble {
+        validate_link_expressions(&slot.elements, Some(&slot.name), &mut diagnostics);
+    }
+    validate_link_expressions(&doc.body, None, &mut diagnostics);
+
     ValidationResult { diagnostics }
+}
+
+// ---------------------------------------------------------------------------
+// Link expressions (ADR-058)
+// ---------------------------------------------------------------------------
+
+/// Report link expressions that will not take effect: malformed ones, ones
+/// inside running text, and ones in the body (`slot` is `None`).
+fn validate_link_expressions(
+    elements: &im::Vector<Spanned<ContentElement>>,
+    slot: Option<&SlotName>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let mut push = |severity: Severity, message: String| {
+        let message = match slot {
+            Some(name) => format!("slot '{name}': {message}"),
+            None => message,
+        };
+        diagnostics.push(ValidationDiagnostic { severity, message, slot: slot.cloned() });
+    };
+    for spanned in elements {
+        match &spanned.node {
+            ContentElement::Paragraph { text } => match diagnose_paragraph(text) {
+                Some(d @ LinkExpressionDiagnostic::Malformed(_)) => {
+                    push(Severity::Error, d.to_string());
+                }
+                Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
+                    push(Severity::Warning, d.to_string());
+                }
+                None => {}
+            },
+            // pulldown reads a destination without spaces (`[x](->>)`,
+            // `[x](->)`) as a plain link when it is not a link expression.
+            ContentElement::Link { href, .. } if is_link_expression(href) => {
+                if let Err(e) = parse_destination(&href.replace("%20", " ")) {
+                    push(Severity::Error, LinkExpressionDiagnostic::Malformed(e).to_string());
+                }
+            }
+            ContentElement::LinkExpression { .. } if slot.is_none() => {
+                push(
+                    Severity::Warning,
+                    "link expressions only take effect in preamble slots; move it above `----`"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +685,76 @@ mod tests {
             !result.is_valid(),
             "list with 1 item (min 2) should be invalid"
         );
+    }
+
+    // ── Link expressions (ADR-058) ───────────────────────────────────────
+
+    fn link_expression_grammar() -> Grammar {
+        parse_schema(
+            "# Title {#title}\n\nSummary. {#summary}\noccurs\n: 0..3\n\n\
+             [posts](/post/<name>) {#posts}\noccurs\n: *\n\n----\n\nBody.\n",
+        )
+        .expect("schema parses")
+    }
+
+    fn link_diagnostics(doc_input: &str) -> Vec<ValidationDiagnostic> {
+        let grammar = link_expression_grammar();
+        let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
+        validate(&doc, &grammar)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains("link expression") || d.message.contains("->>"))
+            .collect()
+    }
+
+    #[test]
+    fn preamble_link_expression_is_clean() {
+        assert!(link_diagnostics("# T\n\n[posts](->> :post (take 2))\n\n----\n\nBody.\n").is_empty());
+    }
+
+    #[test]
+    fn malformed_link_expression_paragraph_is_an_error() {
+        let d = link_diagnostics("# T\n\n----\n\n[x](->> :post (map :title))\n");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains("unknown operation `map`"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn malformed_link_expression_in_paragraph_slot_names_the_slot() {
+        let d = link_diagnostics("# T\n\n[x](->> :post (take x))\n");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("summary"));
+    }
+
+    #[test]
+    fn thread_first_suggests_double_arrow() {
+        for src in ["# T\n\n----\n\n[x](-> :post)\n", "# T\n\n----\n\n[x](->)\n"] {
+            let d = link_diagnostics(src);
+            assert_eq!(d.len(), 1, "{src:?}: {d:#?}");
+            assert!(d[0].message.contains("use `->>`"), "{}", d[0].message);
+        }
+    }
+
+    #[test]
+    fn inline_link_expression_must_stand_alone() {
+        let d = link_diagnostics("# T\n\n----\n\nSee [x](->> :post) here.\n");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(d[0].message.contains("must stand alone (ADR-058)"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn body_link_expression_is_ignored_with_a_warning() {
+        let d = link_diagnostics("# T\n\n----\n\n[posts](->> :post)\n");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(d[0].message.contains("move it above `----`"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn quoted_link_expression_syntax_is_not_diagnosed() {
+        assert!(link_diagnostics("# T\n\n----\n\nWrite `[p](->> :post)` alone.\n").is_empty());
     }
 
     #[test]

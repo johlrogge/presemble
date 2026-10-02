@@ -53,8 +53,8 @@ pub struct BuildOutcome {
     pub files_with_suggestions: usize,
     /// Per-page build errors, keyed by URL path (e.g. "/article/foo").
     /// Populated only when a content page fails to parse (hard failure).
-    /// In build mode these are already printed to stdout; in serve mode
-    /// the server uses this map to return styled error pages instead of 404s.
+    /// `build_via_conductor` prints these to stderr in both modes; in serve mode
+    /// the server also uses this map to return styled error pages instead of 404s.
     pub build_errors: std::collections::HashMap<String, Vec<String>>,
     /// Per-page suggestion diagnostics, keyed by URL path (e.g. "/article/foo").
     /// Populated when a content page fails validation but is still rendered with
@@ -144,6 +144,9 @@ fn build_via_conductor(site_dir: &Path) -> Result<BuildOutcome, CliError> {
         println!("  {files_built} pages built successfully");
     } else {
         println!("  {files_built} pages built, {files_failed} failed");
+        for line in build_error_lines(&errors) {
+            eprintln!("  error: {line}");
+        }
     }
 
     Ok(BuildOutcome {
@@ -153,6 +156,16 @@ fn build_via_conductor(site_dir: &Path) -> Result<BuildOutcome, CliError> {
         build_errors: errors,
         page_suggestions: std::collections::HashMap::new(),
     })
+}
+
+/// Flatten per-page build errors into `"{url}: {msg}"` lines, sorted by URL so
+/// the output is stable. Messages for one URL keep their original order.
+fn build_error_lines(errors: &std::collections::HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut urls: Vec<&String> = errors.keys().collect();
+    urls.sort();
+    urls.into_iter()
+        .flat_map(|url| errors[url].iter().map(move |msg| format!("{url}: {msg}")))
+        .collect()
 }
 
 /// Returns `true` if the site source directory has no schemas and no content files yet.
@@ -779,6 +792,25 @@ mod tests {
     use site_builder::resolve_link_expressions;
 
     #[test]
+    fn build_error_lines_are_sorted_by_url_and_prefixed() {
+        let mut errors = std::collections::HashMap::new();
+        errors.insert(
+            "/post/b".to_string(),
+            vec!["first problem".to_string(), "second problem".to_string()],
+        );
+        errors.insert("/author/a".to_string(), vec!["missing slot".to_string()]);
+
+        assert_eq!(
+            build_error_lines(&errors),
+            vec![
+                "/author/a: missing slot".to_string(),
+                "/post/b: first problem".to_string(),
+                "/post/b: second problem".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn convert_html_to_edn_roundtrip() {
         use std::io::Write;
         use tempfile::NamedTempFile;
@@ -1073,7 +1105,7 @@ mod tests {
             "posts",
             content::LinkText::Empty,
             content::LinkTarget::ThreadExpr {
-                source: "post".to_string(),
+                source: content::Keyword::new("post").unwrap(),
                 operations: vec![],
             },
         ));
@@ -1112,7 +1144,7 @@ mod tests {
             "recent_posts",
             content::LinkText::Empty,
             content::LinkTarget::ThreadExpr {
-                source: "post".to_string(),
+                source: content::Keyword::new("post").unwrap(),
                 operations: vec![content::LinkOp::Take(2)],
             },
         ));
@@ -1149,9 +1181,9 @@ mod tests {
             "sorted_posts",
             content::LinkText::Empty,
             content::LinkTarget::ThreadExpr {
-                source: "post".to_string(),
+                source: content::Keyword::new("post").unwrap(),
                 operations: vec![content::LinkOp::SortBy {
-                    field: "published".to_string(),
+                    field: content::Keyword::new("published").unwrap(),
                     descending: false,
                 }],
             },
@@ -1202,9 +1234,9 @@ mod tests {
             "rust_posts",
             content::LinkText::Empty,
             content::LinkTarget::ThreadExpr {
-                source: "post".to_string(),
+                source: content::Keyword::new("post").unwrap(),
                 operations: vec![content::LinkOp::Filter {
-                    field: "category".to_string(),
+                    field: content::Keyword::new("category").unwrap(),
                     value: "rust".to_string(),
                 }],
             },
@@ -1241,9 +1273,9 @@ mod tests {
             "latest_posts",
             content::LinkText::Empty,
             content::LinkTarget::ThreadExpr {
-                source: "post".to_string(),
+                source: content::Keyword::new("post").unwrap(),
                 operations: vec![content::LinkOp::SortBy {
-                    field: "published".to_string(),
+                    field: content::Keyword::new("published").unwrap(),
                     descending: true,
                 }],
             },

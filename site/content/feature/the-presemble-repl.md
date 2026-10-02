@@ -90,13 +90,13 @@ Edge records returned by `refs-to` and `refs-from` expose `:source` and `:target
 
 ### Link expressions in content
 
-Content files can include link expressions that assemble collections inline:
+Content files can include link expressions that assemble collections at build time:
 
 ```markdown
-[]((->> :post (sort-by :published :desc) (take 5)))
+[](->> :post (sort-by :published :desc) (take 5))
 ```
 
-The expression is evaluated at build time. The result is a typed list that satisfies the collection schema for that type. The template receives the assembled list and presents it without any iteration logic of its own.
+The expression is resolved against the site graph at build time; it is a fixed query vocabulary, not Presemble Lisp. The result is a typed list that satisfies the collection schema for that type. The template receives the assembled list and presents it without any iteration logic of its own.
 
 This is the content-as-assembly model: the homepage content file decides which collections appear and in what order; the template decides how they look.
 

@@ -81,14 +81,64 @@ pub enum ContentElement {
     },
 }
 
+/// A link-expression keyword: a source schema stem or a field name, written
+/// `:name` in a link expression (ADR-058).
+///
+/// The charset is `[A-Za-z0-9_-]+`, the characters slot names are written
+/// with. `schema::SlotName` itself does not validate, so the rule lives here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Keyword(String);
+
+impl Keyword {
+    /// Validate `name` (without the leading `:`) as a keyword.
+    pub fn new(name: &str) -> Result<Keyword, KeywordError> {
+        if Self::is_valid(name) {
+            Ok(Keyword(name.to_string()))
+        } else {
+            Err(KeywordError(name.to_string()))
+        }
+    }
+
+    /// Whether `name` is a valid keyword: non-empty, `[A-Za-z0-9_-]` only.
+    pub fn is_valid(name: &str) -> bool {
+        !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Keyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A string that is not a valid [`Keyword`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeywordError(pub String);
+
+impl std::fmt::Display for KeywordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid keyword {:?}: expected one or more of A-Z, a-z, 0-9, '_' and '-'",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for KeywordError {}
+
 /// Target of a link expression in content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkTarget {
     /// Simple path reference: /fragments/header
     PathRef(String),
-    /// Threaded expression: (->> :post (sort-by :published :desc) (take 4))
+    /// Threaded expression: ->> :post (sort-by :published :desc) (take 4)
     ThreadExpr {
-        source: String,
+        source: Keyword,
         operations: Vec<LinkOp>,
     },
 }
@@ -97,11 +147,11 @@ pub enum LinkTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkOp {
     /// (sort-by :field :asc/:desc)
-    SortBy { field: String, descending: bool },
+    SortBy { field: Keyword, descending: bool },
     /// (take n)
     Take(usize),
     /// (filter :field "value")
-    Filter { field: String, value: String },
+    Filter { field: Keyword, value: String },
     /// (refs-to self) or (refs-to "/url")
     RefsTo(RefsToTarget),
 }
@@ -151,20 +201,36 @@ mod tests {
 
     #[test]
     fn link_expression_thread_expr_with_ops() {
+        let kw = |s: &str| Keyword::new(s).unwrap();
         let ops = vec![
-            LinkOp::SortBy { field: "published".to_string(), descending: true },
+            LinkOp::SortBy { field: kw("published"), descending: true },
             LinkOp::Take(4),
-            LinkOp::Filter { field: "category".to_string(), value: "news".to_string() },
+            LinkOp::Filter { field: kw("category"), value: "news".to_string() },
         ];
         let elem = ContentElement::LinkExpression {
             text: LinkText::Binding("posts".to_string()),
             target: LinkTarget::ThreadExpr {
-                source: ":post".to_string(),
+                source: kw("post"),
                 operations: ops,
             },
         };
         let cloned = elem.clone();
         assert_eq!(elem, cloned);
+    }
+
+    #[test]
+    fn keyword_accepts_slot_name_charset() {
+        for ok in ["post", "a-b", "a_b", "X1", "-", "_"] {
+            assert_eq!(Keyword::new(ok).unwrap().as_str(), ok);
+            assert_eq!(Keyword::new(ok).unwrap().to_string(), ok);
+        }
+    }
+
+    #[test]
+    fn keyword_rejects_other_characters() {
+        for bad in ["", ":post", "a b", "a(b", "a)", "ünï", "a/b", "a.b", "\"x\""] {
+            assert_eq!(Keyword::new(bad), Err(KeywordError(bad.to_string())), "{bad:?}");
+        }
     }
 
     #[test]
