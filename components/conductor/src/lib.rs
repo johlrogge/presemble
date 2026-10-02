@@ -523,6 +523,41 @@ mod tests {
     }
 
     #[test]
+    fn edit_body_element_keeps_the_comment_above_the_replaced_paragraph() {
+        // ADR-062 D5: the browser's body edit replaces the block; its leading
+        // comment moves to the replacement.
+        let dir = tempfile::tempdir().unwrap();
+        let content_dir = dir.path().join("content/article");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        let content_src =
+            "# My Title\n\n----\n\n<!-- keep me -->\n\nOld body paragraph.\n\nSecond paragraph.\n";
+        std::fs::write(content_dir.join("comment-test.md"), content_src).unwrap();
+        let schema_src = "# Your blog post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+        let schema_dir = dir.path().join("schemas/article");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(schema_dir.join("item.md"), schema_src).unwrap();
+        let repo = site_repository::SiteRepository::builder().schema("article", schema_src).build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+
+        let result = conductor.handle_command(Command::EditBodyElement {
+            file: "content/article/comment-test.md".to_string(),
+            body_idx: 0,
+            content: "New body paragraph.".to_string(),
+        });
+        assert!(!matches!(result.response, Response::Error(_)), "{:?}", result.response);
+
+        let rel_path = std::path::Path::new("content/article/comment-test.md");
+        let doc_root = conductor.doc_root_for_path(rel_path).expect("document in store");
+        let store_arc = conductor.node_store();
+        let store = store_arc.read().unwrap();
+        let saved = node_store_bridge::serialize_from_store(&store, doc_root).expect("saves");
+        assert_eq!(
+            saved,
+            "# My Title\n\n----\n\n<!-- keep me -->\n\nNew body paragraph.\n\nSecond paragraph.\n"
+        );
+    }
+
+    #[test]
     fn edit_body_element_out_of_range_returns_error() {
         let dir = tempfile::tempdir().unwrap();
 

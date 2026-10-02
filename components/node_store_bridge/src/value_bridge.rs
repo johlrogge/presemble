@@ -53,7 +53,7 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                 // Element → Value::Record with named attributes as fields
                 let mut graph = template::DataGraph::new();
                 // Attributes: follow recursively (always leaf values)
-                for (attr_name, attr_value) in store.attributes(id) {
+                for (attr_name, attr_value) in crate::node_helpers::data_attributes(store, id) {
                     let key = store.resolve_name(attr_name).to_string();
                     let val = node_to_value(store, attr_value);
                     graph.insert(key, val);
@@ -119,7 +119,7 @@ fn materialize_reference_shallow(store: &NodeStore, id: NodeId) -> template::Val
             Node::Element(_) => {
                 let mut graph = template::DataGraph::new();
                 // Attributes — safe, leaf values
-                for (attr_name, attr_value) in store.attributes(id) {
+                for (attr_name, attr_value) in crate::node_helpers::data_attributes(store, id) {
                     let key = store.resolve_name(attr_name).to_string();
                     let val = node_to_value(store, attr_value);
                     graph.insert(key, val);

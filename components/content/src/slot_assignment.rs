@@ -1,4 +1,7 @@
-use crate::document::{ContentElement, Document, DocumentSlot, Keyword};
+use crate::document::{
+    AnchoredComment, CommentAnchor, Container, ContentElement, Document, DocumentSlot,
+    FlatDocument, Keyword,
+};
 use crate::link_expression::LinkExpressionDiagnostic;
 use crate::parser::{diagnose_marker_paragraph, is_marker_paragraph};
 use schema::{Element, Grammar, Slot, Span, Spanned};
@@ -98,18 +101,33 @@ pub fn unassigned_reason(el: &ContentElement, grammar: &Grammar) -> UnassignedRe
 ///    followed by N, and assignment is deterministic, so the slots,
 ///    `unassigned` and the body come out identical.
 /// 5. Exception, limit L10: two same-kind lists that end up adjacent merge
-///    into one.
-pub fn assign_slots(
-    elements: &im::Vector<Spanned<ContentElement>>,
-    grammar: &Grammar,
-) -> Document {
+///    into one, unless a comment separates them.
+///
+/// ## Comments (ADR-062)
+///
+/// Each comment of `flat` is anchored to the element it precedes, wherever
+/// that element ends up: `Before(container, index)`. A comment before the
+/// separator, or at the end of a file without one, is `End(Unassigned)`; one
+/// at the end of a file with a separator is `End(Body)`.
+///
+/// Comments take no part in classification or positional assignment, and the
+/// serializer writes each run directly before its host, or at the end of its
+/// section. On re-read every run precedes the same host (or the same section
+/// end), so the anchors come back identical and the fixed point above still
+/// holds. Store edits can also produce `End(Slot)`; it is written after the
+/// slot's last element and reads back as the leading comment of the next
+/// element, which is stable from the first save on.
+pub fn assign_slots(flat: &FlatDocument, grammar: &Grammar) -> Document {
+    let elements = &flat.elements;
     // Pre-pass over section 0: take bound link expressions (B) and elements
     // that can never be slotted (X) out; the rest (R) is assigned by position.
+    // Every element keeps its index in `elements` (spans may be zero).
     let preamble_end = elements
         .iter()
         .position(|e| matches!(e.node, ContentElement::Separator))
         .unwrap_or(elements.len());
-    let mut bound: Vec<Vec<Spanned<ContentElement>>> = vec![Vec::new(); grammar.preamble.len()];
+    let mut bound: Vec<Vec<(usize, Spanned<ContentElement>)>> =
+        vec![Vec::new(); grammar.preamble.len()];
     // Unassigned elements with their index in `elements` (source order).
     let mut unassigned: Vec<(usize, Spanned<ContentElement>)> = Vec::new();
     let mut remaining: im::Vector<Spanned<ContentElement>> = im::Vector::new();
@@ -120,7 +138,7 @@ pub fn assign_slots(
                 ContentElement::LinkExpression { slot: Some(_), .. } => {
                     match bound_slot_index(&element.node, grammar) {
                         Some(slot_index) => {
-                            bound[slot_index].push(element.clone());
+                            bound[slot_index].push((i, element.clone()));
                             continue;
                         }
                         None => true,
@@ -138,13 +156,34 @@ pub fn assign_slots(
         }
     }
 
-    let (mut document, unplaced) =
+    let positional =
         assign_positionally(&remaining, grammar, |slot_index| bound[slot_index].len());
+    let mut document = positional.document;
+    // Where each element of `elements` ends up: (container, index).
+    let mut location: std::collections::HashMap<usize, (Container, usize)> =
+        std::collections::HashMap::new();
 
     // Unassigned elements, merged in source order.
-    unassigned.extend(unplaced.into_iter().map(|at| (remaining_index[at], remaining[at].clone())));
+    unassigned.extend(
+        positional
+            .unplaced
+            .into_iter()
+            .map(|at| (remaining_index[at], remaining[at].clone())),
+    );
     unassigned.sort_by_key(|(i, _)| *i);
+    for (at, (i, _)) in unassigned.iter().enumerate() {
+        location.insert(*i, (Container::Unassigned, at));
+    }
     document.unassigned = unassigned.into_iter().map(|(_, e)| e).collect();
+
+    // Slot members as (index in `elements`, element).
+    let mut slot_members: Vec<Vec<(usize, Spanned<ContentElement>)>> = positional
+        .slot_positions
+        .iter()
+        .map(|positions| {
+            positions.iter().map(|&p| (remaining_index[p], remaining[p].clone())).collect()
+        })
+        .collect();
 
     // Merge bound elements into their slots, in source order.
     for (slot_index, slot) in grammar.preamble.iter().enumerate() {
@@ -153,23 +192,47 @@ pub fn assign_slots(
             continue;
         }
         match document.preamble.iter().position(|s| s.name == slot.name) {
-            Some(at) => {
-                let doc_slot = &mut document.preamble[at];
-                let mut merged: Vec<Spanned<ContentElement>> =
-                    doc_slot.elements.iter().cloned().collect();
-                merged.extend(bound_elements);
-                merged.sort_by_key(|e| e.span.start);
-                doc_slot.elements = merged.into_iter().collect();
-            }
+            Some(at) => slot_members[at].extend(bound_elements),
             // Positional assignment stops at an early separator, so the
             // preamble is a prefix of the grammar's slots. Appending the
             // missing bound slots in grammar order keeps schema order.
-            None => document.preamble.push_back(DocumentSlot {
-                name: slot.name.clone(),
-                elements: bound_elements.into_iter().collect(),
-            }),
+            None => {
+                document.preamble.push_back(DocumentSlot {
+                    name: slot.name.clone(),
+                    elements: im::Vector::new(),
+                });
+                slot_members.push(bound_elements);
+            }
         }
     }
+    for (doc_slot, mut members) in document.preamble.iter_mut().zip(slot_members) {
+        members.sort_by_key(|(i, _)| *i);
+        for (at, (i, _)) in members.iter().enumerate() {
+            location.insert(*i, (Container::Slot(doc_slot.name.clone()), at));
+        }
+        doc_slot.elements = members.into_iter().map(|(_, e)| e).collect();
+    }
+
+    // Body elements.
+    for (at, &i) in remaining_index.iter().skip(positional.body_start).enumerate() {
+        location.insert(i, (Container::Body, at));
+    }
+
+    document.comments = flat
+        .comments
+        .iter()
+        .map(|(host, comment)| {
+            let anchor = match location.get(host) {
+                Some((container, at)) => CommentAnchor::Before(container.clone(), *at),
+                // The separator, or the end of the file.
+                None if *host < elements.len() || !document.has_separator => {
+                    CommentAnchor::End(Container::Unassigned)
+                }
+                None => CommentAnchor::End(Container::Body),
+            };
+            AnchoredComment { anchor, comment: comment.clone() }
+        })
+        .collect();
 
     document
 }
@@ -196,17 +259,19 @@ pub(crate) fn bound_slot_index(element: &ContentElement, grammar: &Grammar) -> O
 /// elements already reserved for grammar preamble slot `i`; positional
 /// matching takes at most `max - bound_count` (saturating) for that slot.
 ///
-/// Returns the document (with an empty `unassigned`) and the positions in
-/// `elements` of the section-0 elements no slot took: those the final
-/// forward scan passes over. Positional matching itself never skips an
-/// element, so these are a suffix of section 0.
+/// Returns the document (with an empty `unassigned`), the positions in
+/// `elements` of each preamble slot's elements, the positions of the
+/// section-0 elements no slot took (those the final forward scan passes
+/// over; positional matching itself never skips an element, so these are a
+/// suffix of section 0) and where the body starts.
 fn assign_positionally(
     elements: &im::Vector<Spanned<ContentElement>>,
     grammar: &Grammar,
     bound_count: impl Fn(usize) -> usize,
-) -> (Document, Vec<usize>) {
+) -> Positional {
     let mut cursor = 0usize;
     let mut preamble: im::Vector<DocumentSlot> = im::Vector::new();
+    let mut slot_positions: Vec<Vec<usize>> = Vec::new();
     let mut has_separator = false;
     let mut separator_span: Option<Span> = None;
     let mut unplaced: Vec<usize> = Vec::new();
@@ -219,11 +284,13 @@ fn assign_positionally(
             has_separator = true;
             // Push empty slots for the current and remaining grammar slots.
             push_empty_slot(&mut preamble, slot);
+            slot_positions.push(Vec::new());
             break 'slots;
         }
 
         let max = slot.max_count().saturating_sub(bound_count(slot_index));
         let mut slot_elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
+        let mut positions: Vec<usize> = Vec::new();
         let mut count = 0usize;
 
         // Consume matching elements for this slot.
@@ -239,6 +306,7 @@ fn assign_positionally(
             }
             if element_matches_slot(&elements[cursor].node, &slot.element) {
                 slot_elements.push_back(elements[cursor].clone());
+                positions.push(cursor);
                 cursor += 1;
                 count += 1;
             } else {
@@ -250,6 +318,7 @@ fn assign_positionally(
             name: slot.name.clone(),
             elements: slot_elements,
         });
+        slot_positions.push(positions);
 
         // Check again for separator after consuming this slot's elements.
         if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
@@ -286,8 +355,20 @@ fn assign_positionally(
         body,
         has_separator,
         separator_span,
+        comments: im::Vector::new(),
     };
-    (document, unplaced)
+    Positional { document, slot_positions, unplaced, body_start: cursor }
+}
+
+/// The result of [`assign_positionally`]; positions index its `elements`.
+struct Positional {
+    document: Document,
+    /// Positions of each `document.preamble` slot's elements.
+    slot_positions: Vec<Vec<usize>>,
+    /// Positions of section-0 elements no slot took.
+    unplaced: Vec<usize>,
+    /// Position of the first body element.
+    body_start: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +514,7 @@ headings
             separator(),
             heading(3, "Body heading"),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(slotted.has_separator, "should detect separator");
         assert_eq!(slotted.preamble.len(), 2, "should have 2 preamble slots");
@@ -462,7 +543,7 @@ headings
         let grammar = simple_grammar();
         // Document has only a separator — both slots are missing.
         let elements = im::vector![separator()];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(slotted.has_separator);
         // The title slot should be present but empty (separator hit before consuming any title).
@@ -479,7 +560,7 @@ headings
             heading(1, "Title"),
             paragraph("Summary text."),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(!slotted.has_separator, "no separator present");
         assert_eq!(slotted.preamble.len(), 2);
@@ -498,7 +579,7 @@ headings
             paragraph("Third summary."),
             separator(),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(slotted.has_separator);
         let summary_slot = &slotted.preamble[1];
@@ -521,7 +602,7 @@ headings
             paragraph("Para 4 - extra."),
             separator(),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         let summary_slot = &slotted.preamble[1];
         assert_eq!(
@@ -552,7 +633,7 @@ headings
             paragraph("Body paragraph."),
             heading(4, "Section Two"),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(slotted.has_separator);
         assert_eq!(slotted.body.len(), 3, "3 elements after separator");
@@ -573,7 +654,7 @@ headings
             paragraph("Summary."),
             separator(),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         let title_slot = &slotted.preamble[0];
         assert_eq!(title_slot.name.as_str(), "title");
@@ -598,7 +679,7 @@ headings
             separator(),
             paragraph("Body text."),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert_eq!(slotted.preamble.len(), 2);
         let author_slot = &slotted.preamble[1];
@@ -611,7 +692,7 @@ headings
     fn assign_empty_document() {
         let grammar = simple_grammar();
         let elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(!slotted.has_separator);
         // All grammar slots are processed but produce empty DocumentSlots.
@@ -633,7 +714,7 @@ headings
             separator(),
             heading(3, "Body Heading"),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
         let flat = slotted.flat_elements();
 
         assert_eq!(flat.len(), 4);
@@ -650,7 +731,7 @@ headings
             heading(1, "Title"),
             paragraph("Summary."),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
         let flat = slotted.flat_elements();
 
         assert_eq!(flat.len(), 2, "no separator should be added");
@@ -663,7 +744,7 @@ headings
     fn flat_elements_empty_document_is_empty() {
         let grammar = simple_grammar();
         let elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
         let flat = slotted.flat_elements();
         assert!(flat.is_empty());
     }
@@ -677,7 +758,7 @@ headings
         let doc = parse_document(doc_input).expect("hello-world.md should parse");
         let grammar = article_grammar();
 
-        let slotted = assign_slots(&doc.elements, &grammar);
+        let slotted = assign_slots(&doc, &grammar);
 
         assert!(slotted.has_separator, "hello-world.md should have a separator");
         // Must have at least one preamble slot filled.
@@ -704,7 +785,7 @@ headings
         let doc = parse_document(doc_input).expect("hello-world.md should parse");
         let grammar = article_grammar();
 
-        let slotted = assign_slots(&doc.elements, &grammar);
+        let slotted = assign_slots(&doc, &grammar);
         let flat = slotted.flat_elements();
 
         // flat_elements may not include elements that didn't match any slot,
@@ -735,7 +816,7 @@ headings
 
     fn assign_page(src: &str, news_occurs: &str) -> Document {
         let flat = parse_document(src).expect("document should parse");
-        assign_slots(&flat.elements, &page_grammar(news_occurs))
+        assign_slots(&flat,&page_grammar(news_occurs))
     }
 
     fn slot_counts(doc: &Document) -> Vec<(String, usize)> {
@@ -858,7 +939,7 @@ headings
              [<name>](/post/<name>) {#news}\noccurs\n: 0..1\n\n----\n\nBody.\n",
         )
         .unwrap();
-        let doc = assign_slots(&flat.elements, &grammar);
+        let doc = assign_slots(&flat,&grammar);
         assert_eq!(slot_labels(&doc, "latest"), vec!["a"]);
         assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
     }
@@ -928,7 +1009,7 @@ headings
             separator(),
             html("<i>y</i>"),
         ];
-        let doc = assign_slots(&elements, &grammar);
+        let doc = assign_slots(&FlatDocument::from_elements(elements), &grammar);
         assert_eq!(doc.preamble[0].elements.len(), 1, "title is still assigned");
         assert_eq!(doc.preamble[1].elements.len(), 1, "summary is still assigned");
         assert_eq!(
@@ -1003,7 +1084,7 @@ headings
             paragraph("Extra."),
             heading(3, "More"),
         ];
-        let doc = assign_slots(&elements, &grammar);
+        let doc = assign_slots(&FlatDocument::from_elements(elements), &grammar);
         assert!(!doc.has_separator);
         assert!(doc.body.is_empty());
         assert_eq!(doc.unassigned.len(), 2);
@@ -1095,7 +1176,7 @@ headings
             separator(),
             heading(3, "Section"),
         ];
-        let slotted = assign_slots(&elements, &grammar);
+        let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         // Find the cover slot (image slot in the article grammar).
         let cover_slot = slotted.preamble.iter().find(|s| s.name.as_str() == "cover");

@@ -5,9 +5,71 @@ use schema::{HeadingLevel, Span, SlotName, Spanned};
 /// This is the low-level flat representation returned by the parser before
 /// slot assignment. Use [`FlatDocument`] when working directly with the parser
 /// output, and [`Document`] (the slotted form) as the canonical structured type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FlatDocument {
     pub elements: im::Vector<Spanned<ContentElement>>,
+    /// HTML comments (ADR-062), each with the index in `elements` of the
+    /// element it precedes; `elements.len()` for comments at the end of the
+    /// file. In source order.
+    pub comments: im::Vector<(usize, Spanned<Comment>)>,
+}
+
+impl FlatDocument {
+    /// A flat document with no comments.
+    pub fn from_elements(elements: im::Vector<Spanned<ContentElement>>) -> Self {
+        FlatDocument { elements, comments: im::Vector::new() }
+    }
+}
+
+/// An HTML comment kept as trivia (ADR-062): its trimmed source, one or more
+/// `<!-- … -->` separated only by whitespace. Never content, never rendered,
+/// never an error.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Comment(String);
+
+impl Comment {
+    /// A comment from its source, or `None` when the source is not
+    /// comment-only ([`crate::html::is_comment_only`]).
+    pub fn new(source: &str) -> Option<Comment> {
+        crate::html::is_comment_only(source).then(|| Comment(source.trim().to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Comment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A container of blocks in a [`Document`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Container {
+    /// A preamble slot.
+    Slot(SlotName),
+    /// Section-0 elements that fill no slot.
+    Unassigned,
+    /// The body.
+    Body,
+}
+
+/// Where a comment sits in a [`Document`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CommentAnchor {
+    /// Directly before the block at this index of the container.
+    Before(Container, usize),
+    /// After the container's last block.
+    End(Container),
+}
+
+/// A comment and where it sits.
+#[derive(Debug, Clone)]
+pub struct AnchoredComment {
+    pub anchor: CommentAnchor,
+    pub comment: Spanned<Comment>,
 }
 
 /// A named slot in a parsed document, holding the elements that belong to it.
@@ -35,6 +97,10 @@ pub struct Document {
     pub body: im::Vector<Spanned<ContentElement>>,
     pub has_separator: bool,
     pub separator_span: Option<Span>,
+    /// HTML comments (ADR-062), in source order for each anchor. They never
+    /// fill a slot, never count in a container's block indices and are never
+    /// rendered.
+    pub comments: im::Vector<AnchoredComment>,
 }
 
 impl Document {
@@ -269,7 +335,7 @@ mod tests {
         let span = Span { start: 0, end: 5 };
         let elem = ContentElement::Paragraph { text: "hello".to_string() };
         let spanned = Spanned { node: elem, span };
-        let doc = FlatDocument { elements: im::vector![spanned] };
+        let doc = FlatDocument::from_elements(im::vector![spanned]);
         assert_eq!(doc.elements.len(), 1);
         assert_eq!(doc.elements[0].span.start, 0);
         assert_eq!(doc.elements[0].span.end, 5);

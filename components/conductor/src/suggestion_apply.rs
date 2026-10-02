@@ -509,6 +509,7 @@ mod tests {
             has_separator: true,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         }
     }
 

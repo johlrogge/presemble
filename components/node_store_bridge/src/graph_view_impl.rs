@@ -90,7 +90,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
 
             // 3. Fall back to Attribute edges
-            let attrs = self.store.attributes(current);
+            let attrs = crate::node_helpers::data_attributes(self.store, current);
             let attr_target = attrs
                 .iter()
                 .find(|(name, _)| self.store.resolve_name(*name) == *segment)
@@ -120,7 +120,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
         for (name, _) in self.store.references(self.root) {
             keys.push(self.store.resolve_name(name).to_string());
         }
-        for (name, _) in self.store.attributes(self.root) {
+        for (name, _) in crate::node_helpers::data_attributes(self.store, self.root) {
             keys.push(self.store.resolve_name(name).to_string());
         }
         keys
@@ -146,7 +146,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
                 continue;
             }
             // Then Attribute
-            let attrs = self.store.attributes(current);
+            let attrs = crate::node_helpers::data_attributes(self.store, current);
             if let Some((_, id)) = attrs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
                 current = *id;
                 continue;
@@ -182,7 +182,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
 
             // Try Attribute edges
-            let attrs = self.store.attributes(current);
+            let attrs = crate::node_helpers::data_attributes(self.store, current);
             if let Some((_, id)) = attrs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
                 if is_last {
                     return Some(ResolvedNode { id: *id, store: self.store });
@@ -419,7 +419,7 @@ fn walk_store(store: &NodeStore, root: NodeId, path: &[&str]) -> Option<NodeId> 
             continue;
         }
         // Attribute edges
-        let attrs = store.attributes(current);
+        let attrs = crate::node_helpers::data_attributes(store, current);
         if let Some((_, id)) = attrs.iter().find(|(n, _)| store.resolve_name(*n) == *segment) {
             current = *id;
             continue;

@@ -1,4 +1,6 @@
-use crate::document::{ContentElement, Document, FlatDocument, Keyword, LinkTarget, LinkText};
+use crate::document::{
+    Comment, ContentElement, Document, FlatDocument, Keyword, LinkTarget, LinkText,
+};
 use crate::error::ContentError;
 use crate::link_expression::{
     bare_marker, parse_destination, recognise_paragraph, split_marker, LinkExpressionDiagnostic,
@@ -189,6 +191,7 @@ pub fn paragraph_link_destinations(source: &str) -> Vec<String> {
 pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     let event_iter = Parser::new_ext(input, MARKDOWN_OPTIONS).into_offset_iter();
     let mut elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
+    let mut comments: im::Vector<(usize, Spanned<Comment>)> = im::Vector::new();
 
     enum State {
         Idle,
@@ -524,13 +527,17 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             Event::End(TagEnd::HtmlBlock) => {
                 if let State::HtmlBlock { byte_range } = state {
                     let source = input.get(byte_range.clone()).map(str::trim).unwrap_or_default();
-                    // Comment-only HTML is not content; Step 4 keeps it as
-                    // trivia (limit L12 for comments).
-                    if !crate::html::is_comment_only(source) {
-                        elements.push_back(Spanned {
+                    // Comment-only HTML is trivia of the element that follows
+                    // it (ADR-062 D1), not content.
+                    match Comment::new(source) {
+                        Some(comment) => comments.push_back((
+                            elements.len(),
+                            Spanned { node: comment, span: Span::from(byte_range) },
+                        )),
+                        None => elements.push_back(Spanned {
                             node: ContentElement::HtmlBlock { source: source.to_string() },
                             span: Span::from(byte_range),
-                        });
+                        }),
                     }
                     state = State::Idle;
                 }
@@ -667,7 +674,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         }
     }
 
-    Ok(FlatDocument { elements })
+    Ok(FlatDocument { elements, comments })
 }
 
 /// Parse a markdown content document and assign its elements to grammar slots.
@@ -677,7 +684,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
 /// returning a [`Document`] with named preamble slots and a body section.
 pub fn parse_and_assign(input: &str, grammar: &Grammar) -> Result<Document, ContentError> {
     let flat = parse_document(input)?;
-    Ok(assign_slots(&flat.elements, grammar))
+    Ok(assign_slots(&flat, grammar))
 }
 
 /// How an event inside a raw-source capture relates to the captured kind.
@@ -796,15 +803,50 @@ mod tests {
         assert_eq!(src[block.span.start..block.span.end].trim_end(), "<div class=\"x\">\n  y\n</div>");
     }
 
-    /// Known limit L12, comments half: comment-only HTML is still dropped
-    /// until it becomes trivia (ADR-062, Step 4).
+    /// L12 resolved (ADR-062): comment-only HTML is trivia, never an element,
+    /// and is written back.
     #[test]
-    fn html_comments_are_dropped_l12() {
-        assert_element_count(&parse_document("<!-- note -->\n").unwrap(), 0);
-        assert_element_count(&parse_document("<!--\nmulti\n\nline\n-->\n").unwrap(), 0);
-        assert_element_count(&parse_document("<!-- a -->\n<!-- b -->\n").unwrap(), 0);
+    fn html_comments_are_trivia() {
+        let doc = parse_document("<!-- note -->\n").unwrap();
+        assert_element_count(&doc, 0);
+        assert_eq!(doc.comments.len(), 1);
+        assert_eq!(doc.comments[0].0, 0);
+        assert_eq!(doc.comments[0].1.node.as_str(), "<!-- note -->");
+        let grammar = schema::Grammar { preamble: vec![], body: None };
+        let saved = crate::serializer::serialize_document(&parse_and_assign("<!-- note -->\n", &grammar).unwrap());
+        assert_eq!(saved, "<!-- note -->\n");
+
+        let doc = parse_document("<!--\nmulti\n\nline\n-->\n").unwrap();
+        assert_element_count(&doc, 0);
+        assert_eq!(doc.comments[0].1.node.as_str(), "<!--\nmulti\n\nline\n-->");
+        // Consecutive comment blocks stay separate comments.
+        let doc = parse_document("<!-- a -->\n<!-- b -->\n").unwrap();
+        assert_element_count(&doc, 0);
+        assert_eq!(doc.comments.len(), 2);
+        // A comment is anchored by the index of the element it precedes.
         let doc = parse_document("A.\n\n<!-- note -->\n\nB.\n").unwrap();
         assert_element_count(&doc, 2);
+        assert_eq!(doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1]);
+    }
+
+    /// pulldown-cmark 0.12: a type-2 block (`<!--`) ends on the first line
+    /// that contains `-->`, also when it overlaps the opener (`<!-->`,
+    /// `<!--->`), and a comment block can interrupt a paragraph.
+    #[test]
+    fn pulldown_comment_block_ends_are_pinned() {
+        for comment in ["<!-->", "<!--->", "<!---->", "<!-- a -->", "<!--\nx\n-->"] {
+            let doc = parse_document(&format!("{comment}\n\nAfter.\n")).unwrap();
+            assert_eq!(doc.comments.len(), 1, "{comment:?}");
+            assert_eq!(doc.comments[0].1.node.as_str(), comment);
+            assert_eq!(
+                doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+                vec![ContentElement::Paragraph { text: "After.".to_string() }],
+                "{comment:?}"
+            );
+        }
+        let doc = parse_document("Para line\n<!-- c -->\n").unwrap();
+        assert_element_count(&doc, 1);
+        assert_eq!(doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1]);
     }
 
     /// HTML inside a blockquote is not captured as an element (limit L13).

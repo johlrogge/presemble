@@ -1,5 +1,6 @@
 use crate::document::{
-    ContentElement, Document, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection,
+    CommentAnchor, Container, ContentElement, Document, LinkOp, LinkTarget, LinkText,
+    RefsToTarget, SortDirection,
 };
 use crate::parser::read_link_expression_paragraph;
 use schema::Spanned;
@@ -14,26 +15,44 @@ use schema::Spanned;
 /// Writing unassigned elements after the slots is a fixed point for slot
 /// assignment (see [`crate::assign_slots`]), except for limit L10: two
 /// same-kind lists that end up adjacent merge into one on re-read.
+///
+/// Comments (ADR-062) are written before the element they are anchored to,
+/// and `End` comments after the container's last element. A `Before` anchor
+/// past the container's end is written at the end; a comment is never
+/// dropped. A comment for a slot the document does not have is written at
+/// the end of the unassigned elements.
 pub fn serialize_document(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
+    let mut written = vec![false; doc.comments.len()];
 
     for slot in &doc.preamble {
-        for spanned in &slot.elements {
-            parts.push(serialize_element(&spanned.node));
-        }
+        let container = Container::Slot(slot.name.clone());
+        write_container(&mut parts, &container, &slot.elements, doc, &mut written);
     }
 
-    for spanned in &doc.unassigned {
-        parts.push(serialize_element(&spanned.node));
+    // Comments of slots the document does not have go with the unassigned.
+    let mut orphans: Vec<usize> = doc
+        .comments
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            !written[*i]
+                && matches!(&c.anchor, CommentAnchor::Before(Container::Slot(_), _)
+                    | CommentAnchor::End(Container::Slot(_)))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    write_container(&mut parts, &Container::Unassigned, &doc.unassigned, doc, &mut written);
+    for i in orphans.drain(..) {
+        parts.push(doc.comments[i].comment.node.as_str().to_string());
+        written[i] = true;
     }
 
     if doc.has_separator {
         parts.push(serialize_element(&ContentElement::Separator));
     }
 
-    for spanned in &doc.body {
-        parts.push(serialize_element(&spanned.node));
-    }
+    write_container(&mut parts, &Container::Body, &doc.body, doc, &mut written);
 
     if parts.is_empty() {
         return String::new();
@@ -41,6 +60,32 @@ pub fn serialize_document(doc: &Document) -> String {
 
     // Join with blank lines, end with single newline
     parts.join("\n\n") + "\n"
+}
+
+/// Write `container`'s elements, each preceded by its `Before` comments,
+/// then its `End` comments (and `Before` comments past its end).
+fn write_container(
+    parts: &mut Vec<String>,
+    container: &Container,
+    elements: &im::Vector<Spanned<ContentElement>>,
+    doc: &Document,
+    written: &mut [bool],
+) {
+    let mut write_comments = |parts: &mut Vec<String>, select: &dyn Fn(&CommentAnchor) -> bool| {
+        for (i, c) in doc.comments.iter().enumerate() {
+            if !written[i] && select(&c.anchor) {
+                parts.push(c.comment.node.as_str().to_string());
+                written[i] = true;
+            }
+        }
+    };
+    for (at, spanned) in elements.iter().enumerate() {
+        write_comments(parts, &|a| matches!(a, CommentAnchor::Before(c, i) if c == container && *i == at));
+        parts.push(serialize_element(&spanned.node));
+    }
+    write_comments(parts, &|a| match a {
+        CommentAnchor::Before(c, _) | CommentAnchor::End(c) => c == container,
+    });
 }
 
 pub(crate) fn serialize_elements(elements: &im::Vector<Spanned<ContentElement>>) -> String {
@@ -765,6 +810,7 @@ headings
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         }
     }
 
@@ -783,6 +829,7 @@ headings
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         }
     }
 
@@ -838,6 +885,7 @@ headings
             has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
         let output = serialize_document(&d);
         assert!(output.contains("----"), "expected '----' in: {output:?}");
@@ -1598,16 +1646,18 @@ headings
     /// elements after the slots (ADR-060 P1). Each is excluded from the
     /// property domain in `tests/conservation.rs`.
     ///
-    /// - L10: two same-kind lists that end up adjacent on save merge into one.
+    /// - L10: two same-kind lists that end up adjacent on save merge into one,
+    ///   unless a comment separates them.
     /// - L11: a store-originated paragraph whose text is
     ///   `[x](->> :post) {#news}` is not marker-shaped (it is in the remaining
     ///   set). It is written escaped, then re-read as marker-shaped. So for
     ///   store-originated text, slot assignment is not a fixed point on the
     ///   first save. The text is stable from the second save on. The real fix
     ///   comes with ADR-059.
-    /// - L12: resolved for HTML blocks, which are kept as `HtmlBlock` elements
-    ///   (ADR-062). Comment-only HTML is still dropped until Step 4 makes it
-    ///   trivia; pinned by `html_comments_are_dropped_l12` in `parser.rs`.
+    /// - L12: resolved (ADR-062). HTML blocks are `HtmlBlock` elements and
+    ///   comments are trivia; pinned by `html_comments_are_trivia` in
+    ///   `parser.rs`. A comment between two same-kind lists keeps them apart
+    ///   (`a_comment_keeps_same_kind_lists_apart_across_a_save`).
     /// - L14: an HTML block of CommonMark types 1–5 with no end condition
     ///   (`<!--` without `-->`, an unclosed `<script>`) runs to the end of the
     ///   file. An edit that adds content after such a block is folded into
@@ -1638,6 +1688,132 @@ headings
         );
         // Text is a fixed point from then on.
         assert_eq!(serialize_document(&second), saved);
+    }
+
+    // ── comments as trivia (ADR-062) ────────────────────────────────────────
+
+    fn comment_anchors(doc: &Document) -> Vec<(CommentAnchor, String)> {
+        doc.comments
+            .iter()
+            .map(|c| (c.anchor.clone(), c.comment.node.as_str().to_string()))
+            .collect()
+    }
+
+    /// Parse and assign `src` under the simple grammar, check its comment
+    /// anchors, and that it is written back byte for byte.
+    fn check_comments(src: &str, expected: &[(CommentAnchor, &str)]) {
+        let doc = parse_and_assign(src, &simple_grammar()).expect("parses");
+        let expected: Vec<(CommentAnchor, String)> =
+            expected.iter().map(|(a, s)| (a.clone(), s.to_string())).collect();
+        assert_eq!(comment_anchors(&doc), expected, "{src:?}");
+        assert_eq!(serialize_document(&doc), src, "{src:?}");
+    }
+
+    fn slot(name: &str) -> Container {
+        Container::Slot(schema::SlotName::new(name))
+    }
+
+    #[test]
+    fn comment_positions_are_anchored_and_written_back() {
+        use CommentAnchor::{Before, End};
+        // In the preamble, before a slotted element.
+        check_comments(
+            "<!-- a -->\n\n# Title\n\n<!-- b -->\n\nSummary.\n\n----\n\nBody.\n",
+            &[(Before(slot("title"), 0), "<!-- a -->"), (Before(slot("summary"), 0), "<!-- b -->")],
+        );
+        // Before `----`.
+        check_comments(
+            "# Title\n\nSummary.\n\n<!-- c -->\n\n----\n\nBody.\n",
+            &[(End(Container::Unassigned), "<!-- c -->")],
+        );
+        // Right after `----`.
+        check_comments(
+            "# Title\n\nSummary.\n\n----\n\n<!-- c -->\n\nBody.\n",
+            &[(Before(Container::Body, 0), "<!-- c -->")],
+        );
+        // At EOF, with and without a separator.
+        check_comments(
+            "# Title\n\nSummary.\n\n----\n\nBody.\n\n<!-- c -->\n",
+            &[(End(Container::Body), "<!-- c -->")],
+        );
+        check_comments(
+            "# Title\n\nSummary.\n\n<!-- c -->\n",
+            &[(End(Container::Unassigned), "<!-- c -->")],
+        );
+        // Consecutive comments keep their order and both go with the host.
+        check_comments(
+            "# Title\n\nSummary.\n\n----\n\n<!-- 1 -->\n\n<!-- 2 -->\n\nBody.\n",
+            &[(Before(Container::Body, 0), "<!-- 1 -->"), (Before(Container::Body, 0), "<!-- 2 -->")],
+        );
+        // Multi-line and empty comments.
+        check_comments(
+            "# Title\n\n<!--\nx\n-->\n\nSummary.\n\n----\n\n<!---->\n\nBody.\n",
+            &[(Before(slot("summary"), 0), "<!--\nx\n-->"), (Before(Container::Body, 0), "<!---->")],
+        );
+        // Before an unassigned element, which moves after the slots.
+        check_comments(
+            "# Title\n\nSummary.\n\n<!-- u -->\n\n## Aside\n\n----\n\nBody.\n",
+            &[(Before(Container::Unassigned, 0), "<!-- u -->")],
+        );
+    }
+
+    #[test]
+    fn a_comment_moves_with_its_host() {
+        // `{#x}` is never slotted (it does not stop positional assignment) and
+        // is written after the slots; its comment goes with it.
+        let src = "# Title\n\n<!-- u -->\n\n{#x}\n\nSummary.\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &simple_grammar()).expect("parses");
+        let saved = serialize_document(&doc);
+        assert_eq!(saved, "# Title\n\nSummary.\n\n<!-- u -->\n\n{#x}\n\n----\n\nBody.\n");
+        let again = parse_and_assign(&saved, &simple_grammar()).expect("parses");
+        assert_eq!(comment_anchors(&again), comment_anchors(&doc));
+        assert_eq!(serialize_document(&again), saved);
+    }
+
+    #[test]
+    fn comments_never_shift_body_indices_or_fill_slots() {
+        let src = "<!-- a -->\n\n# Title\n\nSummary.\n\n----\n\n<!-- b -->\n\nOne.\n\nTwo.\n";
+        let doc = parse_and_assign(src, &simple_grammar()).expect("parses");
+        assert!(doc.unassigned.is_empty());
+        assert_eq!(doc.body.len(), 2);
+        assert_eq!(doc.body[0].node, para("One."));
+    }
+
+    #[test]
+    fn a_comment_keeps_same_kind_lists_apart_across_a_save() {
+        // In the body: pulldown ends the list at the comment, so the second
+        // list is a list of its own.
+        let body = "# Title\n\nSummary.\n\n----\n\n- a\n\n<!-- -->\n\n- b\n";
+        let doc = parse_and_assign(body, &simple_grammar()).expect("parses");
+        assert_eq!(doc.body.len(), 2, "{doc:#?}");
+        assert_eq!(serialize_document(&doc), body);
+        // In section 0: both lists are unassigned and stay apart.
+        let section0 = "# Title\n\nSummary.\n\n- a\n\n<!-- -->\n\n- b\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(section0, &simple_grammar()).expect("parses");
+        assert_eq!(doc.unassigned.len(), 2, "{doc:#?}");
+        let saved = serialize_document(&doc);
+        assert_eq!(saved, section0);
+        assert_eq!(parse_and_assign(&saved, &simple_grammar()).unwrap().unassigned.len(), 2);
+    }
+
+    #[test]
+    fn comment_anchors_past_the_end_are_written_at_the_end() {
+        use CommentAnchor::{Before, End};
+        let mut doc = doc_with_slot("title", vec![ContentElement::Heading {
+            level: HeadingLevel::new(1).unwrap(),
+            text: "T".to_string(),
+        }]);
+        let comment = |anchor: CommentAnchor, text: &str| crate::document::AnchoredComment {
+            anchor,
+            comment: Spanned { node: crate::document::Comment::new(text).unwrap(), span: Span { start: 0, end: 0 } },
+        };
+        doc.comments.push_back(comment(Before(slot("title"), 7), "<!-- past -->"));
+        doc.comments.push_back(comment(End(slot("title")), "<!-- end -->"));
+        doc.comments.push_back(comment(Before(slot("missing"), 0), "<!-- orphan -->"));
+        assert_eq!(
+            serialize_document(&doc),
+            "# T\n\n<!-- past -->\n\n<!-- end -->\n\n<!-- orphan -->\n"
+        );
     }
 
     #[test]

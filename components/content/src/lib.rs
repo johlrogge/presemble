@@ -19,8 +19,9 @@ pub use adapters::{
 pub use block::{check_block_round_trip, RoundTripError};
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{
-    ContentElement, Document, DocumentSlot, FlatDocument, Keyword, KeywordError, LinkOp,
-    LinkTarget, LinkText, RefsToTarget, SortDirection,
+    AnchoredComment, Comment, CommentAnchor, Container, ContentElement, Document, DocumentSlot,
+    FlatDocument, Keyword, KeywordError, LinkOp, LinkTarget, LinkText, RefsToTarget,
+    SortDirection,
 };
 pub use error::ContentError;
 pub use link_expression::{

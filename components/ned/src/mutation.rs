@@ -1,6 +1,7 @@
 use node_store::{Edge, Node, NodeId, NodeStore};
 
 use crate::tree::NodeTree;
+use crate::trivia;
 use crate::Selection;
 
 /// Replace text content of selected Text nodes.
@@ -17,12 +18,83 @@ pub fn set_text(store: &mut NodeStore, sel: &Selection, text: &str) -> Selection
     Selection::from_ids(modified)
 }
 
+/// The element parent of `id` (structural, not a semantic `Collection`).
+fn element_parent(store: &NodeStore, id: NodeId) -> Option<NodeId> {
+    store
+        .parents(id)
+        .into_iter()
+        .find(|p| matches!(store.get(*p), Some(Node::Element(_))))
+}
+
+/// Keep the leading comments of nodes about to be removed (ADR-062 D5).
+///
+/// For each node of `removed_roots` (in document order) that carries
+/// `_trivia-before`, the comments move to the `_trivia-before` of the next
+/// element sibling that survives (`to_delete` holds every node going away),
+/// after any comments already moved there; with no such sibling they are
+/// appended to the parent's `_trivia-end`. A node whose parent is removed too
+/// (a container deleted whole) loses its comments with it.
+fn relocate_leading_trivia(store: &mut NodeStore, removed_roots: &[NodeId], to_delete: &Selection) {
+    let mut ordered: Vec<(NodeId, usize, NodeId)> = removed_roots
+        .iter()
+        .filter(|id| !trivia::trivia_texts(store, **id, trivia::ATTR_TRIVIA_BEFORE).is_empty())
+        .filter_map(|&id| {
+            let parent = element_parent(store, id)?;
+            if to_delete.contains(parent) {
+                return None;
+            }
+            let pos = store.children(parent).iter().position(|&c| c == id)?;
+            Some((parent, pos, id))
+        })
+        .collect();
+    ordered.sort();
+    // Comments moved into a sibling's leading trivia go before its own, in
+    // document order.
+    let mut inserted: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
+    for (parent, pos, id) in ordered {
+        let next = store
+            .children(parent)
+            .into_iter()
+            .skip(pos + 1)
+            .find(|c| !to_delete.contains(*c) && matches!(store.get(*c), Some(Node::Element(_))));
+        match next {
+            Some(next) => {
+                let at = inserted.entry(next).or_insert(0);
+                *at += trivia::move_trivia(
+                    store,
+                    id,
+                    trivia::ATTR_TRIVIA_BEFORE,
+                    next,
+                    trivia::ATTR_TRIVIA_BEFORE,
+                    trivia::Placement::At(*at),
+                );
+            }
+            None => {
+                trivia::move_trivia(
+                    store,
+                    id,
+                    trivia::ATTR_TRIVIA_BEFORE,
+                    parent,
+                    trivia::ATTR_TRIVIA_END,
+                    trivia::Placement::End,
+                );
+            }
+        }
+    }
+}
+
 /// Delete selected nodes and all their descendants (cascade).
 /// Returns the number of nodes removed from the store (selected nodes plus
 /// cascaded descendants; ids not present in the store are not counted).
+///
+/// Leading comments (`_trivia-before`) of a deleted node move to the next
+/// surviving sibling, or to the parent's `_trivia-end` (ADR-062 D5).
+/// Comments of a container deleted whole are lost with it.
 pub fn delete(store: &mut NodeStore, sel: &Selection) -> usize {
     // First collect all nodes to delete (selected + descendants)
     let to_delete = sel.union(&sel.descendants(store));
+    let roots: Vec<NodeId> = sel.iter().collect();
+    relocate_leading_trivia(store, &roots, &to_delete);
 
     let count_before = store.node_count();
     // store.remove_node handles edge cleanup, so order doesn't matter
@@ -177,6 +249,20 @@ pub fn replace(store: &mut NodeStore, sel: &Selection, replacement: Vec<NodeTree
         return Selection::new();
     }
 
+    // Leading comments (ADR-062 D5): they move to the first replacement root
+    // when that root is an element; otherwise (no replacement, or a text root)
+    // they move as on delete.
+    let first_root_is_element = match replacement.first() {
+        Some(NodeTree::Element { .. }) => true,
+        Some(NodeTree::Existing(id)) => matches!(store.get(*id), Some(Node::Element(_))),
+        _ => false,
+    };
+    if !first_root_is_element {
+        let removed = Selection::from_ids(selected_with_parents.iter().copied());
+        let to_delete = removed.union(&removed.descendants(store));
+        relocate_leading_trivia(store, &selected_with_parents, &to_delete);
+    }
+
     let mut created: Vec<NodeId> = Vec::new();
 
     // Apply replacements: for each (selected, parent) re-look up current position,
@@ -189,6 +275,21 @@ pub fn replace(store: &mut NodeStore, sel: &Selection, replacement: Vec<NodeTree
             let new_id = tree.clone().materialize(store);
             store.insert_child_at(*parent, current_pos + offset, new_id);
             created.push(new_id);
+            // Only under the structural parent, so a semantic Collection copy
+            // never takes the comments.
+            if offset == 0
+                && first_root_is_element
+                && matches!(store.get(*parent), Some(Node::Element(_)))
+            {
+                trivia::move_trivia(
+                    store,
+                    *selected_id,
+                    trivia::ATTR_TRIVIA_BEFORE,
+                    new_id,
+                    trivia::ATTR_TRIVIA_BEFORE,
+                    trivia::Placement::At(0),
+                );
+            }
         }
         // Remove the original child edge (selected node stays until cascade delete below)
         store.remove_child_edge(*parent, *selected_id);
@@ -627,6 +728,115 @@ mod tests {
         let sec_children = store.children(new_id);
         assert_eq!(sec_children.len(), 1);
         assert_eq!(store.get(sec_children[0]), Some(&Node::Text("after".to_string())));
+    }
+
+    // --- comment trivia (ADR-062 D5) ---
+
+    /// body > [a, b, c] (paragraphs); returns (store, body, a, b, c).
+    fn body_with_three() -> (NodeStore, NodeId, NodeId, NodeId, NodeId) {
+        let mut store = NodeStore::new();
+        let body_name = store.intern("body");
+        let p_name = store.intern("paragraph");
+        let body = store.add_node(Node::Element(body_name));
+        let a = store.add_node(Node::Element(p_name));
+        let b = store.add_node(Node::Element(p_name));
+        let c = store.add_node(Node::Element(p_name));
+        for x in [a, b, c] {
+            store.add_edge(body, Edge::Child(x));
+        }
+        (store, body, a, b, c)
+    }
+
+    fn comment(store: &mut NodeStore, host: NodeId, attr: &str, text: &str) {
+        let t = trivia::ensure_trivia_element(store, host, attr);
+        let n = store.add_node(Node::Text(text.to_string()));
+        store.add_edge(t, Edge::Child(n));
+    }
+
+    fn comments(store: &NodeStore, host: NodeId, attr: &str) -> Vec<String> {
+        trivia::trivia_texts(store, host, attr)
+            .into_iter()
+            .map(|t| match store.get(t) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    const BEFORE: &str = trivia::ATTR_TRIVIA_BEFORE;
+    const END: &str = trivia::ATTR_TRIVIA_END;
+
+    #[test]
+    fn delete_moves_leading_comments_to_the_next_sibling() {
+        let (mut store, body, a, b, c) = body_with_three();
+        comment(&mut store, b, BEFORE, "b1");
+        comment(&mut store, c, BEFORE, "c1");
+        delete(&mut store, &Selection::single(b));
+        assert_eq!(store.children(body), vec![a, c]);
+        assert_eq!(comments(&store, c, BEFORE), vec!["b1", "c1"]);
+    }
+
+    #[test]
+    fn delete_of_the_last_block_moves_comments_to_the_container_end() {
+        let (mut store, body, a, b, c) = body_with_three();
+        comment(&mut store, body, END, "e0");
+        comment(&mut store, c, BEFORE, "c1");
+        delete(&mut store, &Selection::single(c));
+        assert_eq!(store.children(body), vec![a, b]);
+        assert_eq!(comments(&store, body, END), vec!["e0", "c1"]);
+    }
+
+    #[test]
+    fn deleting_adjacent_blocks_keeps_comment_order() {
+        let (mut store, body, _a, b, c) = body_with_three();
+        let a = store.children(body)[0];
+        comment(&mut store, a, BEFORE, "a1");
+        comment(&mut store, b, BEFORE, "b1");
+        comment(&mut store, c, BEFORE, "c1");
+        delete(&mut store, &Selection::from_ids([a, b]));
+        assert_eq!(comments(&store, c, BEFORE), vec!["a1", "b1", "c1"]);
+    }
+
+    #[test]
+    fn deleting_a_container_whole_drops_its_comments() {
+        let (mut store, body, _a, b, c) = body_with_three();
+        let doc_name = store.intern("document");
+        let doc = store.add_node(Node::Element(doc_name));
+        store.add_edge(doc, Edge::Child(body));
+        comment(&mut store, body, END, "e0");
+        comment(&mut store, c, BEFORE, "c1");
+        // Deleting the container together with one of its blocks: nothing
+        // moves to the document.
+        delete(&mut store, &Selection::from_ids([body, b]));
+        assert!(store.get(body).is_none() && store.get(c).is_none());
+        assert!(comments(&store, doc, END).is_empty());
+        assert!(comments(&store, doc, BEFORE).is_empty());
+    }
+
+    #[test]
+    fn replace_moves_leading_comments_to_the_first_new_root() {
+        let (mut store, body, a, b, _c) = body_with_three();
+        comment(&mut store, b, BEFORE, "b1");
+        let created = replace(
+            &mut store,
+            &Selection::single(b),
+            vec![NodeTree::element("heading"), NodeTree::element("paragraph")],
+        );
+        let children = store.children(body);
+        assert_eq!(children[0], a);
+        let first = children[1];
+        assert!(created.contains(first));
+        assert_eq!(comments(&store, first, BEFORE), vec!["b1"]);
+        assert!(comments(&store, children[2], BEFORE).is_empty());
+    }
+
+    #[test]
+    fn replace_with_nothing_moves_comments_like_delete() {
+        let (mut store, body, _a, b, c) = body_with_three();
+        comment(&mut store, b, BEFORE, "b1");
+        replace(&mut store, &Selection::single(b), vec![]);
+        assert_eq!(store.children(body).len(), 2);
+        assert_eq!(comments(&store, c, BEFORE), vec!["b1"]);
     }
 
     // --- positional correctness with multiple siblings sharing a parent ---

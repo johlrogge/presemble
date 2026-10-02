@@ -1067,6 +1067,7 @@ mod tests {
             has_separator: true,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
 
         let graph = build_article_graph(&doc, &grammar);
@@ -1391,6 +1392,18 @@ mod tests {
         let html = render_table(&["a | b"], &[&["a | b"]]);
         assert!(html.contains("<th>a | b</th>"), "got: {html}");
         assert!(html.contains("<td>a | b</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn comments_are_never_rendered() {
+        // ADR-062: comments are trivia, not body elements.
+        let grammar = schema::parse_schema("# Title {#title}\n\n----\n\nBody.\n").expect("schema");
+        let src = "# Title\n\n----\n\n<!-- secret one -->\n\nVisible.\n\n<!-- secret two -->\n";
+        let doc = parse_and_assign(src, &grammar).expect("parses");
+        assert_eq!(doc.comments.len(), 2);
+        let html = render_body_html(&doc.body, Some(src));
+        assert!(html.contains("Visible."), "got: {html}");
+        assert!(!html.contains("secret") && !html.contains("<!--"), "got: {html}");
     }
 
     #[test]

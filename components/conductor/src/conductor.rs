@@ -3617,6 +3617,7 @@ mod query_edges_tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
 
         let meta = node_store_bridge::content_bridge::DocumentMeta {
@@ -3653,6 +3654,7 @@ mod query_edges_tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
 
         let meta = node_store_bridge::content_bridge::DocumentMeta {
@@ -5313,6 +5315,7 @@ mod creation_check_tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -5548,6 +5551,7 @@ mod ned_suggestion_handler_tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -6722,6 +6726,7 @@ mod apply_ned_program_diagnostic_tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -6854,6 +6859,7 @@ mod body_structural_bsave_tests {
             has_separator: true,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/test/doc".to_string(),
@@ -7005,6 +7011,7 @@ mod body_structural_bsave_tests {
             has_separator: true,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
         let good_meta = DocumentMeta {
             url: url.to_string(),

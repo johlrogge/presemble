@@ -1135,6 +1135,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -1263,6 +1264,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/post/empty".to_string(),
@@ -1399,6 +1401,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/post/replace-test".to_string(),
@@ -1532,6 +1535,110 @@ mod tests {
         assert!(valid, "{saved}");
     }
 
+    // ── Comment trivia (ADR-062 D5) ───────────────────────────────────────────
+
+    /// A store holding `src` (under `HTML_SCHEMA_SRC`) as content/post/html.md.
+    fn make_doc_store_from(src: &str) -> (Arc<RwLock<NodeStore>>, node_store::NodeId, schema::Grammar) {
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+        let grammar = schema::parse_schema(HTML_SCHEMA_SRC).expect("schema parses");
+        let doc = content::parse_and_assign(src, &grammar).expect("doc parses");
+        let meta = DocumentMeta {
+            url: "/post/html".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/html.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut raw_store = NodeStore::new();
+        let root = document_to_store(&doc, &mut raw_store, Some(&meta));
+        (Arc::new(RwLock::new(raw_store)), root, grammar)
+    }
+
+    fn body_at(root_env: &RootEnv, idx: usize) -> Value {
+        crate::eval_str_with_root(
+            &format!(r#"(ned/body-at (ned/doc-by-path "content/post/html.md") {idx})"#),
+            root_env,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn delete_html_block_moves_its_comment_to_the_next_block() {
+        let (store, root, grammar) = make_doc_store_from(
+            "# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n\n<div>x</div>\n\nAfter.\n",
+        );
+        let root_env = setup_with_prelude(store.clone());
+        call(&root_env, "ned/delete", vec![body_at(&root_env, 1)]).unwrap();
+        let (saved, valid) = saved_and_validity(&store, root, &grammar);
+        assert_eq!(saved, "# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n\nAfter.\n");
+        assert!(valid, "{saved}");
+    }
+
+    #[test]
+    fn deleting_the_last_block_moves_its_comment_to_the_body_end() {
+        let (store, root, grammar) =
+            make_doc_store_from("# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n\n<div>x</div>\n");
+        let root_env = setup_with_prelude(store.clone());
+        call(&root_env, "ned/delete", vec![body_at(&root_env, 1)]).unwrap();
+        // The document still decodes and saves: the edit is accepted.
+        let (saved, valid) = saved_and_validity(&store, root, &grammar);
+        assert_eq!(saved, "# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n");
+        assert!(valid, "{saved}");
+        let st = store.read().unwrap();
+        let body = node_store_bridge::content_bridge::find_child_by_name(&st, root, "body").unwrap();
+        assert_eq!(
+            ned::trivia::trivia_texts(&st, body, ned::trivia::ATTR_TRIVIA_END).len(),
+            1,
+            "the comment is the body's end trivia"
+        );
+    }
+
+    #[test]
+    fn comments_do_not_shift_body_at_indices() {
+        let (store, _root, _grammar) = make_doc_store_from(
+            "# Title\n\n----\n\n<!-- a -->\n\nFirst.\n\n<!-- b -->\n\nSecond.\n",
+        );
+        let root_env = setup_with_prelude(store);
+        let text = crate::eval_str_with_root(
+            r#"(ned/text-of (ned/children (ned/body-at (ned/doc-by-path "content/post/html.md") 1)))"#,
+            &root_env,
+        )
+        .unwrap();
+        assert!(
+            matches!(&text, Value::List(items) if matches!(items.as_slice(), [Value::Text(t)] if t == "Second.")),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn structural_anchors_never_count_html_blocks() {
+        // The browser addresses body blocks by kind (heading + nth paragraph
+        // after it, or nth paragraph), so an HTML block never shifts them.
+        let (store, _root, _grammar) =
+            make_doc_store_from("# Title\n\n----\n\n### H\n\na\n\n<div>x</div>\n\nb\n");
+        let root_env = setup_with_prelude(store);
+        let body = r#"(ned/children (ned/slot (ned/doc-by-path "content/post/html.md") "body"))"#;
+        let kinds = crate::eval_str_with_root(&format!("(ned/kind-of {body})"), &root_env).unwrap();
+        assert!(
+            matches!(&kinds, Value::List(items) if items.len() == 4
+                && matches!(&items[2], Value::Text(k) if k == "html-block")),
+            "{kinds:?}"
+        );
+        for selection in [
+            format!(r#"(ned/nth-after (ned/heading-with-text {body} "H") "paragraph" 1)"#),
+            format!(r#"(ned/nth-of-kind {body} "paragraph" 1)"#),
+        ] {
+            let text = crate::eval_str_with_root(
+                &format!("(ned/text-of (ned/filter (ned/descendants {selection}) :text))"),
+                &root_env,
+            )
+            .unwrap();
+            assert!(
+                matches!(&text, Value::List(items) if matches!(items.as_slice(), [Value::Text(t)] if t == "b")),
+                "{selection}: {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn html_block_suggestion_payload_is_rejected() {
         use node_store_bridge::content_bridge::{tree_to_block, BlockDecodeError};
@@ -1578,6 +1685,7 @@ mod tests {
                 has_separator: false,
                 separator_span: None,
                 unassigned: Default::default(),
+                comments: Default::default(),
             };
             let meta = DocumentMeta {
                 url: url.to_string(),
@@ -1988,6 +2096,7 @@ mod tests {
             has_separator: true,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/".to_string(),
@@ -2189,6 +2298,7 @@ mod tests {
             has_separator: true,
             separator_span: None,
             unassigned: Default::default(),
+            comments: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/".to_string(),

@@ -2,7 +2,18 @@
 //! Used by the template renderer to discriminate node types and extract
 //! text/attribute values directly from the graph.
 
-use node_store::{Node, NodeId, NodeStore};
+use node_store::{Name, Node, NodeId, NodeStore};
+
+/// The attributes of `id` that are data: every attribute except the reserved
+/// comment trivia (`_trivia-before`, `_trivia-end`, ADR-062), which data
+/// paths never resolve.
+pub fn data_attributes(store: &NodeStore, id: NodeId) -> Vec<(Name, NodeId)> {
+    store
+        .attributes(id)
+        .into_iter()
+        .filter(|(name, _)| !ned::trivia::is_trivia_attr(store.resolve_name(*name)))
+        .collect()
+}
 
 /// Get the text content of a node.
 /// - For `Node::Text(s)`, returns the text directly.

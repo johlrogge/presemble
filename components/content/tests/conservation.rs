@@ -6,13 +6,14 @@
 //! family:
 //!
 //! 1. **Conservation**: the multiset of `parse_document` elements equals the
-//!    multiset of `assign_slots(..).flat_elements()`.
+//!    multiset of `assign_slots(..).flat_elements()`, and the multiset of its
+//!    comments equals the multiset of the document's comments (ADR-062).
 //! 2. **Byte coverage**: every non-whitespace input byte lies inside some
-//!    element's span or the separator line.
+//!    element's span, some comment's span or the separator line.
 //! 3. **Assignment fixed point**: with `d1 = assign(parse(src))` and
 //!    `d2 = assign(parse(serialize(d1)))`, `d1` equals `d2` ignoring spans
 //!    (slot membership in order, `unassigned` in order, body,
-//!    `has_separator`).
+//!    `has_separator`, comment anchors in order).
 //! 4. **Text fixed point**: `serialize(d2) == serialize(d1)`.
 //!
 //! ## Grammar family
@@ -29,7 +30,8 @@
 //! takes (code block, table, blockquote, HTML blocks) and paragraphs near the
 //! marker shape (an inline image, `text {#x}`, a marker on its own line). It
 //! is optionally followed by `----` and body elements, marker misuse and HTML
-//! blocks included.
+//! blocks included. HTML comments (trivia, ADR-062) are inserted between any
+//! two blocks, before and after `----`, and at the end of the file.
 //!
 //! Excluded, as documented on `link_expression_target` and
 //! `ordering_limits_are_pinned` in `serializer.rs`:
@@ -37,18 +39,18 @@
 //! - L5-L8: link text is a plain label, plain link hrefs never look like link
 //!   expressions, and link expressions are whole top-level paragraphs;
 //! - L10: lists alternate kinds within section 0 and within the body, so no
-//!   two same-kind lists can become adjacent on save;
-//! - L12 (comments only): comment-only HTML (`<!-- … -->`) produces no
-//!   element and is lost on save until it becomes trivia (ADR-062); see
-//!   `html_comments_are_dropped_l12` in parser.rs. HTML blocks are in the
-//!   domain;
+//!   two same-kind lists can become adjacent on save; a list directly after a
+//!   comment may repeat the kind, because the comment (its leading trivia)
+//!   keeps the two apart wherever the list is written;
+//! - L12 is resolved (ADR-062): HTML blocks and comments are in the domain;
 //! - L14: HTML blocks of types 1–5 always have their end condition, so none
 //!   runs to the end of the file;
 //! - a leading link followed by text with no marker (`[a](/x) trailing`), a
 //!   pinned limit for inline segments (S-A).
 
 use content::{
-    assign_slots, parse_document, serialize_document, ContentElement, Document,
+    assign_slots, parse_document, serialize_document, CommentAnchor, Container, ContentElement,
+    Document,
 };
 use schema::Grammar;
 
@@ -160,11 +162,22 @@ const MARKERISH_PARAGRAPHS: &[&str] = &[
 ];
 const BODY_HEADINGS: &[&str] = &["### Section", "#### Deeper", "## Too high"];
 
-/// A list whose kind is the opposite of `previous_ordered` (limit L10).
-fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String {
+/// HTML comments (trivia, ADR-062). Each is a complete comment-only block.
+const COMMENTS: &[&str] = &[
+    "<!-- note -->",
+    "<!---->",
+    "<!-->",
+    "<!--\nmulti\nline\n-->",
+    "<!-- a --> <!-- b -->",
+];
+
+/// A list whose kind is the opposite of `previous_ordered` (limit L10),
+/// unless it directly follows a comment, which keeps two same-kind lists
+/// apart; then the kind is random.
+fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
     let ordered = match *previous_ordered {
-        Some(previous) => !previous,
-        None => rng.chance(50),
+        Some(previous) if !after_comment => !previous,
+        _ => rng.chance(50),
     };
     *previous_ordered = Some(ordered);
     let n = 1 + rng.below(3);
@@ -177,13 +190,13 @@ fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String {
         .join("\n")
 }
 
-fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String {
+fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
     match rng.below(26) {
         0..=2 => rng.pick(HEADINGS).to_string(),
         3..=5 => rng.pick(PARAGRAPHS).to_string(),
         6..=7 => rng.pick(LINKS).to_string(),
         8 => rng.pick(IMAGES).to_string(),
-        9..=10 => gen_list(rng, previous_ordered),
+        9..=10 => gen_list(rng, previous_ordered, after_comment),
         11..=12 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
         13..=14 => rng.pick(MARKED_FOR_LINK_SLOT).to_string(),
         15 => rng.pick(MARKED_FOR_NO_SLOT).to_string(),
@@ -195,11 +208,11 @@ fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> Str
     }
 }
 
-fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String {
+fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
     match rng.below(11) {
         0..=1 => rng.pick(BODY_HEADINGS).to_string(),
         2..=4 => rng.pick(PARAGRAPHS).to_string(),
-        5 => gen_list(rng, previous_ordered),
+        5 => gen_list(rng, previous_ordered, after_comment),
         6 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
         7 => rng.pick(LINKS).to_string(),
         8 => rng.pick(HTML_BLOCKS).to_string(),
@@ -207,24 +220,43 @@ fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>) -> String 
     }
 }
 
+/// 0-2 comments, as separate blocks; whether any was pushed.
+fn gen_comments(rng: &mut Rng, blocks: &mut Vec<String>) -> bool {
+    let n = match rng.below(10) {
+        0..=6 => 0,
+        7..=8 => 1,
+        _ => 2,
+    };
+    for _ in 0..n {
+        blocks.push(rng.pick(COMMENTS).to_string());
+    }
+    n > 0
+}
+
 /// A source document: 0-9 section-0 blocks, then optionally `----` and 0-5
-/// body blocks, all separated by blank lines.
+/// body blocks, all separated by blank lines, with comments anywhere between
+/// them and at the end.
 fn gen_source(seed: u64) -> String {
     let mut rng = Rng::new(seed);
     let mut blocks: Vec<String> = Vec::new();
     let mut previous_ordered = None;
     // Usually start with a title, as real pages do.
+    let commented = gen_comments(&mut rng, &mut blocks);
     if rng.chance(80) {
         blocks.push("# Home".to_string());
     }
+    let mut commented = commented && blocks.last().is_some_and(|b| b.starts_with("<!--"));
     for _ in 0..rng.below(10) {
-        blocks.push(gen_section0_block(&mut rng, &mut previous_ordered));
+        blocks.push(gen_section0_block(&mut rng, &mut previous_ordered, commented));
+        commented = gen_comments(&mut rng, &mut blocks);
     }
     if rng.chance(70) {
         blocks.push("----".to_string());
         let mut previous_ordered = None;
+        commented = gen_comments(&mut rng, &mut blocks);
         for _ in 0..rng.below(6) {
-            blocks.push(gen_body_block(&mut rng, &mut previous_ordered));
+            blocks.push(gen_body_block(&mut rng, &mut previous_ordered, commented));
+            commented = gen_comments(&mut rng, &mut blocks);
         }
     }
     let mut src = blocks.join("\n\n");
@@ -238,14 +270,15 @@ fn nodes(elements: &im::Vector<schema::Spanned<ContentElement>>) -> Vec<ContentE
     elements.iter().map(|e| e.node.clone()).collect()
 }
 
-/// A document without spans: slot membership in order, `unassigned`, body
-/// and `has_separator`.
+/// A document without spans: slot membership in order, `unassigned`, body,
+/// `has_separator` and comment anchors in order.
 #[derive(Debug, PartialEq)]
 struct Shape {
     slots: Vec<(String, Vec<ContentElement>)>,
     unassigned: Vec<ContentElement>,
     body: Vec<ContentElement>,
     has_separator: bool,
+    comments: Vec<(CommentAnchor, String)>,
 }
 
 fn shape(doc: &Document) -> Shape {
@@ -258,12 +291,24 @@ fn shape(doc: &Document) -> Shape {
         unassigned: nodes(&doc.unassigned),
         body: nodes(&doc.body),
         has_separator: doc.has_separator,
+        comments: {
+            // `Document::comments` is in source order per anchor; a save
+            // moves a host's comments with it, so compare grouped by anchor
+            // (a stable sort keeps the order within each anchor).
+            let mut comments: Vec<(CommentAnchor, String)> = doc
+                .comments
+                .iter()
+                .map(|c| (c.anchor.clone(), c.comment.node.as_str().to_string()))
+                .collect();
+            comments.sort_by_key(|(anchor, _)| format!("{anchor:?}"));
+            comments
+        },
     }
 }
 
 fn assign(src: &str, grammar: &Grammar) -> Document {
     let flat = parse_document(src).expect("markdown parses");
-    assign_slots(&flat.elements, grammar)
+    assign_slots(&flat, grammar)
 }
 
 /// Whether `a` and `b` hold the same elements, counting repeats.
@@ -305,12 +350,23 @@ fn check_all(property: &str, check: impl Fn(&str, &Grammar) -> Result<(), String
 #[test]
 fn conservation() {
     check_all("conservation", |src, grammar| {
-        let parsed = nodes(&parse_document(src).expect("parses").elements);
-        let assigned = nodes(&assign(src, grammar).flat_elements());
-        if same_multiset(&parsed, &assigned) {
+        let flat = parse_document(src).expect("parses");
+        let parsed = nodes(&flat.elements);
+        let doc = assign(src, grammar);
+        let assigned = nodes(&doc.flat_elements());
+        if !same_multiset(&parsed, &assigned) {
+            return Err(format!("parsed:\n{parsed:#?}\n--- assigned:\n{assigned:#?}"));
+        }
+        let mut parsed_comments: Vec<String> =
+            flat.comments.iter().map(|(_, c)| c.node.as_str().to_string()).collect();
+        let mut assigned_comments: Vec<String> =
+            doc.comments.iter().map(|c| c.comment.node.as_str().to_string()).collect();
+        parsed_comments.sort();
+        assigned_comments.sort();
+        if parsed_comments == assigned_comments {
             Ok(())
         } else {
-            Err(format!("parsed:\n{parsed:#?}\n--- assigned:\n{assigned:#?}"))
+            Err(format!("comments parsed:\n{parsed_comments:#?}\n--- assigned:\n{assigned_comments:#?}"))
         }
     });
 }
@@ -321,6 +377,7 @@ fn byte_coverage() {
         let doc = assign(src, grammar);
         let mut spans: Vec<schema::Span> = doc.flat_elements().iter().map(|e| e.span).collect();
         spans.extend(doc.separator_span);
+        spans.extend(doc.comments.iter().map(|c| c.comment.span));
         let uncovered: Vec<usize> = src
             .char_indices()
             .filter(|(_, c)| !c.is_whitespace())
@@ -379,9 +436,43 @@ fn generator_exercises_unassigned_bound_and_body() {
     let mut unassigned_other_blocks = 0;
     let mut unassigned_html = 0;
     let mut body_html = 0;
+    let mut comments = 0;
+    let mut end_unassigned = 0;
+    let mut end_body = 0;
+    let mut commented_adjacent_lists = 0;
     let is_html = |e: &schema::Spanned<ContentElement>| matches!(e.node, ContentElement::HtmlBlock { .. });
     for seed in SEEDS {
-        let doc = assign(&gen_source(seed), &grammar);
+        let src = gen_source(seed);
+        let doc = assign(&src, &grammar);
+        comments += doc.comments.len();
+        end_unassigned += doc
+            .comments
+            .iter()
+            .filter(|c| c.anchor == CommentAnchor::End(Container::Unassigned))
+            .count();
+        end_body +=
+            doc.comments.iter().filter(|c| c.anchor == CommentAnchor::End(Container::Body)).count();
+        // Two same-kind lists with only comments between them.
+        let blocks: Vec<&str> = src.split("\n\n").collect();
+        for (i, block) in blocks.iter().enumerate() {
+            let kind = |b: &str| {
+                if b.starts_with("- ") {
+                    Some(false)
+                } else if b.starts_with("1. ") {
+                    Some(true)
+                } else {
+                    None
+                }
+            };
+            if let Some(k) = kind(block) {
+                let rest = &blocks[i + 1..];
+                let after_comments = rest.iter().skip_while(|b| b.starts_with("<!--")).next();
+                let skipped = rest.iter().take_while(|b| b.starts_with("<!--")).count();
+                if skipped > 0 && after_comments.and_then(|b| kind(b)) == Some(k) {
+                    commented_adjacent_lists += 1;
+                }
+            }
+        }
         unassigned += doc.unassigned.len();
         unassigned_html += doc.unassigned.iter().filter(|e| is_html(e)).count();
         body_html += doc.body.iter().filter(|e| is_html(e)).count();
@@ -424,6 +515,13 @@ fn generator_exercises_unassigned_bound_and_body() {
     );
     assert!(unassigned_html > 100, "too few unassigned HTML blocks: {unassigned_html}");
     assert!(body_html > 50, "too few body HTML blocks: {body_html}");
+    assert!(comments > 200, "too few comments: {comments}");
+    assert!(end_unassigned > 20, "too few End(Unassigned) comments: {end_unassigned}");
+    assert!(end_body > 20, "too few End(Body) comments: {end_body}");
+    assert!(
+        commented_adjacent_lists > 2,
+        "too few same-kind lists kept apart by a comment: {commented_adjacent_lists}"
+    );
 }
 
 /// `text {#x}` is not marker-shaped: it stays a normal paragraph, also after

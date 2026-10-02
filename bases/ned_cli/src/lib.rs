@@ -230,10 +230,26 @@ fn round_trip_content(
                     .elements
                     .iter()
                     .any(|e| matches!(e.node, ContentElement::Separator));
+                // Comments keep their host: the index among the kept
+                // (non-separator) elements before it.
+                let is_separator = |e: &schema::Spanned<ContentElement>| {
+                    matches!(e.node, ContentElement::Separator)
+                };
+                let comments = flat
+                    .comments
+                    .iter()
+                    .map(|(host, comment)| {
+                        let at = flat.elements.iter().take(*host).filter(|e| !is_separator(e)).count();
+                        content::AnchoredComment {
+                            anchor: content::CommentAnchor::Before(content::Container::Body, at),
+                            comment: comment.clone(),
+                        }
+                    })
+                    .collect();
                 let body: im::Vector<_> = flat
                     .elements
                     .into_iter()
-                    .filter(|e| !matches!(e.node, ContentElement::Separator))
+                    .filter(|e| !is_separator(e))
                     .collect();
                 Document {
                     preamble: im::Vector::new(),
@@ -241,6 +257,7 @@ fn round_trip_content(
                     has_separator,
                     separator_span: None,
                     unassigned: Default::default(),
+                    comments,
                 }
             }
             Err(e) => {

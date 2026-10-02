@@ -3583,6 +3583,39 @@ mod tests {
     }
 
     #[test]
+    fn native_body_comment_trivia_is_never_rendered() {
+        // ADR-062: comments are `_trivia-before` / `_trivia-end` attributes.
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let body_name = store.intern("body");
+        let body = store.add_node(node_store::Node::Element(body_name));
+        let para_name = store.intern("paragraph");
+        let para = store.add_node(node_store::Node::Element(para_name));
+        let text = store.add_node(node_store::Node::Text("Visible.".into()));
+        store.add_edge(para, node_store::Edge::Child(text));
+        store.add_edge(body, node_store::Edge::Child(para));
+        let trivia_name = store.intern("trivia");
+        for (host, attr) in [(para, "_trivia-before"), (body, "_trivia-end")] {
+            let trivia = store.add_node(node_store::Node::Element(trivia_name));
+            let comment = store.add_node(node_store::Node::Text("<!-- secret -->".into()));
+            store.add_edge(trivia, node_store::Edge::Child(comment));
+            let attr_name = store.intern(attr);
+            store.add_edge(host, node_store::Edge::Attribute { name: attr_name, value: trivia });
+        }
+        let body_co_name = store.intern("body");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+
+        let graph = NodeStoreGraphView { store, root };
+        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
+        assert!(html.contains("Visible."), "got: {html}");
+        assert!(!html.contains("secret") && !html.contains("<!--"), "got: {html}");
+    }
+
+    #[test]
     fn native_body_code_block_is_escaped_once() {
         let html = render_native_body_block("code-block", "x<y", None);
         assert!(html.contains("<code>x&lt;y</code>"), "expected single escaping; got: {html}");

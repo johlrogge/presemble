@@ -1,5 +1,5 @@
-use content::ContentError;
-use node_store::{NodeId, NodeStore};
+use content::{CommentAnchor, Container, ContentError};
+use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::Grammar;
 
 use crate::content_bridge::content_element_to_store;
@@ -23,10 +23,41 @@ pub fn ingest_body_fragment(
     let wrapped = format!("----\n{src}");
     let doc = content::parse_and_assign(&wrapped, grammar)?;
 
+    // Every comment is the leading trivia of the block after it (ADR-062).
+    // A fragment that ends with a comment has no block to carry it.
+    let mut before: Vec<Vec<&str>> = vec![Vec::new(); doc.body.len()];
+    for c in &doc.comments {
+        match &c.anchor {
+            CommentAnchor::Before(Container::Body, at) if *at < doc.body.len() => {
+                before[*at].push(c.comment.node.as_str());
+            }
+            _ => {
+                return Err(ContentError::ParseError(
+                    "a comment must be followed by a block".to_string(),
+                ));
+            }
+        }
+    }
+
     let ids: Vec<NodeId> = doc
         .body
         .iter()
-        .map(|spanned| content_element_to_store(&spanned.node, store))
+        .zip(&before)
+        .map(|(spanned, comments)| {
+            let id = content_element_to_store(&spanned.node, store);
+            if !comments.is_empty() {
+                let trivia = ned::trivia::ensure_trivia_element(
+                    store,
+                    id,
+                    ned::trivia::ATTR_TRIVIA_BEFORE,
+                );
+                for comment in comments {
+                    let text = store.add_node(Node::Text(comment.to_string()));
+                    store.add_edge(trivia, Edge::Child(text));
+                }
+            }
+            id
+        })
         .collect();
 
     Ok(ids)
@@ -63,6 +94,37 @@ mod tests {
                 None
             }
         })
+    }
+
+    #[test]
+    fn fragment_comments_attach_to_the_following_block() {
+        let mut store = NodeStore::new();
+        let ids = ingest_body_fragment(
+            "<!-- a -->\n\nOne.\n\n<!-- b -->\n<!-- c -->\n\nTwo.\n",
+            &empty_grammar(),
+            &mut store,
+        )
+        .expect("should parse");
+        assert_eq!(ids.len(), 2, "comments are not blocks");
+        let comments = |id| -> Vec<String> {
+            ned::trivia::trivia_texts(&store, id, ned::trivia::ATTR_TRIVIA_BEFORE)
+                .into_iter()
+                .map(|t| match store.get(t) {
+                    Some(Node::Text(s)) => s.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(comments(ids[0]), vec!["<!-- a -->"]);
+        assert_eq!(comments(ids[1]), vec!["<!-- b -->", "<!-- c -->"]);
+    }
+
+    #[test]
+    fn fragment_ending_with_a_comment_is_an_error() {
+        let mut store = NodeStore::new();
+        let err = ingest_body_fragment("One.\n\n<!-- last -->\n", &empty_grammar(), &mut store)
+            .expect_err("a trailing comment has no block");
+        assert!(err.to_string().contains("a comment must be followed by a block"), "{err}");
     }
 
     #[test]

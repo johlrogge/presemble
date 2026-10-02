@@ -1208,6 +1208,18 @@ mod tests {
     }
 
     #[test]
+    fn comments_have_no_diagnostics() {
+        let g = summary_grammar(true);
+        let src = "<!-- a -->\n\n# Title\n\n<!-- b -->\n\nOne.\n\n<!-- c -->\n\n----\n\n\
+                   <!-- d -->\n\nBody.\n\n<!--\nmulti\n-->\n";
+        let doc = parse_and_assign(src, &g).expect("parses");
+        assert_eq!(doc.comments.len(), 5);
+        assert!(doc.unassigned.is_empty());
+        let d = validate(&doc, &g).diagnostics;
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
     fn unslotted_body_paragraphs_have_no_diagnostics() {
         let g = summary_grammar(true);
         let d = diagnostics_for(

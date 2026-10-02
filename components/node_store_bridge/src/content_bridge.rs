@@ -1,6 +1,6 @@
 use content::{
-    ContentElement, Document, DocumentSlot, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget,
-    SortDirection,
+    AnchoredComment, Comment, CommentAnchor, Container, ContentElement, Document, DocumentSlot,
+    Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection,
 };
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
@@ -330,34 +330,119 @@ pub fn document_to_store(doc: &Document, store: &mut NodeStore, meta: Option<&Do
         add_text_attr(store, root, "page-kind", &meta.page_kind);
     }
 
+    // Comments (ADR-062) by container. A comment for a slot the document
+    // does not have goes to the end of the unassigned elements.
+    let has_slot = |name: &SlotName| doc.preamble.iter().any(|s| &s.name == name);
+    let in_container = |container: &Container| -> Vec<&AnchoredComment> {
+        doc.comments
+            .iter()
+            .filter(|c| {
+                let anchored = match &c.anchor {
+                    CommentAnchor::Before(k, _) | CommentAnchor::End(k) => k,
+                };
+                match (anchored, container) {
+                    (Container::Slot(name), Container::Unassigned) => !has_slot(name),
+                    _ => anchored == container,
+                }
+            })
+            .collect()
+    };
+
     // preamble
     let preamble_node = add_child_element(store, root, "preamble");
     for slot in &doc.preamble {
         let slot_node = add_child_element(store, preamble_node, "slot");
         add_text_attr(store, slot_node, "name", slot.name.as_str());
-        for spanned in &slot.elements {
-            let id = content_element_to_store(&spanned.node, store);
-            store.add_edge(slot_node, Edge::Child(id));
-        }
+        let container = Container::Slot(slot.name.clone());
+        let comments = in_container(&container);
+        add_blocks_with_trivia(store, slot_node, &container, &slot.elements, &comments);
     }
     // Section-0 elements that fill no slot (ADR-060 P1): frame, after the
-    // slots, only when non-empty.
-    if !doc.unassigned.is_empty() {
+    // slots, only when it has elements or end comments.
+    let unassigned_comments = in_container(&Container::Unassigned);
+    if !doc.unassigned.is_empty() || !unassigned_comments.is_empty() {
         let unassigned_node = add_child_element(store, preamble_node, "unassigned");
-        for spanned in &doc.unassigned {
-            let id = content_element_to_store(&spanned.node, store);
-            store.add_edge(unassigned_node, Edge::Child(id));
-        }
+        add_blocks_with_trivia(
+            store,
+            unassigned_node,
+            &Container::Unassigned,
+            &doc.unassigned,
+            &unassigned_comments,
+        );
     }
 
     // body
     let body_node = add_child_element(store, root, "body");
-    for spanned in &doc.body {
-        let id = content_element_to_store(&spanned.node, store);
-        store.add_edge(body_node, Edge::Child(id));
-    }
+    let body_comments = in_container(&Container::Body);
+    add_blocks_with_trivia(store, body_node, &Container::Body, &doc.body, &body_comments);
 
     root
+}
+
+/// Add `elements` as blocks of `container_node`, with their comments as
+/// trivia (ADR-062): `Before(_, i)` on block `i`, everything else (`End`,
+/// and `Before` past the last block) on the container's `_trivia-end`.
+/// `comments` are this container's comments, in order.
+fn add_blocks_with_trivia(
+    store: &mut NodeStore,
+    container_node: NodeId,
+    container: &Container,
+    elements: &im::Vector<Spanned<ContentElement>>,
+    comments: &[&AnchoredComment],
+) {
+    for (at, spanned) in elements.iter().enumerate() {
+        let id = content_element_to_store(&spanned.node, store);
+        store.add_edge(container_node, Edge::Child(id));
+        let before: Vec<&str> = comments
+            .iter()
+            .filter(|c| matches!(&c.anchor, CommentAnchor::Before(k, i) if k == container && *i == at))
+            .map(|c| c.comment.node.as_str())
+            .collect();
+        add_trivia(store, id, ned::trivia::ATTR_TRIVIA_BEFORE, &before);
+    }
+    let end: Vec<&str> = comments
+        .iter()
+        .filter(|c| match &c.anchor {
+            CommentAnchor::Before(k, i) => k != container || *i >= elements.len(),
+            CommentAnchor::End(_) => true,
+        })
+        .map(|c| c.comment.node.as_str())
+        .collect();
+    add_trivia(store, container_node, ned::trivia::ATTR_TRIVIA_END, &end);
+}
+
+/// Attach `comments` to `host` under the trivia attribute `attr`; nothing
+/// when there are none.
+fn add_trivia(store: &mut NodeStore, host: NodeId, attr: &str, comments: &[&str]) {
+    if comments.is_empty() {
+        return;
+    }
+    let trivia = ned::trivia::ensure_trivia_element(store, host, attr);
+    for comment in comments {
+        add_child_text(store, trivia, comment);
+    }
+}
+
+/// Decode the comments under `host`'s trivia attribute `attr`. Every child
+/// must be a `Text` that is comment-only ([`Comment::new`]).
+fn decode_trivia(
+    store: &NodeStore,
+    host: NodeId,
+    attr: &str,
+) -> Result<Vec<Comment>, BlockDecodeError> {
+    let Some(trivia) = ned::trivia::trivia_element(store, host, attr) else {
+        return Ok(Vec::new());
+    };
+    store
+        .children(trivia)
+        .into_iter()
+        .map(|t| match store.get(t) {
+            Some(Node::Text(s)) => {
+                Comment::new(s).ok_or_else(|| BlockDecodeError::InvalidComment(s.clone()))
+            }
+            other => Err(BlockDecodeError::InvalidComment(format!("{other:?}"))),
+        })
+        .collect()
 }
 
 // ── content element decoding ──────────────────────────────────────────────────
@@ -435,6 +520,8 @@ pub enum BlockDecodeError {
     NotPayloadKind(String),
     /// A single-text tree payload does not have exactly one `Text` child.
     TextChildCount { kind: String, found: usize },
+    /// Comment trivia (ADR-062) holding something that is not a comment.
+    InvalidComment(String),
 }
 
 impl std::fmt::Display for BlockDecodeError {
@@ -474,6 +561,9 @@ impl std::fmt::Display for BlockDecodeError {
                 f,
                 "{kind} must have exactly one Text child, found {found} child(ren)"
             ),
+            BlockDecodeError::InvalidComment(text) => {
+                write!(f, "comment trivia holds something that is not an HTML comment: {text}")
+            }
         }
     }
 }
@@ -570,8 +660,12 @@ fn heading_level(store: &NodeStore, node: NodeId) -> Result<HeadingLevel, BlockD
 /// Decode a block element node into a [`ContentElement`].
 ///
 /// Accepts every kind in [`BLOCK_KINDS`]; never panics on malformed input.
+///
+/// The block's leading comments (`_trivia-before`, ADR-062) must decode too:
+/// trivia that is not comment-only is [`BlockDecodeError::InvalidComment`].
 pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, BlockDecodeError> {
     let tag = element_name_of(store, id).ok_or(BlockDecodeError::NotAnElement)?;
+    decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_BEFORE)?;
     let kind = tag.as_str();
     match kind {
         "heading" => {
@@ -1079,24 +1173,45 @@ impl std::error::Error for DocumentDecodeError {
     }
 }
 
-/// Decode the element children of a container (`slot` or `body`) as blocks.
+/// Decode the element children of a container (`slot`, `unassigned` or
+/// `body`) as blocks, and its comment trivia (ADR-062) into `comments`:
+/// each block's `_trivia-before` as `Before(container, index)`, then the
+/// container's `_trivia-end` as `End(container)`.
 ///
-/// Non-element children are skipped; a malformed block is an error naming the
-/// offending block node.
+/// Non-element children are skipped; a malformed block (or trivia that is not
+/// comment-only) is an error naming the offending block or container node.
 fn decode_blocks(
     store: &NodeStore,
-    container: NodeId,
+    container_node: NodeId,
+    container: Container,
+    comments: &mut im::Vector<AnchoredComment>,
 ) -> Result<im::Vector<Spanned<ContentElement>>, DocumentDecodeError> {
-    store
-        .children(container)
+    let blocks: im::Vector<Spanned<ContentElement>> = store
+        .children(container_node)
         .into_iter()
         .filter(|&id| matches!(store.get(id), Some(Node::Element(_))))
-        .map(|id| {
-            block_from_node(store, id)
-                .map(spanned)
-                .map_err(|error| DocumentDecodeError { block: id, error })
+        .enumerate()
+        .map(|(at, id)| {
+            let error = |error| DocumentDecodeError { block: id, error };
+            let block = block_from_node(store, id).map_err(error)?;
+            for comment in decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_BEFORE).map_err(error)? {
+                comments.push_back(AnchoredComment {
+                    anchor: CommentAnchor::Before(container.clone(), at),
+                    comment: spanned(comment),
+                });
+            }
+            Ok(spanned(block))
         })
-        .collect()
+        .collect::<Result<_, DocumentDecodeError>>()?;
+    let end = decode_trivia(store, container_node, ned::trivia::ATTR_TRIVIA_END)
+        .map_err(|error| DocumentDecodeError { block: container_node, error })?;
+    for comment in end {
+        comments.push_back(AnchoredComment {
+            anchor: CommentAnchor::End(container.clone()),
+            comment: spanned(comment),
+        });
+    }
+    Ok(blocks)
 }
 
 /// Reconstruct a [`Document`] from the node store given its root node ID.
@@ -1110,17 +1225,17 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
     let has_separator = find_attr_bool(store, root, "has-separator").unwrap_or(false);
 
     let preamble_node = find_child_by_name(store, root, "preamble");
+    let mut comments = im::Vector::new();
 
     // preamble
     let preamble = match preamble_node {
         Some(preamble_node) => children_by_name(store, preamble_node, "slot")
             .into_iter()
             .map(|slot_id| {
-                let name_str = find_attr_text(store, slot_id, "name").unwrap_or_default();
-                Ok(DocumentSlot {
-                    name: SlotName::new(name_str),
-                    elements: decode_blocks(store, slot_id)?,
-                })
+                let name = SlotName::new(find_attr_text(store, slot_id, "name").unwrap_or_default());
+                let elements =
+                    decode_blocks(store, slot_id, Container::Slot(name.clone()), &mut comments)?;
+                Ok(DocumentSlot { name, elements })
             })
             .collect::<Result<im::Vector<DocumentSlot>, DocumentDecodeError>>()?,
         None => im::Vector::new(),
@@ -1130,13 +1245,15 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
     let unassigned = match preamble_node
         .and_then(|preamble_node| find_child_by_name(store, preamble_node, "unassigned"))
     {
-        Some(unassigned_node) => decode_blocks(store, unassigned_node)?,
+        Some(unassigned_node) => {
+            decode_blocks(store, unassigned_node, Container::Unassigned, &mut comments)?
+        }
         None => im::Vector::new(),
     };
 
     // body
     let body = match find_child_by_name(store, root, "body") {
-        Some(body_node) => decode_blocks(store, body_node)?,
+        Some(body_node) => decode_blocks(store, body_node, Container::Body, &mut comments)?,
         None => im::Vector::new(),
     };
 
@@ -1146,6 +1263,7 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
         body,
         has_separator,
         separator_span: None,
+        comments,
     })
 }
 
@@ -1307,6 +1425,7 @@ mod tests {
             has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1355,10 +1474,110 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
         compare_documents(&doc, &recovered);
+    }
+
+    // ── comment trivia (ADR-062) ────────────────────────────────────────────
+
+    const TRIVIA_SCHEMA: &str = "# Title {#title}\noccurs\n: exactly once\n\n\
+                                 Summary. {#summary}\noccurs\n: 1..2\n\n----\n\nBody.\n";
+
+    fn trivia_doc(src: &str) -> Document {
+        let grammar = schema::parse_schema(TRIVIA_SCHEMA).expect("schema parses");
+        content::parse_and_assign(src, &grammar).expect("doc parses")
+    }
+
+    fn comment_texts(store: &NodeStore, host: NodeId, attr: &str) -> Vec<String> {
+        ned::trivia::trivia_texts(store, host, attr)
+            .into_iter()
+            .map(|t| match store.get(t) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn comments_are_stored_as_trivia_and_read_back() {
+        let src = "<!-- t -->\n\n# Title\n\nSummary.\n\n<!-- u -->\n\n----\n\n<!-- b0 -->\n\nOne.\n\nTwo.\n\n<!-- end -->\n";
+        let doc = trivia_doc(src);
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+
+        // Trivia is never a child, so block indices are unchanged.
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let blocks = store.children(body);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(comment_texts(&store, blocks[0], ned::trivia::ATTR_TRIVIA_BEFORE), vec!["<!-- b0 -->"]);
+        assert_eq!(comment_texts(&store, body, ned::trivia::ATTR_TRIVIA_END), vec!["<!-- end -->"]);
+        // `End(Unassigned)` alone creates the unassigned frame.
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        let unassigned = find_child_by_name(&store, preamble, "unassigned").expect("frame");
+        assert!(store.children(unassigned).is_empty());
+        assert_eq!(comment_texts(&store, unassigned, ned::trivia::ATTR_TRIVIA_END), vec!["<!-- u -->"]);
+
+        // Decode and save: byte for byte.
+        assert_eq!(serialize_from_store(&store, root).unwrap(), src);
+        let back = store_to_document(&store, root).unwrap();
+        assert_eq!(back.comments.len(), 4);
+    }
+
+    #[test]
+    fn trivia_that_is_not_a_comment_is_malformed() {
+        let doc = trivia_doc("# Title\n\nSummary.\n\n----\n\n<!-- c -->\n\nOne.\n");
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let block = store.children(body)[0];
+        let text = ned::trivia::trivia_texts(&store, block, ned::trivia::ATTR_TRIVIA_BEFORE)[0];
+        store.replace_node(text, Node::Text("<b>not a comment</b>".to_string()));
+        assert!(matches!(block_from_node(&store, block), Err(BlockDecodeError::InvalidComment(_))));
+        let err = store_to_document(&store, root).unwrap_err();
+        assert_eq!(err.block, block);
+        assert!(matches!(err.error, BlockDecodeError::InvalidComment(_)));
+    }
+
+    #[test]
+    fn trivia_text_is_owned_by_its_host_block() {
+        let doc = trivia_doc("# Title\n\nSummary.\n\n----\n\n<!-- c -->\n\nOne.\n");
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let block = store.children(body)[0];
+        let text = ned::trivia::trivia_texts(&store, block, ned::trivia::ATTR_TRIVIA_BEFORE)[0];
+        assert_eq!(owning_block(&store, text), Some(block));
+        assert_eq!(owning_document(&store, text), Some(root));
+    }
+
+    #[test]
+    fn data_paths_never_resolve_trivia() {
+        use template::GraphView;
+        let doc = trivia_doc("# Title\n\nSummary.\n\n----\n\n<!-- c -->\n\nOne.\n\n<!-- end -->\n");
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let block = store.children(body)[0];
+        for (host, attr) in [
+            (block, ned::trivia::ATTR_TRIVIA_BEFORE),
+            (body, ned::trivia::ATTR_TRIVIA_END),
+        ] {
+            let view = crate::graph_view_impl::NodeStoreView::new(&store, host);
+            assert!(view.resolve(&[attr]).is_none(), "{attr}");
+            assert!(view.resolve_node(&[attr]).is_none(), "{attr}");
+            assert!(!view.iter_keys().iter().any(|k| k == attr), "{attr}");
+            // A single-text block becomes its text; a container a record.
+            match crate::value_bridge::node_to_value(&store, host) {
+                template::Value::Record(record) => {
+                    assert!(record.resolve(&[attr]).is_none(), "{attr}")
+                }
+                template::Value::Text(t) => assert!(!t.contains("<!--"), "{t}"),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     // ── unassigned section-0 elements (ADR-060 P1) ──────────────────────────
@@ -1402,6 +1621,7 @@ mod tests {
             body: im::vector![zero_spanned(ContentElement::Paragraph { text: "b".to_string() })],
             has_separator: true,
             separator_span: None,
+            comments: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let root = document_to_store(&doc, &mut store, None);
@@ -1525,6 +1745,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1580,6 +1801,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1603,6 +1825,7 @@ mod tests {
             has_separator: true,
             separator_span: Some(Span { start: 10, end: 14 }),
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1622,6 +1845,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1639,6 +1863,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let meta = DocumentMeta {
@@ -1670,6 +1895,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let meta = DocumentMeta {
@@ -1758,6 +1984,7 @@ mod tests {
             has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         }
     }
 
@@ -2098,6 +2325,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
         let grammar = {
             use schema::{BodyRules, Constraint, CountRange, Element as SchemaElement, Slot};
@@ -2545,6 +2773,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let root = document_to_store(&doc, &mut store, None);
@@ -2565,6 +2794,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let root = document_to_store(&doc, &mut store, None);
@@ -2608,6 +2838,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         // First serialization: document → store → serialize
@@ -2642,6 +2873,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -2693,6 +2925,7 @@ mod tests {
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
+            comments: im::Vector::new(),
         };
 
         let mut store = NodeStore::new();
