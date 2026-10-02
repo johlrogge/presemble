@@ -346,10 +346,14 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
         }
     }
 
-    // Render body elements as HTML.
-    let body_html = render_body_html(&doc.body, source);
-    if !body_html.is_empty() {
-        graph.insert("body", Value::Html(body_html));
+    // Render body elements as HTML. A schema with only a preamble has no
+    // body: content below `----` is invalid and never rendered (ADR-060 P1).
+    // `doc.unassigned` never reaches the data graph.
+    if grammar.body.is_some() {
+        let body_html = render_body_html(&doc.body, source);
+        if !body_html.is_empty() {
+            graph.insert("body", Value::Html(body_html));
+        }
     }
 
     // Insert suggestion placeholders for any preamble slots not yet in the graph,
@@ -616,6 +620,42 @@ mod tests {
             include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let grammar = article_grammar();
         parse_and_assign(doc_input, &grammar).expect("hello-world.md should parse")
+    }
+
+    // ---------------------------------------------------------------------------
+    // Sections (ADR-060 P1)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn body_under_a_preamble_only_schema_is_omitted_from_the_data_graph() {
+        let grammar = parse_schema("# Title {#title}\noccurs\n: exactly once\n")
+            .expect("schema parses");
+        let doc = parse_and_assign("# Title\n\n----\n\nBody text.\n", &grammar).expect("parses");
+        assert_eq!(doc.body.len(), 1, "the content stays in the body");
+        let graph = build_article_graph(&doc, &grammar);
+        assert!(
+            !graph.entries.contains_key("body"),
+            "{:?}",
+            graph.entries.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unassigned_elements_never_reach_the_data_graph() {
+        let grammar = parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\nSummary. {#summary}\n\n----\n\nBody.\n",
+        )
+        .expect("schema parses");
+        let doc = parse_and_assign(
+            "# Title\n\nSummary.\n\nUNASSIGNED-TEXT\n\n----\n\nBody text.\n",
+            &grammar,
+        )
+        .expect("parses");
+        assert_eq!(doc.unassigned.len(), 1);
+        let graph = build_article_graph(&doc, &grammar);
+        let dump = format!("{:?}", graph.entries);
+        assert!(!dump.contains("UNASSIGNED-TEXT"), "{dump}");
+        assert!(dump.contains("Body text."), "{dump}");
     }
 
     // ---------------------------------------------------------------------------
@@ -1031,6 +1071,7 @@ mod tests {
             body: vector![],
             has_separator: true,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let graph = build_article_graph(&doc, &grammar);

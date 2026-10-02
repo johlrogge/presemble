@@ -42,7 +42,10 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
         .diagnostics
         .iter()
         .map(|vd| {
-            let span = find_span_for_diagnostic(vd.slot.as_ref(), &doc);
+            let span = vd
+                .span
+                .map(Range::from)
+                .or_else(|| find_span_for_diagnostic(vd.slot.as_ref(), &doc));
             Diagnostic {
                 severity: vd.severity.clone(),
                 message: vd.message.clone(),

@@ -4,9 +4,14 @@ use schema::Spanned;
 
 /// Serialize a Document back to canonical markdown.
 ///
-/// Serializes preamble slot elements in declaration order, then the separator
-/// (if present), then body elements. Each element is separated by blank lines.
+/// Serializes preamble slot elements in declaration order, then the
+/// unassigned section-0 elements in source order, then the separator (if
+/// present), then body elements. Each element is separated by blank lines.
 /// The output is deterministic — same Document always produces same markdown.
+///
+/// Writing unassigned elements after the slots is a fixed point for slot
+/// assignment (see [`crate::assign_slots`]), except for limit L10: two
+/// same-kind lists that end up adjacent merge into one on re-read.
 pub fn serialize_document(doc: &Document) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -14,6 +19,10 @@ pub fn serialize_document(doc: &Document) -> String {
         for spanned in &slot.elements {
             parts.push(serialize_element(&spanned.node));
         }
+    }
+
+    for spanned in &doc.unassigned {
+        parts.push(serialize_element(&spanned.node));
     }
 
     if doc.has_separator {
@@ -749,6 +758,7 @@ headings
                 .collect::<im::Vector<_>>(),
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         }
     }
 
@@ -766,6 +776,7 @@ headings
             body: im::Vector::new(),
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         }
     }
 
@@ -820,6 +831,7 @@ headings
             body: im::Vector::new(),
             has_separator: true,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
         let output = serialize_document(&d);
         assert!(output.contains("----"), "expected '----' in: {output:?}");
@@ -1569,6 +1581,68 @@ headings
             reparse_one(&serialize_element(&el)),
             ContentElement::LinkExpression { .. }
         ));
+    }
+
+    /// Ordering limits of writing slots in schema order and unassigned
+    /// elements after the slots (ADR-060 P1). Each is excluded from the
+    /// property domain in `tests/conservation.rs`.
+    ///
+    /// - L10: two same-kind lists that end up adjacent on save merge into one.
+    /// - L11: a store-originated paragraph whose text is
+    ///   `[x](->> :post) {#news}` is not marker-shaped (it is in the remaining
+    ///   set). It is written escaped, then re-read as marker-shaped. So for
+    ///   store-originated text, slot assignment is not a fixed point on the
+    ///   first save. The text is stable from the second save on. The real fix
+    ///   comes with ADR-059.
+    /// - L12: HTML blocks produce no element and are lost on save; pinned by
+    ///   `raw_html_blocks_are_dropped_l12` in `parser.rs`.
+    #[test]
+    fn ordering_limits_are_pinned() {
+        let grammar = parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\n\
+             [<name>](/post/<name>) {#latest}\noccurs\n: *\n\n\
+             - Tags {#tags}\n\n----\n\nBody.\n",
+        )
+        .expect("schema parses");
+        // `- b` fills no slot; the bound expression between the two lists
+        // moves up into `latest`, so the lists become adjacent on save.
+        let src = "# T\n\n- a\n\n[x](->> :post) {#latest}\n\n- b\n\n----\n\nBody.\n";
+        let first = parse_and_assign(src, &grammar).expect("parses");
+        assert_eq!(first.unassigned.len(), 1);
+        let saved = serialize_document(&first);
+        assert_eq!(saved, "# T\n\n[x](->> :post) {#latest}\n\n- a\n\n- b\n\n----\n\nBody.\n");
+        let second = parse_and_assign(&saved, &grammar).expect("parses");
+        // L10: the two lists merged into the `tags` list; nothing is unassigned.
+        assert!(second.unassigned.is_empty());
+        let tags = second.preamble.iter().find(|s| s.name.as_str() == "tags").expect("tags");
+        assert_eq!(
+            tags.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![ContentElement::List { source: "- a\n\n- b".to_string() }]
+        );
+        // Text is a fixed point from then on.
+        assert_eq!(serialize_document(&second), saved);
+    }
+
+    #[test]
+    fn unassigned_elements_are_written_after_the_slots_before_the_separator() {
+        let grammar = simple_grammar();
+        let src = "# Title\n\n## Aside\n\nSummary.\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &grammar).expect("parses");
+        assert_eq!(doc.unassigned.len(), 2, "{doc:#?}");
+        assert_eq!(serialize_document(&doc), src);
+        // Without a separator, they come right after the slots.
+        let no_sep = "# Title\n\n## Aside\n";
+        let doc = parse_and_assign(no_sep, &grammar).expect("parses");
+        assert_eq!(serialize_document(&doc), no_sep);
+    }
+
+    #[test]
+    fn marker_shaped_paragraphs_are_written_verbatim() {
+        let grammar = simple_grammar();
+        let src = "# Title\n\nSummary.\n\n![c](i.jpg) {#cover}\n\n[x](:p)\n{#n}\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &grammar).expect("parses");
+        assert_eq!(doc.unassigned.len(), 2, "{doc:#?}");
+        assert_eq!(serialize_document(&doc), src);
     }
 
     #[test]

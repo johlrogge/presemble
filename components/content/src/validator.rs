@@ -1,7 +1,9 @@
 use crate::document::{ContentElement, Document, Keyword, LinkText};
 use crate::link_expression::{diagnose_paragraph, parse_destination, LinkExpressionDiagnostic};
 use crate::parse_list_items;
-use crate::parser::is_link_expression;
+use crate::parser::{diagnose_marker_paragraph, is_link_expression, is_marker_paragraph};
+use crate::serializer::serialize_element;
+use crate::slot_assignment::{element_matches_slot, unassigned_reason, UnassignedReason};
 use schema::{
     AltRequirement, BodyRules, Constraint, ContentConstraint, CountRange, Element, Grammar,
     HeadingLevelRange, Slot, SlotName, Spanned,
@@ -28,6 +30,11 @@ pub struct ValidationDiagnostic {
     pub severity: Severity,
     pub message: String,
     pub slot: Option<SlotName>,
+    /// The source span of the element the diagnostic is about, when the
+    /// diagnostic concerns one element rather than a slot (an unassigned
+    /// element, ADR-060 P1). `None` for slot-level diagnostics and for
+    /// documents built from the store (they carry no source spans).
+    pub span: Option<schema::Span>,
 }
 
 /// Severity level for a validation diagnostic.
@@ -66,6 +73,7 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
                             grammar_slot.name
                         ),
                         slot: Some(grammar_slot.name.clone()),
+                        span: None,
                     });
                 }
                 continue;
@@ -102,9 +110,20 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
         }
     }
 
+    // ── Unassigned section-0 elements (ADR-060 P1) ─────────────────────────
+    validate_unassigned(doc, grammar, &mut diagnostics);
+
     // ── Body validation ────────────────────────────────────────────────────
-    if let Some(body_rules) = &grammar.body {
-        validate_body(&doc.body, body_rules, &mut diagnostics);
+    match &grammar.body {
+        Some(body_rules) => validate_body(&doc.body, body_rules, &mut diagnostics),
+        None if !doc.body.is_empty() => diagnostics.push(ValidationDiagnostic {
+            severity: Severity::Error,
+            message: "this schema has only a preamble; content below `----` is not allowed"
+                .to_string(),
+            slot: None,
+            span: None,
+        }),
+        None => {}
     }
 
     // ── Link expressions (ADR-058) ─────────────────────────────────────────
@@ -117,13 +136,142 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Unassigned section-0 elements (ADR-060 P1)
+// ---------------------------------------------------------------------------
+
+/// One error per element of `doc.unassigned`: it is kept and saved but never
+/// rendered, so the page cannot be published until it is fixed.
+fn validate_unassigned(
+    doc: &Document,
+    grammar: &Grammar,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    for spanned in &doc.unassigned {
+        let el = &spanned.node;
+        let message = match unassigned_reason(el, grammar) {
+            UnassignedReason::MarkerNamesNoSlot(name) => {
+                format!("`{{#{name}}}` does not name a slot")
+            }
+            UnassignedReason::MarkerNamesNonLinkSlot(name) => {
+                format!("`{{#{name}}}` names `{name}`, which is not a link slot")
+            }
+            UnassignedReason::MisplacedMarker(d) => match d {
+                // These messages do not quote the marker: quote the element.
+                LinkExpressionDiagnostic::Malformed(_)
+                | LinkExpressionDiagnostic::MarkedExpressionSpansLines(_) => {
+                    format!("{}: {d}", describe_element(el))
+                }
+                _ => d.to_string(),
+            },
+            UnassignedReason::NotAllowedHere => {
+                let kind = kind_name(el);
+                let mut message = format!(
+                    "{}: the schema does not allow a {kind} here in the preamble",
+                    describe_element(el)
+                );
+                let takers: Vec<String> = grammar
+                    .preamble
+                    .iter()
+                    .filter(|s| element_matches_slot(el, &s.element))
+                    .map(|s| format!("`{}`", s.name))
+                    .collect();
+                if !takers.is_empty() {
+                    message.push_str(&format!(
+                        "; slot(s) {} take {}; move it there or raise `occurs`",
+                        takers.join(", "),
+                        kind_plural(el)
+                    ));
+                }
+                if grammar.body.is_some() && !doc.has_separator {
+                    message.push_str("; did you forget `----` before the body?");
+                }
+                if let ContentElement::Paragraph { text } = el
+                    && let Some(d) = diagnose_paragraph(text)
+                {
+                    message.push_str(&format!("; {d}"));
+                }
+                message
+            }
+        };
+        // The preceding slot only names a position in the message: the
+        // diagnostic is about this element, not about that slot.
+        let message = match preceding_slot(doc, spanned.span.start) {
+            Some(name) => format!("after slot '{name}': {message}"),
+            None => message,
+        };
+        // Store-built documents carry zero spans: no position to point at.
+        let span = (spanned.span.end > spanned.span.start).then_some(spanned.span);
+        diagnostics.push(ValidationDiagnostic {
+            severity: Severity::Error,
+            message,
+            slot: None,
+            span,
+        });
+    }
+}
+
+/// The name of the nearest slot with an element before byte `at`, if any.
+fn preceding_slot(doc: &Document, at: usize) -> Option<SlotName> {
+    doc.preamble
+        .iter()
+        .filter_map(|s| {
+            s.elements
+                .iter()
+                .map(|e| e.span.start)
+                .filter(|&start| start < at)
+                .max()
+                .map(|start| (start, &s.name))
+        })
+        .max_by_key(|(start, _)| *start)
+        .map(|(_, name)| name.clone())
+}
+
+/// `<kind> `<first 40 characters>``, as the element is written.
+fn describe_element(el: &ContentElement) -> String {
+    let written = serialize_element(el).replace('\n', " ");
+    let mut excerpt: String = written.chars().take(40).collect();
+    if written.chars().count() > 40 {
+        excerpt.push('…');
+    }
+    format!("{} `{excerpt}`", kind_name(el))
+}
+
+fn kind_name(el: &ContentElement) -> &'static str {
+    match el {
+        ContentElement::Heading { .. } => "heading",
+        ContentElement::Paragraph { .. } => "paragraph",
+        ContentElement::Image { .. } => "image",
+        ContentElement::Link { .. } => "link",
+        ContentElement::Separator => "separator",
+        ContentElement::CodeBlock { .. } => "code block",
+        ContentElement::Table { .. } => "table",
+        ContentElement::RawHtml { .. } => "HTML block",
+        ContentElement::Blockquote { .. } => "blockquote",
+        ContentElement::List { .. } => "list",
+        ContentElement::LinkExpression { .. } => "link expression",
+    }
+}
+
+/// What slots of the element's kind take, in the plural.
+fn kind_plural(el: &ContentElement) -> &'static str {
+    match el {
+        ContentElement::Heading { .. } => "headings",
+        ContentElement::Paragraph { .. } => "paragraphs",
+        ContentElement::Image { .. } => "images",
+        ContentElement::Link { .. } | ContentElement::LinkExpression { .. } => "links",
+        ContentElement::List { .. } => "lists",
+        _ => "elements of this kind",
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Link expressions (ADR-058)
 // ---------------------------------------------------------------------------
 
 /// Report link expressions that will not take effect: malformed ones, ones
-/// inside running text, ones in the body (`slot` is `None`), slot markers
-/// that did not bind, and labels that look like a missing marker (ADR-058,
-/// decision 9).
+/// inside running text, ones in the body (`slot` is `None`), misused slot
+/// markers (errors, ADR-060 P1), and labels that look like a missing marker
+/// (ADR-058, decision 9).
 fn validate_link_expressions(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: Option<&SlotName>,
@@ -135,21 +283,19 @@ fn validate_link_expressions(
             Some(name) => format!("slot '{name}': {message}"),
             None => message,
         };
-        diagnostics.push(ValidationDiagnostic { severity, message, slot: slot.cloned() });
+        diagnostics.push(ValidationDiagnostic { severity, message, slot: slot.cloned(), span: None });
     };
     for spanned in elements {
         match &spanned.node {
+            // Marker misuse is an error in any section (ADR-060 P1).
+            ContentElement::Paragraph { text } if is_marker_paragraph(text) => {
+                push(Severity::Error, diagnose_marker_paragraph(text).to_string());
+            }
             ContentElement::Paragraph { text } => match diagnose_paragraph(text) {
-                Some(d @ LinkExpressionDiagnostic::Malformed(_)) => {
-                    push(Severity::Error, d.to_string());
-                }
-                Some(
-                    d @ (LinkExpressionDiagnostic::MustStandAlone
-                    | LinkExpressionDiagnostic::InvalidSlotMarker(_)
-                    | LinkExpressionDiagnostic::MarkerOnOwnLine(_)),
-                ) => {
+                Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
                     push(Severity::Warning, d.to_string());
                 }
+                Some(d) => push(Severity::Error, d.to_string()),
                 None => {}
             },
             // pulldown reads a destination without spaces (`[x](->>)`,
@@ -179,40 +325,27 @@ fn validate_link_expressions(
 }
 
 /// The warning for a preamble link expression that sits in `slot`
-/// (ADR-058, decision 9), if any:
+/// (ADR-058, decision 9), if any: it has no marker, its label equals the
+/// name of a link slot, and it is not in that slot (a hint to add the
+/// marker).
 ///
-/// 1. its marker `{#name}` names no slot;
-/// 2. its marker names a slot that is not a link slot;
-/// 3. it has no marker, its label equals the name of a link slot, and it is
-///    not in that slot (a hint to add the marker).
-///
-/// In cases 1 and 2 the element was placed by position. All are warnings for
-/// now; checks 1 and 2 become errors with the unplaced-element rule.
+/// A marker that does not bind never puts its expression in a slot: it is
+/// unassigned and reported by `validate_unassigned` (ADR-060 P1).
 fn slot_marker_message(
     text: &LinkText,
     marker: Option<&Keyword>,
     slot: &SlotName,
     grammar: &Grammar,
 ) -> Option<String> {
-    let named = |name: &str| grammar.preamble.iter().find(|s| s.name.as_str() == name);
-    match marker {
-        Some(name) => match named(name.as_str()) {
-            None => Some(format!("`{{#{name}}}` does not name a slot; placed by position")),
-            Some(target) if !matches!(target.element, Element::Link { .. }) => Some(format!(
-                "`{{#{name}}}` names slot `{name}`, which is not a link slot; placed by position"
-            )),
-            // Names a link slot: slot assignment placed it there.
-            Some(_) => None,
-        },
-        None => {
-            let LinkText::Label(label) = text else {
-                return None;
-            };
-            let target = named(label)?;
-            (matches!(target.element, Element::Link { .. }) && target.name != *slot)
-                .then(|| format!("did you mean `[{label}](…) {{#{label}}}`?"))
-        }
+    if marker.is_some() {
+        return None;
     }
+    let LinkText::Label(label) = text else {
+        return None;
+    };
+    let target = grammar.preamble.iter().find(|s| s.name.as_str() == label)?;
+    (matches!(target.element, Element::Link { .. }) && target.name != *slot)
+        .then(|| format!("did you mean `[{label}](…) {{#{label}}}`?"))
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +422,7 @@ fn check_count_against_range(
                 slot.name
             ),
             slot: Some(slot.name.clone()),
+            span: None,
         });
     }
 }
@@ -333,6 +467,7 @@ fn validate_headings(
                         level_range.max.value(),
                     ),
                     slot: Some(slot.name.clone()),
+                    span: None,
                 });
             }
         }
@@ -349,6 +484,7 @@ fn validate_headings(
                 level_range.max.value()
             ),
             slot: Some(slot.name.clone()),
+            span: None,
         });
     }
 
@@ -385,6 +521,7 @@ fn check_occurs_count_paragraphs(
                 slot.name
             ),
             slot: Some(slot.name.clone()),
+            span: None,
         });
     } else if let Some(limit) = max && count > limit {
         diagnostics.push(ValidationDiagnostic {
@@ -394,6 +531,7 @@ fn check_occurs_count_paragraphs(
                 slot.name
             ),
             slot: Some(slot.name.clone()),
+            span: None,
         });
     }
 }
@@ -418,6 +556,7 @@ fn validate_links(
             severity: Severity::Error,
             message: format!("slot '{}': missing required link", slot.name),
             slot: Some(slot.name.clone()),
+            span: None,
         });
     }
 
@@ -444,6 +583,7 @@ fn validate_images(
             severity: Severity::Error,
             message: format!("slot '{}': missing required image", slot.name),
             slot: Some(slot.name.clone()),
+            span: None,
         });
     }
 
@@ -473,6 +613,7 @@ fn validate_list(
                     severity: Severity::Error,
                     message: format!("slot '{}': missing required list", slot.name),
                     slot: Some(slot.name.clone()),
+                    span: None,
                 });
             }
             0
@@ -504,6 +645,7 @@ fn check_content_constraints(text: &str, slot: &Slot, diagnostics: &mut Vec<Vali
                                 slot.name, text
                             ),
                             slot: Some(slot.name.clone()),
+                            span: None,
                         });
                     }
                 }
@@ -531,6 +673,7 @@ fn check_alt_constraints(
                                 slot.name
                             ),
                             slot: Some(slot.name.clone()),
+                            span: None,
                         });
                     }
                 }
@@ -566,6 +709,7 @@ fn validate_body(
                             text
                         ),
                         slot: None,
+                        span: None,
                     });
                 }
             }
@@ -831,30 +975,179 @@ mod tests {
     }
 
     #[test]
-    fn marker_that_names_no_slot_warns() {
+    fn marker_that_names_no_slot_is_an_error() {
         let d = page_diagnostics("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
         assert_eq!(d.len(), 1, "{d:#?}");
-        assert_eq!(d[0].severity, Severity::Warning);
-        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("latest"));
+        assert_eq!(d[0].severity, Severity::Error);
+        // Positioned after the nearest preceding slot, but not attached to it.
+        assert_eq!(d[0].slot, None);
+        assert!(d[0].message.starts_with("after slot 'title': "), "{}", d[0].message);
+        assert!(d[0].span.is_some());
+        assert!(d[0].message.contains("`{#newz}` does not name a slot"), "{}", d[0].message);
+        assert!(!d[0].message.contains("placed by position"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn marker_that_names_a_non_link_slot_is_an_error() {
+        let d = page_diagnostics("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
         assert!(
-            d[0].message.contains("`{#newz}` does not name a slot; placed by position"),
+            d[0].message.contains("`{#title}` names `title`, which is not a link slot"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    // ── Unassigned section-0 elements (ADR-060 P1) ───────────────────────
+
+    fn summary_grammar(with_body: bool) -> Grammar {
+        let body = if with_body { "\n----\n\nBody.\nheadings\n: h3..h6\n" } else { "" };
+        parse_schema(&format!(
+            "# Title {{#title}}\noccurs\n: exactly once\n\n\
+             Summary. {{#summary}}\noccurs\n: 1..2\n{body}"
+        ))
+        .expect("schema parses")
+    }
+
+    fn diagnostics_for(src: &str, grammar: &Grammar) -> Vec<ValidationDiagnostic> {
+        let doc = parse_and_assign(src, grammar).expect("parses");
+        validate(&doc, grammar).diagnostics
+    }
+
+    #[test]
+    fn element_not_allowed_in_the_preamble_is_an_error_with_a_hint() {
+        let g = summary_grammar(true);
+        let src = "# Title\n\nOne.\n\nTwo.\n\nThree.\n\n----\n\nBody.\n";
+        let d = diagnostics_for(src, &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(d[0].slot, None);
+        assert!(d[0].message.starts_with("after slot 'summary': "), "{}", d[0].message);
+        let span = d[0].span.expect("unassigned element has a span");
+        assert_eq!(&src[span.start..span.end].trim_end(), &"Three.");
+        assert!(d[0].message.contains("paragraph `Three.`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("the schema does not allow a paragraph here in the preamble"),
+            "{}",
+            d[0].message
+        );
+        assert!(
+            d[0].message
+                .contains("slot(s) `summary` take paragraphs; move it there or raise `occurs`"),
+            "{}",
+            d[0].message
+        );
+        assert!(!d[0].message.contains("forget"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn malformed_unmarked_expression_not_allowed_here_explains_the_expression() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for(
+            "# Title\n\nOne.\n\nTwo.\n\n[x](->> :post (map :title))\n\n----\n\nBody.\n",
+            &g,
+        );
+        let unassigned: Vec<_> =
+            d.iter().filter(|d| d.message.contains("not allow a paragraph")).collect();
+        assert_eq!(unassigned.len(), 1, "{d:#?}");
+        assert!(
+            unassigned[0].message.contains("unknown operation `map`"),
+            "{}",
+            unassigned[0].message
+        );
+    }
+
+    #[test]
+    fn element_excerpt_is_at_most_40_characters() {
+        let g = summary_grammar(true);
+        let long = "## A heading that is much longer than forty characters in total";
+        let d = diagnostics_for(&format!("# Title\n\nOne.\n\n{long}\n\n----\n\nBody.\n"), &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(
+            d[0].message.contains("heading `## A heading that is much longer than fo…`"),
             "{}",
             d[0].message
         );
     }
 
     #[test]
-    fn marker_that_names_a_non_link_slot_warns() {
-        let d = page_diagnostics("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
+    fn forgotten_separator_hint() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for("# Title\n\nOne.\n\n### Body heading\n", &g);
         assert_eq!(d.len(), 1, "{d:#?}");
-        assert_eq!(d[0].severity, Severity::Warning);
-        assert!(
-            d[0].message.contains(
-                "`{#title}` names slot `title`, which is not a link slot; placed by position"
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains("did you forget `----` before the body?"), "{}", d[0].message);
+        // No body in the schema: no such hint.
+        let d = diagnostics_for("# Title\n\nOne.\n\n### Heading\n", &summary_grammar(false));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(!d[0].message.contains("forget"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn misplaced_marker_in_the_preamble_is_an_error() {
+        let g = summary_grammar(true);
+        for (md, needle) in [
+            ("{#summary}", "`{#summary}` on its own is not allowed"),
+            ("![c](i.jpg) {#cover}", "`{#cover}`: slot markers apply to link expressions only"),
+            ("[a](/x) {#s}", "`{#s}`: slot markers apply to link expressions only"),
+            (
+                "[x\ny](:p) {#n}",
+                "a slot marker must be on the same line as a one-line link expression",
             ),
-            "{}",
-            d[0].message
+        ] {
+            let d = diagnostics_for(&format!("# Title\n\n{md}\n\nOne.\n\n----\n\nBody.\n"), &g);
+            assert_eq!(d.len(), 1, "{md:?}: {d:#?}");
+            assert_eq!(d[0].severity, Severity::Error, "{md:?}");
+            assert!(d[0].message.contains(needle), "{md:?}: {}", d[0].message);
+        }
+    }
+
+    #[test]
+    fn marker_misuse_in_the_body_stays_in_the_body_and_is_an_error() {
+        let g = summary_grammar(true);
+        for md in [
+            "{#x}",
+            "[a](/x) {#s}",
+            "![c](i.jpg) {#cover}",
+            "[x](->> :post) {#a b}",
+            "[x](->> :post)\n{#news}",
+            "[x\ny](:p) {#n}",
+            "[p]((->>%20:post%20(map%20:x))) {#news}",
+        ] {
+            let src = format!("# Title\n\nOne.\n\n----\n\n{md}\n");
+            let doc = parse_and_assign(&src, &g).expect("parses");
+            assert!(doc.unassigned.is_empty(), "{md:?}");
+            assert_eq!(doc.body.len(), 1, "{md:?}");
+            let d = validate(&doc, &g).diagnostics;
+            assert_eq!(d.len(), 1, "{md:?}: {d:#?}");
+            assert_eq!(d[0].severity, Severity::Error, "{md:?}");
+            assert_eq!(d[0].slot, None, "{md:?}");
+        }
+    }
+
+    #[test]
+    fn unslotted_body_paragraphs_have_no_diagnostics() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for(
+            "# Title\n\nOne.\n\n----\n\nFree text.\n\nMore free text.\n\n### Section\n\nText.\n",
+            &g,
         );
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn content_below_the_separator_under_a_preamble_only_schema_is_an_error() {
+        let g = summary_grammar(false);
+        let d = diagnostics_for("# Title\n\nOne.\n\n----\n\nBody text.\n", &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(
+            d[0].message,
+            "this schema has only a preamble; content below `----` is not allowed"
+        );
+        // A bare separator with nothing below it is fine.
+        assert!(diagnostics_for("# Title\n\nOne.\n\n----\n", &g).is_empty());
     }
 
     #[test]
@@ -903,12 +1196,12 @@ mod tests {
     fn invalid_and_misplaced_markers_are_reported() {
         let d = link_diagnostics("# T\n\n[x](->> :post) {#a b}\n\n----\n\nBody.\n");
         assert_eq!(d.len(), 1, "{d:#?}");
-        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(d[0].severity, Severity::Error);
         assert!(d[0].message.contains("invalid slot marker `{#a b}`"), "{}", d[0].message);
 
         let d = link_diagnostics("# T\n\n[x](->> :post)\n{#posts}\n\n----\n\nBody.\n");
         assert_eq!(d.len(), 1, "{d:#?}");
-        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(d[0].severity, Severity::Error);
         assert!(
             d[0].message
                 .contains("put the slot marker on the same line as the link expression"),

@@ -1,6 +1,8 @@
 use crate::document::{ContentElement, Document, FlatDocument, Keyword, LinkTarget, LinkText};
 use crate::error::ContentError;
-use crate::link_expression::{parse_destination, recognise_paragraph, split_marker};
+use crate::link_expression::{
+    bare_marker, parse_destination, recognise_paragraph, split_marker, LinkExpressionDiagnostic,
+};
 use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use schema::{Grammar, HeadingLevel, Span, Spanned};
@@ -38,10 +40,94 @@ pub(crate) fn read_link_expression_paragraph(
         let slot = c.slot.and_then(|name| Keyword::new(name).ok());
         return Some((parse_link_text(c.text), target, slot));
     }
+    // (b) The pulldown path: a one-line marked `PathRef` or legacy spelling.
+    if source.contains('\n') {
+        return None;
+    }
     let (expression, name) = split_marker(source)?;
     let keyword = Keyword::new(name).ok()?;
     let (text, target) = read_pulldown_link_expression(expression)?;
     Some((text, target, Some(keyword)))
+}
+
+/// Whether `source`, standing alone as a one-line paragraph, reads as a link
+/// expression in any spelling: through [`read_link_expression_paragraph`] or,
+/// unmarked, through pulldown's link (`[x](:p)` and legacy spellings).
+fn reads_as_link_expression(source: &str) -> bool {
+    let source = source.trim();
+    read_link_expression_paragraph(source).is_some()
+        || (!source.contains('\n') && read_pulldown_link_expression(source).is_some())
+}
+
+/// Whether a paragraph source is marker-shaped (ADR-060 P1): it is not a
+/// link expression, but either ends with a slot marker (`… {#name}`, any
+/// name) or its last line is a bare `{#name}` (which includes a paragraph
+/// that is only `{#name}`).
+///
+/// Such a paragraph is kept verbatim by the parser and is never assigned to a
+/// slot; the validator reports it with [`diagnose_marker_paragraph`].
+pub(crate) fn is_marker_paragraph(source: &str) -> bool {
+    let trimmed = source.trim();
+    if read_link_expression_paragraph(trimmed).is_some() {
+        return false;
+    }
+    split_marker(trimmed).is_some() || last_line_marker(trimmed).is_some()
+}
+
+/// The name of a bare `{#name}` on the last line of `trimmed`, if any.
+fn last_line_marker(trimmed: &str) -> Option<&str> {
+    bare_marker(trimmed.rsplit('\n').next().unwrap_or(trimmed))
+}
+
+/// What is wrong with a marker-shaped paragraph (see [`is_marker_paragraph`]).
+///
+/// Total for every source for which `is_marker_paragraph` is true. With
+/// `reads(s)` meaning `s` reads as a link expression and `joined(s)` being
+/// `s` with each `\n` replaced by a space, the first match wins:
+///
+/// 1. a link-expression candidate whose destination does not parse →
+///    `Malformed`;
+/// 2. a single line `{#name}` → `StrayMarker`;
+/// 3. `expr {#name}` with a multi-line `expr` and `reads(joined(expr))` →
+///    `MarkedExpressionSpansLines`;
+/// 4. `expr {#name}` with a one-line `expr`, an invalid name and
+///    `reads(expr)` → `InvalidSlotMarker`;
+/// 5. any other `expr {#name}` → `MarkerNotOnLinkExpression`;
+/// 6. a bare `{#name}` last line after lines that read as a link expression
+///    (joined) → `MarkerOnOwnLine`;
+/// 7. any other bare `{#name}` last line → `StrayMarker`.
+pub(crate) fn diagnose_marker_paragraph(source: &str) -> LinkExpressionDiagnostic {
+    let trimmed = source.trim();
+    let joined = |s: &str| s.replace('\n', " ");
+    if let Some(candidate) = recognise_paragraph(trimmed)
+        && let Err(e) = parse_destination(candidate.dest)
+    {
+        return LinkExpressionDiagnostic::Malformed(e);
+    }
+    if !trimmed.contains('\n')
+        && let Some(name) = bare_marker(trimmed)
+    {
+        return LinkExpressionDiagnostic::StrayMarker(name.to_string());
+    }
+    if let Some((expression, name)) = split_marker(trimmed) {
+        if expression.contains('\n') && reads_as_link_expression(&joined(expression)) {
+            return LinkExpressionDiagnostic::MarkedExpressionSpansLines(name.to_string());
+        }
+        if !expression.contains('\n')
+            && !Keyword::is_valid(name)
+            && reads_as_link_expression(expression)
+        {
+            return LinkExpressionDiagnostic::InvalidSlotMarker(name.to_string());
+        }
+        return LinkExpressionDiagnostic::MarkerNotOnLinkExpression(name.to_string());
+    }
+    let name = last_line_marker(trimmed).unwrap_or_default().to_string();
+    match trimmed.rsplit_once('\n') {
+        Some((before, _)) if reads_as_link_expression(&joined(before)) => {
+            LinkExpressionDiagnostic::MarkerOnOwnLine(name)
+        }
+        _ => LinkExpressionDiagnostic::StrayMarker(name),
+    }
 }
 
 /// Read `expr` as pulldown reads a paragraph that is exactly one link whose
@@ -99,6 +185,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             text: String,
             images: Vec<Spanned<ContentElement>>,
             byte_range: std::ops::Range<usize>,
+            /// A marker-shaped paragraph (`is_marker_paragraph`): links and
+            /// images inside it do not change the state, and it is emitted as
+            /// a paragraph whose text is its trimmed source (ADR-060 P1).
+            forced: bool,
         },
         Image {
             alt: String,
@@ -214,25 +304,38 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 // A top-level paragraph whose whole source is a link
                 // expression (ADR-058). If it does not parse it stays a
                 // paragraph; the validator reports it.
-                let link_expression = matches!(state, State::Idle)
+                let top_level_source = matches!(state, State::Idle)
                     .then(|| input.get(range.clone()))
-                    .flatten()
-                    .and_then(read_link_expression_paragraph);
+                    .flatten();
+                let link_expression = top_level_source.and_then(read_link_expression_paragraph);
                 if let Some((text, target, slot)) = link_expression {
                     state = State::LinkExpression { text, target, slot, byte_range: range };
                 } else if !matches!(state, State::Blockquote { .. }) {
                     // If we're inside a blockquote, the inner paragraph events
                     // are suppressed — raw source captures the content.
+                    // A marker-shaped paragraph is kept verbatim (ADR-060 P1).
+                    let forced = top_level_source.is_some_and(is_marker_paragraph);
                     state = State::Paragraph {
                         text: String::new(),
                         images: Vec::new(),
                         byte_range: range,
+                        forced,
                     };
                 }
             }
             Event::End(TagEnd::Paragraph) => {
                 // Inside a blockquote the paragraph end is a no-op.
-                if let State::Paragraph { text, images, byte_range } = state {
+                if let State::Paragraph { forced: true, byte_range, .. } = &state {
+                    let text = input
+                        .get(byte_range.clone())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    elements.push_back(Spanned {
+                        node: ContentElement::Paragraph { text },
+                        span: Span::from(byte_range.clone()),
+                    });
+                    state = State::Idle;
+                } else if let State::Paragraph { text, images, byte_range, .. } = state {
                     if !text.trim().is_empty() {
                         // When the paragraph contains only text (no images), use the original
                         // markdown source text so inline markers (**bold**, `code`, _italic_)
@@ -256,10 +359,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
 
+            // Inside a marker-shaped paragraph images stay part of its text.
+            Event::Start(Tag::Image { .. }) if matches!(state, State::Paragraph { forced: true, .. }) => {}
             Event::Start(Tag::Image { dest_url, .. }) => {
                 let path = dest_url.to_string();
                 match state {
-                    State::Paragraph { ref text, ref images, ref byte_range } => {
+                    State::Paragraph { ref text, ref images, ref byte_range, .. } => {
                         let prefix = text.clone();
                         let existing_images = images.clone();
                         let para_range = byte_range.clone();
@@ -308,6 +413,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                             text: paragraph_prefix,
                             images: prior_images,
                             byte_range: paragraph_range,
+                            forced: false,
                         };
                     } else {
                         elements.push_back(image_spanned);
@@ -322,7 +428,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 // The raw source text captures `[text](url)` and the renderer handles it.
                 // When the paragraph has no text yet, the link IS the paragraph
                 // (a standalone link-type preamble slot like `[Author](/author/name)`).
+                // Inside a marker-shaped paragraph links stay part of its text.
                 let is_inline = match &state {
+                    State::Paragraph { forced: true, .. } => true,
                     State::Paragraph { text, .. } => !text.trim().is_empty(),
                     State::Blockquote { .. } => true,
                     _ => false,
@@ -629,6 +737,16 @@ mod tests {
             doc.elements.len(),
             doc.elements
         );
+    }
+
+    /// Known limit L12 (ADR-060 P1 exception): HTML blocks are not parsed and
+    /// are lost on save. The raw-HTML package must flip this test.
+    #[test]
+    fn raw_html_blocks_are_dropped_l12() {
+        let div = parse_document("<div>x</div>\n").unwrap();
+        assert_element_count(&div, 0);
+        let comment = parse_document("<!-- note -->\n").unwrap();
+        assert_element_count(&comment, 0);
     }
 
     // ── Headings ────────────────────────────────────────────────────────────
@@ -1607,6 +1725,138 @@ headings
         let legacy = vec![marked(thread_expr(label("p"), "post", vec![LinkOp::Take(4)]), "news")];
         assert_eq!(nodes("[p](<(-\\>\\> :post (take 4))>) {#news}"), legacy);
         assert_eq!(nodes("[p]((->>%20:post%20(take%204))) {#news}"), legacy);
+    }
+
+    // ── Marker-shaped paragraphs (ADR-060 P1) ───────────────────────────────
+
+    fn para(text: &str) -> ContentElement {
+        ContentElement::Paragraph { text: text.to_string() }
+    }
+
+    #[test]
+    fn marker_shaped_paragraphs_are_kept_verbatim() {
+        for md in [
+            "[a](/x) {#s}",
+            "![c](i.jpg) {#cover}",
+            "[x](:p)\n{#n}",
+            "[x\ny](:p) {#n}",
+            "[x](->> :post) {#a b}",
+            "[x](:p) {#a b}",
+            "[p]((->>%20:post%20(take%204))) {#a b}",
+            "[p]((->>%20:post%20(map%20:x))) {#news}",
+            "[x](->> :post)\n{#news}",
+            "{#title}",
+            "some text\n{#x}",
+            "text (aside) {#x}",
+        ] {
+            assert_eq!(nodes(md), vec![para(md)], "{md:?}");
+            assert_eq!(nodes(&format!("\n  {md}  \n")), vec![para(md)], "{md:?} (padded)");
+        }
+    }
+
+    #[test]
+    fn marker_shaped_paragraph_span_is_the_paragraph() {
+        let src = "# T\n\n![c](i.jpg) {#cover}\n";
+        let doc = parse_document(src).unwrap();
+        assert_eq!(doc.elements.len(), 2);
+        let span = doc.elements[1].span;
+        assert_eq!(src[span.start..span.end].trim(), "![c](i.jpg) {#cover}");
+    }
+
+    #[test]
+    fn a_leading_link_followed_by_text_without_a_marker_is_unchanged() {
+        // Pinned limit for S-A (inline segments): not marker-shaped.
+        let got = nodes("[a](/x) trailing");
+        assert_eq!(got, vec![ContentElement::Link { text: "a".to_string(), href: "/x".to_string() }]);
+    }
+
+    #[test]
+    fn is_marker_paragraph_cases() {
+        for yes in [
+            "{#x}",
+            "{#}",
+            "{#a b}",
+            "[a](/x) {#s}",
+            "![c](i.jpg) {#cover}",
+            "x\n{#n}",
+            "[x\ny](:p) {#n}",
+            "[x](->> :post) {#a b}",
+            "(x) {#y}",
+        ] {
+            assert!(is_marker_paragraph(yes), "{yes:?}");
+        }
+        for no in [
+            "[x](->> :post) {#news}",
+            "[x](:p) {#news}",
+            "[p]((->> :post)) {#news}",
+            "plain text",
+            "text {#x}",
+            "{#x} more",
+            "[x](->> :post)",
+        ] {
+            assert!(!is_marker_paragraph(no), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn diagnose_marker_paragraph_table() {
+        use crate::link_expression::LinkExpressionError as E;
+        use LinkExpressionDiagnostic as D;
+        let s = |x: &str| x.to_string();
+        let cases = [
+            // 1. A candidate whose destination does not parse.
+            ("[x](->> :post (map :t)) {#news}", D::Malformed(E::UnknownOp(s("map")))),
+            (
+                "[p]((->>%20:post%20(map%20:x))) {#news}",
+                D::Malformed(E::ExpectedWhitespace { at: 3 }),
+            ),
+            // 2. A single line `{#name}`.
+            ("{#title}", D::StrayMarker(s("title"))),
+            ("{#a b}", D::StrayMarker(s("a b"))),
+            // 3. A marked expression spanning lines.
+            ("[x\ny](:p) {#n}", D::MarkedExpressionSpansLines(s("n"))),
+            ("[x\ny](->> :post) {#n}", D::MarkedExpressionSpansLines(s("n"))),
+            // 4. An invalid marker name on a one-line expression.
+            ("[x](->> :post) {#a b}", D::InvalidSlotMarker(s("a b"))),
+            ("[x](:p) {#a b}", D::InvalidSlotMarker(s("a b"))),
+            ("[p]((->>%20:post%20(take%204))) {#a b}", D::InvalidSlotMarker(s("a b"))),
+            // 5. A marker on anything else.
+            ("[a](/x) {#s}", D::MarkerNotOnLinkExpression(s("s"))),
+            ("![c](i.jpg) {#cover}", D::MarkerNotOnLinkExpression(s("cover"))),
+            ("text (aside) {#x}", D::MarkerNotOnLinkExpression(s("x"))),
+            ("a\nb (c) {#x}", D::MarkerNotOnLinkExpression(s("x"))),
+            ("[a](/x) {#a b}", D::MarkerNotOnLinkExpression(s("a b"))),
+            // 6. A bare marker line after a link expression.
+            ("[x](->> :post)\n{#news}", D::MarkerOnOwnLine(s("news"))),
+            ("[x](:p)\n{#n}", D::MarkerOnOwnLine(s("n"))),
+            ("[x\ny](:p)\n{#n}", D::MarkerOnOwnLine(s("n"))),
+            // 7. Any other bare marker line.
+            ("some text\n{#x}", D::StrayMarker(s("x"))),
+            ("[a](/x)\n{#x}", D::StrayMarker(s("x"))),
+        ];
+        for (md, expected) in cases {
+            assert!(is_marker_paragraph(md), "{md:?} should be marker-shaped");
+            assert_eq!(diagnose_marker_paragraph(md), expected, "{md:?}");
+        }
+        assert!(
+            D::StrayMarker(s("x")).to_string().contains("`{#x}` on its own is not allowed"),
+            "{}",
+            D::StrayMarker(s("x"))
+        );
+        assert_eq!(
+            D::MarkedExpressionSpansLines(s("n")).to_string(),
+            "a slot marker must be on the same line as a one-line link expression"
+        );
+        assert_eq!(
+            D::MarkerNotOnLinkExpression(s("cover")).to_string(),
+            "`{#cover}`: slot markers apply to link expressions only"
+        );
+    }
+
+    #[test]
+    fn multi_line_marked_expression_is_not_a_link_expression() {
+        assert_eq!(read_link_expression_paragraph("[x\ny](:p) {#n}"), None);
+        assert_eq!(nodes("[x\ny](:p) {#n}"), vec![para("[x\ny](:p) {#n}")]);
     }
 
     // ── parse_link_target unit tests ─────────────────────────────────────────

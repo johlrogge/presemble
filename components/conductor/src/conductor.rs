@@ -3354,6 +3354,7 @@ mod query_edges_tests {
             }],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta = node_store_bridge::content_bridge::DocumentMeta {
@@ -3389,6 +3390,7 @@ mod query_edges_tests {
             }],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta = node_store_bridge::content_bridge::DocumentMeta {
@@ -4894,6 +4896,7 @@ mod creation_check_tests {
             ],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -5128,6 +5131,7 @@ mod ned_suggestion_handler_tests {
             ],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -6155,6 +6159,59 @@ mod suggestion_accept_tests {
         assert_eq!(block_text(&store, store.children(slot)[0]), "First Post");
     }
 
+    /// `Stray para.` sits above `----` where the schema takes no paragraph:
+    /// it lands in `preamble > unassigned` (ADR-060 P1).
+    const CONTENT_WITH_UNASSIGNED: &str =
+        "# First Post\n\nStray para.\n\n----\n\nAlpha para.\n";
+    const STRAY_BLOCK: &str =
+        r#"(ned/parents (ned/text-containing (ned/doc-by-path "content/post/first.md") "Stray"))"#;
+
+    fn accept_and_save_unassigned(mutation: NedMutation) -> String {
+        let tmp = build_site();
+        std::fs::write(tmp.path().join(FILE), CONTENT_WITH_UNASSIGNED).unwrap();
+        let conductor = make_conductor(&tmp);
+        {
+            let root = live_root(&conductor);
+            let store = conductor.node_store.read().unwrap();
+            let preamble =
+                node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                    .expect("preamble");
+            assert!(
+                node_store_bridge::content_bridge::find_child_by_name(&store, preamble, "unassigned")
+                    .is_some(),
+                "fixture must have an unassigned block"
+            );
+        }
+        let id = create(&conductor, STRAY_BLOCK, mutation);
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert!(is_dirty(&conductor));
+        let saved = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string() })
+            .response;
+        assert!(!matches!(saved, Response::Error(_)), "save: {saved:?}");
+        std::fs::read_to_string(tmp.path().join(FILE)).expect("file written")
+    }
+
+    #[test]
+    fn accept_delete_of_unassigned_block_removes_it_from_the_file() {
+        let written = accept_and_save_unassigned(NedMutation::Delete);
+        assert!(!written.contains("Stray para."), "written: {written}");
+        assert!(written.contains("# First Post"), "written: {written}");
+        assert!(written.contains("Alpha para."), "written: {written}");
+    }
+
+    #[test]
+    fn accept_replace_of_unassigned_block_removes_it_from_the_file() {
+        let heading = ned::NodeTree::element("heading")
+            .with_attr("level", "3")
+            .with_child(ned::NodeTree::text("Replaced"));
+        let written = accept_and_save_unassigned(NedMutation::Replace(vec![heading]));
+        assert!(!written.contains("Stray para."), "written: {written}");
+        assert!(written.contains("### Replaced"), "written: {written}");
+    }
+
     #[test]
     fn accept_multi_line_code_block_is_a_fixed_point_after_rebuild() {
         let tmp = build_site();
@@ -6248,6 +6305,7 @@ mod apply_ned_program_diagnostic_tests {
             body: im::vector![],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -6379,6 +6437,7 @@ mod body_structural_bsave_tests {
             ],
             has_separator: true,
             separator_span: None,
+            unassigned: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/test/doc".to_string(),
@@ -6529,6 +6588,7 @@ mod body_structural_bsave_tests {
             body: im::vector![p("Other para")],
             has_separator: true,
             separator_span: None,
+            unassigned: Default::default(),
         };
         let good_meta = DocumentMeta {
             url: url.to_string(),

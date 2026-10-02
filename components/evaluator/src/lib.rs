@@ -1462,6 +1462,7 @@ mod tests {
             }],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta_with_link = node_store_bridge::content_bridge::DocumentMeta {
@@ -1479,6 +1480,7 @@ mod tests {
             }],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta_no_link = node_store_bridge::content_bridge::DocumentMeta {

@@ -19,13 +19,19 @@ pub struct DocumentSlot {
 
 /// A parsed content document with named slot structure.
 ///
-/// Produced by [`crate::assign_slots`] or [`crate::parse_and_assign`]. The
-/// preamble slots are ordered according to the grammar declaration order;
-/// `body` contains all elements after the separator (if any). The preamble is
-/// in grammar order; slots may be absent.
-#[derive(Debug, Clone)]
+/// Produced by [`crate::assign_slots`] or [`crate::parse_and_assign`].
+/// `body` contains all elements after the separator (if any).
+///
+/// The preamble is in grammar order; slots may be absent. `unassigned` holds
+/// section-0 elements the schema does not allow; any element there makes the
+/// page invalid. They are written after the slots, before `----`, which is a
+/// fixed point (see [`crate::assign_slots`]).
+#[derive(Debug, Clone, Default)]
 pub struct Document {
     pub preamble: im::Vector<DocumentSlot>,
+    /// Section-0 elements that fill no slot, in source order (ADR-060 P1).
+    /// Kept and saved, never rendered; each one is a validation error.
+    pub unassigned: im::Vector<Spanned<ContentElement>>,
     pub body: im::Vector<Spanned<ContentElement>>,
     pub has_separator: bool,
     pub separator_span: Option<Span>,
@@ -34,8 +40,8 @@ pub struct Document {
 impl Document {
     /// Reconstruct the flat element sequence in declaration order.
     ///
-    /// The order is: preamble slot elements (in slot order), an optional
-    /// separator, then body elements.
+    /// The order is: preamble slot elements (in slot order), unassigned
+    /// elements, an optional separator, then body elements.
     ///
     /// When `separator_span` is available the reconstructed separator carries
     /// that span; otherwise a zero span is used.
@@ -44,6 +50,7 @@ impl Document {
         for slot in &self.preamble {
             result.append(slot.elements.clone());
         }
+        result.append(self.unassigned.clone());
         if self.has_separator {
             let span = self.separator_span.unwrap_or(Span { start: 0, end: 0 });
             result.push_back(Spanned {

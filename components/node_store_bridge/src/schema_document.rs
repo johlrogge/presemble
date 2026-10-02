@@ -30,6 +30,7 @@ pub fn synthesize_schema_document(grammar: &Grammar, _kind: SchemaKind) -> Docum
         body: im::Vector::new(),
         has_separator: grammar.body.is_some(),
         separator_span: None,
+        unassigned: im::Vector::new(),
     }
 }
 

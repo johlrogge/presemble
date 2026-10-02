@@ -334,6 +334,15 @@ pub fn document_to_store(doc: &Document, store: &mut NodeStore, meta: Option<&Do
             store.add_edge(slot_node, Edge::Child(id));
         }
     }
+    // Section-0 elements that fill no slot (ADR-060 P1): frame, after the
+    // slots, only when non-empty.
+    if !doc.unassigned.is_empty() {
+        let unassigned_node = add_child_element(store, preamble_node, "unassigned");
+        for spanned in &doc.unassigned {
+            let id = content_element_to_store(&spanned.node, store);
+            store.add_edge(unassigned_node, Edge::Child(id));
+        }
+    }
 
     // body
     let body_node = add_child_element(store, root, "body");
@@ -1048,8 +1057,10 @@ fn decode_blocks(
 pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, DocumentDecodeError> {
     let has_separator = find_attr_bool(store, root, "has-separator").unwrap_or(false);
 
+    let preamble_node = find_child_by_name(store, root, "preamble");
+
     // preamble
-    let preamble = match find_child_by_name(store, root, "preamble") {
+    let preamble = match preamble_node {
         Some(preamble_node) => children_by_name(store, preamble_node, "slot")
             .into_iter()
             .map(|slot_id| {
@@ -1063,6 +1074,14 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
         None => im::Vector::new(),
     };
 
+    // unassigned (ADR-060 P1): missing means empty.
+    let unassigned = match preamble_node
+        .and_then(|preamble_node| find_child_by_name(store, preamble_node, "unassigned"))
+    {
+        Some(unassigned_node) => decode_blocks(store, unassigned_node)?,
+        None => im::Vector::new(),
+    };
+
     // body
     let body = match find_child_by_name(store, root, "body") {
         Some(body_node) => decode_blocks(store, body_node)?,
@@ -1071,6 +1090,7 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
 
     Ok(Document {
         preamble,
+        unassigned,
         body,
         has_separator,
         separator_span: None,
@@ -1134,11 +1154,14 @@ pub fn owning_document(store: &NodeStore, id: NodeId) -> Option<NodeId> {
 }
 
 /// The block that owns `id`: the ancestor (or `id` itself) that is a direct
-/// child of a `body` or `slot` element.
+/// child of a `body`, `slot` or `unassigned` element.
 pub fn owning_block(store: &NodeStore, id: NodeId) -> Option<NodeId> {
     find_ancestor_or_self(store, id, |n| {
         store.parents(n).into_iter().any(|p| {
-            matches!(element_name_of(store, p).as_deref(), Some("body") | Some("slot"))
+            matches!(
+                element_name_of(store, p).as_deref(),
+                Some("body") | Some("slot") | Some("unassigned")
+            )
         })
     })
 }
@@ -1210,6 +1233,7 @@ mod tests {
                 &format!("preamble slot {i} ({})", orig_slot.name),
             );
         }
+        compare_elements(&original.unassigned, &recovered.unassigned, "unassigned");
         compare_elements(&original.body, &recovered.body, "body");
     }
 
@@ -1230,6 +1254,7 @@ mod tests {
             })],
             has_separator: true,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1277,10 +1302,119 @@ mod tests {
             body: elements.into_iter().map(zero_spanned).collect(),
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
         compare_documents(&doc, &recovered);
+    }
+
+    // ── unassigned section-0 elements (ADR-060 P1) ──────────────────────────
+
+    #[test]
+    fn round_trip_unassigned_elements_of_every_kind() {
+        let unassigned = vec![
+            ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), text: "Aside".to_string() },
+            ContentElement::Paragraph { text: "{#stray}".to_string() },
+            ContentElement::Paragraph { text: "![c](i.jpg) {#cover}".to_string() },
+            ContentElement::Image { alt: Some("alt".to_string()), path: "/i.jpg".to_string() },
+            ContentElement::Image { alt: None, path: "/j.jpg".to_string() },
+            ContentElement::Link { text: "x".to_string(), href: "/x".to_string() },
+            ContentElement::Separator,
+            ContentElement::CodeBlock { language: Some("rust".to_string()), code: "fn f() {}".to_string() },
+            ContentElement::Table {
+                headers: vec!["a".to_string()],
+                rows: vec![vec!["1".to_string()]],
+            },
+            ContentElement::RawHtml { html: "<b>x</b>".to_string() },
+            ContentElement::Blockquote { text: "q".to_string() },
+            ContentElement::List { source: "- a".to_string() },
+            ContentElement::LinkExpression {
+                text: LinkText::Label("N".to_string()),
+                target: LinkTarget::ThreadExpr {
+                    source: Keyword::new("post").unwrap(),
+                    operations: vec![LinkOp::Take(2)],
+                },
+                slot: Some(Keyword::new("newz").unwrap()),
+            },
+        ];
+        let doc = Document {
+            preamble: im::vector![slot(
+                "title",
+                vec![ContentElement::Heading {
+                    level: HeadingLevel::new(1).unwrap(),
+                    text: "T".to_string(),
+                }]
+            )],
+            unassigned: unassigned.into_iter().map(zero_spanned).collect(),
+            body: im::vector![zero_spanned(ContentElement::Paragraph { text: "b".to_string() })],
+            has_separator: true,
+            separator_span: None,
+        };
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        // Frame: `preamble > unassigned`, after the slots.
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        let names: Vec<String> = store
+            .children(preamble)
+            .into_iter()
+            .filter_map(|id| element_name_of(&store, id))
+            .collect();
+        assert_eq!(names, vec!["slot", "unassigned"]);
+        let recovered = store_to_document(&store, root).expect("decodes");
+        compare_documents(&doc, &recovered);
+        // Serialization from the store keeps them, before the separator.
+        let md = serialize_from_store(&store, root).unwrap();
+        assert!(md.find("## Aside").unwrap() < md.find("\n----\n").unwrap(), "{md}");
+    }
+
+    #[test]
+    fn empty_unassigned_adds_no_frame_element() {
+        let doc = Document {
+            preamble: im::vector![slot("title", vec![])],
+            has_separator: true,
+            ..Document::default()
+        };
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let preamble = find_child_by_name(&store, root, "preamble").unwrap();
+        assert!(find_child_by_name(&store, preamble, "unassigned").is_none());
+        assert!(store_to_document(&store, root).unwrap().unassigned.is_empty());
+    }
+
+    #[test]
+    fn semantic_content_ignores_unassigned() {
+        let grammar = schema::parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\nSummary. {#summary}\n\n----\n\nBody.\n",
+        )
+        .unwrap();
+        let doc = content::parse_and_assign("# T\n\n## H\n\nS.\n\n----\n\nB.\n", &grammar).unwrap();
+        assert_eq!(doc.unassigned.len(), 2);
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/p".to_string(),
+            stem: "p".to_string(),
+            file: "content/p.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(
+            &mut store,
+            root,
+            &grammar,
+            &meta,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            None,
+        );
+        let names: Vec<String> = store
+            .consists_of(sem)
+            .iter()
+            .map(|(n, _)| store.resolve_name(*n).to_string())
+            .collect();
+        assert!(!names.iter().any(|n| n == "unassigned"), "{names:?}");
+        // The unassigned paragraph does not fill the (empty) `summary` slot.
+        assert!(!names.iter().any(|n| n == "summary"), "{names:?}");
     }
 
     // ── test 3: LinkExpression variants ─────────────────────────────────────
@@ -1333,6 +1467,7 @@ mod tests {
             body: elements.into_iter().map(zero_spanned).collect(),
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1387,6 +1522,7 @@ mod tests {
             })],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1409,6 +1545,7 @@ mod tests {
             })],
             has_separator: true,
             separator_span: Some(Span { start: 10, end: 14 }),
+            unassigned: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1427,6 +1564,7 @@ mod tests {
             })],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -1443,6 +1581,7 @@ mod tests {
             })],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let meta = DocumentMeta {
@@ -1473,6 +1612,7 @@ mod tests {
             })],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let meta = DocumentMeta {
@@ -1560,6 +1700,7 @@ mod tests {
             })],
             has_separator: true,
             separator_span: None,
+            unassigned: im::Vector::new(),
         }
     }
 
@@ -1899,6 +2040,7 @@ mod tests {
             body: im::vector![],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
         let grammar = {
             use schema::{BodyRules, Constraint, CountRange, Element as SchemaElement, Slot};
@@ -2257,6 +2399,7 @@ mod tests {
             })],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let root = document_to_store(&doc, &mut store, None);
@@ -2276,6 +2419,7 @@ mod tests {
             })],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
         let mut store = NodeStore::new();
         let root = document_to_store(&doc, &mut store, None);
@@ -2318,6 +2462,7 @@ mod tests {
             body: elements.into_iter().map(zero_spanned).collect(),
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         // First serialization: document → store → serialize
@@ -2351,6 +2496,7 @@ mod tests {
             body: im::vector![],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         let recovered = round_trip(&doc);
@@ -2401,6 +2547,7 @@ mod tests {
             body: im::vector![],
             has_separator: false,
             separator_span: None,
+            unassigned: im::Vector::new(),
         };
 
         let mut store = NodeStore::new();

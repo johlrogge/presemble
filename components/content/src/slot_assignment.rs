@@ -1,17 +1,56 @@
-use crate::document::{ContentElement, Document, DocumentSlot};
+use crate::document::{ContentElement, Document, DocumentSlot, Keyword};
+use crate::link_expression::LinkExpressionDiagnostic;
+use crate::parser::{diagnose_marker_paragraph, is_marker_paragraph};
 use schema::{Element, Grammar, Slot, Span, Spanned};
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Why a section-0 element is in [`Document::unassigned`] (ADR-060 P1).
+///
+/// Computed on demand from the element and the grammar by
+/// [`unassigned_reason`]; never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnassignedReason {
+    /// A link expression marked `{#name}` where `name` is no slot.
+    MarkerNamesNoSlot(Keyword),
+    /// A link expression marked `{#name}` where `name` is a slot whose
+    /// element is not a link.
+    MarkerNamesNonLinkSlot(Keyword),
+    /// A marker-shaped paragraph (a misplaced, stray or invalid `{#name}`).
+    MisplacedMarker(LinkExpressionDiagnostic),
+    /// Any other element the schema's slots do not take at this position.
+    NotAllowedHere,
+}
+
+/// Why `el`, an element of [`Document::unassigned`], fills no slot.
+pub fn unassigned_reason(el: &ContentElement, grammar: &Grammar) -> UnassignedReason {
+    match el {
+        ContentElement::LinkExpression { slot: Some(name), .. }
+            if bound_slot_index(el, grammar).is_none() =>
+        {
+            if grammar.preamble.iter().any(|s| s.name.as_str() == name.as_str()) {
+                UnassignedReason::MarkerNamesNonLinkSlot(name.clone())
+            } else {
+                UnassignedReason::MarkerNamesNoSlot(name.clone())
+            }
+        }
+        ContentElement::Paragraph { text } if is_marker_paragraph(text) => {
+            UnassignedReason::MisplacedMarker(diagnose_marker_paragraph(text))
+        }
+        _ => UnassignedReason::NotAllowedHere,
+    }
+}
+
 /// Assign elements from a flat document to named grammar slots, producing a
 /// [`Document`].
 ///
 /// This function walks the grammar's preamble slots in declaration order,
-/// consuming matching elements from the flat list. Annotation-only paragraphs
-/// (parser artifacts that look like `{#slot-name}`) are skipped. A `Separator`
-/// element ends preamble processing; all remaining elements go into `body`.
+/// consuming matching elements from the flat list. A `Separator` element ends
+/// preamble processing (section 0); all elements after it go into `body`.
+/// Section-0 elements that fill no slot go into `unassigned`, in source
+/// order: nothing is ever dropped (ADR-060 P1).
 ///
 /// If no separator is present, `body` will be empty and `has_separator` will
 /// be `false`.
@@ -31,27 +70,76 @@ use schema::{Element, Grammar, Slot, Span, Spanned};
 ///
 /// Unmarked expressions, and all other preamble elements, are assigned by
 /// position. A marker that names no slot, or a slot whose element is not a
-/// link, does not bind: the element is assigned by position, so it is never
-/// dropped, and the validator reports the marker.
+/// link, does not bind: the element goes into `unassigned` and the validator
+/// reports it ([`unassigned_reason`]).
+///
+/// ## Why writing unassigned elements after the slots is a fixed point
+///
+/// The serializer writes `unassigned` after the last slot, before `----`.
+/// Reading that output back yields the same assignment:
+///
+/// 1. A pre-pass classifies every element of section 0 by looking only at the
+///    element and the grammar, never at its position:
+///    - **B**: marked link expressions whose marker names a link slot;
+///    - **X**: marked link expressions whose marker does not bind, plus
+///      marker-shaped paragraphs (`is_marker_paragraph`);
+///    - **R**: everything else.
+/// 2. Positional assignment over R never skips an element in the middle; the
+///    only skip is the final forward scan. So the placed elements P form a
+///    prefix of R, and the unplaced elements N are the rest of R.
+/// 3. The serializer writes the slots in schema order (P in source order,
+///    with B merged into its slots), then X and N in source order, then
+///    `----`.
+/// 4. On re-read, every element lands in the same group, R comes back as P
+///    followed by N, and assignment is deterministic, so the slots,
+///    `unassigned` and the body come out identical.
+/// 5. Exception, limit L10: two same-kind lists that end up adjacent merge
+///    into one.
 pub fn assign_slots(
     elements: &im::Vector<Spanned<ContentElement>>,
     grammar: &Grammar,
 ) -> Document {
-    // Pre-pass: take bound link expressions out of the preamble region.
+    // Pre-pass over section 0: take bound link expressions (B) and elements
+    // that can never be slotted (X) out; the rest (R) is assigned by position.
     let preamble_end = elements
         .iter()
         .position(|e| matches!(e.node, ContentElement::Separator))
         .unwrap_or(elements.len());
     let mut bound: Vec<Vec<Spanned<ContentElement>>> = vec![Vec::new(); grammar.preamble.len()];
+    // Unassigned elements with their index in `elements` (source order).
+    let mut unassigned: Vec<(usize, Spanned<ContentElement>)> = Vec::new();
     let mut remaining: im::Vector<Spanned<ContentElement>> = im::Vector::new();
+    let mut remaining_index: Vec<usize> = Vec::new();
     for (i, element) in elements.iter().enumerate() {
-        match bound_slot_index(&element.node, grammar) {
-            Some(slot_index) if i < preamble_end => bound[slot_index].push(element.clone()),
-            _ => remaining.push_back(element.clone()),
+        let never_slotted = i < preamble_end
+            && match &element.node {
+                ContentElement::LinkExpression { slot: Some(_), .. } => {
+                    match bound_slot_index(&element.node, grammar) {
+                        Some(slot_index) => {
+                            bound[slot_index].push(element.clone());
+                            continue;
+                        }
+                        None => true,
+                    }
+                }
+                ContentElement::Paragraph { text } => is_marker_paragraph(text),
+                _ => false,
+            };
+        if never_slotted {
+            unassigned.push((i, element.clone()));
+        } else {
+            remaining.push_back(element.clone());
+            remaining_index.push(i);
         }
     }
 
-    let mut document = assign_positionally(&remaining, grammar, |slot_index| bound[slot_index].len());
+    let (mut document, unplaced) =
+        assign_positionally(&remaining, grammar, |slot_index| bound[slot_index].len());
+
+    // Unassigned elements, merged in source order.
+    unassigned.extend(unplaced.into_iter().map(|at| (remaining_index[at], remaining[at].clone())));
+    unassigned.sort_by_key(|(i, _)| *i);
+    document.unassigned = unassigned.into_iter().map(|(_, e)| e).collect();
 
     // Merge bound elements into their slots, in source order.
     for (slot_index, slot) in grammar.preamble.iter().enumerate() {
@@ -102,28 +190,23 @@ pub(crate) fn bound_slot_index(element: &ContentElement, grammar: &Grammar) -> O
 /// Positional slot assignment. `bound_count(i)` is the number of bound
 /// elements already reserved for grammar preamble slot `i`; positional
 /// matching takes at most `max - bound_count` (saturating) for that slot.
+///
+/// Returns the document (with an empty `unassigned`) and the positions in
+/// `elements` of the section-0 elements no slot took: those the final
+/// forward scan passes over. Positional matching itself never skips an
+/// element, so these are a suffix of section 0.
 fn assign_positionally(
     elements: &im::Vector<Spanned<ContentElement>>,
     grammar: &Grammar,
     bound_count: impl Fn(usize) -> usize,
-) -> Document {
+) -> (Document, Vec<usize>) {
     let mut cursor = 0usize;
     let mut preamble: im::Vector<DocumentSlot> = im::Vector::new();
     let mut has_separator = false;
     let mut separator_span: Option<Span> = None;
+    let mut unplaced: Vec<usize> = Vec::new();
 
     'slots: for (slot_index, slot) in grammar.preamble.iter().enumerate() {
-        // Skip annotation-only paragraphs (parser artifacts from inline slot annotations).
-        while cursor < elements.len() {
-            if let ContentElement::Paragraph { text } = &elements[cursor].node
-                && is_annotation_paragraph(text)
-            {
-                cursor += 1;
-                continue;
-            }
-            break;
-        }
-
         // Stop at separator — no more preamble slots after it.
         if cursor < elements.len() && matches!(elements[cursor].node, ContentElement::Separator) {
             separator_span = Some(elements[cursor].span);
@@ -173,7 +256,8 @@ fn assign_positionally(
     }
 
     // If the separator was not encountered during slot processing, scan forward
-    // to find it so body collection starts at the right position.
+    // to find it so body collection starts at the right position. Every
+    // element passed over fills no slot.
     if !has_separator {
         while cursor < elements.len() {
             if matches!(elements[cursor].node, ContentElement::Separator) {
@@ -182,6 +266,7 @@ fn assign_positionally(
                 has_separator = true;
                 break;
             }
+            unplaced.push(cursor);
             cursor += 1;
         }
     }
@@ -190,12 +275,14 @@ fn assign_positionally(
     // empty if no separator was found).
     let body = elements.clone().slice(cursor..);
 
-    Document {
+    let document = Document {
         preamble,
+        unassigned: im::Vector::new(),
         body,
         has_separator,
         separator_span,
-    }
+    };
+    (document, unplaced)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +296,7 @@ fn push_empty_slot(preamble: &mut im::Vector<DocumentSlot>, slot: &Slot) {
     });
 }
 
-fn element_matches_slot(element: &ContentElement, slot_element: &Element) -> bool {
+pub(crate) fn element_matches_slot(element: &ContentElement, slot_element: &Element) -> bool {
     matches!(
         (element, slot_element),
         (ContentElement::Heading { .. }, Element::Heading { .. })
@@ -219,12 +306,6 @@ fn element_matches_slot(element: &ContentElement, slot_element: &Element) -> boo
             | (ContentElement::Image { .. }, Element::Image { .. })
             | (ContentElement::List { .. }, Element::List)
     )
-}
-
-/// Returns true if the paragraph text is a bare slot anchor annotation (e.g. `{#cover}`).
-fn is_annotation_paragraph(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with("{#") && t.ends_with('}') && !t[2..t.len() - 1].contains('}')
 }
 
 // ---------------------------------------------------------------------------
@@ -443,8 +524,14 @@ headings
             3,
             "should consume at most 3 paragraphs"
         );
-        // The 4th paragraph is not in any slot; it is skipped by the forward scan.
-        // The separator is found by the forward scan.
+        // The 4th paragraph is not in any slot; the forward scan passes it
+        // into `unassigned` (ADR-060 P1). The separator is found by the
+        // forward scan.
+        assert_eq!(slotted.unassigned.len(), 1);
+        assert_eq!(
+            slotted.unassigned[0].node,
+            ContentElement::Paragraph { text: "Para 4 - extra.".to_string() }
+        );
         assert!(slotted.has_separator, "separator should be found by forward scan");
         assert!(slotted.body.is_empty(), "nothing after separator");
     }
@@ -471,9 +558,10 @@ headings
     }
 
     #[test]
-    fn assign_annotation_paragraphs_are_skipped() {
+    fn assign_bare_marker_paragraphs_are_unassigned() {
         let grammar = simple_grammar();
-        // {#title} annotation paragraph should be skipped, not assigned to a slot.
+        // A `{#title}` paragraph is never assigned to a slot, does not stop
+        // positional assignment, and is kept in `unassigned`.
         let elements = im::vector![
             paragraph("{#title}"),
             heading(1, "Real Title"),
@@ -490,6 +578,10 @@ headings
             &title_slot.elements[0].node,
             ContentElement::Heading { .. }
         ));
+        assert_eq!(
+            slotted.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![ContentElement::Paragraph { text: "{#title}".to_string() }]
+        );
     }
 
     #[test]
@@ -766,17 +858,141 @@ headings
         assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
     }
 
-    #[test]
-    fn marker_naming_no_slot_falls_back_to_position() {
-        let doc = assign_page("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
-        assert_eq!(slot_labels(&doc, "latest"), vec!["In the news"]);
+    fn unassigned_nodes(doc: &Document) -> Vec<ContentElement> {
+        doc.unassigned.iter().map(|e| e.node.clone()).collect()
+    }
+
+    fn reasons(doc: &Document, grammar: &Grammar) -> Vec<UnassignedReason> {
+        doc.unassigned.iter().map(|e| unassigned_reason(&e.node, grammar)).collect()
     }
 
     #[test]
-    fn marker_naming_a_non_link_slot_falls_back_to_position() {
+    fn marker_naming_no_slot_is_unassigned() {
+        let doc = assign_page("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
+        // The separator directly after the title ends positional assignment.
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1)]));
+        assert_eq!(doc.unassigned.len(), 1);
+        assert_eq!(
+            reasons(&doc, &page_grammar("*")),
+            vec![UnassignedReason::MarkerNamesNoSlot(Keyword::new("newz").unwrap())]
+        );
+        assert_eq!(doc.body.len(), 1);
+    }
+
+    #[test]
+    fn marker_naming_a_non_link_slot_is_unassigned() {
         let doc = assign_page("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
         assert_eq!(slot_labels(&doc, "title").len(), 1, "title keeps its heading");
-        assert_eq!(slot_labels(&doc, "latest"), vec!["Posts"]);
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1)]));
+        assert_eq!(
+            reasons(&doc, &page_grammar("*")),
+            vec![UnassignedReason::MarkerNamesNonLinkSlot(Keyword::new("title").unwrap())]
+        );
+    }
+
+    #[test]
+    fn element_the_schema_does_not_allow_is_unassigned_not_allowed_here() {
+        // An H2 fits no slot of the page grammar.
+        let doc = assign_page("# Home\n\n## Aside\n\n[a](/post/a)\n\n----\n\nBody.\n", "*");
+        assert_eq!(
+            unassigned_nodes(&doc),
+            vec![
+                ContentElement::Heading {
+                    level: schema::HeadingLevel::new(2).unwrap(),
+                    text: "Aside".to_string()
+                },
+                ContentElement::Link { text: "a".to_string(), href: "/post/a".to_string() },
+            ]
+        );
+        assert_eq!(
+            reasons(&doc, &page_grammar("*")),
+            vec![UnassignedReason::NotAllowedHere, UnassignedReason::NotAllowedHere]
+        );
+        assert_eq!(doc.body.len(), 1);
+    }
+
+    #[test]
+    fn misplaced_marker_reasons_carry_the_diagnostic() {
+        use crate::link_expression::LinkExpressionDiagnostic as D;
+        let cases = [
+            ("{#news}", D::StrayMarker("news".to_string())),
+            ("[a](/x) {#news}", D::MarkerNotOnLinkExpression("news".to_string())),
+            ("![c](i.jpg) {#news}", D::MarkerNotOnLinkExpression("news".to_string())),
+            ("[x](->> :post) {#a b}", D::InvalidSlotMarker("a b".to_string())),
+            ("[x](->> :post)\n{#news}", D::MarkerOnOwnLine("news".to_string())),
+            ("[x\ny](:p) {#news}", D::MarkedExpressionSpansLines("news".to_string())),
+            (
+                "[p]((->>%20:post%20(map%20:x))) {#news}",
+                D::Malformed(crate::link_expression::LinkExpressionError::ExpectedWhitespace {
+                    at: 3,
+                }),
+            ),
+        ];
+        for (md, expected) in cases {
+            let src = format!("# Home\n\n{md}\n\n[a](/post/a)\n\n----\n\nBody.\n");
+            let doc = assign_page(&src, "*");
+            assert_eq!(
+                reasons(&doc, &page_grammar("*")),
+                vec![UnassignedReason::MisplacedMarker(expected)],
+                "{md:?}"
+            );
+            // The marker paragraph does not stop positional assignment.
+            assert_eq!(slot_labels(&doc, "latest"), vec!["a"], "{md:?}");
+            assert_eq!(doc.body.len(), 1, "{md:?}");
+        }
+    }
+
+    #[test]
+    fn unassigned_elements_are_in_source_order() {
+        let doc = assign_page(
+            "# Home\n\n{#x}\n\n[a](/post/a)\n\n[N](->> :post) {#newz}\n\n## H\n\n{#y}\n\n\
+             ----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(slot_labels(&doc, "latest"), vec!["a"]);
+        let texts: Vec<String> = doc
+            .unassigned
+            .iter()
+            .map(|e| match &e.node {
+                ContentElement::Paragraph { text } => text.clone(),
+                ContentElement::Heading { text, .. } => text.clone(),
+                ContentElement::LinkExpression { slot: Some(k), .. } => k.to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, vec!["{#x}", "newz", "H", "{#y}"]);
+    }
+
+    #[test]
+    fn without_a_separator_trailing_elements_are_unassigned_not_body() {
+        let grammar = no_body_grammar();
+        let elements = im::vector![
+            heading(1, "Title"),
+            paragraph("Summary."),
+            paragraph("Extra."),
+            heading(3, "More"),
+        ];
+        let doc = assign_slots(&elements, &grammar);
+        assert!(!doc.has_separator);
+        assert!(doc.body.is_empty());
+        assert_eq!(doc.unassigned.len(), 2);
+    }
+
+    #[test]
+    fn marker_misuse_after_the_separator_stays_in_the_body() {
+        let doc = assign_page("# Home\n\n----\n\n{#x}\n\n[a](/x) {#news}\n", "*");
+        assert!(doc.unassigned.is_empty());
+        assert_eq!(doc.body.len(), 2);
+    }
+
+    #[test]
+    fn flat_elements_puts_unassigned_between_slots_and_separator() {
+        let doc = assign_page("# Home\n\n## H\n\n----\n\nBody.\n", "*");
+        let flat: Vec<ContentElement> = doc.flat_elements().iter().map(|e| e.node.clone()).collect();
+        assert!(matches!(flat[0], ContentElement::Heading { .. }));
+        assert!(matches!(&flat[1], ContentElement::Heading { text, .. } if text == "H"));
+        assert_eq!(flat[2], ContentElement::Separator);
+        assert!(matches!(flat[3], ContentElement::Paragraph { .. }));
     }
 
     #[test]

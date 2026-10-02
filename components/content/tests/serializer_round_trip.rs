@@ -399,18 +399,20 @@ fn gen_document(seed: u64) -> Document {
         previous_list = None;
     }
     let body = (0..rng.below(6)).map(|_| next_block(&mut rng, &mut previous_list)).collect();
-    Document { preamble, body, has_separator, separator_span: None }
+    Document { preamble, body, has_separator, ..Document::default() }
 }
 
 // ── Properties ──────────────────────────────────────────────────────────────
 
-/// Preamble blocks in order, the separator if present, then body blocks.
+/// Preamble blocks in order, unassigned blocks, the separator if present,
+/// then body blocks.
 fn flatten(doc: &Document) -> Vec<ContentElement> {
     let mut out: Vec<ContentElement> = doc
         .preamble
         .iter()
         .flat_map(|slot| slot.elements.iter().map(|s| s.node.clone()))
         .collect();
+    out.extend(doc.unassigned.iter().map(|s| s.node.clone()));
     if doc.has_separator {
         out.push(ContentElement::Separator);
     }
@@ -420,10 +422,8 @@ fn flatten(doc: &Document) -> Vec<ContentElement> {
 
 fn body_only(blocks: &[ContentElement]) -> Document {
     Document {
-        preamble: im::Vector::new(),
         body: blocks.iter().cloned().map(spanned).collect(),
-        has_separator: false,
-        separator_span: None,
+        ..Document::default()
     }
 }
 

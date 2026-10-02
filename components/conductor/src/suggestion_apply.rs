@@ -30,6 +30,8 @@ pub(crate) const DOCUMENT_KIND: &str = "document";
 const BODY_KIND: &str = "body";
 const SLOT_KIND: &str = "slot";
 const PREAMBLE_KIND: &str = "preamble";
+/// Section-0 blocks that fill no slot: `preamble > unassigned` (ADR-060 P1).
+const UNASSIGNED_KIND: &str = "unassigned";
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -171,7 +173,8 @@ fn live_document(store: &NodeStore, id: NodeId) -> Result<NodeId, AddressError> 
     }
 }
 
-/// Check that `id` is a container (body or slot) and return its document.
+/// Check that `id` is a container (body, slot or unassigned) and return its
+/// document.
 fn container_document(
     store: &NodeStore,
     id: NodeId,
@@ -182,7 +185,7 @@ fn container_document(
             let parent = single_parent(store, id, expected)?;
             live_document(store, parent)
         }
-        Some(SLOT_KIND) => {
+        Some(SLOT_KIND | UNASSIGNED_KIND) => {
             let preamble = single_parent(store, id, expected)?;
             if element_name(store, preamble) != Some(PREAMBLE_KIND) {
                 return Err(AddressError::Unresolved);
@@ -438,7 +441,7 @@ pub(crate) fn creation_hint(cause: &StaleCause, kind: TargetKind) -> Option<&'st
             Some("address the block's text with (ned/text-in <block address>)")
         }
         StaleCause::WrongKind { expected: TargetKind::Text, found }
-            if found == SLOT_KIND || found == BODY_KIND =>
+            if found == SLOT_KIND || found == BODY_KIND || found == UNASSIGNED_KIND =>
         {
             Some(
                 "address one block's text with (ned/text-in (ned/children <slot address>)) \
@@ -505,6 +508,7 @@ mod tests {
             body: im::vector![sp(para("a")), sp(para("b"))],
             has_separator: true,
             separator_span: None,
+            unassigned: Default::default(),
         }
     }
 
@@ -914,6 +918,9 @@ mod tests {
         assert!(creation_hint(&wrong, TargetKind::Text).unwrap().contains("ned/text-in"));
         let slot = StaleCause::WrongKind { expected: TargetKind::Text, found: "slot".into() };
         assert!(creation_hint(&slot, TargetKind::Text).unwrap().contains("ned/text-in"));
+        let unassigned =
+            StaleCause::WrongKind { expected: TargetKind::Text, found: "unassigned".into() };
+        assert!(creation_hint(&unassigned, TargetKind::Text).unwrap().contains("ned/text-in"));
         let amb = StaleCause::Ambiguous { matches: 2 };
         assert!(creation_hint(&amb, TargetKind::Text).unwrap().contains("ned/nth-of-kind"));
         assert!(creation_hint(&amb, TargetKind::Block).is_none());

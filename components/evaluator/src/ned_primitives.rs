@@ -1134,6 +1134,7 @@ mod tests {
             ],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
 
         let meta = DocumentMeta {
@@ -1261,6 +1262,7 @@ mod tests {
             body: im::vector![],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/post/empty".to_string(),
@@ -1396,6 +1398,7 @@ mod tests {
             ],
             has_separator: false,
             separator_span: None,
+            unassigned: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/post/replace-test".to_string(),
@@ -1473,6 +1476,7 @@ mod tests {
                 }],
                 has_separator: false,
                 separator_span: None,
+                unassigned: Default::default(),
             };
             let meta = DocumentMeta {
                 url: url.to_string(),
@@ -1882,6 +1886,7 @@ mod tests {
             ],
             has_separator: true,
             separator_span: None,
+            unassigned: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/".to_string(),
@@ -2082,6 +2087,7 @@ mod tests {
             body: im::vector![h2("Example"), p("Alpha"), h2("Example"), p("Beta")],
             has_separator: true,
             separator_span: None,
+            unassigned: Default::default(),
         };
         let meta = DocumentMeta {
             url: "/".to_string(),

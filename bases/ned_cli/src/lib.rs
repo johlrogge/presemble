@@ -240,6 +240,7 @@ fn round_trip_content(
                     body,
                     has_separator,
                     separator_span: None,
+                    unassigned: Default::default(),
                 }
             }
             Err(e) => {

@@ -21,6 +21,7 @@
 use std::fmt;
 
 use crate::document::{Keyword, LinkOp, LinkTarget, RefsToTarget};
+use crate::parser::{diagnose_marker_paragraph, is_marker_paragraph};
 
 /// Why a link-expression destination does not match the grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +261,14 @@ pub enum LinkExpressionDiagnostic {
     /// A link expression's slot marker `{#name}` is on the line after it, in
     /// the same paragraph.
     MarkerOnOwnLine(String),
+    /// A `{#name}` that marks nothing: a paragraph that is only the marker,
+    /// or a bare marker line after something that is not a link expression.
+    StrayMarker(String),
+    /// A slot marker after a link expression that spans several lines.
+    MarkedExpressionSpansLines(String),
+    /// A slot marker after something that is not a link expression (an
+    /// image, a plain link, text).
+    MarkerNotOnLinkExpression(String),
 }
 
 impl fmt::Display for LinkExpressionDiagnostic {
@@ -279,6 +288,19 @@ impl fmt::Display for LinkExpressionDiagnostic {
                 f,
                 "`{{#{name}}}`: put the slot marker on the same line as the link expression"
             ),
+            Self::StrayMarker(name) => write!(
+                f,
+                "`{{#{name}}}` on its own is not allowed; put it at the end of a link \
+                 expression's line, or remove it"
+            ),
+            Self::MarkedExpressionSpansLines(_) => write!(
+                f,
+                "a slot marker must be on the same line as a one-line link expression"
+            ),
+            Self::MarkerNotOnLinkExpression(name) => write!(
+                f,
+                "`{{#{name}}}`: slot markers apply to link expressions only"
+            ),
         }
     }
 }
@@ -288,8 +310,14 @@ impl fmt::Display for LinkExpressionDiagnostic {
 ///
 /// A paragraph that starts with `\[` and is otherwise a candidate is the
 /// serializer's escaped form of a literal paragraph and is not diagnosed.
+///
+/// A marker-shaped paragraph (`is_marker_paragraph`) is diagnosed by
+/// `diagnose_marker_paragraph`.
 pub fn diagnose_paragraph(source: &str) -> Option<LinkExpressionDiagnostic> {
     let trimmed = source.trim();
+    if is_marker_paragraph(trimmed) {
+        return Some(diagnose_marker_paragraph(trimmed));
+    }
     if let Some(candidate) = recognise_paragraph(trimmed) {
         return parse_destination(candidate.dest)
             .err()
@@ -301,27 +329,13 @@ pub fn diagnose_paragraph(source: &str) -> Option<LinkExpressionDiagnostic> {
     {
         return None;
     }
-    if !trimmed.contains('\n')
-        && let Some((expression, name)) = split_marker(trimmed)
-        && recognise_expression(expression).is_some()
-    {
-        // A candidate whose only fault is the marker's name.
-        return Some(LinkExpressionDiagnostic::InvalidSlotMarker(name.to_string()));
-    }
-    if let Some((first, second)) = trimmed.split_once('\n')
-        && !second.contains('\n')
-        && recognise_paragraph(first).is_some()
-        && let Some(name) = bare_marker(second)
-    {
-        return Some(LinkExpressionDiagnostic::MarkerOnOwnLine(name.to_string()));
-    }
     let prose = without_code_spans(trimmed);
     (prose.contains("](->>") || prose.contains("]((->>"))
         .then_some(LinkExpressionDiagnostic::MustStandAlone)
 }
 
 /// The name in a line that is only a slot marker `{#name}`.
-fn bare_marker(line: &str) -> Option<&str> {
+pub(crate) fn bare_marker(line: &str) -> Option<&str> {
     let name = line.trim().strip_prefix("{#")?.strip_suffix('}')?;
     (!name.contains('}')).then_some(name)
 }
@@ -912,11 +926,18 @@ mod tests {
                 .to_string()
                 .contains("put the slot marker on the same line as the link expression")
         );
-        // Escaped (literal) paragraphs with markers are not diagnosed.
-        assert_eq!(diagnose_paragraph("\\[x](->> :post) {#news}"), None);
+        // An escaped (literal) paragraph ending in a marker is marker-shaped
+        // (ADR-060 P1): the marker is not on a link expression.
+        assert_eq!(
+            diagnose_paragraph("\\[x](->> :post) {#news}"),
+            Some(LinkExpressionDiagnostic::MarkerNotOnLinkExpression("news".to_string()))
+        );
         let all = [
             LinkExpressionDiagnostic::InvalidSlotMarker("a b".to_string()),
             LinkExpressionDiagnostic::MarkerOnOwnLine("news".to_string()),
+            LinkExpressionDiagnostic::StrayMarker("x".to_string()),
+            LinkExpressionDiagnostic::MarkedExpressionSpansLines("x".to_string()),
+            LinkExpressionDiagnostic::MarkerNotOnLinkExpression("x".to_string()),
         ];
         for d in all {
             assert!(!d.to_string().is_empty(), "{d:?}");

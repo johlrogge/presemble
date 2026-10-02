@@ -1084,6 +1084,36 @@ mod tests {
     }
 
     #[test]
+    fn unassigned_paragraph_mentioning_missing_gets_its_own_span_and_no_action() {
+        let para = "The missing piece of the puzzle.";
+        let src = format!(
+            "# Title\n\nSummary.\n\n[Author](/author/test)\n\n![Cover](images/cover.jpg)\n\n{para}\n\n----\n\n### Body\n"
+        );
+        let grammar = article_grammar();
+
+        let raw = validation::validate_content(&src, &grammar);
+        let unassigned = raw
+            .iter()
+            .find(|d| d.message.contains("The missing piece"))
+            .unwrap_or_else(|| panic!("expected an unassigned diagnostic: {raw:#?}"));
+        assert_eq!(unassigned.slot, None, "{unassigned:#?}");
+        let span = unassigned.span.clone().expect("unassigned diagnostic should have a span");
+        let para_start = src.find(para).unwrap();
+        assert!(
+            span.start <= para_start && span.end >= para_start + para.len(),
+            "span {span:?} should cover the paragraph at {para_start}"
+        );
+
+        let diags = validate_with_positions(&src, &grammar);
+        let positioned = diags
+            .iter()
+            .find(|d| d.message.contains("The missing piece"))
+            .unwrap_or_else(|| panic!("expected a positioned diagnostic: {diags:#?}"));
+        assert!(positioned.action.is_none(), "unexpected action: {:?}", positioned.action);
+        assert_eq!(positioned.start, byte_to_position(&src, para_start));
+    }
+
+    #[test]
     fn hover_for_line_returns_hint_for_title_line() {
         let src = "# Hello World\n\nSome text.\n\n[Author](/authors/test)\n\n![Cover](cover.jpg)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
