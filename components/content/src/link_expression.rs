@@ -189,16 +189,24 @@ pub fn recognise_paragraph(source: &str) -> Option<Candidate<'_>> {
 
 /// Split a trailing slot marker off `line`: `(expression, name)` when `line`
 /// ends with `}` and its last `{#` that follows a space or tab starts the
-/// marker, and the text before the marker (whitespace trimmed) ends with `)`.
-/// The name is not validated.
+/// marker. `expression` is the text before the marker, trailing spaces and
+/// tabs trimmed; it may be anything (a link expression, text, an image).
+///
+/// The name is not validated as a keyword, but a name containing `{`, `}`,
+/// a backtick or a newline is not a marker (`see {#a} or {b}`,
+/// `` t ` {#a` b} ``): the line has no marker and `None` is returned.
 pub(crate) fn split_marker(line: &str) -> Option<(&str, &str)> {
     let body = line.strip_suffix('}')?;
     let at = body
         .rmatch_indices("{#")
         .map(|(at, _)| at)
         .find(|&at| body[..at].ends_with([' ', '\t']))?;
+    let name = &body[at + 2..];
+    if name.contains(['{', '}', '`', '\n']) {
+        return None;
+    }
     let expression = body[..at].trim_end_matches([' ', '\t']);
-    expression.ends_with(')').then_some((expression, &body[at + 2..]))
+    Some((expression, name))
 }
 
 /// Recognise `[text](dest)` (no marker) on a single trimmed line.
@@ -266,8 +274,8 @@ pub enum LinkExpressionDiagnostic {
     StrayMarker(String),
     /// A slot marker after a link expression that spans several lines.
     MarkedExpressionSpansLines(String),
-    /// A slot marker after something that is not a link expression (an
-    /// image, a plain link, text).
+    /// A slot marker after anything that is not a link expression (text, an
+    /// image, a plain link).
     MarkerNotOnLinkExpression(String),
 }
 
@@ -299,7 +307,8 @@ impl fmt::Display for LinkExpressionDiagnostic {
             ),
             Self::MarkerNotOnLinkExpression(name) => write!(
                 f,
-                "`{{#{name}}}`: slot markers apply to link expressions only"
+                "`{{#{name}}}`: slot markers only apply to link expressions; remove it (other elements \
+                 fill slots by their position), or write `\\{{#{name}}}` to keep it as text"
             ),
         }
     }

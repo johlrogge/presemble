@@ -239,7 +239,8 @@ member   := keyword                   ; a slot name, or `rest` in a Mixed sectio
   - `Document::sections`, with a not-allowed container per section;
   - `preamble`, `body` and `has_separator` become accessors, then are removed.
 - **Parsing:**
-  - named-divider recognition;
+  - named-divider recognition; it runs before marker-misuse classification,
+    and `---- {#name}` is misuse until then;
   - one shared divider predicate used by the schema parser, the content parser
     and the validator; `find_separator_span` is deleted;
   - schema syntax for `rest` and section-level terms.
@@ -320,6 +321,17 @@ memory `feedback_invalid_is_saveable`, `project_ned_exact_addressing`.
 6. **Reordering:** the serializer restores schema order.
 7. **Missing-section severity:** a missing named section that has required
    slots is an **Error**.
+8. **Markers on text:** any top-level paragraph ending in `{#name}` that is
+   not a link expression is marker misuse (Error); `\{#name}` is literal.
+   Headings: Error; no escape yet (L18). Lists and blockquotes: not yet
+   covered (follow-up).
+   (Author decision 2026-10-02/04.)
+
+   **L18:** headings store decoded text, so a heading cannot end in a literal
+   `{#name}`: `# Title \{#x}` and a heading ending in a code span containing
+   `{#…}` (``# Title `{#x}` ``) are both reported. Code spans in headings
+   already lose their backticks on save (ADR-062 L17). Both limits go away
+   when headings store their source (ADR-057 OQ6).
 
 ## Open questions
 
@@ -330,5 +342,3 @@ memory `feedback_invalid_is_saveable`, `project_ned_exact_addressing`.
 - **(new, from 4) Addressing instances of a repeated section.** For example,
   `faq[2]::question` or `faq::2::question`. Decide this, together with how named
   dividers bind to repeated instances.
-- **(follow-up)** Any paragraph ending in `{#name}` is marker misuse (author
-  decision 2026-10-02); implemented after P1.

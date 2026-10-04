@@ -55,7 +55,7 @@ The number of `#` symbols (1–6) sets the required heading level. Hint text bet
 A one-sentence summary of the post. {#summary}
 ```
 
-Any text line ending with `{#name}` is a paragraph slot. The text before the anchor is shown as a hint.
+Any text line ending with `{#name}` is a paragraph slot (in schema files; in content see *Choosing the slot with a slot marker*). The text before the anchor is shown as a hint.
 
 #### Link slots
 
@@ -813,7 +813,7 @@ By default a link expression fills the next preamble slot by position, like any 
 
 A marked expression fills the named link slot wherever it appears in the preamble, so two adjacent slots that both accept any number of links each get their own expression. The text in brackets is display text only; it never chooses the slot. The marker goes on the same line as the link expression, after at least one space; a marker on the next line is reported. When the file is saved, markers are kept and slots are written in schema order. This works for every link-expression spelling, including `[text](:path)`.
 
-If a marker names no slot or a slot that is not a link slot, is invalid, is on its own line, follows a multi-line expression, or is on anything other than a link expression (an image, a plain link), the line is kept exactly as written but not used, and the page cannot be published until it is fixed. A line that is only `{#name}` is reported the same way. If an unmarked expression's text equals the name of a link slot it did not land in, for example `[news](->> :post)` placed in `latest`, a hint suggests adding the marker: `[news](->> :post) {#news}`.
+If a marker names no slot or a slot that is not a link slot, is invalid, is on its own line, follows a multi-line expression, or is on anything other than a link expression (text, an image, a plain link), the line is kept exactly as written but not used, and the page cannot be published until it is fixed. A line that is only `{#name}` is reported the same way. A paragraph ending in `{#name}` is reported the same way: paragraphs, headings, images and lists fill slots by position. To end a paragraph with a literal `{#name}`, write `\{#name}`. A heading ending in `{#name}` is reported the same way; there is no escape for headings yet, and a code span at the end of a heading does not help. If an unmarked expression's text equals the name of a link slot it did not land in, for example `[news](->> :post)` placed in `latest`, a hint suggests adding the marker: `[news](->> :post) {#news}`.
 
 ### Reverse references with `refs-to self`
 

@@ -1660,7 +1660,11 @@ headings
     ///   set). It is written escaped, then re-read as marker-shaped. So for
     ///   store-originated text, slot assignment is not a fixed point on the
     ///   first save. The text is stable from the second save on. The real fix
-    ///   comes with ADR-059.
+    ///   comes with ADR-059. Likewise, a store-originated slotted paragraph
+    ///   whose text ends in a slot marker (`text {#summary}`) is written as
+    ///   is, re-read as marker misuse and moves to `unassigned` on its first
+    ///   save; the text is stable from the second save on. Pinned by
+    ///   `store_paragraph_ending_in_a_marker_moves_to_unassigned_l11`.
     /// - L12: resolved (ADR-062). HTML blocks are `HtmlBlock` elements and
     ///   comments are trivia; pinned by `html_comments_are_trivia` in
     ///   `parser.rs`. A comment between two same-kind lists keeps them apart
@@ -1695,6 +1699,32 @@ headings
         );
         // Text is a fixed point from then on.
         assert_eq!(serialize_document(&second), saved);
+    }
+
+    /// L11, for text: a slotted store paragraph ending in a marker.
+    #[test]
+    fn store_paragraph_ending_in_a_marker_moves_to_unassigned_l11() {
+        let grammar = simple_grammar();
+        let mut doc = parse_and_assign("# T\n\nOne.\n\n----\n\nBody.\n", &grammar)
+            .expect("parses");
+        let summary = doc
+            .preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == "summary")
+            .expect("summary slot");
+        summary.elements = im::vector![Spanned {
+            node: para("text {#summary}"),
+            span: Span { start: 0, end: 0 },
+        }];
+        let saved = serialize_document(&doc);
+        let reassigned = parse_and_assign(&saved, &grammar).expect("parses");
+        assert_eq!(
+            reassigned.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![para("text {#summary}")],
+            "saved:\n{saved}"
+        );
+        // The text is stable from the second save on.
+        assert_eq!(serialize_document(&reassigned), saved);
     }
 
     // ── comments as trivia (ADR-062) ────────────────────────────────────────

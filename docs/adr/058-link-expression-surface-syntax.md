@@ -46,8 +46,11 @@ ADR-030 introduced link expressions in content and left their markdown syntax op
    rendered, and reported as an error (ADR-060 §5). A label that equals a link slot name without a
    marker gets a hint to add the marker. Markers are written back on save;
    slots are written in schema order. Markers are recognised on link
-   expressions only (thread, PathRef and legacy spellings); extending them to other preamble elements awaits inline
-   segments (ADR-059).
+   expressions only (thread, PathRef and legacy spellings); a marker on
+   anything else, including a text paragraph or a heading, is marker misuse:
+   kept verbatim, saved, reported as an Error (author decision 2026-10-02/04).
+   `\{#name}` writes a literal marker in a paragraph. Extending markers to other
+   elements awaits ADR-059.
 
 ## Evaluation and invalidation
 

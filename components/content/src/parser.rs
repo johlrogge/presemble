@@ -64,9 +64,13 @@ fn reads_as_link_expression(source: &str) -> bool {
 }
 
 /// Whether a paragraph source is marker-shaped (ADR-060 P1): it is not a
-/// link expression, but either ends with a slot marker (`… {#name}`, any
-/// name) or its last line is a bare `{#name}` (which includes a paragraph
-/// that is only `{#name}`).
+/// link expression, but either ends with a slot marker after a space or tab
+/// (`… {#name}`, after anything: text, an image, a plain link; see
+/// [`split_marker`] for the names that count) or its last line is a bare
+/// `{#name}` (which includes a paragraph that is only `{#name}`).
+///
+/// An escaped `\{#name}`, a `{#name}` inside a code span or emphasis, or one
+/// not at the end is literal text.
 ///
 /// Such a paragraph is kept verbatim by the parser and is never assigned to a
 /// slot; the validator reports it with [`diagnose_marker_paragraph`].
@@ -96,7 +100,9 @@ fn last_line_marker(trimmed: &str) -> Option<&str> {
 ///    `MarkedExpressionSpansLines`;
 /// 4. `expr {#name}` with a one-line `expr`, an invalid name and
 ///    `reads(expr)` → `InvalidSlotMarker`;
-/// 5. any other `expr {#name}` → `MarkerNotOnLinkExpression`;
+/// 5. any other `expr {#name}` → `MarkerNotOnLinkExpression`: `expr` is text,
+///    an image, a plain link, a link expression inside running text, or
+///    `----` (a named divider, until ADR-060 P2);
 /// 6. a bare `{#name}` last line after lines that read as a link expression
 ///    (joined) → `MarkerOnOwnLine`;
 /// 7. any other bare `{#name}` last line → `StrayMarker`.
@@ -377,7 +383,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                                 .filter(|s| !s.is_empty())
                                 .unwrap_or_else(|| text.trim().to_string())
                         } else {
-                            text.trim().to_string()
+                            // The accumulated text is decoded (`\{#x}` reads
+                            // as `{#x}`), so a literal `{#` is escaped again
+                            // here, on the whole text: otherwise the emitted
+                            // paragraph would read as marker misuse.
+                            text.trim().replace("{#", "\\{#")
                         };
                         elements.push_back(Spanned {
                             node: ContentElement::Paragraph { text: para_text },
@@ -947,6 +957,23 @@ mod tests {
             vec![
                 ContentElement::Paragraph { text: "a \\<b>".to_string() },
                 ContentElement::Image { alt: Some("i".to_string()), path: "a.png".to_string() },
+            ]
+        );
+        let saved = crate::serializer::serialize_elements(&doc.elements);
+        let again: Vec<ContentElement> =
+            parse_document(&saved).unwrap().elements.iter().map(|e| e.node.clone()).collect();
+        assert_eq!(again, nodes, "{saved:?}");
+    }
+
+    #[test]
+    fn image_bearing_paragraph_keeps_a_literal_marker() {
+        let doc = parse_document("Text \\{#x} ![i](x.png)\n").unwrap();
+        let nodes: Vec<ContentElement> = doc.elements.iter().map(|e| e.node.clone()).collect();
+        assert_eq!(
+            nodes,
+            vec![
+                ContentElement::Paragraph { text: "Text \\{#x}".to_string() },
+                ContentElement::Image { alt: Some("i".to_string()), path: "x.png".to_string() },
             ]
         );
         let saved = crate::serializer::serialize_elements(&doc.elements);
@@ -2087,6 +2114,11 @@ headings
     }
 
     #[test]
+    fn a_leading_link_followed_by_text_and_a_marker_is_kept_whole() {
+        assert_eq!(nodes("[a](/x) trailing {#x}"), vec![para("[a](/x) trailing {#x}")]);
+    }
+
+    #[test]
     fn is_marker_paragraph_cases() {
         for yes in [
             "{#x}",
@@ -2098,6 +2130,17 @@ headings
             "[x\ny](:p) {#n}",
             "[x](->> :post) {#a b}",
             "(x) {#y}",
+            "text {#x}",
+            "Summary text {#summary}",
+            "text {#a b}",
+            "text {#}",
+            "a\nb {#x}",
+            "`code` {#x}",
+            "**b** {#x}",
+            "text\t{#x}",
+            "---- {#notes}",
+            "[a](/x) trailing {#x}",
+            "a [p](->> :post) b {#x}",
         ] {
             assert!(is_marker_paragraph(yes), "{yes:?}");
         }
@@ -2106,9 +2149,17 @@ headings
             "[x](:p) {#news}",
             "[p]((->> :post)) {#news}",
             "plain text",
-            "text {#x}",
             "{#x} more",
             "[x](->> :post)",
+            // Guards: a literal `{#…}` that is not a trailing marker.
+            "text \\{#x}",
+            "text {\\#x}",
+            "text{#x}",
+            "`{#x}`",
+            "text `a {#x}`",
+            "text {#x} more",
+            "see {#a} or {b}",
+            "t ` {#a` b}",
         ] {
             assert!(!is_marker_paragraph(no), "{no:?}");
         }
@@ -2142,6 +2193,14 @@ headings
             ("text (aside) {#x}", D::MarkerNotOnLinkExpression(s("x"))),
             ("a\nb (c) {#x}", D::MarkerNotOnLinkExpression(s("x"))),
             ("[a](/x) {#a b}", D::MarkerNotOnLinkExpression(s("a b"))),
+            ("text {#x}", D::MarkerNotOnLinkExpression(s("x"))),
+            ("Summary text {#summary}", D::MarkerNotOnLinkExpression(s("summary"))),
+            ("text {#a b}", D::MarkerNotOnLinkExpression(s("a b"))),
+            ("text {#}", D::MarkerNotOnLinkExpression(s(""))),
+            ("a\nb {#x}", D::MarkerNotOnLinkExpression(s("x"))),
+            // A named divider is marker misuse until ADR-060 P2.
+            ("---- {#notes}", D::MarkerNotOnLinkExpression(s("notes"))),
+            ("a [p](->> :post) b {#x}", D::MarkerNotOnLinkExpression(s("x"))),
             // 6. A bare marker line after a link expression.
             ("[x](->> :post)\n{#news}", D::MarkerOnOwnLine(s("news"))),
             ("[x](:p)\n{#n}", D::MarkerOnOwnLine(s("n"))),
@@ -2165,7 +2224,8 @@ headings
         );
         assert_eq!(
             D::MarkerNotOnLinkExpression(s("cover")).to_string(),
-            "`{#cover}`: slot markers apply to link expressions only"
+            "`{#cover}`: slot markers only apply to link expressions; remove it (other elements \
+             fill slots by their position), or write `\\{#cover}` to keep it as text"
         );
     }
 

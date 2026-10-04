@@ -1,5 +1,7 @@
 use crate::document::{ContentElement, Document, Keyword, LinkText};
-use crate::link_expression::{diagnose_paragraph, parse_destination, LinkExpressionDiagnostic};
+use crate::link_expression::{
+    bare_marker, diagnose_paragraph, parse_destination, split_marker, LinkExpressionDiagnostic,
+};
 use crate::parse_list_items;
 use crate::parser::{diagnose_marker_paragraph, is_link_expression, is_marker_paragraph};
 use crate::serializer::serialize_element;
@@ -142,7 +144,61 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     }
     validate_link_expressions(&doc.body, None, grammar, &mut diagnostics);
 
+    // ── Slot markers on headings ───────────────────────────────────────────
+    for slot in &doc.preamble {
+        validate_heading_markers(&slot.elements, Some(&slot.name), &mut diagnostics);
+    }
+    validate_heading_markers(&doc.unassigned, None, &mut diagnostics);
+    validate_heading_markers(&doc.body, None, &mut diagnostics);
+
     ValidationResult { diagnostics }
+}
+
+// ---------------------------------------------------------------------------
+// Slot markers on headings
+// ---------------------------------------------------------------------------
+
+/// The name of a slot marker that ends a heading's text (`Title {#x}`, or a
+/// heading that is only `{#x}`), if any. Headings store decoded text, so an
+/// escaped `\{#x}` reads the same (limit L18).
+fn heading_marker(text: &str) -> Option<&str> {
+    split_marker(text)
+        .map(|(_, name)| name)
+        .or_else(|| bare_marker(text))
+        .filter(|name| !name.contains(['{', '}', '`']))
+}
+
+/// One error per heading that ends in a slot marker. The heading stays where
+/// slot assignment put it; elements of a slot are reported against the slot.
+fn validate_heading_markers(
+    elements: &im::Vector<Spanned<ContentElement>>,
+    slot: Option<&SlotName>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    for spanned in elements {
+        let ContentElement::Heading { text, .. } = &spanned.node else {
+            continue;
+        };
+        let Some(name) = heading_marker(text) else {
+            continue;
+        };
+        let message = format!(
+            "{}: `{{#{name}}}`: slot markers only apply to link expressions; headings fill slots \
+             by position, so remove it (a heading cannot end in a literal `{{#{name}}}` yet)",
+            describe_element(&spanned.node)
+        );
+        let (message, span) = match slot {
+            Some(slot_name) => (format!("slot '{slot_name}': {message}"), None),
+            // Store-built documents carry zero spans.
+            None => (message, (spanned.span.end > spanned.span.start).then_some(spanned.span)),
+        };
+        diagnostics.push(ValidationDiagnostic {
+            severity: Severity::Error,
+            message,
+            slot: slot.cloned(),
+            span,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,12 +1229,23 @@ mod tests {
         let g = summary_grammar(true);
         for (md, needle) in [
             ("{#summary}", "`{#summary}` on its own is not allowed"),
-            ("![c](i.jpg) {#cover}", "`{#cover}`: slot markers apply to link expressions only"),
-            ("[a](/x) {#s}", "`{#s}`: slot markers apply to link expressions only"),
+            (
+                "![c](i.jpg) {#cover}",
+                "`{#cover}`: slot markers only apply to link expressions; remove it (other \
+                 elements fill slots by their position), or write `\\{#cover}` to keep it as text",
+            ),
+            (
+                "[a](/x) {#s}",
+                "`{#s}`: slot markers only apply to link expressions; remove it (other \
+                 elements fill slots by their position), or write `\\{#s}` to keep it as text",
+            ),
             (
                 "[x\ny](:p) {#n}",
                 "a slot marker must be on the same line as a one-line link expression",
             ),
+            ("Summary text {#summary}", "`{#summary}`: slot markers"),
+            ("text {#a b}", "`{#a b}`: slot markers"),
+            ("a\nb {#x}", "`{#x}`: slot markers"),
         ] {
             let d = diagnostics_for(&format!("# Title\n\n{md}\n\nOne.\n\n----\n\nBody.\n"), &g);
             assert_eq!(d.len(), 1, "{md:?}: {d:#?}");
@@ -1198,6 +1265,8 @@ mod tests {
             "[x](->> :post)\n{#news}",
             "[x\ny](:p) {#n}",
             "[p]((->>%20:post%20(map%20:x))) {#news}",
+            "text {#x}",
+            "Summary text {#summary}",
         ] {
             let src = format!("# Title\n\nOne.\n\n----\n\n{md}\n");
             let doc = parse_and_assign(&src, &g).expect("parses");
@@ -1208,6 +1277,122 @@ mod tests {
             assert_eq!(d[0].severity, Severity::Error, "{md:?}");
             assert_eq!(d[0].slot, None, "{md:?}");
         }
+    }
+
+    // ── Markers on headings ──────────────────────────────────────────────
+
+    #[test]
+    fn heading_ending_in_a_marker_is_an_error() {
+        let g = summary_grammar(true);
+        for (src, name) in [
+            ("# Title {#title}\n\nOne.\n\n----\n\nBody.\n", "title"),
+            ("# Title\n\nOne.\n\n----\n\n### Sec {#x}\n", "x"),
+            ("# {#title}\n\nOne.\n\n----\n\nBody.\n", "title"),
+            ("# Title {#a b}\n\nOne.\n\n----\n\nBody.\n", "a b"),
+        ] {
+            let d = diagnostics_for(src, &g);
+            assert_eq!(d.len(), 1, "{src:?}: {d:#?}");
+            assert_eq!(d[0].severity, Severity::Error, "{src:?}");
+            let needle = format!("`{{#{name}}}`: slot markers only apply");
+            assert!(d[0].message.contains(&needle), "{src:?}: {}", d[0].message);
+        }
+    }
+
+    #[test]
+    fn heading_marker_error_message_and_position() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for("# Title {#title}\n\nOne.\n\n----\n\nBody.\n", &g);
+        assert_eq!(
+            d[0].message,
+            "slot 'title': heading `# Title {#title}`: `{#title}`: slot markers only apply to \
+             link expressions; headings fill slots by position, so remove it (a heading cannot \
+             end in a literal `{#title}` yet)"
+        );
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("title"));
+        // The heading stays in its slot.
+        let doc = parse_and_assign("# Title {#title}\n\nOne.\n\n----\n\nBody.\n", &g).unwrap();
+        assert_eq!(doc.preamble[0].elements.len(), 1);
+        assert!(doc.unassigned.is_empty());
+        // A body heading points at its source.
+        let src = "# Title\n\nOne.\n\n----\n\n### Sec {#x}\n";
+        let d = diagnostics_for(src, &g);
+        let span = d[0].span.expect("body heading has a span");
+        assert_eq!(src[span.start..span.end].trim_end(), "### Sec {#x}");
+        assert_eq!(d[0].slot, None);
+    }
+
+    /// L18: headings store decoded text, so `\{#x}` cannot be told apart from
+    /// `{#x}`; a heading cannot end in a literal marker yet.
+    #[test]
+    fn escaped_marker_on_a_heading_is_still_an_error_l18() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for("# Title \\{#x}\n\nOne.\n\n----\n\nBody.\n", &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains("`{#x}`: slot markers only apply"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn heading_with_a_marker_not_at_the_end_is_not_an_error() {
+        let g = summary_grammar(true);
+        for heading in ["# Title {#x} more", "# see {#a} or {b}"] {
+            let d = diagnostics_for(&format!("{heading}\n\nOne.\n\n----\n\nBody.\n"), &g);
+            assert!(!d.iter().any(|d| d.message.contains("slot marker")), "{heading:?}: {d:#?}");
+        }
+    }
+
+    /// L18: a heading's code span loses its backticks in the stored text
+    /// (ADR-062 L17), so a code span ending in `{#…}` reads as a marker.
+    #[test]
+    fn heading_ending_in_code_span_marker_is_reported_l18() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for("# Title `{#x}`\n\nOne.\n\n----\n\nBody.\n", &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains("`{#x}`: slot markers only apply"), "{}", d[0].message);
+    }
+
+    /// Lists and blockquotes ending in `{#name}` are not covered by marker
+    /// misuse; see ADR-060 open questions.
+    #[test]
+    fn lists_and_blockquotes_ending_in_a_marker_are_not_marker_misuse() {
+        let g = summary_grammar(true);
+        for (md, is_kind) in [
+            ("- a {#tags}", (|e: &ContentElement| matches!(e, ContentElement::List { .. })) as fn(&ContentElement) -> bool),
+            ("> q {#x}", |e: &ContentElement| matches!(e, ContentElement::Blockquote { .. })),
+        ] {
+            let src = format!("# Title\n\nOne.\n\n----\n\n{md}\n");
+            let doc = parse_and_assign(&src, &g).expect("parses");
+            assert_eq!(doc.body.len(), 1, "{md:?}: {doc:#?}");
+            assert!(is_kind(&doc.body[0].node), "{md:?}: {:?}", doc.body[0].node);
+            let d = validate(&doc, &g).diagnostics;
+            assert!(
+                !d.iter().any(|d| d.message.contains("slot marker")),
+                "{md:?}: {d:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn marked_summary_paragraph_is_misuse_and_the_slot_is_missing() {
+        let g = summary_grammar(true);
+        let src = "# Title\n\nSummary text {#summary}\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &g).expect("parses");
+        assert_eq!(
+            doc.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![ContentElement::Paragraph { text: "Summary text {#summary}".to_string() }]
+        );
+        let d = validate(&doc, &g).diagnostics;
+        assert_eq!(d.len(), 2, "{d:#?}");
+        assert!(d.iter().all(|d| d.severity == Severity::Error), "{d:#?}");
+        assert!(
+            d.iter().any(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary")),
+            "{d:#?}"
+        );
+        assert!(
+            d.iter().any(|d| d.message.contains("`{#summary}`: slot markers")),
+            "{d:#?}"
+        );
     }
 
     // ── Raw HTML (ADR-062) ───────────────────────────────────────────────

@@ -26,11 +26,13 @@
 //!
 //! Section 0 mixes headings, paragraphs, plain links, images, lists, link
 //! expressions (unmarked; marked for a link slot; marked naming no slot;
-//! marked naming a non-link slot), every form of marker misuse, blocks no slot
-//! takes (code block, table, blockquote, HTML blocks) and paragraphs near the
-//! marker shape (an inline image, `text {#x}`, a marker on its own line). It
-//! is optionally followed by `----` and body elements, marker misuse and HTML
-//! blocks included. HTML comments (trivia, ADR-062) are inserted between any
+//! marked naming a non-link slot), every form of marker misuse (a marker
+//! after an image, a plain link or text, `Summary text {#summary}`, a marker
+//! on its own line), blocks no slot takes (code block, table, blockquote,
+//! HTML blocks) and paragraphs holding a literal `{#…}` (`text \{#x}`, a code
+//! span, a `{#x}` that is not at the end, and image-bearing paragraphs whose
+//! text holds one). It is optionally followed by `----` and body elements,
+//! marker misuse and HTML blocks included. HTML comments (trivia, ADR-062) are inserted between any
 //! two blocks, before and after `----`, and at the end of the file.
 //!
 //! Excluded, as documented on `link_expression_target` and
@@ -135,6 +137,13 @@ const MARKER_MISUSE: &[&str] = &[
     "[x](->> :post)\n{#news}",
     "[x\ny](:p) {#n}",
     "[p]((->>%20:post%20(map%20:x))) {#news}",
+    "text {#x}",
+    "text (aside) {#x}",
+    "some text\n{#x}",
+    "Summary text {#summary}",
+    "a\nb {#x}",
+    "`code` {#x}",
+    "[a](/x) trailing {#x}",
 ];
 /// Blocks no slot of the grammar family takes.
 const OTHER_BLOCKS: &[&str] = &[
@@ -152,13 +161,18 @@ const HTML_BLOCKS: &[&str] = &[
     "<!-- c --> <b>after</b>",
     "<hr/>",
 ];
-/// Paragraphs near the marker shape. `text {#x}` is not marker-shaped and
-/// stays a normal paragraph.
-const MARKERISH_PARAGRAPHS: &[&str] = &[
+/// Paragraphs holding a literal `{#…}` that is not a trailing marker: they
+/// are normal paragraphs, also when an image splits them (the paragraph's
+/// text is then written with `\{#`).
+const LITERAL_MARKER_PARAGRAPHS: &[&str] = &[
     "Text ![i](x.png)",
-    "some text\n{#x}",
-    "text (aside) {#x}",
-    "text {#x}",
+    "text \\{#x}",
+    "`{#x}`",
+    "text {#x} more",
+    "see {#a} or {b}",
+    "Text {#x} ![i](x.png)",
+    "Text \\{#x} ![i](x.png)",
+    "`{#x}` ![i](x.png)",
 ];
 const BODY_HEADINGS: &[&str] = &["### Section", "#### Deeper", "## Too high"];
 
@@ -204,7 +218,7 @@ fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_
         17..=19 => rng.pick(MARKER_MISUSE).to_string(),
         20..=21 => rng.pick(OTHER_BLOCKS).to_string(),
         22..=23 => rng.pick(HTML_BLOCKS).to_string(),
-        _ => rng.pick(MARKERISH_PARAGRAPHS).to_string(),
+        _ => rng.pick(LITERAL_MARKER_PARAGRAPHS).to_string(),
     }
 }
 
@@ -432,6 +446,7 @@ fn generator_exercises_unassigned_bound_and_body() {
     let mut bound = 0;
     let mut marker_paragraphs = 0;
     let mut body_marker_paragraphs = 0;
+    let mut escaped_marker_paragraphs = 0;
     let mut no_separator_unassigned = 0;
     let mut unassigned_other_blocks = 0;
     let mut unassigned_html = 0;
@@ -503,11 +518,25 @@ fn generator_exercises_unassigned_bound_and_body() {
         };
         marker_paragraphs += doc.unassigned.iter().filter(|e| is_marker(&e.node)).count();
         body_marker_paragraphs += doc.body.iter().filter(|e| is_marker(&e.node)).count();
+        let is_escaped = |e: &schema::Spanned<ContentElement>| {
+            matches!(&e.node, ContentElement::Paragraph { text } if text.contains("\\{#"))
+        };
+        escaped_marker_paragraphs += doc
+            .preamble
+            .iter()
+            .flat_map(|s| s.elements.iter())
+            .chain(doc.body.iter())
+            .filter(|e| is_escaped(e))
+            .count();
     }
     assert!(unassigned > 500, "too few unassigned elements: {unassigned}");
     assert!(bound > 100, "too few bound expressions: {bound}");
     assert!(marker_paragraphs > 100, "too few marker paragraphs: {marker_paragraphs}");
     assert!(body_marker_paragraphs > 50, "too few body marker paragraphs: {body_marker_paragraphs}");
+    assert!(
+        escaped_marker_paragraphs > 20,
+        "too few slotted or body paragraphs with a literal `\\{{#`: {escaped_marker_paragraphs}"
+    );
     assert!(no_separator_unassigned > 50, "too few separator-less documents: {no_separator_unassigned}");
     assert!(
         unassigned_other_blocks > 100,
@@ -524,16 +553,55 @@ fn generator_exercises_unassigned_bound_and_body() {
     );
 }
 
-/// `text {#x}` is not marker-shaped: it stays a normal paragraph, also after
-/// a save.
+/// A literal marker is never marker misuse: in section 0 every
+/// `LITERAL_MARKER_PARAGRAPHS` entry fills slots (nothing unassigned), and in
+/// either section no marker diagnostic is reported.
 #[test]
-fn text_before_a_marker_is_a_normal_paragraph() {
+fn literal_markers_are_never_misuse() {
+    let (_, grammar) = grammars().pop().expect("with body");
+    let is_marker_diagnostic = |m: &str| {
+        let m = m.to_lowercase();
+        m.contains("slot marker") || m.contains("on its own is not allowed")
+    };
+    let mut failures = Vec::new();
+    for p in LITERAL_MARKER_PARAGRAPHS {
+        for (where_, src) in [
+            ("preamble", format!("# Home\n\n{p}\n\n----\n\nBody.\n")),
+            ("body", format!("# Home\n\nOne.\n\n----\n\n{p}\n")),
+        ] {
+            let doc = assign(&src, &grammar);
+            if where_ == "preamble" && !doc.unassigned.is_empty() {
+                failures.push(format!("{where_} {p:?}: unassigned {:#?}", nodes(&doc.unassigned)));
+            }
+            let marker: Vec<String> = content::validate(&doc, &grammar)
+                .diagnostics
+                .into_iter()
+                .map(|d| d.message)
+                .filter(|m| is_marker_diagnostic(m))
+                .collect();
+            if !marker.is_empty() {
+                failures.push(format!("{where_} {p:?}: {marker:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// `text {#x}` is marker misuse: kept verbatim in `unassigned`, never in the
+/// `summary` slot, also after a save.
+#[test]
+fn text_before_a_marker_is_marker_misuse() {
     let (_, grammar) = grammars().pop().expect("with body");
     let src = "# Home\n\ntext {#x}\n";
-    let expected = ContentElement::Paragraph { text: "text {#x}".to_string() };
-    let parsed = nodes(&parse_document(src).expect("parses").elements);
-    assert_eq!(parsed[1], expected, "{parsed:#?}");
-    let saved = serialize_document(&assign(src, &grammar));
-    let reparsed = nodes(&parse_document(&saved).expect("parses").elements);
-    assert_eq!(reparsed[1], expected, "saved:\n{saved}");
+    let expected = vec![ContentElement::Paragraph { text: "text {#x}".to_string() }];
+    let check = |doc: &Document, label: &str| {
+        assert_eq!(nodes(&doc.unassigned), expected, "{label}: {doc:#?}");
+        let summary = doc.preamble.iter().find(|s| s.name.as_str() == "summary");
+        assert!(summary.is_none_or(|s| s.elements.is_empty()), "{label}: {doc:#?}");
+    };
+    let d1 = assign(src, &grammar);
+    check(&d1, "before save");
+    let saved = serialize_document(&d1);
+    assert!(saved.contains("text {#x}"), "saved:\n{saved}");
+    check(&assign(&saved, &grammar), "after save");
 }

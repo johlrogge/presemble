@@ -1592,6 +1592,34 @@ mod tests {
         );
     }
 
+    // ── Markers on text ──────────────────────────────────────────────────────
+
+    fn set_body_paragraph_text(text: &str) -> (String, bool) {
+        let (store, root, grammar) = make_doc_store_from("# Title\n\n----\n\nBefore.\n");
+        let root_env = setup_with_prelude(store.clone());
+        let selection = crate::eval_str_with_root(
+            r#"(ned/filter (ned/descendants (ned/body-at (ned/doc-by-path "content/post/html.md") 0)) :text)"#,
+            &root_env,
+        )
+        .unwrap();
+        call(&root_env, "ned/set-text", vec![selection, Value::Text(text.to_string())]).unwrap();
+        saved_and_validity(&store, root, &grammar)
+    }
+
+    #[test]
+    fn set_text_ending_in_a_marker_saves_and_is_invalid() {
+        let (saved, valid) = set_body_paragraph_text("Summary text {#summary}");
+        assert!(saved.contains("Summary text {#summary}"), "{saved}");
+        assert!(!valid, "marker misuse is an Error: {saved}");
+    }
+
+    #[test]
+    fn set_text_ending_in_an_escaped_marker_saves_and_is_valid() {
+        let (saved, valid) = set_body_paragraph_text("Summary text \\{#summary}");
+        assert!(saved.contains("Summary text \\{#summary}"), "{saved}");
+        assert!(valid, "{saved}");
+    }
+
     #[test]
     fn comments_do_not_shift_body_at_indices() {
         let (store, _root, _grammar) = make_doc_store_from(
