@@ -1395,6 +1395,21 @@ mod tests {
     }
 
     #[test]
+    fn literal_angle_brackets_in_headings_and_blockquotes_render_escaped() {
+        for (md, escaped) in [
+            ("## The `<div>` element", "&lt;div&gt;"),
+            ("# Use \\<div>", "&lt;div&gt;"),
+            ("> a \\<b>", "&lt;b&gt;"),
+            ("# a <b>x</b>", "&lt;b&gt;x&lt;/b&gt;"),
+        ] {
+            let elements = content::parse_document(md).expect("parses").elements;
+            let html = render_body_html(&elements, None);
+            assert!(html.contains(escaped), "{md:?}: {html}");
+            assert!(!html.contains("<div") && !html.contains("<b>"), "{md:?}: {html}");
+        }
+    }
+
+    #[test]
     fn comments_are_never_rendered() {
         // ADR-062: comments are trivia, not body elements.
         let grammar = schema::parse_schema("# Title {#title}\n\n----\n\nBody.\n").expect("schema");

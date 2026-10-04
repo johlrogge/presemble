@@ -361,7 +361,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     });
                     state = State::Idle;
                 } else if let State::Paragraph { text, images, byte_range, .. } = state {
-                    if !text.trim().is_empty() {
+                    // A text-only paragraph is kept whenever its source is
+                    // non-empty: one holding only inline HTML has no text
+                    // events but is content (ADR-062 D3).
+                    let has_source = images.is_empty()
+                        && input.get(byte_range.clone()).is_some_and(|s| !s.trim().is_empty());
+                    if has_source || !text.trim().is_empty() {
                         // When the paragraph contains only text (no images), use the original
                         // markdown source text so inline markers (**bold**, `code`, _italic_)
                         // are preserved for the renderer. When images are mixed in, the source
@@ -519,8 +524,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             // Only a top-level HTML block becomes an element. Inside a
-            // blockquote the HTML is not captured (limit L13); lists and link
-            // expressions consume their events at the top of the loop.
+            // blockquote the HTML is kept in the quote's text as literal text,
+            // which the serializer writes escaped (limit L13); lists and link
+            // expressions consume
+            // their events at the top of the loop.
             Event::Start(Tag::HtmlBlock) if matches!(state, State::Idle) => {
                 state = State::HtmlBlock { byte_range: range };
             }
@@ -626,7 +633,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 let s = text.as_ref();
                 match &mut state {
                     State::Heading { text: buf, .. } => buf.push_str(s),
-                    State::Paragraph { text: buf, .. } => buf.push_str(s),
+                    // Only an image-bearing paragraph uses this text (others
+                    // keep their source): a literal `<` stays literal
+                    // (ADR-062, limit L15).
+                    State::Paragraph { text: buf, .. } => buf.push_str(&s.replace('<', "\\<")),
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
@@ -645,7 +655,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 let s = text.as_ref();
                 match &mut state {
                     State::Heading { text: buf, .. } => buf.push_str(s),
-                    State::Paragraph { text: buf, .. } => buf.push_str(s),
+                    // Only an image-bearing paragraph uses this text (others
+                    // keep their source): a literal `<` stays literal
+                    // (ADR-062, limit L15).
+                    State::Paragraph { text: buf, .. } => buf.push_str(&s.replace('<', "\\<")),
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
@@ -667,6 +680,21 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::Heading { text, .. } => text.push(' '),
                     State::Blockquote { text, .. } => text.push(' '),
                     _ => {}
+                }
+            }
+
+            // Inline HTML in heading and blockquote text is kept as literal
+            // text: rendered escaped, not reported, written as `\<` (limit
+            // L13). Paragraphs keep their source anyway.
+            Event::InlineHtml(s) => match &mut state {
+                State::Heading { text, .. } | State::Blockquote { text, .. } => text.push_str(&s),
+                _ => {}
+            },
+            // An HTML block inside a blockquote is kept as text (limit L13);
+            // a top-level one is captured by `State::HtmlBlock`.
+            Event::Html(s) => {
+                if let State::Blockquote { text, .. } = &mut state {
+                    text.push_str(&s);
                 }
             }
 
@@ -849,14 +877,133 @@ mod tests {
         assert_eq!(doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1]);
     }
 
-    /// HTML inside a blockquote is not captured as an element (limit L13).
+    /// Limit L13: HTML in headings and blockquotes is read as literal text:
+    /// shown escaped, not reported, and written with every `<` as `\<`.
+    ///
+    /// A blockquote's text is decoded and its soft breaks are joined on the
+    /// next load, so the first save keeps the lines and the second joins them;
+    /// the output is stable from the second save on.
     #[test]
-    fn html_inside_a_blockquote_is_not_an_element() {
+    fn html_inside_a_blockquote_is_literal_text_l13() {
         let doc = parse_document("> <div>\n> x\n> </div>\n").unwrap();
-        assert!(
-            doc.elements.iter().all(|e| !matches!(e.node, ContentElement::HtmlBlock { .. })),
-            "{:#?}",
-            doc.elements
+        let text = match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
+            [ContentElement::Blockquote { text }] => text.clone(),
+            other => panic!("{other:#?}"),
+        };
+        assert_eq!(text, "<div>\nx\n</div>");
+
+        let first = crate::serializer::serialize_elements(&doc.elements);
+        assert_eq!(first, "> \\<div>\n> x\n> \\</div>");
+        assert!(crate::html::first_inline_html(&first).is_none(), "literal after a save");
+
+        let second =
+            crate::serializer::serialize_elements(&parse_document(&first).unwrap().elements);
+        assert_eq!(second, "> \\<div> x \\</div>");
+        assert!(crate::html::first_inline_html(&second).is_none(), "still literal");
+        let third =
+            crate::serializer::serialize_elements(&parse_document(&second).unwrap().elements);
+        assert_eq!(third, second, "stable from the second save on");
+    }
+
+    /// A heading with raw inline HTML is written escaped and stable from the
+    /// first save on.
+    #[test]
+    fn inline_html_in_a_heading_is_written_escaped_l13() {
+        let doc = parse_document("# a <b>x</b>\n").unwrap();
+        let first = crate::serializer::serialize_elements(&doc.elements);
+        assert_eq!(first, "# a \\<b>x\\</b>");
+        let again = parse_document(&first).unwrap();
+        assert_eq!(again.elements[0].node, doc.elements[0].node);
+        assert_eq!(crate::serializer::serialize_elements(&again.elements), first);
+    }
+
+    /// Literal `<` in headings and blockquotes round-trips without a second
+    /// backslash, also at the start of a line.
+    #[test]
+    fn literal_angle_brackets_in_headings_and_blockquotes_round_trip() {
+        for (md, written) in [
+            ("## The `<div>` element", "## The \\<div> element"),
+            ("## Using `Vec<T>`", "## Using Vec\\<T>"),
+            ("# Use \\<div>", "# Use \\<div>"),
+            ("> a \\<b>", "> a \\<b>"),
+            ("> \\<div> starts the quote", "> \\<div> starts the quote"),
+            ("# \\<x> first", "# \\<x> first"),
+        ] {
+            let doc = parse_document(md).unwrap();
+            let el = &doc.elements[0].node;
+            assert_eq!(crate::check_block_round_trip(el), Ok(()), "{md:?}");
+            assert_eq!(crate::serializer::serialize_element(el), written, "{md:?}");
+        }
+    }
+
+    /// Limit L15 also covers image-bearing paragraphs: their text is built
+    /// from events, with a literal `<` kept as `\<`.
+    #[test]
+    fn image_bearing_paragraph_keeps_a_literal_angle_bracket() {
+        let doc = parse_document("![i](a.png) a \\<b>\n").unwrap();
+        let nodes: Vec<ContentElement> = doc.elements.iter().map(|e| e.node.clone()).collect();
+        assert_eq!(
+            nodes,
+            vec![
+                ContentElement::Paragraph { text: "a \\<b>".to_string() },
+                ContentElement::Image { alt: Some("i".to_string()), path: "a.png".to_string() },
+            ]
+        );
+        let saved = crate::serializer::serialize_elements(&doc.elements);
+        let again: Vec<ContentElement> =
+            parse_document(&saved).unwrap().elements.iter().map(|e| e.node.clone()).collect();
+        assert_eq!(again, nodes, "{saved:?}");
+    }
+
+    /// Inline HTML in headings and blockquotes is kept as typed.
+    #[test]
+    fn inline_html_in_headings_and_blockquotes_is_kept() {
+        let doc = parse_document("## a <b>x</b>\n\n> q <i>y</i> z\n").unwrap();
+        assert_eq!(
+            doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![
+                ContentElement::Heading {
+                    level: HeadingLevel::new(2).unwrap(),
+                    text: "a <b>x</b>".to_string()
+                },
+                ContentElement::Blockquote { text: "q <i>y</i> z".to_string() },
+            ]
+        );
+    }
+
+    /// A paragraph of only inline HTML has no text events; it is kept.
+    #[test]
+    fn inline_html_only_paragraph_is_kept_and_round_trips() {
+        let src = "<img src=a> <img src=b>";
+        let doc = parse_document(&format!("{src}\n")).unwrap();
+        assert_eq!(
+            doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![ContentElement::Paragraph { text: src.to_string() }]
+        );
+        assert_eq!(crate::serializer::serialize_elements(&doc.elements), src);
+    }
+
+    /// Limit L15 (until ADR-059): inline HTML in link text, image alt text
+    /// and paragraphs that carry inline images is dropped on load.
+    #[test]
+    fn inline_html_in_links_alt_text_and_image_paragraphs_is_dropped_l15() {
+        let nodes = |md: &str| -> Vec<ContentElement> {
+            parse_document(md).unwrap().elements.iter().map(|e| e.node.clone()).collect()
+        };
+        assert_eq!(
+            nodes("[a <b>x</b>](/p)\n"),
+            vec![ContentElement::Link { text: "a x".to_string(), href: "/p".to_string() }]
+        );
+        assert_eq!(
+            nodes("![a <b>x</b>](i.png)\n"),
+            vec![ContentElement::Image { alt: Some("a x".to_string()), path: "i.png".to_string() }]
+        );
+        assert_eq!(
+            nodes("t <b>x</b> ![i](i.png)\n"),
+            vec![
+                ContentElement::Paragraph { text: "t x".to_string() },
+                ContentElement::Image { alt: Some("i".to_string()), path: "i.png".to_string() },
+            ]
         );
     }
 

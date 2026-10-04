@@ -92,8 +92,10 @@ comments are stripped and are not an Error.
 - Body indices in existing files that contain HTML blocks shift, because those
   blocks now count.
 - Known limits:
-  - **L13:** HTML inside a blockquote becomes literal text on the first save,
-    until blockquotes store their source.
+  - **L13:** HTML in headings and blockquotes is read as literal text: shown
+    escaped, not reported, written escaped on save, until they store their
+    source (ADR-057 OQ6). A heading is stable from the first save on; a
+    multi-line blockquote from the second, when its lines are joined.
   - **L14:** an HTML block of CommonMark types 1–5 (`<script>`, `<pre>`,
     `<style>`, `<textarea>`, comments, processing instructions, declarations,
     CDATA) with no end condition runs to the end of the file, as CommonMark
@@ -102,6 +104,7 @@ comments are stripped and are not an Error.
     is reported.
   - **L15:** inline HTML in link text, image alt text and image-bearing
     paragraphs is still dropped, until ADR-059 (inline segments).
+    Image-bearing paragraphs escape a literal `<` as `\<`.
   - **L16:** GFM drops table cells beyond the header's column count. An
     unescaped `|` inside a code span splits the cell (`` `a|b` `` reads as
     `` `a `` and `` b` ``), so the cells pushed past the last column are lost

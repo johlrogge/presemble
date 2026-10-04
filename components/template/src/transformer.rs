@@ -3583,6 +3583,14 @@ mod tests {
     }
 
     #[test]
+    fn native_literal_angle_brackets_in_headings_and_blockquotes_render_escaped() {
+        let html = render_native_body_block("heading", "The <div> element", Some(2));
+        assert!(html.contains("The &lt;div&gt; element") && !html.contains("<div"), "{html}");
+        let html = render_native_body_block("blockquote", "a <b>", None);
+        assert!(html.contains("a &lt;b&gt;") && !html.contains("<b>"), "{html}");
+    }
+
+    #[test]
     fn native_body_comment_trivia_is_never_rendered() {
         // ADR-062: comments are `_trivia-before` / `_trivia-end` attributes.
         let mut store = node_store::NodeStore::new();

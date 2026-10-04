@@ -104,7 +104,7 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
     match element {
         ContentElement::Heading { level, text } => {
             let hashes = "#".repeat(level.value() as usize);
-            format!("{hashes} {}", escape_closing_hashes(text))
+            format!("{hashes} {}", escape_closing_hashes(&escape_angle_brackets(text)))
         }
         ContentElement::Paragraph { text } => escape_block_lines(text).join("\n"),
         ContentElement::Link { text, href } => format!("[{text}]({})", destination(href)),
@@ -136,7 +136,7 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
         }
         // Verbatim (ADR-062); the `"\n\n"` join supplies the blank lines.
         ContentElement::HtmlBlock { source } => source.clone(),
-        ContentElement::Blockquote { text } => escape_block_lines(text)
+        ContentElement::Blockquote { text } => escape_block_lines(&escape_angle_brackets(text))
             .iter()
             .map(|l| format!("> {l}"))
             .collect::<Vec<_>>()
@@ -685,6 +685,13 @@ fn parse_closing_tag(b: &[u8]) -> Option<usize> {
 }
 
 /// Escape a trailing run of `#` that would read as a closing ATX sequence.
+/// Write every `<` of literal text as `\<`, so headings and blockquotes never
+/// write raw HTML (ADR-062, limit L13): what was read as text is written as
+/// text.
+fn escape_angle_brackets(text: &str) -> String {
+    text.replace('<', "\\<")
+}
+
 fn escape_closing_hashes(text: &str) -> String {
     let trimmed = text.trim_end_matches([' ', '\t']);
     let run = trimmed.len() - trimmed.trim_end_matches('#').len();

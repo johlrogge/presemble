@@ -116,6 +116,13 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     // ── Raw HTML in the body (ADR-062) ─────────────────────────────────────
     validate_html(&doc.body, &mut diagnostics);
 
+    // ── Inline HTML in every container (ADR-062 D3) ────────────────────────
+    for slot in &doc.preamble {
+        validate_inline_html(&slot.elements, Some(&slot.name), &mut diagnostics);
+    }
+    validate_inline_html(&doc.unassigned, None, &mut diagnostics);
+    validate_inline_html(&doc.body, None, &mut diagnostics);
+
     // ── Body validation ────────────────────────────────────────────────────
     match &grammar.body {
         Some(body_rules) => validate_body(&doc.body, body_rules, &mut diagnostics),
@@ -235,6 +242,46 @@ fn validate_html(
                 span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
             });
         }
+    }
+}
+
+/// One error per paragraph or list that holds inline HTML (ADR-062 D3): the
+/// kinds stored as markdown source. HTML blocks have their own error
+/// ([`validate_html`]); comment-only HTML is never reported. Elements of a
+/// slot are reported against the slot.
+///
+/// Headings and blockquotes store literal text: HTML in them is shown
+/// escaped, written escaped on save and not reported (limit L13).
+fn validate_inline_html(
+    elements: &im::Vector<Spanned<ContentElement>>,
+    slot: Option<&SlotName>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    for spanned in elements {
+        let source = match &spanned.node {
+            ContentElement::Paragraph { text } => text,
+            ContentElement::List { source } => source,
+            _ => continue,
+        };
+        let Some(html) = crate::html::first_inline_html(source) else {
+            continue;
+        };
+        let message = format!(
+            "{}: inline HTML `{html}` is not allowed in content; it is kept in the file, but this \
+             page cannot be published until it is removed (write `\\<` for a literal `<`, or use \
+             backticks for code)",
+            describe_element(&spanned.node)
+        );
+        let message = match slot {
+            Some(name) => format!("slot '{name}': {message}"),
+            None => message,
+        };
+        diagnostics.push(ValidationDiagnostic {
+            severity: Severity::Error,
+            message,
+            slot: slot.cloned(),
+            span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
+        });
     }
 }
 
@@ -1205,6 +1252,84 @@ mod tests {
         let span = d[0].span.expect("unassigned HTML block has a span");
         assert_eq!(src[span.start..span.end].trim_end(), "<div>x</div>");
         assert_eq!(crate::parser::byte_to_position(src, span.start).0, 2, "line (0-based)");
+    }
+
+    // ── Inline HTML (ADR-062 D3) ─────────────────────────────────────────
+
+    const INLINE_TAIL: &str = " is not allowed in content; it is kept in the file, but this page \
+                               cannot be published until it is removed (write `\\<` for a literal \
+                               `<`, or use backticks for code)";
+
+    fn body_diagnostics(body: &str) -> Vec<ValidationDiagnostic> {
+        let g = summary_grammar(true);
+        diagnostics_for(&format!("# Title\n\nOne.\n\n----\n\n{body}\n"), &g)
+    }
+
+    #[test]
+    fn inline_html_in_a_paragraph_is_an_error_with_a_span() {
+        let src = "# Title\n\nOne.\n\n----\n\na <b>x</b> b\n";
+        let d = diagnostics_for(src, &summary_grammar(true));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(
+            d[0].message,
+            format!("paragraph `a <b>x</b> b`: inline HTML `<b>`{INLINE_TAIL}")
+        );
+        let span = d[0].span.expect("span");
+        assert_eq!(src[span.start..span.end].trim_end(), "a <b>x</b> b");
+    }
+
+    #[test]
+    fn inline_comments_escapes_code_and_autolinks_are_not_errors() {
+        for body in ["a <!-- c --> b", "a \\<b> b", "a `<b>` b", "see <https://x> here"] {
+            let d = body_diagnostics(body);
+            assert!(d.is_empty(), "{body:?}: {d:#?}");
+        }
+    }
+
+    #[test]
+    fn inline_html_only_paragraph_is_kept_and_an_error() {
+        let d = body_diagnostics("<img src=a> <img src=b>");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(d[0].message.contains("inline HTML `<img src=a>`"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn inline_html_in_a_list_is_an_error() {
+        let d = body_diagnostics("- item <span>s</span>");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(d[0].message.contains("inline HTML `<span>`"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn headings_and_blockquotes_hold_literal_text_and_are_not_reported() {
+        for body in [
+            "### a <b>x</b>",
+            "### The `<div>` element",
+            "### Using `Vec<T>`",
+            "### Use \\<div>",
+            "> q <i>y</i>",
+            "> a \\<b>",
+            "![i](a.png) a \\<b>",
+        ] {
+            let d = body_diagnostics(body);
+            assert!(d.is_empty(), "{body:?}: {d:#?}");
+        }
+    }
+
+    #[test]
+    fn inline_html_in_a_slot_is_reported_against_the_slot() {
+        let d = diagnostics_for("# Title\n\nOne <b>x</b>.\n\n----\n\nBody.\n", &summary_grammar(true));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("summary"));
+        assert!(d[0].message.starts_with("slot 'summary': paragraph"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn html_blocks_are_not_reported_twice() {
+        let d = body_diagnostics("<div>\nx <b>y</b>\n</div>");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(d[0].message.starts_with("HTML block"), "{}", d[0].message);
     }
 
     #[test]

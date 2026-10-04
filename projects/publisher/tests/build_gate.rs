@@ -108,6 +108,43 @@ fn html_block_fails_the_build() {
 }
 
 #[test]
+fn inline_html_fails_the_build() {
+    let (tmp, site) = valid_site_with_body_appended("\nSome <b>bold</b> text.\n");
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(stderr.contains("content/article/hello-world.md:"), "stderr:\n{stderr}");
+    assert!(stderr.contains("inline HTML `<b>` is not allowed in content"), "stderr:\n{stderr}");
+    assert!(!index_html(&tmp).exists(), "no page should be written");
+}
+
+#[test]
+fn heading_with_html_in_a_code_span_builds() {
+    let (tmp, site) = valid_site_with_body_appended("\n### The `<div>` element\n");
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(index_html(&tmp).exists(), "index.html should be written");
+}
+
+#[test]
+fn html_comment_does_not_fail_the_build() {
+    let (tmp, site) = valid_site_with_body_appended(
+        "\n<!-- an editorial note -->\n\nText with <!-- an inline note --> in it.\n",
+    );
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(index_html(&tmp).exists(), "index.html should be written");
+}
+
+#[test]
 fn html_inside_code_fence_does_not_fail() {
     let (tmp, site) = valid_site_with_body_appended("\n```html\n<div>x</div>\n```\n");
 
