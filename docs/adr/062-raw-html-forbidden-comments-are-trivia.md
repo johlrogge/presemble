@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -31,6 +31,10 @@ Proposed
 Raw HTML is not allowed in content. Every HTML block is kept verbatim, saved,
 never rendered, and reported as an Error, so the page is unpublishable under
 ADR-061.
+
+Content stays HTML-free even though CommonMark allows HTML, following the
+direction of Hugo (goldmark's `unsafe = false` default) and other publishers:
+presentation belongs in templates.
 
 ### 2. Comments are trivia (D1)
 
@@ -109,6 +113,10 @@ comments are stripped and are not an Error.
     unescaped `|` inside a code span splits the cell (`` `a|b` `` reads as
     `` `a `` and `` b` ``), so the cells pushed past the last column are lost
     on save. Write `` `a\|b` `` instead.
+  - **L17:** code spans in headings and blockquotes lose their backticks on
+    save (``## The `<div>` element`` is written as `## The \<div> element`).
+    This is fixed when headings and blockquotes store their markdown source
+    (ADR-057 OQ6); raw HTML in them then becomes an Error too.
 - An HTML comment between two same-kind lists keeps them separate, because the
   comment is trivia of the second list. Follow-up: when a save would put two
   same-kind lists next to each other with no comment between them (L10), the

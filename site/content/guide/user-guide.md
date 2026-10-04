@@ -175,6 +175,16 @@ The body section supports the full range of markdown block and inline content:
 | Italic | `*text*` or `_text_` |
 | Inline code | `` `code` `` |
 
+### HTML and comments in content
+
+Presemble keeps content free of HTML, even though markdown allows it, like Hugo does by default (goldmark's `unsafe = false`). Presentation belongs in templates.
+
+- **HTML blocks** (a line that starts with a tag such as `<div>`) are kept in the file, but the page cannot be published until they are removed. In `presemble serve` a placeholder shows where the block is.
+- **Inline HTML** in paragraphs and lists (such as `<b>bold</b>` inside a sentence) also stops the page from publishing.
+- **In headings and blockquotes**, inline HTML is shown as text and saved escaped, for now.
+- **The fix:** delete the HTML, write `\<` for a literal `<`, or put code in backticks (`` `<div>` ``).
+- **HTML comments** (`<!-- … -->`) are kept in the file, move with the block that follows them, and are never published.
+
 ### Full schema example
 
 ```markdown
@@ -501,7 +511,7 @@ content/post/my-post.md: error: slot 'title': missing required element
 1 validation error(s) in 1 file(s); site not published
 ```
 
-Warnings are printed too, but they don't fail the build. A schema that fails to parse is an error, and so is every page that uses it ("not built: schema `schemas/post/item.md` does not parse"). Fix the errors and build again; `presemble serve` shows the same pages while you work on them.
+Warnings are printed too, but they don't fail the build. A schema that fails to parse is an error, and so is every page that uses it ("not built: schema `schemas/post/item.md` does not parse"). Fix the errors and build again; `presemble serve` shows the same pages while you work on them. HTML in content is one such error; see [HTML and comments in content](#html-and-comments-in-content).
 
 ### CLI flags
 
