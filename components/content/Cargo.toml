@@ -11,3 +11,6 @@ schema = { workspace = true }
 pulldown-cmark = "0.12"
 im = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

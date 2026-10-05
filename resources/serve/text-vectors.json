@@ -1,0 +1,34 @@
+{
+  "atx": [
+    ["# Title", "Title"],
+    ["## C#", "C#"],
+    ["# Title #", "Title"],
+    ["# Title \\#", "Title \\#"],
+    ["# #", ""],
+    ["#\tA\t##\t", "A"],
+    ["   ## x ###", "x"],
+    ["## The `<div>` element", "The `<div>` element"]
+  ],
+  "normalize": [
+    ["a  b", "a b"],
+    [" a\nb\t", "a b"],
+    ["\uFEFFa", "\uFEFFa"]
+  ],
+  "plain": [
+    ["The `<div>` element", "The <div> element"],
+    ["Use \\<div>", "Use <div>"],
+    ["**Bold** _it_", "Bold it"],
+    ["a <b>x</b>", "a <b>x</b>"],
+    ["a <!-- c --> b", "a b"],
+    ["![i](x.png) T", "T"],
+    ["[l](/a) &amp; b", "l & b"],
+    ["1. Intro", "1. Intro"],
+    ["x\ny", "x y"]
+  ],
+  "capitalize_first": [
+    ["*hello*", "*Hello*"],
+    ["`code` x", null],
+    ["\\*x", null],
+    ["Ok", null]
+  ]
+}

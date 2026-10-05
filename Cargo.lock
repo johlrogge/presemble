@@ -406,6 +406,7 @@ dependencies = [
  "im",
  "pulldown-cmark",
  "schema",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1577,6 +1578,7 @@ dependencies = [
  "im",
  "node_store",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

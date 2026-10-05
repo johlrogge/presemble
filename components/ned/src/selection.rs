@@ -929,4 +929,20 @@ mod tests {
         assert!(sel.contains(new_p));
         assert!(!sel.contains(p0));
     }
+
+    /// `normalize_ws` must agree with `content::inline::normalize_plain_text`
+    /// and the browser's normalisation (ADR-063 §3); all are checked against
+    /// the same shared vectors.
+    #[test]
+    fn normalize_ws_matches_shared_vectors() {
+        let all: serde_json::Value =
+            serde_json::from_str(include_str!("../../../resources/serve/text-vectors.json"))
+                .expect("text-vectors.json parses");
+        let vectors = all["normalize"].as_array().expect("normalize group");
+        assert!(!vectors.is_empty());
+        for pair in vectors {
+            let input = pair[0].as_str().unwrap();
+            assert_eq!(normalize_ws(input), pair[1].as_str().unwrap(), "normalize {input:?}");
+        }
+    }
 }

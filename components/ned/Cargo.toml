@@ -10,3 +10,6 @@ interface = "ned"
 node_store = { workspace = true }
 im = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

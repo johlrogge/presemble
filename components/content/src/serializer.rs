@@ -692,7 +692,7 @@ fn escape_angle_brackets(text: &str) -> String {
     text.replace('<', "\\<")
 }
 
-fn escape_closing_hashes(text: &str) -> String {
+pub(crate) fn escape_closing_hashes(text: &str) -> String {
     let trimmed = text.trim_end_matches([' ', '\t']);
     let run = trimmed.len() - trimmed.trim_end_matches('#').len();
     if run == 0 {

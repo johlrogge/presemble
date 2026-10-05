@@ -4,6 +4,7 @@ mod diff;
 mod document;
 mod error;
 pub mod html;
+pub mod inline;
 mod link_expression;
 mod parser;
 mod serializer;
@@ -24,6 +25,7 @@ pub use document::{
     SortDirection,
 };
 pub use error::ContentError;
+pub use inline::{AsPlainText, MarkdownText};
 pub use link_expression::{
     diagnose_paragraph, parse_thread, recognise_paragraph, Candidate, LinkExpressionDiagnostic,
     LinkExpressionError,
