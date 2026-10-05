@@ -611,6 +611,16 @@ mod tests {
         assert_eq!(slot.hint_text.as_deref(), Some("Your blog post title"));
     }
 
+    /// Guard (ADR-063): schemas have their own heading reader, unaffected by
+    /// content headings storing source.
+    #[test]
+    fn schema_heading_with_code_span_hint_unchanged() {
+        let grammar = parse("# Your `post` title {#title}\n");
+        let slot = &grammar.preamble[0];
+        assert_eq!(slot.name.as_str(), "title");
+        assert_eq!(slot.hint_text.as_deref(), Some("Your `post` title"));
+    }
+
     // -------------------------------------------------------------------
     // Paragraph element
     // -------------------------------------------------------------------

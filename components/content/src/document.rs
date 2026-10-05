@@ -132,7 +132,10 @@ impl Document {
 /// A structural element within a content document.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentElement {
-    Heading { level: HeadingLevel, text: String },
+    /// `source` is the inline markdown of the heading line, without the `#`
+    /// markers or a closing `#` run (ADR-063). Readers that need text use
+    /// [`crate::inline::AsPlainText`].
+    Heading { level: HeadingLevel, source: crate::inline::MarkdownText },
     Paragraph { text: String },
     Image { alt: Option<String>, path: String },
     Link { text: String, href: String },

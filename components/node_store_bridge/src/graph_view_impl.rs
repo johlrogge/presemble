@@ -726,6 +726,32 @@ mod tests {
         assert!(matches!(result.as_value(), Value::Text(t) if t == "Via ConsistsOf"));
     }
 
+    /// `:apply` reads a store heading through `resolve`: its plain text, not
+    /// its stored source (ADR-063).
+    #[test]
+    fn apply_text_on_store_heading_is_plain_text() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(Node::Element(heading_name));
+        let text = store.add_node(Node::Text("Use \\<div>".into()));
+        store.add_edge(heading, Edge::Child(text));
+        let title_name = store.intern("title");
+        store.add_edge(root, Edge::ConsistsOf { name: title_name, part: heading });
+
+        let view = NodeStoreView::new(&store, root);
+        let prefixed = PrefixedGraphView::new("input".to_string(), view);
+        let nodes = template::parse_template_xml(
+            r#"<presemble:insert data="input.title" as="h1" apply="text" />"#,
+        )
+        .unwrap();
+        let reg = template::NullRegistry;
+        let ctx = template::RenderContext::editorial(&reg);
+        let html = template::serialize_nodes(&template::transform(nodes, &prefixed, &ctx).unwrap());
+        assert!(html.contains(">Use &lt;div&gt;</h1>"), "{html}");
+    }
+
     #[test]
     fn iter_keys_includes_consists_of_names() {
         let mut store = NodeStore::new();

@@ -146,6 +146,8 @@ struct Domain {
     link_statics: &'static [&'static str],
     /// Inline markup for list items (lists store their source verbatim).
     inline_markup: &'static [&'static str],
+    /// Inline markup for headings (headings store their source, ADR-063).
+    heading_markup: &'static [&'static str],
 }
 
 const DOMAIN: Domain = Domain {
@@ -196,6 +198,7 @@ const DOMAIN: Domain = Domain {
     link_slots: &[None, Some("latest"), Some("news"), Some("a-b_1")],
     link_statics: &["(str title)", "(x)"],
     inline_markup: &["`c`", "*em*", "[a](/x)", "![i](/p.png)"],
+    heading_markup: &["`", "*", "_", "\\<", "&amp;", "[l](/a)"],
 };
 
 // ── Generators ──────────────────────────────────────────────────────────────
@@ -240,14 +243,44 @@ fn gen_multiline_paragraph(rng: &mut Rng) -> ContentElement {
     ContentElement::Paragraph { text }
 }
 
+/// A heading's source in canonical form (ADR-063): one line, trimmed, with a
+/// trailing `#` run that would read as a closing sequence written escaped.
+fn canonical_heading_source(text: &str) -> String {
+    let text = text.trim_matches([' ', '\t']);
+    let run = text.len() - text.trim_end_matches('#').len();
+    let before = &text[..text.len() - run];
+    if run > 0 && (before.is_empty() || before.ends_with([' ', '\t'])) {
+        format!("{before}\\{}", &text[before.len()..])
+    } else {
+        text.to_string()
+    }
+}
+
+/// Headings store their markdown source (ADR-063), so inline markup, escapes,
+/// entities and leading block openers are all text; only canonical sources
+/// are generated (closing runs escaped, no surrounding whitespace).
 fn gen_heading(rng: &mut Rng) -> ContentElement {
     let level = HeadingLevel::new(1 + rng.below(6) as u8).expect("1..=6");
-    let text = match rng.below(3) {
+    let text = match rng.below(5) {
         0 => gen_words(rng, 1, 4),
         1 => format!("{}{}", gen_words(rng, 1, 3), rng.pick(DOMAIN.heading_tails).trim_end()),
-        _ => rng.pick(DOMAIN.heading_tails).trim().to_string(),
+        2 => rng.pick(DOMAIN.heading_tails).trim().to_string(),
+        3 => {
+            let n = 1 + rng.below(4);
+            (0..n)
+                .map(|_| {
+                    if rng.chance(50) {
+                        rng.pick(DOMAIN.heading_markup).to_string()
+                    } else {
+                        rng.pick(DOMAIN.words).to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        _ => gen_opener_text(rng, false),
     };
-    ContentElement::Heading { level, text }
+    ContentElement::Heading { level, source: canonical_heading_source(&text).into() }
 }
 
 fn gen_code(rng: &mut Rng) -> ContentElement {
@@ -752,6 +785,10 @@ fn from_disk_corpus_is_written_unchanged() {
         "[Latest posts](->> :post (take 4)) {#latest}",
         // A list whose item contains a link stays one list.
         "- see [docs](/d)\n- b",
+        // Headings store their source (ADR-063).
+        "## The `<div>` element",
+        "# Use \\<div>",
+        "# a *b* \\#",
     ];
     let mut failures = Vec::new();
     for md in corpus {

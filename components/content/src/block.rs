@@ -12,13 +12,14 @@ impl ContentElement {
     /// exactly one editable text value (Image, Table, Separator,
     /// LinkExpression, and HtmlBlock, which cannot be text-edited: ADR-062 D4).
     ///
-    /// - Heading, Paragraph, Link, Blockquote → `text`
+    /// - Paragraph, Link, Blockquote → `text`
+    /// - Heading → `source` (its markdown source, ADR-063)
     /// - List → `source`
     /// - CodeBlock → `code`
     pub fn text(&self) -> Option<&str> {
         match self {
-            ContentElement::Heading { text, .. }
-            | ContentElement::Paragraph { text }
+            ContentElement::Heading { source, .. } => Some(source.as_str()),
+            ContentElement::Paragraph { text }
             | ContentElement::Link { text, .. }
             | ContentElement::Blockquote { text } => Some(text),
             ContentElement::List { source } => Some(source),
@@ -39,7 +40,7 @@ impl ContentElement {
         match self {
             ContentElement::Heading { level, .. } => Some(ContentElement::Heading {
                 level: *level,
-                text,
+                source: text.into(),
             }),
             ContentElement::Paragraph { .. } => Some(ContentElement::Paragraph { text }),
             ContentElement::Link { href, .. } => Some(ContentElement::Link {
@@ -142,14 +143,14 @@ mod tests {
     fn with_text_keeps_heading_level() {
         let h = ContentElement::Heading {
             level: HeadingLevel::new(3).unwrap(),
-            text: "Old".to_string(),
+            source: "Old".into(),
         };
         let new = h.with_text("New").expect("heading has text");
         assert_eq!(
             new,
             ContentElement::Heading {
                 level: HeadingLevel::new(3).unwrap(),
-                text: "New".to_string(),
+                source: "New".into(),
             }
         );
         assert_eq!(new.text(), Some("New"));
@@ -297,10 +298,30 @@ mod tests {
 
     // ── round trip: rejections ──────────────────────────────────────────────
 
+    /// Newlines in a heading's source are canonicalised to spaces when it is
+    /// written (ADR-063), so it reads back as a different heading.
     #[test]
     fn rejects_newline_in_heading() {
         let h = parse_one("# Title").with_text("Title\nmore").unwrap();
-        assert_eq!(check_block_round_trip(&h), Err(RoundTripError::BlockCount(2)));
+        match check_block_round_trip(&h) {
+            Err(RoundTripError::Changed { got }) => assert!(got.contains("Title more"), "{got}"),
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    /// A heading source ending in what reads as a closing `#` run is written
+    /// with the run escaped, so it reads back as a different source.
+    #[test]
+    fn heading_source_ending_in_closing_run_is_changed() {
+        let h = parse_one("# Title").with_text("Title #").unwrap();
+        let err = check_block_round_trip(&h).unwrap_err();
+        assert!(matches!(err, RoundTripError::Changed { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn heading_source_with_escaped_closing_run_round_trips() {
+        let h = parse_one("## Sharp").with_text("Sharp \\##").unwrap();
+        assert_eq!(check_block_round_trip(&h), Ok(()));
     }
 
     #[test]
@@ -341,7 +362,7 @@ mod tests {
         let cases = [
             ContentElement::Heading {
                 level: HeadingLevel::new(2).unwrap(),
-                text: "Sharp ##".to_string(),
+                source: "Sharp \\##".into(),
             },
             ContentElement::Blockquote {
                 text: "# not a heading".to_string(),

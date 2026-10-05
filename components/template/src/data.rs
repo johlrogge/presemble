@@ -1,4 +1,4 @@
-use content::{ContentElement, Document};
+use content::{AsPlainText, ContentElement, Document};
 use schema::{Element, Grammar, Spanned};
 use std::sync::Arc;
 
@@ -281,15 +281,17 @@ fn build_article_graph_inner(
         match &slot.element {
             Element::Heading { .. } => {
                 if let Some(spanned) = elements.front()
-                    && let ContentElement::Heading { text, .. } = &spanned.node
+                    && let ContentElement::Heading { source, .. } = &spanned.node
                 {
-                    // The stored text, which the browser editor edits (ADR-063).
+                    // The stored source, which the browser editor edits (ADR-063).
                     if output == OutputMode::Editorial {
                         let stored_key =
                             format!("{}{slot_key}", crate::constants::KEY_STORED_TEXT_PREFIX);
-                        graph.insert(stored_key, Value::Text(text.clone()));
+                        graph.insert(stored_key, Value::Text(source.to_string()));
                     }
-                    graph.insert(slot_key, Value::Text(text.clone()));
+                    // Templates get the plain text until heading slots render
+                    // inline nodes (ADR-064).
+                    graph.insert(slot_key, Value::Text(source.plain_text()));
                 }
             }
 
@@ -528,9 +530,10 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
             format!(r#" {attr_md}="{}""#, crate::dom::html_escape_attr(raw))
         }).unwrap_or_default();
         let html = match &spanned.node {
-            ContentElement::Heading { level, text } => {
+            ContentElement::Heading { level, source } => {
                 let l = level.value();
-                let inner = render_inline_markdown(text);
+                // Body headings: unchanged until package N (ADR-064).
+                let inner = render_inline_markdown(source.as_str());
                 format!("<h{l} {attr_slot}=\"body\"{md_attr}>{inner}</h{l}>")
             }
             ContentElement::Paragraph { text } => {
@@ -900,7 +903,7 @@ mod tests {
     fn render_body_html_elements_have_data_presemble_slot_body() {
         let elements: im::Vector<_> = vec![
             spanned(ContentElement::Paragraph { text: "para".to_string() }),
-            spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), text: "head".to_string() }),
+            spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), source: "head".into() }),
         ].into_iter().collect();
         let html = render_body_html(&elements, None);
         assert!(
@@ -1125,7 +1128,7 @@ mod tests {
                     name: SlotName::new("title"),
                     elements: vector![spanned(ContentElement::Heading {
                         level: schema::HeadingLevel::new(1).unwrap(),
-                        text: "My Page".to_string(),
+                        source: "My Page".into(),
                     })],
                 },
                 DocumentSlot {
@@ -1360,7 +1363,7 @@ mod tests {
     fn body_heading_with_inline_markdown_renders_correctly() {
         let heading = spanned(ContentElement::Heading {
             level: schema::HeadingLevel::new(3).unwrap(),
-            text: "Section with *emphasis*".to_string(),
+            source: "Section with *emphasis*".into(),
         });
         let html = render_body_html(&im::vector![heading], None);
         assert!(
@@ -1389,7 +1392,7 @@ mod tests {
     fn body_heading_literal_html_renders_escaped() {
         let heading = spanned(ContentElement::Heading {
             level: schema::HeadingLevel::new(2).unwrap(),
-            text: "<script>x</script>".to_string(),
+            source: "<script>x</script>".into(),
         });
         let html = render_body_html(&im::vector![heading], None);
         assert!(!html.contains("<script"), "heading HTML must not be rendered; got: {html}");

@@ -218,7 +218,7 @@ headings
             elements: im::vector![schema::Spanned {
                 node: crate::document::ContentElement::Heading {
                     level: schema::HeadingLevel::new(1).unwrap(),
-                    text: "New Title".to_string(),
+                    source: "New Title".into(),
                 },
                 span: Span { start: 0, end: 0 },
             }],

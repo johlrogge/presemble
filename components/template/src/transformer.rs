@@ -1,6 +1,7 @@
 use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, OutputMode, Value};
 use crate::dom::{Element, Form, Node};
+use content::AsPlainText;
 use crate::expr::parse_expr;
 use crate::graph_view::{GraphView, ResolvedNode};
 use crate::registry::RenderContext;
@@ -201,16 +202,22 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
                     Some(node_store::Node::Boolean(b)) => b.to_string(),
                     Some(node_store::Node::Keyword(name)) => format!(":{}", store.resolve_name(*name)),
                     Some(node_store::Node::Element(name)) => {
-                        // heading/paragraph — extract text from first child
+                        // heading/paragraph — extract text from first child;
+                        // a heading's is its source, read as plain text (ADR-063).
                         let elem_name = store.resolve_name(*name);
                         if elem_name == "heading" || elem_name == "paragraph" {
-                            store.children(id).into_iter().find_map(|c| {
+                            let text = store.children(id).into_iter().find_map(|c| {
                                 if let Some(node_store::Node::Text(s)) = store.get(c) {
                                     Some(s.clone())
                                 } else {
                                     None
                                 }
-                            }).unwrap_or_default()
+                            }).unwrap_or_default();
+                            if elem_name == "heading" {
+                                content::MarkdownText::from(text).plain_text()
+                            } else {
+                                text
+                            }
                         } else {
                             String::new()
                         }
@@ -989,15 +996,22 @@ fn render_insert_native(
                             (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                             (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                         ];
-                        // A heading's Text child is its stored text (ADR-063).
-                        if editorial && element_name == "heading" {
-                            elem_attrs.push(stored_text_attr(text.clone()));
-                        }
+                        // A heading's Text child is its markdown source
+                        // (ADR-063): the editor gets it, the page shows the
+                        // plain text until heading slots render inline nodes.
+                        let shown = if element_name == "heading" {
+                            if editorial {
+                                elem_attrs.push(stored_text_attr(text.clone()));
+                            }
+                            content::MarkdownText::from(text).plain_text()
+                        } else {
+                            text
+                        };
                         elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
                             name: tag,
                             attrs: elem_attrs,
-                            children: vec![Node::Text(text)],
+                            children: vec![Node::Text(shown)],
                         };
                         return Ok(Some(vec![Node::Element(element)]));
                     }
@@ -2641,6 +2655,142 @@ mod tests {
         );
     }
 
+    // ── Headings store markdown source; slots show plain text (ADR-063) ────
+
+    fn heading_graph(content_src: &str, output: crate::data::OutputMode) -> DataGraph {
+        let grammar = schema::parse_schema(STORED_TEXT_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
+        let mut input = crate::data::build_article_graph(&doc, &grammar, output);
+        let title = match input.resolve(&["title"]) {
+            Some(Value::Text(t)) => t.clone(),
+            other => panic!("title should be text, got {other:?}"),
+        };
+        let source_text = crate::data::stored_text(&input, "title");
+        input.insert(
+            "link",
+            Value::Record(crate::data::synthesize_link(&title, "/post/x", source_text.as_deref())),
+        );
+        let mut graph = DataGraph::new();
+        graph.insert("input", Value::Record(input));
+        graph
+    }
+
+    /// A store page whose `title` is a heading element holding `source`.
+    fn heading_store(source: &str) -> NodeStoreGraphView {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(node_store::Node::Element(heading_name));
+        let text = store.add_node(node_store::Node::Text(source.into()));
+        store.add_edge(heading, node_store::Edge::Child(text));
+        let title_name = store.intern("title");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+        NodeStoreGraphView { store, root }
+    }
+
+    fn render_for(graph: &dyn GraphView, src: &str, output: crate::data::OutputMode) -> String {
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = match output {
+            crate::data::OutputMode::Editorial => RenderContext::editorial(&reg),
+            crate::data::OutputMode::Published => RenderContext::published(&reg),
+        };
+        serialize_nodes(&transform(nodes, graph, &ctx).unwrap())
+    }
+
+    /// The source `# Use \<div> <!-- note -->` reads as `Use <div>`.
+    const SOURCE_TITLE: &str = "# Use \\<div> <!-- note -->\n\nA summary.\n";
+    const TITLE_SOURCE: &str = "Use \\<div> <!-- note -->";
+
+    #[test]
+    fn input_title_is_plain_text() {
+        use crate::data::OutputMode::Editorial;
+        let legacy = render_for(
+            &heading_graph(SOURCE_TITLE, Editorial),
+            r#"<h1><presemble:insert data="input.title" /></h1>"#,
+            Editorial,
+        );
+        let native = render_for(
+            &heading_store(TITLE_SOURCE),
+            r#"<h1><presemble:insert data="title" /></h1>"#,
+            Editorial,
+        );
+        for html in [legacy, native] {
+            assert!(html.contains(">Use &lt;div&gt;</span>"), "{html}");
+            assert!(!html.contains(">Use \\"), "no backslash in the text: {html}");
+        }
+        // `:apply text` reads the same plain text.
+        let applied = render_for(
+            &heading_graph(SOURCE_TITLE, Editorial),
+            r#"<presemble:insert data="input.title" as="h1" apply="text" />"#,
+            Editorial,
+        );
+        assert!(applied.contains(">Use &lt;div&gt;</h1>"), "{applied}");
+    }
+
+    #[test]
+    fn heading_slot_shows_plain_text_and_carries_source() {
+        use crate::data::OutputMode::Editorial;
+        let attr = r#"data-presemble-text="Use \&lt;div&gt; &lt;!-- note --&gt;""#;
+        let legacy = render_for(
+            &heading_graph(SOURCE_TITLE, Editorial),
+            r#"<presemble:insert data="input.title" as="h1" />"#,
+            Editorial,
+        );
+        let native = render_for(
+            &heading_store(TITLE_SOURCE),
+            r#"<presemble:insert data="title" as="h1" />"#,
+            Editorial,
+        );
+        for html in [legacy, native] {
+            assert!(html.contains(">Use &lt;div&gt;</h1>"), "{html}");
+            assert!(html.contains(attr), "{html}");
+        }
+    }
+
+    #[test]
+    fn synthesized_title_link_text_is_plain_and_attr_is_source() {
+        use crate::data::OutputMode::Editorial;
+        let attr = r#"data-presemble-text="Use \&lt;div&gt; &lt;!-- note --&gt;""#;
+        let graph = heading_graph(SOURCE_TITLE, Editorial);
+        for template in [
+            r#"<presemble:insert data="input.link" />"#,
+            r#"<presemble:insert data="input.link" as="h3" apply="text" />"#,
+        ] {
+            let html = render_for(&graph, template, Editorial);
+            assert!(html.contains(">Use &lt;div&gt;</"), "{template}: {html}");
+            assert!(html.contains(attr), "{template}: {html}");
+        }
+    }
+
+    #[test]
+    fn published_heading_slot_is_plain_without_attr() {
+        use crate::data::OutputMode::Published;
+        let legacy = render_for(
+            &heading_graph(SOURCE_TITLE, Published),
+            r#"<presemble:insert data="input.title" as="h1" />"#,
+            Published,
+        );
+        let native = render_for(
+            &heading_store(TITLE_SOURCE),
+            r#"<presemble:insert data="title" as="h1" />"#,
+            Published,
+        );
+        for html in [legacy, native] {
+            assert!(html.contains(">Use &lt;div&gt;</h1>"), "{html}");
+            assert!(!html.contains(crate::constants::ATTR_TEXT), "{html}");
+        }
+    }
+
+    #[test]
+    fn eval_expr_to_string_reads_heading_plain_text() {
+        use crate::ast::Expr;
+        let graph = heading_store(TITLE_SOURCE);
+        let expr = Expr::Lookup(vec!["title".to_string()]);
+        assert_eq!(eval_expr_to_string(&expr, &graph), "Use <div>");
+    }
+
     #[test]
     fn paragraph_slot_has_no_stored_text_attribute() {
         // Legacy: a paragraph slot from build_article_graph.
@@ -3563,7 +3713,7 @@ mod tests {
         let elements: im::Vector<_> = vec![
             mk_spanned(content::ContentElement::Heading {
                 level: schema::HeadingLevel::new(2).unwrap(),
-                text: "Section".to_string(),
+                source: "Section".into(),
             }),
             mk_spanned(content::ContentElement::Paragraph {
                 text: "A paragraph.".to_string(),

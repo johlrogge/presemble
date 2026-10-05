@@ -91,13 +91,12 @@ fn body_idx_to_structural(
     let mut heading_idx: Option<usize> = None;
     let mut heading_text: Option<String> = None;
     for i in (0..body_idx).rev() {
-        if let content::ContentElement::Heading { text, .. } = &doc.body[i].node {
+        if let content::ContentElement::Heading { source, .. } = &doc.body[i].node {
             heading_idx = Some(i);
-            heading_text = Some(
-                text.split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+            // The heading's plain text, as rendered and as
+            // `ned/heading-with-text` matches it (ADR-063); already
+            // whitespace-normalised.
+            heading_text = Some(content::AsPlainText::plain_text(source));
             break;
         }
     }
@@ -5304,7 +5303,7 @@ mod creation_check_tests {
                     elements: im::vector![Spanned {
                         node: ContentElement::Heading {
                             level: HeadingLevel::new(1).unwrap(),
-                            text: "Test Title".to_string(),
+                            source: "Test Title".into(),
                         },
                         span: Span { start: 0, end: 0 },
                     }],
@@ -5553,7 +5552,7 @@ mod ned_suggestion_handler_tests {
                     elements: im::vector![Spanned {
                         node: ContentElement::Heading {
                             level: HeadingLevel::new(1).unwrap(),
-                            text: "Test Title".to_string(),
+                            source: "Test Title".into(),
                         },
                         span: Span { start: 0, end: 0 },
                     }],
@@ -6744,7 +6743,7 @@ mod apply_ned_program_diagnostic_tests {
                 elements: im::vector![Spanned {
                     node: ContentElement::Heading {
                         level: HeadingLevel::new(1).unwrap(),
-                        text: "Test Title".to_string(),
+                        source: "Test Title".into(),
                     },
                     span: Span { start: 0, end: 0 },
                 }],
@@ -6837,7 +6836,7 @@ mod body_structural_bsave_tests {
     fn h2(text: &str) -> Spanned<ContentElement> {
         spanned(ContentElement::Heading {
             level: HeadingLevel::new(2).unwrap(),
-            text: text.to_string(),
+            source: text.into(),
         })
     }
 
@@ -6873,7 +6872,7 @@ mod body_structural_bsave_tests {
                 name: SlotName::new("title"),
                 elements: im::vector![spanned(ContentElement::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    text: "Test Title".to_string(),
+                    source: "Test Title".into(),
                 })],
             }],
             body: im::vector![
@@ -6918,7 +6917,7 @@ mod body_structural_bsave_tests {
         doc.body
             .iter()
             .map(|el| match &el.node {
-                ContentElement::Heading { text, .. } => ("heading".to_string(), text.clone()),
+                ContentElement::Heading { source, .. } => ("heading".to_string(), source.to_string()),
                 ContentElement::Paragraph { text } => ("paragraph".to_string(), text.clone()),
                 other => ("other".to_string(), format!("{other:?}")),
             })
@@ -7031,7 +7030,7 @@ mod body_structural_bsave_tests {
                 name: SlotName::new("title"),
                 elements: im::vector![spanned(ContentElement::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    text: "Other Title".to_string(),
+                    source: "Other Title".into(),
                 })],
             }],
             body: im::vector![p("Other para")],
@@ -7469,6 +7468,17 @@ mod body_idx_to_structural_tests {
         );
     }
 
+    /// The anchor's heading text is the heading's plain text, as rendered
+    /// (ADR-063): markup, escapes, images and comments are not part of it.
+    #[test]
+    fn body_idx_to_structural_uses_plain_heading_text() {
+        let src = "# Title\n\n----\n\n## ![i](x.png) The `<div>` *element* <!-- c -->\n\nA paragraph.\n";
+        let doc = parse_doc(src);
+        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 1)
+            .expect("should produce anchor");
+        assert_eq!(anchor.heading_text, Some("The <div> element".to_string()));
+    }
+
     #[test]
     fn body_idx_to_structural_out_of_range_returns_none() {
         let src = "# Title\n\n----\n\nOnly paragraph.\n";
@@ -7814,6 +7824,32 @@ mod link_expression_pipeline_tests {
                 assert_eq!(item.field_text(field), from_graph, "{url} {field}");
             }
         }
+    }
+
+    /// A heading stores its source; thread operations read its plain text on
+    /// both adapters (ADR-063).
+    #[test]
+    fn store_field_text_heading_is_plain_and_matches_graph() {
+        use expressions::ThreadItem;
+        let tmp = build_site();
+        write(
+            &tmp,
+            "content/post/p7.md",
+            "# *Post* \\<seven> <!-- c -->\n\n2026-04-10\n\nnotes\n\n[a](/author/a)\n\n----\n\nBody.\n",
+        );
+        let conductor = make_conductor(&tmp);
+        let url = "/post/p7";
+        let root = conductor.document_by_url(url).unwrap();
+        let sem = conductor.semantic_content_by_url(url).unwrap();
+        let data = conductor.datagraph_for_document(root).unwrap();
+        let store = conductor.node_store.read().unwrap();
+        let item = node_store_bridge::store_pipeline::SemItem {
+            store: &store,
+            sem_root: sem,
+            url: url.to_string(),
+        };
+        assert_eq!(item.field_text("title").as_deref(), Some("Post <seven>"));
+        assert_eq!(item.field_text("title"), expressions::graph_field_text(&data, "title"));
     }
 
     // ── Derived state ────────────────────────────────────────────────────────

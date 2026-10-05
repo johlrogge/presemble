@@ -255,6 +255,19 @@ pub fn register_ned_query_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>
                         };
                         Ok(wrap_selection(sel.filter(&st, selection::has_text_equals(&value))))
                     }
+                    // Headings store markdown source; this compares their
+                    // plain text, as rendered (ADR-063).
+                    "heading-text-equals" => {
+                        let value = match args.get(2) {
+                            Some(Value::Text(s)) => s.clone(),
+                            _ => return Err("ned/filter :heading-text-equals requires a string".into()),
+                        };
+                        let plain = |s: &str| {
+                            use content::AsPlainText;
+                            content::MarkdownText::from(s).plain_text()
+                        };
+                        Ok(wrap_selection(sel.filter(&st, selection::has_projected_text_equals(&value, plain))))
+                    }
                     other => Err(format!("ned/filter: unknown predicate keyword :{other}")),
                 }
             }
@@ -1112,7 +1125,7 @@ mod tests {
                     elements: im::vector![Spanned {
                         node: ContentElement::Heading {
                             level: HeadingLevel::new(1).unwrap(),
-                            text: "My Title".to_string(),
+                            source: "My Title".into(),
                         },
                         span: Span { start: 0, end: 0 },
                     }],
@@ -1386,7 +1399,7 @@ mod tests {
                     elements: im::vector![Spanned {
                         node: ContentElement::Heading {
                             level: HeadingLevel::new(1).unwrap(),
-                            text: "Title".to_string(),
+                            source: "Title".into(),
                         },
                         span: Span { start: 0, end: 0 },
                     }],
@@ -2099,7 +2112,7 @@ mod tests {
         fn h2(text: &str) -> Spanned<ContentElement> {
             spanned(ContentElement::Heading {
                 level: HeadingLevel::new(2).unwrap(),
-                text: text.to_string(),
+                source: text.into(),
             })
         }
         fn p(text: &str) -> Spanned<ContentElement> {
@@ -2111,7 +2124,7 @@ mod tests {
                 name: SlotName::new("title"),
                 elements: im::vector![spanned(ContentElement::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    text: "Home".to_string(),
+                    source: "Home".into(),
                 })],
             }],
             body: im::vector![
@@ -2317,7 +2330,7 @@ mod tests {
         fn spanned(node: ContentElement) -> Spanned<ContentElement> {
             Spanned { node, span: Span { start: 0, end: 0 } }
         }
-        let h2 = |t: &str| spanned(ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), text: t.to_string() });
+        let h2 = |t: &str| spanned(ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), source: t.into() });
         let p = |t: &str| spanned(ContentElement::Paragraph { text: t.to_string() });
 
         let doc = Document {
@@ -2337,6 +2350,54 @@ mod tests {
         let mut store = NodeStore::new();
         document_to_store(&doc, &mut store, Some(&meta));
         Arc::new(RwLock::new(store))
+    }
+
+    /// Body parsed from `markdown`, stored for `content/index.md`.
+    fn make_markdown_body_store(markdown: &str) -> Arc<RwLock<NodeStore>> {
+        use content::Document;
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+
+        let flat = content::parse_document(markdown).expect("markdown parses");
+        let doc = Document {
+            preamble: im::vector![],
+            body: flat.elements,
+            has_separator: true,
+            separator_span: None,
+            unassigned: Default::default(),
+            comments: Default::default(),
+        };
+        let meta = DocumentMeta {
+            url: "/".to_string(),
+            stem: "index".to_string(),
+            file: "content/index.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut store = NodeStore::new();
+        document_to_store(&doc, &mut store, Some(&meta));
+        Arc::new(RwLock::new(store))
+    }
+
+    /// Headings store their source; `ned/heading-with-text` matches their
+    /// plain text, as rendered (ADR-063).
+    #[test]
+    fn heading_with_text_matches_plain_text() {
+        let root_env =
+            setup_with_prelude(make_markdown_body_store("## The `<div>` element\n\nPara.\n"));
+        let heading = format!(r#"(ned/nth-of-kind (ned/blocks {BODY}) "heading" 0)"#);
+        assert_eq!(
+            texts_of(&root_env, &format!("(ned/text-in {heading})")),
+            vec!["The `<div>` element".to_string()],
+            "the store holds the source"
+        );
+        let with_text = |t: &str| {
+            format!(r#"(ned/heading-with-text (ned/blocks {BODY}) "{}")"#, t.replace('"', "\\\""))
+        };
+        assert_eq!(count_of(&root_env, &with_text("The <div> element")), 1);
+        assert_eq!(count_of(&root_env, &with_text("The `<div>` element")), 0);
+
+        // Two headings with equal plain text both match (ambiguous to address).
+        let root_env = setup_with_prelude(make_markdown_body_store("## *A*\n\n## A\n"));
+        assert_eq!(count_of(&root_env, &with_text("A")), 2);
     }
 
     #[test]

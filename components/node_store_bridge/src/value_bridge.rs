@@ -43,6 +43,14 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                             }
                         });
                         if let Some(t) = text {
+                            // A heading stores its markdown source; its value
+                            // is the plain text (ADR-063).
+                            if element_name == "heading" {
+                                use content::AsPlainText;
+                                return template::Value::Text(
+                                    content::MarkdownText::from(t).plain_text(),
+                                );
+                            }
                             return template::Value::Text(t);
                         }
                         // No text child — fall through to Record
@@ -309,6 +317,20 @@ mod tests {
 
         let val = node_to_value(&store, heading);
         assert!(matches!(val, template::Value::Text(s) if s == "My Title"));
+    }
+
+    /// A heading stores its markdown source; its value is the plain text
+    /// (ADR-063).
+    #[test]
+    fn node_to_value_heading_is_plain_text() {
+        let mut store = NodeStore::new();
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(Node::Element(heading_name));
+        let text_node = store.add_node(Node::Text("The `<div>` element".to_string()));
+        store.add_edge(heading, Edge::Child(text_node));
+
+        let val = node_to_value(&store, heading);
+        assert!(matches!(&val, template::Value::Text(s) if s == "The <div> element"), "{val:?}");
     }
 
     #[test]

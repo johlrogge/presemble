@@ -120,6 +120,21 @@ fn inline_html_fails_the_build() {
     assert!(!index_html(&tmp).exists(), "no page should be written");
 }
 
+/// Headings store their source (ADR-063): a bare tag in one is an Error, so
+/// the page is unpublishable, as for paragraphs.
+#[test]
+fn heading_inline_html_makes_page_unpublishable() {
+    let (tmp, site) = valid_site_with_body_appended("\n### a <b>x</b>\n");
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(stderr.contains("content/article/hello-world.md:"), "stderr:\n{stderr}");
+    assert!(stderr.contains("heading `### a <b>x</b>`: inline HTML `<b>`"), "stderr:\n{stderr}");
+    assert!(!index_html(&tmp).exists(), "no page should be written");
+}
+
 #[test]
 fn heading_with_html_in_a_code_span_builds() {
     let (tmp, site) = valid_site_with_body_appended("\n### The `<div>` element\n");

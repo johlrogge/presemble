@@ -102,10 +102,9 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
     // and table cells are not canonicalised yet. Only lossless block-level
     // escaping is applied below.
     match element {
-        ContentElement::Heading { level, text } => {
-            let hashes = "#".repeat(level.value() as usize);
-            format!("{hashes} {}", escape_closing_hashes(&escape_angle_brackets(text)))
-        }
+        // A heading stores its source (ADR-063): written as one canonical ATX
+        // line, with no escaping beyond a closing `#` run.
+        ContentElement::Heading { level, source } => crate::inline::heading_markdown(*level, source),
         ContentElement::Paragraph { text } => escape_block_lines(text).join("\n"),
         ContentElement::Link { text, href } => format!("[{text}]({})", destination(href)),
         ContentElement::Image { alt, path } => {
@@ -684,14 +683,15 @@ fn parse_closing_tag(b: &[u8]) -> Option<usize> {
     (b.get(i) == Some(&b'>')).then_some(i + 1)
 }
 
-/// Escape a trailing run of `#` that would read as a closing ATX sequence.
-/// Write every `<` of literal text as `\<`, so headings and blockquotes never
-/// write raw HTML (ADR-062, limit L13): what was read as text is written as
-/// text.
+/// Write every `<` of literal text as `\<`, so blockquotes never write raw
+/// HTML (ADR-062, limit L13): what was read as text is written as text.
+/// Headings store their source (ADR-063) and do not use this.
 fn escape_angle_brackets(text: &str) -> String {
     text.replace('<', "\\<")
 }
 
+/// Escape a trailing run of `#` that would read as a closing ATX sequence.
+/// Used by [`crate::inline::heading_markdown`].
 pub(crate) fn escape_closing_hashes(text: &str) -> String {
     let trimmed = text.trim_end_matches([' ', '\t']);
     let run = trimmed.len() - trimmed.trim_end_matches('#').len();
@@ -844,7 +844,7 @@ headings
     fn serialize_heading() {
         let d = doc_with_slot("title", vec![ContentElement::Heading {
             level: HeadingLevel::new(1).unwrap(),
-            text: "Hello".to_string(),
+            source: "Hello".into(),
         }]);
         assert_eq!(serialize_document(&d), "# Hello\n");
     }
@@ -1059,10 +1059,22 @@ headings
         for (level, text, expected) in cases {
             let el = ContentElement::Heading {
                 level: HeadingLevel::new(level).unwrap(),
-                text: text.to_string(),
+                source: text.into(),
             };
             assert_eq!(serialize_element(&el), expected, "heading {text:?}");
-            assert_eq!(reparse_one(expected), el, "heading {text:?}");
+            // Headings store their source (ADR-063): the escape is part of
+            // the source read back, which is then a fixed point.
+            let back = reparse_one(expected);
+            let written_source = expected.split_once(' ').unwrap().1;
+            assert_eq!(
+                back,
+                ContentElement::Heading {
+                    level: HeadingLevel::new(level).unwrap(),
+                    source: written_source.into(),
+                },
+                "heading {text:?}"
+            );
+            assert_eq!(serialize_element(&back), expected, "heading {text:?}");
         }
     }
 
@@ -1838,7 +1850,7 @@ headings
         use CommentAnchor::{Before, End};
         let mut doc = doc_with_slot("title", vec![ContentElement::Heading {
             level: HeadingLevel::new(1).unwrap(),
-            text: "T".to_string(),
+            source: "T".into(),
         }]);
         let comment = |anchor: CommentAnchor, text: &str| crate::document::AnchoredComment {
             anchor,

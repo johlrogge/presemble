@@ -753,7 +753,7 @@ fn suggest_ned_description() -> String {
          - (ned/body doc): the body of doc.\n\
          - (ned/children sel) / (ned/blocks sel): the blocks of a slot or body.\n\
          - (ned/nth-of-kind sel kind i): the i-th (0-based) element of kind within sel.\n\
-         - (ned/heading-with-text sel text): headings in sel whose text equals text.\n\
+         - (ned/heading-with-text sel text): headings in sel whose plain text, as rendered, equals text.\n\
          - (ned/nth-after sel kind i): for each node in sel, the i-th following sibling of kind.\n\
          - (ned/first-after sel kind): for each node in sel, the first following sibling of kind.\n\
          - (ned/text-in sel): the text of each selected block.\n\

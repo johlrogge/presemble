@@ -1,4 +1,5 @@
 use crate::document::{ContentElement, Document, Keyword, LinkText};
+use crate::inline::AsPlainText;
 use crate::link_expression::{
     bare_marker, diagnose_paragraph, parse_destination, split_marker, LinkExpressionDiagnostic,
 };
@@ -158,9 +159,9 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 // Slot markers on headings
 // ---------------------------------------------------------------------------
 
-/// The name of a slot marker that ends a heading's text (`Title {#x}`, or a
-/// heading that is only `{#x}`), if any. Headings store decoded text, so an
-/// escaped `\{#x}` reads the same (limit L18).
+/// The name of a slot marker that ends a heading's source (`Title {#x}`, or a
+/// heading that is only `{#x}`), if any. Headings store their source
+/// (ADR-063), so an escaped `\{#x}` or a code span is literal.
 fn heading_marker(text: &str) -> Option<&str> {
     split_marker(text)
         .map(|(_, name)| name)
@@ -176,15 +177,15 @@ fn validate_heading_markers(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     for spanned in elements {
-        let ContentElement::Heading { text, .. } = &spanned.node else {
+        let ContentElement::Heading { source, .. } = &spanned.node else {
             continue;
         };
-        let Some(name) = heading_marker(text) else {
+        let Some(name) = heading_marker(source.as_str()) else {
             continue;
         };
         let message = format!(
             "{}: `{{#{name}}}`: slot markers only apply to link expressions; headings fill slots \
-             by position, so remove it (a heading cannot end in a literal `{{#{name}}}` yet)",
+             by position, so remove it (write `\\{{#{name}}}` for a literal marker)",
             describe_element(&spanned.node)
         );
         let (message, span) = match slot {
@@ -301,13 +302,14 @@ fn validate_html(
     }
 }
 
-/// One error per paragraph or list that holds inline HTML (ADR-062 D3): the
-/// kinds stored as markdown source. HTML blocks have their own error
-/// ([`validate_html`]); comment-only HTML is never reported. Elements of a
-/// slot are reported against the slot.
+/// One error per paragraph, list or heading that holds inline HTML (ADR-062
+/// D3): the kinds stored as markdown source (headings since ADR-063). HTML
+/// blocks have their own error ([`validate_html`]); comment-only HTML, code
+/// spans and `\<` are never reported. Elements of a slot are reported against
+/// the slot.
 ///
-/// Headings and blockquotes store literal text: HTML in them is shown
-/// escaped, written escaped on save and not reported (limit L13).
+/// Blockquotes still store literal text: HTML in them is shown escaped,
+/// written escaped on save and not reported (limit L13, until package Q).
 fn validate_inline_html(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: Option<&SlotName>,
@@ -315,8 +317,9 @@ fn validate_inline_html(
 ) {
     for spanned in elements {
         let source = match &spanned.node {
-            ContentElement::Paragraph { text } => text,
-            ContentElement::List { source } => source,
+            ContentElement::Paragraph { text } => text.as_str(),
+            ContentElement::List { source } => source.as_str(),
+            ContentElement::Heading { source, .. } => source.as_str(),
             _ => continue,
         };
         let Some(html) = crate::html::first_inline_html(source) else {
@@ -590,12 +593,14 @@ fn validate_headings(
     let mut count = 0usize;
 
     for spanned in elements {
-        if let ContentElement::Heading { level, text } = &spanned.node {
+        if let ContentElement::Heading { level, source } = &spanned.node {
             if level.value() >= level_range.min.value()
                 && level.value() <= level_range.max.value()
             {
                 count += 1;
-                check_content_constraints(text, slot, diagnostics);
+                // Constraints read the plain text; messages quote the source
+                // (ADR-063).
+                check_content_constraints(&source.plain_text(), source.as_str(), slot, diagnostics);
             } else {
                 diagnostics.push(ValidationDiagnostic {
                     severity: Severity::Error,
@@ -767,7 +772,15 @@ fn validate_list(
 // ---------------------------------------------------------------------------
 
 /// Check content constraints (e.g. `capitalized`) on a text value.
-fn check_content_constraints(text: &str, slot: &Slot, diagnostics: &mut Vec<ValidationDiagnostic>) {
+///
+/// `text` is what is checked (a heading's plain text); `quoted` is what the
+/// message quotes (its source).
+fn check_content_constraints(
+    text: &str,
+    quoted: &str,
+    slot: &Slot,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
     for constraint in &slot.constraints {
         if let Constraint::Content(cc) = constraint {
             match cc {
@@ -782,7 +795,7 @@ fn check_content_constraints(text: &str, slot: &Slot, diagnostics: &mut Vec<Vali
                             severity: Severity::Error,
                             message: format!(
                                 "slot '{}': text must start with an uppercase letter, got: {:?}",
-                                slot.name, text
+                                slot.name, quoted
                             ),
                             slot: Some(slot.name.clone()),
                             span: None,
@@ -835,7 +848,8 @@ fn validate_body(
 ) {
     if let Some(heading_range) = &body_rules.heading_range {
         for spanned in elements.iter() {
-            if let ContentElement::Heading { level, text } = &spanned.node {
+            if let ContentElement::Heading { level, source } = &spanned.node {
+                let text = source.as_str();
                 let in_range = level.value() >= heading_range.min.value()
                     && level.value() <= heading_range.max.value();
                 if !in_range {
@@ -1305,8 +1319,8 @@ mod tests {
         assert_eq!(
             d[0].message,
             "slot 'title': heading `# Title {#title}`: `{#title}`: slot markers only apply to \
-             link expressions; headings fill slots by position, so remove it (a heading cannot \
-             end in a literal `{#title}` yet)"
+             link expressions; headings fill slots by position, so remove it (write \
+             `\\{#title}` for a literal marker)"
         );
         assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("title"));
         // The heading stays in its slot.
@@ -1321,15 +1335,33 @@ mod tests {
         assert_eq!(d[0].slot, None);
     }
 
-    /// L18: headings store decoded text, so `\{#x}` cannot be told apart from
-    /// `{#x}`; a heading cannot end in a literal marker yet.
+    /// `capitalized` reads a heading's plain text (ADR-063); the message
+    /// quotes its source.
     #[test]
-    fn escaped_marker_on_a_heading_is_still_an_error_l18() {
+    fn capitalized_checks_plain_text() {
+        let g = parse_schema("# Title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n")
+            .expect("schema parses");
+        let uppercase_errors = |src: &str| -> Vec<String> {
+            diagnostics_for(src, &g)
+                .into_iter()
+                .filter(|d| d.message.contains("uppercase"))
+                .map(|d| d.message)
+                .collect()
+        };
+        assert!(uppercase_errors("# **Bold** title\n").is_empty());
+        assert!(uppercase_errors("# ![i](x.png) Title\n").is_empty());
+        let errors = uppercase_errors("# `x` y\n");
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert!(errors[0].contains("`x` y"), "{}", errors[0]);
+    }
+
+    /// L18 resolved (ADR-063): headings store their source, so an escaped
+    /// `\{#x}` is a literal marker.
+    #[test]
+    fn escaped_marker_on_a_heading_is_literal() {
         let g = summary_grammar(true);
         let d = diagnostics_for("# Title \\{#x}\n\nOne.\n\n----\n\nBody.\n", &g);
-        assert_eq!(d.len(), 1, "{d:#?}");
-        assert_eq!(d[0].severity, Severity::Error);
-        assert!(d[0].message.contains("`{#x}`: slot markers only apply"), "{}", d[0].message);
+        assert!(d.is_empty(), "{d:#?}");
     }
 
     #[test]
@@ -1341,15 +1373,13 @@ mod tests {
         }
     }
 
-    /// L18: a heading's code span loses its backticks in the stored text
-    /// (ADR-062 L17), so a code span ending in `{#…}` reads as a marker.
+    /// L18 resolved (ADR-063): a heading's code span keeps its backticks, so a
+    /// code span ending in `{#…}` is literal.
     #[test]
-    fn heading_ending_in_code_span_marker_is_reported_l18() {
+    fn heading_ending_in_code_span_marker_is_literal() {
         let g = summary_grammar(true);
         let d = diagnostics_for("# Title `{#x}`\n\nOne.\n\n----\n\nBody.\n", &g);
-        assert_eq!(d.len(), 1, "{d:#?}");
-        assert_eq!(d[0].severity, Severity::Error);
-        assert!(d[0].message.contains("`{#x}`: slot markers only apply"), "{}", d[0].message);
+        assert!(d.is_empty(), "{d:#?}");
     }
 
     /// Lists and blockquotes ending in `{#name}` are not covered by marker
@@ -1486,10 +1516,38 @@ mod tests {
         assert!(d[0].message.contains("inline HTML `<span>`"), "{}", d[0].message);
     }
 
+    /// L13 resolved for headings (ADR-063): a bare tag in a heading's source
+    /// is an Error, as in paragraphs.
     #[test]
-    fn headings_and_blockquotes_hold_literal_text_and_are_not_reported() {
+    fn inline_html_in_a_heading_is_an_error_l13() {
+        let d = body_diagnostics("### a <b>x</b>");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(d[0].message, format!("heading `### a <b>x</b>`: inline HTML `<b>`{INLINE_TAIL}"));
+        // In a slot it is reported against the slot.
+        let d = diagnostics_for("# T <i>x</i>\n\nOne.\n\n----\n\nBody.\n", &summary_grammar(true));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("title"));
+        assert!(d[0].message.starts_with("slot 'title': heading"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn code_span_or_escaped_html_in_a_heading_is_not_an_error() {
+        for body in ["### `<b>`", "### \\<b>"] {
+            let d = body_diagnostics(body);
+            assert!(d.is_empty(), "{body:?}: {d:#?}");
+        }
+    }
+
+    #[test]
+    fn heading_comment_is_not_an_error() {
+        let d = body_diagnostics("### a <!-- c --> b");
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn literal_html_in_headings_and_blockquotes_is_not_reported() {
         for body in [
-            "### a <b>x</b>",
             "### The `<div>` element",
             "### Using `Vec<T>`",
             "### Use \\<div>",

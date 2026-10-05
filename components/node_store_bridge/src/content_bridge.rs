@@ -163,10 +163,11 @@ pub(crate) fn content_element_to_store(
     store: &mut NodeStore,
 ) -> NodeId {
     match element {
-        ContentElement::Heading { level, text } => {
+        // One Text child holding the heading's markdown source (ADR-063).
+        ContentElement::Heading { level, source } => {
             let node = make_element(store, "heading");
             add_int_attr(store, node, "level", level.value() as i64);
-            add_child_text(store, node, text);
+            add_child_text(store, node, source.as_str());
             node
         }
         ContentElement::Paragraph { text } => {
@@ -670,8 +671,8 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
     match kind {
         "heading" => {
             let level = heading_level(store, id)?;
-            let text = try_child_text(store, id, kind)?;
-            Ok(ContentElement::Heading { level, text })
+            let source = try_child_text(store, id, kind)?;
+            Ok(ContentElement::Heading { level, source: source.into() })
         }
         "paragraph" => Ok(ContentElement::Paragraph {
             text: try_child_text(store, id, kind)?,
@@ -1113,7 +1114,7 @@ pub fn create_semantic_content(
         let title_entry = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title").copied();
         title_entry.and_then(|(_, title_node)| {
             // Walk into the content element (e.g. heading) → first child text
-            store
+            let text = store
                 .children(title_node)
                 .iter()
                 .find_map(|&c| {
@@ -1122,7 +1123,19 @@ pub fn create_semantic_content(
                     } else {
                         None
                     }
-                })
+                })?;
+            // A heading stores its source; the link text is its plain text
+            // (ADR-063).
+            let is_heading = matches!(
+                store.get(title_node),
+                Some(Node::Element(n)) if store.resolve_name(*n) == "heading"
+            );
+            Some(if is_heading {
+                use content::AsPlainText;
+                content::MarkdownText::from(text).plain_text()
+            } else {
+                text
+            })
         })
     };
 
@@ -1416,7 +1429,7 @@ mod tests {
                 "title",
                 vec![ContentElement::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    text: "Hello World".to_string(),
+                    source: "Hello World".into(),
                 }]
             )],
             body: im::vector![zero_spanned(ContentElement::Paragraph {
@@ -1439,7 +1452,7 @@ mod tests {
         let elements = vec![
             ContentElement::Heading {
                 level: HeadingLevel::new(2).unwrap(),
-                text: "Section".to_string(),
+                source: "Section".into(),
             },
             ContentElement::Paragraph { text: "Para text".to_string() },
             ContentElement::Image {
@@ -1585,7 +1598,7 @@ mod tests {
     #[test]
     fn round_trip_unassigned_elements_of_every_kind() {
         let unassigned = vec![
-            ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), text: "Aside".to_string() },
+            ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), source: "Aside".into() },
             ContentElement::Paragraph { text: "{#stray}".to_string() },
             ContentElement::Paragraph { text: "![c](i.jpg) {#cover}".to_string() },
             ContentElement::Image { alt: Some("alt".to_string()), path: "/i.jpg".to_string() },
@@ -1614,7 +1627,7 @@ mod tests {
                 "title",
                 vec![ContentElement::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    text: "T".to_string(),
+                    source: "T".into(),
                 }]
             )],
             unassigned: unassigned.into_iter().map(zero_spanned).collect(),
@@ -1968,7 +1981,7 @@ mod tests {
                     "title",
                     vec![ContentElement::Heading {
                         level: HeadingLevel::new(1).unwrap(),
-                        text: "My Article".to_string(),
+                        source: "My Article".into(),
                     }]
                 ),
                 slot(
@@ -2135,6 +2148,32 @@ mod tests {
         assert_eq!(find_attr_text(&store, *link_id, "href"), Some("/post/my-article".to_string()));
         // title text is "My Article"
         assert_eq!(find_attr_text(&store, *link_id, "text"), Some("My Article".to_string()));
+    }
+
+    /// The synthesized link's text is the title heading's plain text, not its
+    /// stored source (ADR-063).
+    #[test]
+    fn semantic_link_text_is_plain_heading_text() {
+        let mut doc = make_doc_with_title_and_summary();
+        doc.preamble[0].elements[0].node = ContentElement::Heading {
+            level: HeadingLevel::new(1).unwrap(),
+            source: "*My* \\<Article> <!-- c -->".into(),
+        };
+        let grammar = make_grammar_with_title_summary();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/my-article".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/my-article.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let empty_stems = std::collections::HashMap::new();
+        let empty_urls = std::collections::HashMap::new();
+        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let parts = store.consists_of(sem);
+        let (_, link_id) = parts.iter().find(|(n, _)| store.resolve_name(*n) == "link").unwrap();
+        assert_eq!(find_attr_text(&store, *link_id, "text"), Some("My <Article>".to_string()));
     }
 
     #[test]
@@ -2386,7 +2425,7 @@ mod tests {
     fn h(level: u8, text: &str) -> ContentElement {
         ContentElement::Heading {
             level: HeadingLevel::new(level).unwrap(),
-            text: text.to_string(),
+            source: text.into(),
         }
     }
 
@@ -2818,7 +2857,7 @@ mod tests {
         let elements = vec![
             ContentElement::Heading {
                 level: HeadingLevel::new(2).unwrap(),
-                text: "Section".to_string(),
+                source: "Section".into(),
             },
             ContentElement::Paragraph { text: "Para text".to_string() },
             ContentElement::Image {
@@ -2918,7 +2957,7 @@ mod tests {
                 "title",
                 vec![ContentElement::Heading {
                     level: HeadingLevel::new(1).unwrap(),
-                    text: "Title Only".to_string(),
+                    source: "Title Only".into(),
                 }]
             )],
             body: im::vector![],

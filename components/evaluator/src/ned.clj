@@ -105,9 +105,9 @@
 
 ;; ── Structural anchor helpers ────────────────────────────────────────────
 
-(def-doc! ned/heading-with-text "(ned/heading-with-text sel text)" "Filter sel to heading elements whose concatenated text descendants exactly equal text.")
+(def-doc! ned/heading-with-text "(ned/heading-with-text sel text)" "Filter sel to headings whose plain text, as rendered, equals text.")
 (defn ned/heading-with-text [sel text]
-  (-> sel (ned/filter :kind "heading") (ned/filter :text-equals text)))
+  (-> sel (ned/filter :kind "heading") (ned/filter :heading-text-equals text)))
 
 (def-doc! ned/nth-heading "(ned/nth-heading sel idx)" "Pick the idx-th heading from sel.")
 (defn ned/nth-heading [sel idx]

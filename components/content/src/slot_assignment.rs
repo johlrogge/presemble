@@ -477,7 +477,7 @@ headings
     fn heading(level: u8, text: &str) -> Spanned<ContentElement> {
         spanned(ContentElement::Heading {
             level: schema::HeadingLevel::new(level).unwrap(),
-            text: text.to_string(),
+            source: text.into(),
         })
     }
 
@@ -985,7 +985,7 @@ headings
             vec![
                 ContentElement::Heading {
                     level: schema::HeadingLevel::new(2).unwrap(),
-                    text: "Aside".to_string()
+                    source: "Aside".into()
                 },
                 ContentElement::Link { text: "a".to_string(), href: "/post/a".to_string() },
             ]
@@ -1067,7 +1067,7 @@ headings
             .iter()
             .map(|e| match &e.node {
                 ContentElement::Paragraph { text } => text.clone(),
-                ContentElement::Heading { text, .. } => text.clone(),
+                ContentElement::Heading { source, .. } => source.to_string(),
                 ContentElement::LinkExpression { slot: Some(k), .. } => k.to_string(),
                 other => format!("{other:?}"),
             })
@@ -1102,7 +1102,7 @@ headings
         let doc = assign_page("# Home\n\n## H\n\n----\n\nBody.\n", "*");
         let flat: Vec<ContentElement> = doc.flat_elements().iter().map(|e| e.node.clone()).collect();
         assert!(matches!(flat[0], ContentElement::Heading { .. }));
-        assert!(matches!(&flat[1], ContentElement::Heading { text, .. } if text == "H"));
+        assert!(matches!(&flat[1], ContentElement::Heading { source, .. } if source.as_str() == "H"));
         assert_eq!(flat[2], ContentElement::Separator);
         assert!(matches!(flat[3], ContentElement::Paragraph { .. }));
     }

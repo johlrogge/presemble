@@ -201,9 +201,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
 
     enum State {
         Idle,
+        /// A heading keeps its source (ADR-063): every event inside it is
+        /// consumed at the top of the loop; only its range is needed.
         Heading {
             level: HeadingLevel,
-            text: String,
             byte_range: std::ops::Range<usize>,
         },
         Paragraph {
@@ -312,23 +313,27 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             continue;
         }
 
+        // A heading is captured as source: its inline events (text, code,
+        // links, images, HTML, breaks) are consumed here.
+        if let State::Heading { level, byte_range } = &state {
+            if matches!(event, Event::End(TagEnd::Heading(_))) {
+                let source = heading_source(input.get(byte_range.clone()).unwrap_or_default());
+                elements.push_back(Spanned {
+                    node: ContentElement::Heading { level: *level, source },
+                    span: Span::from(byte_range.clone()),
+                });
+                state = State::Idle;
+            }
+            continue;
+        }
+
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let heading_level = convert_heading_level(level)?;
                 state = State::Heading {
                     level: heading_level,
-                    text: String::new(),
                     byte_range: range,
                 };
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                if let State::Heading { level, text, byte_range } = state {
-                    elements.push_back(Spanned {
-                        node: ContentElement::Heading { level, text },
-                        span: Span::from(byte_range),
-                    });
-                    state = State::Idle;
-                }
             }
 
             Event::Start(Tag::Paragraph) => {
@@ -642,7 +647,6 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             Event::Text(text) => {
                 let s = text.as_ref();
                 match &mut state {
-                    State::Heading { text: buf, .. } => buf.push_str(s),
                     // Only an image-bearing paragraph uses this text (others
                     // keep their source): a literal `<` stays literal
                     // (ADR-062, limit L15).
@@ -651,11 +655,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // Table cells and HTML blocks are read from their source
-                    // range. List and link-expression events never reach here
-                    // (consumed at the top of the loop).
+                    // Table cells, HTML blocks and headings are read from
+                    // their source range. List, link-expression and heading
+                    // events never reach here (consumed at the top of the
+                    // loop).
                     State::Table { .. }
                     | State::HtmlBlock { .. }
+                    | State::Heading { .. }
                     | State::List { .. }
                     | State::LinkExpression { .. }
                     | State::Idle => {}
@@ -664,7 +670,6 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             Event::Code(text) => {
                 let s = text.as_ref();
                 match &mut state {
-                    State::Heading { text: buf, .. } => buf.push_str(s),
                     // Only an image-bearing paragraph uses this text (others
                     // keep their source): a literal `<` stays literal
                     // (ADR-062, limit L15).
@@ -673,11 +678,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // Table cells and HTML blocks are read from their source
-                    // range. List and link-expression events never reach here
-                    // (consumed at the top of the loop).
+                    // Table cells, HTML blocks and headings are read from
+                    // their source range. List, link-expression and heading
+                    // events never reach here (consumed at the top of the
+                    // loop).
                     State::Table { .. }
                     | State::HtmlBlock { .. }
+                    | State::Heading { .. }
                     | State::List { .. }
                     | State::LinkExpression { .. }
                     | State::Idle => {}
@@ -687,19 +694,19 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             Event::SoftBreak | Event::HardBreak => {
                 match &mut state {
                     State::Paragraph { text, .. } => text.push(' '),
-                    State::Heading { text, .. } => text.push(' '),
                     State::Blockquote { text, .. } => text.push(' '),
                     _ => {}
                 }
             }
 
-            // Inline HTML in heading and blockquote text is kept as literal
-            // text: rendered escaped, not reported, written as `\<` (limit
-            // L13). Paragraphs keep their source anyway.
-            Event::InlineHtml(s) => match &mut state {
-                State::Heading { text, .. } | State::Blockquote { text, .. } => text.push_str(&s),
-                _ => {}
-            },
+            // Inline HTML in blockquote text is kept as literal text:
+            // rendered escaped, not reported, written as `\<` (limit L13).
+            // Paragraphs and headings keep their source.
+            Event::InlineHtml(s) => {
+                if let State::Blockquote { text, .. } = &mut state {
+                    text.push_str(&s);
+                }
+            }
             // An HTML block inside a blockquote is kept as text (limit L13);
             // a top-level one is captured by `State::HtmlBlock`.
             Event::Html(s) => {
@@ -791,6 +798,46 @@ pub fn parse_link_text(text: &str) -> LinkText {
 pub fn parse_link_target(href: &str) -> Result<LinkTarget, ContentError> {
     parse_destination(href)
         .map_err(|e| ContentError::ParseError(format!("malformed link expression `{href}`: {e}")))
+}
+
+/// The markdown source of a heading from its source range (ADR-063).
+///
+/// - ATX: [`crate::inline::atx_heading_content`] of its line.
+/// - Setext: the lines before the underline, each trimmed, with one trailing
+///   `\` (a hard break) stripped from every line but the last, joined with a
+///   space. Limit L19: hard breaks in setext headings become spaces.
+fn heading_source(raw: &str) -> crate::inline::MarkdownText {
+    let lines: Vec<&str> = raw.lines().collect();
+    if let [line] = lines.as_slice()
+        && let Some(content) = crate::inline::atx_heading_content(line)
+    {
+        return content.into();
+    }
+    let content = match lines.split_last() {
+        Some((last, rest)) if is_setext_underline(last) => rest,
+        _ => lines.as_slice(),
+    };
+    let count = content.len();
+    content
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let line = line.trim_matches([' ', '\t']);
+            if i + 1 < count { line.strip_suffix('\\').unwrap_or(line) } else { line }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .into()
+}
+
+/// A setext heading underline: up to three spaces, then a run of `=` or of
+/// `-`, then optional spaces or tabs.
+fn is_setext_underline(line: &str) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = line[indent..].trim_end_matches([' ', '\t']);
+    indent <= 3
+        && !rest.is_empty()
+        && (rest.chars().all(|c| c == '=') || rest.chars().all(|c| c == '-'))
 }
 
 /// Convert a pulldown-cmark HeadingLevel to schema's HeadingLevel.
@@ -915,25 +962,57 @@ mod tests {
         assert_eq!(third, second, "stable from the second save on");
     }
 
-    /// A heading with raw inline HTML is written escaped and stable from the
-    /// first save on.
+    /// Headings store their markdown source (ADR-063): raw inline HTML is
+    /// written back as typed (it is reported as an Error by the validator).
     #[test]
-    fn inline_html_in_a_heading_is_written_escaped_l13() {
+    fn inline_html_in_a_heading_is_kept_as_source() {
         let doc = parse_document("# a <b>x</b>\n").unwrap();
         let first = crate::serializer::serialize_elements(&doc.elements);
-        assert_eq!(first, "# a \\<b>x\\</b>");
+        assert_eq!(first, "# a <b>x</b>");
         let again = parse_document(&first).unwrap();
         assert_eq!(again.elements[0].node, doc.elements[0].node);
         assert_eq!(crate::serializer::serialize_elements(&again.elements), first);
     }
 
+    /// Writes the single block of `md` back.
+    fn written(md: &str) -> String {
+        crate::serializer::serialize_elements(&parse_document(md).unwrap().elements)
+    }
+
+    /// L17 resolved (ADR-063): a code span in a heading keeps its backticks.
+    #[test]
+    fn heading_code_span_keeps_backticks_l17() {
+        assert_eq!(written("## The `<div>` element\n"), "## The `<div>` element");
+    }
+
+    #[test]
+    fn escaped_angle_in_heading_round_trips_as_source() {
+        let doc = parse_document("# Use \\<div>\n").unwrap();
+        assert_eq!(doc.elements[0].node.text(), Some("Use \\<div>"));
+        assert_eq!(written("# Use \\<div>\n"), "# Use \\<div>");
+    }
+
+    #[test]
+    fn heading_markup_round_trips() {
+        assert_eq!(written("# **B** _i_ [l](/a)\n"), "# **B** _i_ [l](/a)");
+    }
+
+    /// L19: a setext heading is written as ATX; its lines are joined with
+    /// spaces, and a hard break (`\` at the end of a line) becomes a space.
+    #[test]
+    fn setext_heading_source_is_joined_l19() {
+        assert_eq!(written("Foo\nbar\n===\n"), "# Foo bar");
+        assert_eq!(written("Foo\\\n  *bar*  \n---\n"), "## Foo *bar*");
+    }
+
     /// Literal `<` in headings and blockquotes round-trips without a second
-    /// backslash, also at the start of a line.
+    /// backslash, also at the start of a line. Headings store their source,
+    /// so they are written as read.
     #[test]
     fn literal_angle_brackets_in_headings_and_blockquotes_round_trip() {
         for (md, written) in [
-            ("## The `<div>` element", "## The \\<div> element"),
-            ("## Using `Vec<T>`", "## Using Vec\\<T>"),
+            ("## The `<div>` element", "## The `<div>` element"),
+            ("## Using `Vec<T>`", "## Using `Vec<T>`"),
             ("# Use \\<div>", "# Use \\<div>"),
             ("> a \\<b>", "> a \\<b>"),
             ("> \\<div> starts the quote", "> \\<div> starts the quote"),
@@ -991,7 +1070,7 @@ mod tests {
             vec![
                 ContentElement::Heading {
                     level: HeadingLevel::new(2).unwrap(),
-                    text: "a <b>x</b>".to_string()
+                    source: "a <b>x</b>".into()
                 },
                 ContentElement::Blockquote { text: "q <i>y</i> z".to_string() },
             ]
@@ -1041,9 +1120,9 @@ mod tests {
         let doc = parse_document("# My Title").unwrap();
         assert_element_count(&doc, 1);
         match &doc.elements[0].node {
-            ContentElement::Heading { level, text } => {
+            ContentElement::Heading { level, source } => {
                 assert_eq!(level.value(), 1, "expected H1");
-                assert_eq!(text, "My Title");
+                assert_eq!(source.as_str(), "My Title");
             }
             other => panic!("expected Heading, got {other:?}"),
         }
@@ -1234,9 +1313,9 @@ Body paragraph."#;
         // We expect at least: Heading(1), Paragraph, Link, Image, Separator, Heading(3), Paragraph.
         // Confirm the first element is an H1 heading.
         match &doc.elements[0].node {
-            ContentElement::Heading { level, text } => {
+            ContentElement::Heading { level, source } => {
                 assert_eq!(level.value(), 1);
-                assert_eq!(text, "Title");
+                assert_eq!(source.as_str(), "Title");
             }
             other => panic!("first element should be Heading(H1), got {other:?}"),
         }

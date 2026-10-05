@@ -520,6 +520,29 @@ mod tests {
         );
     }
 
+    /// Guard (ADR-063): the synthesized link reads the title's plain text
+    /// and carries its source.
+    #[test]
+    fn synthesized_link_text_is_plain_and_source_is_stored() {
+        let repo = site_repository::SiteRepository::builder()
+            .schema("post", "# Post title {#title}\noccurs\n: exactly once\n")
+            .content("post", "hello", "# *Hello* \\<World>\n")
+            .item_template("post", "<html><body></body></html>", false)
+            .build();
+        let result = build_graph(&repo, std::path::Path::new("/output"), SourceAttachment::Attach);
+        let node = result.graph.get(&UrlPath::new("/post/hello")).expect("item page");
+        let pd = node.page_data().expect("page node");
+        let link = match pd.data.resolve(&["link"]) {
+            Some(template::Value::Record(link)) => link.clone(),
+            other => panic!("link record expected, got {other:?}"),
+        };
+        assert!(matches!(link.resolve(&["text"]), Some(template::Value::Text(t)) if t == "Hello <World>"));
+        assert!(matches!(
+            link.resolve(&[template::constants::KEY_SOURCE_TEXT]),
+            Some(template::Value::Text(t)) if t == "*Hello* \\<World>"
+        ));
+    }
+
     #[test]
     fn build_graph_parse_error_recorded() {
         let repo = site_repository::SiteRepository::builder()

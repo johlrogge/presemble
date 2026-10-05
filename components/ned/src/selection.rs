@@ -440,6 +440,24 @@ pub fn has_text_equals<'a>(value: &'a str) -> impl Fn(&NodeStore, NodeId) -> boo
     }
 }
 
+/// Like [`has_text_equals`], comparing a projection of the node's text: the
+/// projected text, whitespace-normalised, must equal `value`
+/// whitespace-normalised. Used to match headings, which store markdown source,
+/// against their plain text (ADR-063) without NED knowing markdown.
+pub fn has_projected_text_equals<'a, P>(
+    value: &'a str,
+    project: P,
+) -> impl Fn(&NodeStore, NodeId) -> bool + 'a
+where
+    P: Fn(&str) -> String + 'a,
+{
+    let normalized_target = normalize_ws(value);
+    move |store, id| {
+        let text = own_or_descendant_text(store, id);
+        normalize_ws(&project(&text)) == normalized_target
+    }
+}
+
 fn normalize_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -943,6 +961,28 @@ mod tests {
         for pair in vectors {
             let input = pair[0].as_str().unwrap();
             assert_eq!(normalize_ws(input), pair[1].as_str().unwrap(), "normalize {input:?}");
+        }
+    }
+
+    /// With the identity projection, `has_projected_text_equals` agrees with
+    /// `has_text_equals` on the shared vectors.
+    #[test]
+    fn projected_text_equals_with_identity_agrees_with_text_equals() {
+        let all: serde_json::Value =
+            serde_json::from_str(include_str!("../../../resources/serve/text-vectors.json"))
+                .expect("text-vectors.json parses");
+        let vectors = all["normalize"].as_array().expect("normalize group");
+        for pair in vectors {
+            let input = pair[0].as_str().unwrap();
+            let mut store = NodeStore::new();
+            let text = store.add_node(node_store::Node::Text(input.to_string()));
+            for value in [input, pair[1].as_str().unwrap(), "other"] {
+                assert_eq!(
+                    has_projected_text_equals(value, |s: &str| s.to_string())(&store, text),
+                    has_text_equals(value)(&store, text),
+                    "{input:?} vs {value:?}"
+                );
+            }
         }
     }
 }

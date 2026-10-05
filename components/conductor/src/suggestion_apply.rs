@@ -473,7 +473,7 @@ mod tests {
     }
 
     fn heading(level: u8, text: &str) -> ContentElement {
-        ContentElement::Heading { level: HeadingLevel::new(level).unwrap(), text: text.to_string() }
+        ContentElement::Heading { level: HeadingLevel::new(level).unwrap(), source: text.into() }
     }
 
     fn para(text: &str) -> ContentElement {

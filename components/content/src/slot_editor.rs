@@ -95,6 +95,20 @@ pub(crate) fn capitalize_slot(
         None => return Ok(false),
     };
 
+    // A heading stores its source (ADR-063): capitalize the first letter of
+    // its plain text in place, or leave it when that cannot be done in source.
+    if let Some(first) = doc_slot.elements.front_mut()
+        && let ContentElement::Heading { source, .. } = &mut first.node
+    {
+        return Ok(match crate::inline::capitalize_first(source) {
+            Some(capitalized) => {
+                *source = capitalized;
+                true
+            }
+            None => false,
+        });
+    }
+
     // Capitalize the first element's text.
     if let Some(first) = doc_slot.elements.front_mut()
         && let Some(text) = element_text_mut(&mut first.node)
@@ -125,7 +139,7 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
                 .ok_or_else(|| format!("invalid heading level: {}", level.min.value()))?;
             Ok(ContentElement::Heading {
                 level: heading_level,
-                text: new_value.to_string(),
+                source: new_value.into(),
             })
         }
         Element::Paragraph => Ok(ContentElement::Paragraph {
@@ -167,9 +181,10 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
 // Helper functions
 // ---------------------------------------------------------------------------
 
+/// The literal text of a non-heading element. Headings store markdown source
+/// and are capitalized with [`crate::inline::capitalize_first`].
 fn element_text_mut(element: &mut ContentElement) -> Option<&mut String> {
     match element {
-        ContentElement::Heading { text, .. } => Some(text),
         ContentElement::Paragraph { text } => Some(text),
         ContentElement::Link { text, .. } => Some(text),
         ContentElement::Image { alt: Some(alt), .. } => Some(alt),
@@ -329,6 +344,22 @@ headings
             result.starts_with("# Hello"),
             "expected result to start with '# Hello', got: {result:?}"
         );
+    }
+
+    /// A heading stores its source (ADR-063): the first letter of its plain
+    /// text is capitalized in place, keeping the markup around it.
+    #[test]
+    fn capitalize_slot_capitalizes_inside_emphasis() {
+        let grammar = post_grammar();
+        let mut doc = parse_and_assign("# *hello* world\n\n----\n", &grammar).unwrap();
+        assert!(capitalize_slot(&mut doc, "title", &grammar).unwrap());
+        let result = serialize_document(&doc);
+        assert!(result.starts_with("# *Hello* world\n"), "{result:?}");
+
+        // Nothing to change in source: a leading code span is left alone.
+        let mut doc = parse_and_assign("# `x` y\n\n----\n", &grammar).unwrap();
+        assert!(!capitalize_slot(&mut doc, "title", &grammar).unwrap());
+        assert!(serialize_document(&doc).starts_with("# `x` y\n"));
     }
 
     #[test]
