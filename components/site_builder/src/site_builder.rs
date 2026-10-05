@@ -15,6 +15,17 @@ pub enum SourceAttachment {
     Attach,
 }
 
+impl SourceAttachment {
+    /// Attached source is for the editor; omitted source means published
+    /// output, which carries no editor-only data (ADR-063).
+    fn output_mode(self) -> template::OutputMode {
+        match self {
+            SourceAttachment::Omit => template::OutputMode::Published,
+            SourceAttachment::Attach => template::OutputMode::Editorial,
+        }
+    }
+}
+
 /// Result of building a site graph.
 pub struct GraphBuildResult {
     pub graph: site_index::SiteGraph,
@@ -168,9 +179,14 @@ pub fn build_graph(
                 Some(template::Value::Text(t)) => t.clone(),
                 _ => slug.clone(),
             };
+            let source_text = template::stored_text(&data, "title");
             data.insert(
                 "link",
-                template::Value::Record(template::synthesize_link(&title, &url_path)),
+                template::Value::Record(template::synthesize_link(
+                    &title,
+                    &url_path,
+                    source_text.as_deref(),
+                )),
             );
 
             // Compute output path
@@ -257,7 +273,11 @@ pub fn build_graph(
             diagnostics.insert(url_path_str, msgs);
         }
 
-        let mut data = template::build_article_graph(&collection_doc, &collection_grammar);
+        let mut data = template::build_article_graph_for(
+            &collection_doc,
+            &collection_grammar,
+            source_attachment.output_mode(),
+        );
 
         // Inject metadata
         let coll_presemble_file = if schema_stem_str.is_empty() {
@@ -284,9 +304,14 @@ pub fn build_graph(
             Some(template::Value::Text(t)) => t.clone(),
             _ => schema_stem_str.to_string(),
         };
+        let source_text = template::stored_text(&data, "title");
         data.insert(
             "link",
-            template::Value::Record(template::synthesize_link(&title, &url_path_str)),
+            template::Value::Record(template::synthesize_link(
+                &title,
+                &url_path_str,
+                source_text.as_deref(),
+            )),
         );
 
         let collection_content_path = repo.collection_content_path(stem);
@@ -331,7 +356,11 @@ pub fn build_graph(
                 && let Some(content_src) = repo.collection_content_source(&root_stem)
                 && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
             {
-                root_graph = template::build_article_graph(&doc, &grammar);
+                root_graph = template::build_article_graph_for(
+                    &doc,
+                    &grammar,
+                    source_attachment.output_mode(),
+                );
                 root_graph.insert(
                     KEY_PRESEMBLE_FILE,
                     template::Value::Text("content/index.md".to_string()),
@@ -454,6 +483,36 @@ mod tests {
         let node = result.graph.get(&url).expect("root page should be in graph via fallback");
         let pd = node.page_data().expect("should be a page node");
         assert_eq!(pd.page_kind, PageKind::Collection);
+    }
+
+    const TITLE_AND_LINK_TEMPLATE: &str = r#"<div><presemble:insert data="title" as="h1" /><presemble:insert data="link" /></div>"#;
+
+    fn render_item(attachment: SourceAttachment) -> String {
+        let repo = make_repo();
+        let output = std::path::PathBuf::from("/output");
+        let result = build_graph(&repo, &output, attachment);
+        let node = result.graph.get(&UrlPath::new("/post/hello")).expect("item page");
+        let pd = node.page_data().expect("page node");
+        template::render_template(TITLE_AND_LINK_TEMPLATE, &pd.data).expect("renders")
+    }
+
+    #[test]
+    fn published_build_has_no_stored_text_attribute() {
+        let html = render_item(SourceAttachment::Omit);
+        assert!(html.contains("Hello World"), "title should render: {html}");
+        assert!(
+            !html.contains(template::constants::ATTR_TEXT),
+            "published output must not carry stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn editorial_build_carries_stored_text_attribute() {
+        let html = render_item(SourceAttachment::Attach);
+        assert!(
+            html.contains(r#"data-presemble-text="Hello World""#),
+            "editorial output should carry the title's stored text: {html}"
+        );
     }
 
     #[test]

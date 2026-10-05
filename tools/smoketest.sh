@@ -371,6 +371,9 @@ assert_curl "index page has data-presemble-file attr" "/" GET "" 'data-presemble
 assert_curl "collection page has index data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/index.md"'
 assert_curl "collection page has item data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/hello-world.md"'
 assert_curl "leaf page has data-presemble-file attr" "/post/hello-world" GET "" 'data-presemble-file="content/post/hello-world.md"'
+# The title is edited from its stored text, not its rendered text (ADR-063).
+assert_curl "post title element carries its stored text" "/post/hello-world" GET "" \
+    'data-presemble-slot="title" data-presemble-file="content/post/hello-world.md" data-presemble-text="Hello, World: Your First Post"'
 
 # ── Test: Reader vs editor injection (ADR-054) ────────────────────────────
 # Lives here, not in the auth-boundary section: /post/hello-world only exists

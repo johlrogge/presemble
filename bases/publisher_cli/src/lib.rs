@@ -79,7 +79,7 @@ pub fn build_for_publish(site_dir: &Path, _url_config: &UrlConfig) -> Result<Bui
         });
     }
 
-    let outcome = render_site(&site_dir, &conductor, report)?;
+    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Published)?;
     if outcome.files_failed > 0 {
         return Err(CliError::PagesFailed(outcome.files_failed));
     }
@@ -96,7 +96,7 @@ pub fn build_for_serve(site_dir: &Path, _url_config: &UrlConfig) -> Result<Build
 
     let conductor = load_conductor(&site_dir)?;
     let report = conductor.validation_report();
-    let outcome = render_site(&site_dir, &conductor, report)?;
+    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial)?;
     print_report(&outcome.validation);
     let files = report_file_count(&outcome.validation);
     if files > 0 {
@@ -120,12 +120,13 @@ fn render_site(
     site_dir: &Path,
     conductor: &conductor::Conductor,
     validation: validation::ValidationReport,
+    output: template::OutputMode,
 ) -> Result<BuildOutcome, CliError> {
     // Copy assets (conductor handles content → HTML; assets are just file copies)
     let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
     copy_site_assets(site_dir, &repo)?;
 
-    let (rebuilt, failed, errors) = conductor.build_all_pages();
+    let (rebuilt, failed, errors) = conductor.build_all_pages_for(output);
 
     let files_built = rebuilt.len();
     let files_failed = failed.len();

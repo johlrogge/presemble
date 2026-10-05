@@ -1469,7 +1469,13 @@ e.preventDefault();
 var pfile=el.getAttribute('data-presemble-file');
 var slot=el.getAttribute('data-presemble-slot');
 if(!pfile||!slot){return;}
-var original=el.innerText;
+// A slot carrying its stored text (ADR-063) is edited as that text, not as
+// the rendered text; cancelling restores the rendered markup.
+var storedText=el.getAttribute('data-presemble-text');
+var savedHtml=el.innerHTML;
+var original=storedText!==null?storedText:el.innerText;
+function restore(){if(storedText!==null){el.innerHTML=savedHtml;}else{el.innerText=original;}}
+if(storedText!==null){el.innerText=storedText;}
 el.contentEditable='true';
 el.classList.add('presemble-editing');
 el.focus();
@@ -1502,7 +1508,7 @@ el.focus();
 function save(){
 if(busy){return;}
 var value=el.innerText.trim();
-if(value===original||!value){cleanup();return;}
+if(value===original||!value){if(storedText!==null){restore();}cleanup();return;}
 if(!pfile){console.error('save called without pfile',el);fail('Cannot save: missing file attribute on element. This is a bug — please report.');return;}
 var sel = buildStructuralSelection(el);
 if (sel === null) {fail('Cannot edit: this element cannot be addressed precisely in the document.');return;}
@@ -1519,10 +1525,10 @@ fail(e.message||'Edit failed');
 });
 }
 toolbar.querySelector('.presemble-save').onclick=function(e){e.stopPropagation();save();};
-toolbar.querySelector('.presemble-undo').onclick=function(e){e.stopPropagation();el.innerText=original;cleanup();};
+toolbar.querySelector('.presemble-undo').onclick=function(e){e.stopPropagation();restore();cleanup();};
 el.addEventListener('keydown',function(e){
 if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();}
-if(e.key==='Escape'&&!busy){el.innerText=original;cleanup();}
+if(e.key==='Escape'&&!busy){restore();cleanup();}
 },{signal:ac.signal});
 });
 document.addEventListener('click',function(e){
@@ -1616,7 +1622,13 @@ var pfile=el.getAttribute('data-presemble-file');
 var editSlot=el.getAttribute('data-presemble-source-slot')||slot;
 if(!pfile||!editSlot){return;}
 e.preventDefault();
-var original=el.innerText;
+// A slot carrying its stored text (ADR-063) is suggested against that text,
+// not the rendered text; closing restores the rendered markup.
+var storedText=el.getAttribute('data-presemble-text');
+var savedHtml=el.innerHTML;
+var original=storedText!==null?storedText:el.innerText;
+function restore(){if(storedText!==null){el.innerHTML=savedHtml;}else{el.innerText=original;}}
+if(storedText!==null){el.innerText=storedText;}
 el.contentEditable='true';
 el.classList.add('presemble-editing');
 el.focus();
@@ -1652,7 +1664,7 @@ var value=el.innerText.trim().replace(/\u00a0/g,' ');
 var origText=original.replace(/\u00a0/g,' ').trim();
 if(!origText){fail("Empty fields can't be suggested yet.");return;}
 var diff=minimalDiff(origText,value);
-if(!diff){cleanup();return;}
+if(!diff){if(storedText!==null){restore();}cleanup();return;}
 var sel = buildStructuralSelection(el);
 if (sel === null) {fail("Cannot suggest: this element cannot be addressed precisely; use edit mode.");return;}
 busy=true;
@@ -1664,7 +1676,7 @@ body:JSON.stringify({file:pfile,selection:nedTextIn(sel),mutation:nedTextMutatio
 if(!data.ok){throw new Error(data.error||'Suggest failed');}
 // A suggestion is not an edit: restore the original text before closing.
 busy=false;
-el.innerText=original;
+restore();
 cleanup();
 if(data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
 window._suggestEnter(data.id);
@@ -1676,10 +1688,10 @@ fail(e.message||'Suggest failed');
 });
 }
 toolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();suggest();};
-toolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();el.innerText=original;cleanup();};
+toolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();restore();cleanup();};
 el.addEventListener('keydown',function(ev){
 if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();suggest();}
-if(ev.key==='Escape'&&!busy){el.innerText=original;cleanup();}
+if(ev.key==='Escape'&&!busy){restore();cleanup();}
 },{signal:ac.signal});
 });
 })();

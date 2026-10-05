@@ -1,5 +1,5 @@
 use crate::ast::{Expr, Transform};
-use crate::data::{DataGraph, Value};
+use crate::data::{DataGraph, OutputMode, Value};
 use crate::dom::{Element, Form, Node};
 use crate::expr::parse_expr;
 use crate::graph_view::{GraphView, ResolvedNode};
@@ -41,7 +41,7 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
             Node::Text(_) => output.push(node),
             Node::Element(el) => {
                 if el.is_presemble() && el.name == crate::constants::ELEM_INSERT {
-                    let mut rendered = render_insert(&el, graph)?;
+                    let mut rendered = render_insert(&el, graph, ctx.output)?;
                     output.append(&mut rendered);
                 } else if el.is_presemble() && el.name == crate::constants::ELEM_INCLUDE {
                     if ctx.is_too_deep() {
@@ -436,7 +436,8 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 }
 
 /// Handle a `<presemble:insert>` element.
-fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, RenderError> {
+fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Result<Vec<Node>, RenderError> {
+    let editorial = output == OutputMode::Editorial;
     let data_path = match el.attr("data") {
         Some(p) => p,
         None => return Ok(Vec::new()),
@@ -469,7 +470,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
         // Try the fast NodeId path first (avoids Value materialization).
         // Falls back to legacy Value path for unhandled node types (e.g. body).
         if let Some(ref resolved) = graph.resolve_node(&path_segments)
-            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs)?
+            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs, editorial)?
         {
             return Ok(nodes);
         }
@@ -493,6 +494,9 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
                     && let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT])
                 {
                     attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
+                    if editorial {
+                        attrs.extend(source_text_attr(source, sub_graph));
+                    }
                 }
                 attrs.extend(constraint_attrs);
                 let element = Element {
@@ -516,6 +520,9 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
             ];
+            if editorial {
+                attrs.extend(resolve_stored_text_attr(data_path, graph));
+            }
             attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
                 name: tag,
@@ -533,7 +540,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
 
         Some(Value::Record(sub_graph)) => {
             let slot = slot_name_from_path(data_path);
-            render_record(&sub_graph, as_tag, &class, &slot, &presemble_file)
+            render_record(&sub_graph, as_tag, &class, &slot, &presemble_file, editorial)
         }
 
         Some(Value::List(items)) => {
@@ -541,7 +548,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView) -> Result<Vec<Node>, Rende
             let slot = slot_name_from_path(data_path);
             let mut result = Vec::new();
             for item in &items {
-                let mut rendered = render_list_item(item, tag, &class, &slot, &presemble_file, graph)?;
+                let mut rendered = render_list_item(item, tag, &class, &slot, &presemble_file, graph, editorial)?;
                 result.append(&mut rendered);
             }
             Ok(result)
@@ -674,6 +681,7 @@ fn render_insert_native(
     data_path: &str,
     presemble_file: &str,
     constraint_attrs: &[(String, Form)],
+    editorial: bool,
 ) -> Result<Option<Vec<Node>>, RenderError> {
     let store = resolved.store;
     let id = resolved.id;
@@ -754,7 +762,7 @@ fn render_insert_native(
                 let mut result = Vec::new();
                 for child_id in store.children(id) {
                     let child_resolved = ResolvedNode { id: child_id, store };
-                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file, &[])? {
+                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file, &[], editorial)? {
                         result.append(&mut rendered);
                     }
                 }
@@ -981,6 +989,10 @@ fn render_insert_native(
                             (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                             (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                         ];
+                        // A heading's Text child is its stored text (ADR-063).
+                        if editorial && element_name == "heading" {
+                            elem_attrs.push(stored_text_attr(text.clone()));
+                        }
                         elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
                             name: tag,
@@ -1054,7 +1066,12 @@ fn render_insert_native(
                                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                             ];
                             if let Some(source) = source_slot {
+                                // A synthesized title link carries the title's stored text (ADR-063).
+                                let source_text = (editorial && source == "title")
+                                    .then(|| node_attr_str(store, id, crate::constants::KEY_SOURCE_TEXT))
+                                    .flatten();
                                 elem_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
+                                elem_attrs.extend(source_text.map(stored_text_attr));
                             }
                             elem_attrs.extend(constraint_attrs.iter().cloned());
                             Ok(Some(vec![Node::Element(Element {
@@ -1290,6 +1307,30 @@ fn resolve_slot_constraint_form_attrs(data_path: &str, graph: &dyn GraphView) ->
     }
 }
 
+/// Look up the stored text of a heading slot (ADR-063) and return it as a
+/// `data-presemble-text` attribute.
+///
+/// The key `"_presemble_text_<slotname>"` sits in the same parent record as
+/// the slot value. Unlike constraints there is no top-level fallback: the
+/// stored text of one document must never be attached to another's slot.
+fn resolve_stored_text_attr(data_path: &str, graph: &dyn GraphView) -> Option<(String, Form)> {
+    let slot_name = slot_name_from_path(data_path);
+    let key = format!("{}{}", crate::constants::KEY_STORED_TEXT_PREFIX, slot_name);
+    let mut scoped: Vec<&str> = data_path.split('.').collect();
+    if let Some(last) = scoped.last_mut() {
+        *last = key.as_str();
+    }
+    match graph.resolve(&scoped)?.into_owned() {
+        Value::Text(t) => Some(stored_text_attr(t)),
+        _ => None,
+    }
+}
+
+/// The `data-presemble-text` attribute holding `text`.
+fn stored_text_attr(text: String) -> (String, Form) {
+    (crate::constants::ATTR_TEXT.to_string(), Form::Str(text))
+}
+
 /// Handle a `<presemble:apply>` element.
 /// Invokes a named callable template fragment with an explicit data context.
 fn render_apply(el: &Element, graph: &dyn GraphView, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
@@ -1342,12 +1383,14 @@ fn render_apply(el: &Element, graph: &dyn GraphView, ctx: &RenderContext) -> Res
 }
 
 /// Build the common presemble attribute vec for a rendered record element.
-/// Appends `data-presemble-source-slot` if the sub-graph carries `_source_slot`.
+/// Appends `data-presemble-source-slot` if the sub-graph carries `_source_slot`,
+/// and in editorial output the title's stored text.
 fn record_attrs(
     class: &str,
     slot: &str,
     file: &str,
     sub_graph: &DataGraph,
+    editorial: bool,
 ) -> Vec<(String, Form)> {
     let mut attrs = vec![
         ("class".to_string(), Form::Str(class.to_string())),
@@ -1356,8 +1399,24 @@ fn record_attrs(
     ];
     if let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT]) {
         attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
+        if editorial {
+            attrs.extend(source_text_attr(source, sub_graph));
+        }
     }
     attrs
+}
+
+/// A synthesized title link carries the title's stored text (ADR-063).
+/// Callers emit it only in editorial output: the render mode alone decides,
+/// whatever the record was built for.
+fn source_text_attr(source_slot: &str, sub_graph: &DataGraph) -> Option<(String, Form)> {
+    if source_slot != "title" {
+        return None;
+    }
+    match sub_graph.resolve(&[crate::constants::KEY_SOURCE_TEXT]) {
+        Some(Value::Text(text)) => Some(stored_text_attr(text.clone())),
+        _ => None,
+    }
 }
 
 /// Render a Record value as a link or image.
@@ -1367,6 +1426,7 @@ fn render_record(
     class: &str,
     slot: &str,
     file: &str,
+    editorial: bool,
 ) -> Result<Vec<Node>, RenderError> {
     let has_href = sub_graph.resolve(&["href"]).is_some();
     let has_path = sub_graph.resolve(&["path"]).is_some();
@@ -1390,7 +1450,7 @@ fn render_record(
         "a" => {
             let href = extract_text(sub_graph, "href").unwrap_or_default();
             let text = extract_text(sub_graph, "text").unwrap_or_default();
-            let mut attrs = record_attrs(class, slot, file, sub_graph);
+            let mut attrs = record_attrs(class, slot, file, sub_graph, editorial);
             attrs.insert(0, ("href".to_string(), Form::Str(href)));
             let element = Element {
                 name: "a".to_string(),
@@ -1403,7 +1463,7 @@ fn render_record(
         "img" => {
             let src = extract_text(sub_graph, "path").unwrap_or_default();
             let alt = extract_text(sub_graph, "alt").unwrap_or_default();
-            let mut attrs = record_attrs(class, slot, file, sub_graph);
+            let mut attrs = record_attrs(class, slot, file, sub_graph, editorial);
             attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
             attrs.insert(0, ("src".to_string(), Form::Str(src)));
             let element = Element {
@@ -1419,7 +1479,7 @@ fn render_record(
             if has_href {
                 let href = extract_text(sub_graph, "href").unwrap_or_default();
                 let text = extract_text(sub_graph, "text").unwrap_or_default();
-                let attrs = record_attrs(class, slot, file, sub_graph);
+                let attrs = record_attrs(class, slot, file, sub_graph, editorial);
                 let inner = Element {
                     name: effective_tag.to_string(),
                     attrs,
@@ -1434,7 +1494,7 @@ fn render_record(
             } else if has_path {
                 let src = extract_text(sub_graph, "path").unwrap_or_default();
                 let alt = extract_text(sub_graph, "alt").unwrap_or_default();
-                let mut attrs = record_attrs(class, slot, file, sub_graph);
+                let mut attrs = record_attrs(class, slot, file, sub_graph, editorial);
                 attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
                 attrs.insert(0, ("src".to_string(), Form::Str(src)));
                 let element = Element {
@@ -1458,6 +1518,7 @@ fn render_list_item(
     slot: &str,
     file: &str,
     _graph: &dyn GraphView,
+    editorial: bool,
 ) -> Result<Vec<Node>, RenderError> {
     match item {
         Value::Text(text) => {
@@ -1479,7 +1540,7 @@ fn render_list_item(
             Ok(nodes)
         }
 
-        Value::Record(sub_graph) => render_record(sub_graph, Some(tag), class, slot, file),
+        Value::Record(sub_graph) => render_record(sub_graph, Some(tag), class, slot, file, editorial),
 
         Value::Absent => Ok(Vec::new()),
 
@@ -2394,7 +2455,7 @@ mod tests {
     #[test]
     fn synthesized_link_renders_with_source_slot_attribute() {
         let mut graph = DataGraph::new();
-        let link = crate::data::synthesize_link("Hello World", "/article/hello-world");
+        let link = crate::data::synthesize_link("Hello World", "/article/hello-world", None);
         graph.insert("link", Value::Record(link));
 
         let src = r#"<presemble:insert data="link" />"#;
@@ -2432,6 +2493,182 @@ mod tests {
         assert!(
             !html.contains("data-presemble-source-slot"),
             "regular link should not have source-slot attribute: {html}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Stored text for browser editing (ADR-063, data-presemble-text)
+    // ---------------------------------------------------------------------------
+
+    const STORED_TEXT_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\n\
+        Summary text. {#summary}\noccurs\n: exactly once\n";
+
+    fn stored_text_graph(content_src: &str) -> DataGraph {
+        let grammar = schema::parse_schema(STORED_TEXT_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
+        crate::data::build_article_graph_for(&doc, &grammar, crate::data::OutputMode::Editorial)
+    }
+
+    fn render_with(graph: &dyn GraphView, src: &str) -> String {
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg);
+        serialize_nodes(&transform(nodes, graph, &ctx).unwrap())
+    }
+
+    #[test]
+    fn native_heading_slot_carries_stored_text() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(node_store::Node::Element(heading_name));
+        let heading_text = store.add_node(node_store::Node::Text("Tom & \"Jerry\"".into()));
+        store.add_edge(heading, node_store::Edge::Child(heading_text));
+        let title_name = store.intern("title");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+
+        let graph = NodeStoreGraphView { store, root };
+        let html = render_with(&graph, r#"<presemble:insert data="title" as="h1" />"#);
+        assert!(
+            html.contains(r#"data-presemble-text="Tom &amp; &quot;Jerry&quot;""#),
+            "native heading slot should carry its stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn legacy_heading_slot_carries_stored_text() {
+        let graph = stored_text_graph("# Tom & \"Jerry\"\n\nA summary.\n");
+        let html = render_with(&graph, r#"<presemble:insert data="title" as="h1" />"#);
+        assert!(
+            html.contains(r#"data-presemble-text="Tom &amp; &quot;Jerry&quot;""#),
+            "legacy heading slot should carry its stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn synthesized_title_link_carries_stored_text_legacy() {
+        let mut graph = DataGraph::new();
+        let link = crate::data::synthesize_link("Hello src", "/article/hello", Some("Hello *src*"));
+        graph.insert("link", Value::Record(link));
+
+        let html = render_with(&graph, r#"<presemble:insert data="link" />"#);
+        assert!(
+            html.contains(r#"data-presemble-text="Hello *src*""#),
+            "synthesized title link should carry the title's stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn synthesized_title_link_carries_stored_text_native() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let record_name = store.intern("record");
+        let record = store.add_node(node_store::Node::Element(record_name));
+        for (key, value) in [
+            ("href", "/article/hello"),
+            ("text", "Hello src"),
+            (crate::constants::KEY_SOURCE_SLOT, "title"),
+            (crate::constants::KEY_SOURCE_TEXT, "Hello *src*"),
+        ] {
+            let name = store.intern(key);
+            let val = store.add_node(node_store::Node::Text(value.into()));
+            store.add_edge(record, node_store::Edge::Attribute { name, value: val });
+        }
+        let link_name = store.intern("link");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: record });
+
+        let graph = NodeStoreGraphView { store, root };
+        let html = render_with(&graph, r#"<presemble:insert data="link" />"#);
+        assert!(
+            html.contains(r#"data-presemble-text="Hello *src*""#),
+            "native synthesized title link should carry the title's stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn apply_text_on_synthesized_link_carries_stored_text() {
+        let mut graph = DataGraph::new();
+        let link = crate::data::synthesize_link("Hello src", "/article/hello", Some("Hello *src*"));
+        graph.insert("link", Value::Record(link));
+
+        let html = render_with(&graph, r#"<presemble:insert data="link" as="h3" apply="text" />"#);
+        assert!(
+            html.contains(r#"data-presemble-text="Hello *src*""#),
+            ":apply on a synthesized title link should carry the title's stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn published_render_of_editorial_record_has_no_stored_text() {
+        let mut graph = DataGraph::new();
+        let link = crate::data::synthesize_link("Hello src", "/article/hello", Some("src"));
+        graph.insert("link", Value::Record(link));
+
+        let nodes = parse_template_xml(r#"<presemble:insert data="link" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg).with_output(crate::data::OutputMode::Published);
+        let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
+        assert!(html.contains("Hello src"), "link should render: {html}");
+        assert!(
+            !html.contains(crate::constants::ATTR_TEXT),
+            "published output must not carry stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn native_heading_slot_has_no_stored_text_when_published() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(node_store::Node::Element(heading_name));
+        let heading_text = store.add_node(node_store::Node::Text("My Heading".into()));
+        store.add_edge(heading, node_store::Edge::Child(heading_text));
+        let title_name = store.intern("title");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+
+        let graph = NodeStoreGraphView { store, root };
+        let nodes = parse_template_xml(r#"<presemble:insert data="title" as="h1" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::new(&reg).with_output(crate::data::OutputMode::Published);
+        let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
+        assert!(html.contains("My Heading"), "heading should render: {html}");
+        assert!(
+            !html.contains(crate::constants::ATTR_TEXT),
+            "published output must not carry stored text: {html}"
+        );
+    }
+
+    #[test]
+    fn paragraph_slot_has_no_stored_text_attribute() {
+        // Legacy: a paragraph slot from build_article_graph.
+        let graph = stored_text_graph("# Title\n\nA summary.\n");
+        let html = render_with(&graph, r#"<presemble:insert data="summary" as="p" />"#);
+        assert!(html.contains("A summary."), "paragraph should render: {html}");
+        assert!(
+            !html.contains(crate::constants::ATTR_TEXT),
+            "legacy paragraph slot must not carry stored text: {html}"
+        );
+
+        // Native: a paragraph element in the store.
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let para_name = store.intern("paragraph");
+        let para = store.add_node(node_store::Node::Element(para_name));
+        let para_text = store.add_node(node_store::Node::Text("A summary.".into()));
+        store.add_edge(para, node_store::Edge::Child(para_text));
+        let summary_name = store.intern("summary");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: para });
+
+        let graph = NodeStoreGraphView { store, root };
+        let html = render_with(&graph, r#"<presemble:insert data="summary" as="p" />"#);
+        assert!(html.contains("A summary."), "paragraph should render: {html}");
+        assert!(
+            !html.contains(crate::constants::ATTR_TEXT),
+            "native paragraph slot must not carry stored text: {html}"
         );
     }
 
@@ -2506,7 +2743,7 @@ mod tests {
         // A synthesized link record (with _source_slot) should carry
         // data-presemble-source-slot even when :apply text is used.
         let mut graph = DataGraph::new();
-        let link = crate::data::synthesize_link("Hello World", "/article/hello-world");
+        let link = crate::data::synthesize_link("Hello World", "/article/hello-world", None);
         graph.insert("link", Value::Record(link));
 
         let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;

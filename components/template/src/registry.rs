@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::data::OutputMode;
 use crate::dom::Node;
 
 /// Trait for resolving named template fragments.
@@ -33,11 +34,21 @@ pub struct RenderContext<'a> {
     /// Local callable definitions extracted from the current template file.
     /// Bare names resolve here first before falling back to the registry.
     pub local_defs: Option<&'a HashMap<String, Vec<Node>>>,
+    /// Whether the output is for editing (serve) or for publishing (build).
+    /// Editor-only data such as `data-presemble-text` is emitted only in
+    /// editorial output. Defaults to [`OutputMode::Editorial`].
+    pub output: OutputMode,
 }
 
 impl<'a> RenderContext<'a> {
     pub fn new(registry: &'a dyn TemplateRegistry) -> Self {
-        Self { registry, depth: 0, max_depth: 32, local_defs: None }
+        Self { registry, depth: 0, max_depth: 32, local_defs: None, output: OutputMode::Editorial }
+    }
+
+    /// This context, rendering for `output`.
+    pub fn with_output(mut self, output: OutputMode) -> Self {
+        self.output = output;
+        self
     }
 
     /// Returns a new context with depth incremented by 1.
@@ -47,6 +58,7 @@ impl<'a> RenderContext<'a> {
             depth: self.depth + 1,
             max_depth: self.max_depth,
             local_defs: self.local_defs,
+            output: self.output,
         }
     }
 
@@ -61,7 +73,7 @@ impl<'a> RenderContext<'a> {
         registry: &'a dyn TemplateRegistry,
         defs: &'a HashMap<String, Vec<Node>>,
     ) -> Self {
-        Self { registry, depth: 0, max_depth: 32, local_defs: Some(defs) }
+        Self { registry, depth: 0, max_depth: 32, local_defs: Some(defs), output: OutputMode::Editorial }
     }
 
     /// Resolve a callable template by name.

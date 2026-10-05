@@ -1151,7 +1151,7 @@ impl Conductor {
         let mut data = if let Some(ref src) = grammar_src
             && let Ok(grammar) = schema::parse_schema(src)
         {
-            template::build_article_graph(&doc, &grammar)
+            template::build_article_graph_for(&doc, &grammar, template::OutputMode::Editorial)
         } else {
             // No grammar (template-only page like the legacy root index).
             // Return an empty DataGraph; collection injection in build_all_pages
@@ -1172,7 +1172,11 @@ impl Conductor {
             Some(template::Value::Text(t)) => t.clone(),
             _ => url.split('/').next_back().unwrap_or("").to_string(),
         };
-        data.insert("link", template::Value::Record(template::synthesize_link(&title, &url)));
+        let source_text = template::stored_text(&data, "title");
+        data.insert(
+            "link",
+            template::Value::Record(template::synthesize_link(&title, &url, source_text.as_deref())),
+        );
 
         Some(data)
     }
@@ -1295,6 +1299,16 @@ impl Conductor {
     ///
     /// Returns `(rebuilt_pages, failed_pages, errors)`.
     pub fn build_all_pages(&self) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
+        self.build_all_pages_for(template::OutputMode::Editorial)
+    }
+
+    /// [`Conductor::build_all_pages`] for the given output. `presemble build`
+    /// renders [`template::OutputMode::Published`] pages, which carry no
+    /// editor-only data (ADR-063); serve renders editorial pages.
+    pub fn build_all_pages_for(
+        &self,
+        output: template::OutputMode,
+    ) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
         // === NodeStore-native pipeline (Phase B) ===
         // Run NodeStore operations first to enrich the store.
         // The legacy DataGraph pipeline below still runs for rendering.
@@ -1421,7 +1435,8 @@ impl Conductor {
                 };
 
                 let (nodes, local_defs) = template::extract_definitions(raw_nodes);
-                let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
+                let ctx = template::RenderContext::with_local_defs(&registry, &local_defs)
+                    .with_output(output);
 
                 // Use PrefixedGraphView — templates access data via input.field paths
                 let view = node_store_bridge::NodeStoreView::new(&store, *sem_root);
@@ -2735,7 +2750,11 @@ impl Conductor {
                 let grammar = schema::parse_schema(&grammar_src)
                     .map_err(|e| format!("schema parse: {e}"))?;
                 let doc = node_store_bridge::synthesize_schema_document(&grammar, kind);
-                let article_graph = template::build_article_graph(&doc, &grammar);
+                let article_graph = template::build_article_graph_for(
+                    &doc,
+                    &grammar,
+                    template::OutputMode::Editorial,
+                );
                 let mut ctx_graph = template::DataGraph::new();
                 ctx_graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
                 ctx_graph.insert("_presemble_file", template::Value::Text(String::new()));

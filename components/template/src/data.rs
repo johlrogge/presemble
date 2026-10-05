@@ -201,19 +201,43 @@ impl DataGraph {
     }
 }
 
+/// Who the output is for. Editor-only data (the stored text a browser editor
+/// edits, ADR-063) is part of editorial output only, never of published pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    /// `presemble build`: the pages that are published.
+    Published,
+    /// `serve`: pages with what the browser editor needs.
+    Editorial,
+}
+
 // ---------------------------------------------------------------------------
 // Synthesized records
 // ---------------------------------------------------------------------------
 
 /// Create a synthesized link record for a content item.
 /// The `_source_slot` field tells the browser editor which grammar slot
-/// to write back to when the link text is edited.
-pub fn synthesize_link(title: &str, url_path: &str) -> DataGraph {
+/// to write back to when the link text is edited. `source_text` is the
+/// title's stored text, which the editor edits instead of the rendered text.
+pub fn synthesize_link(title: &str, url_path: &str, source_text: Option<&str>) -> DataGraph {
     let mut link = DataGraph::new();
     link.insert("href", Value::Text(url_path.to_string()));
     link.insert("text", Value::Text(title.to_string()));
     link.insert(crate::constants::KEY_SOURCE_SLOT, Value::Text("title".to_string()));
+    if let Some(source_text) = source_text {
+        link.insert(crate::constants::KEY_SOURCE_TEXT, Value::Text(source_text.to_string()));
+    }
     link
+}
+
+/// The stored text of heading slot `slot`, as inserted by
+/// `build_article_graph` under `KEY_STORED_TEXT_PREFIX` + slot name.
+pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
+    let key = format!("{}{slot}", crate::constants::KEY_STORED_TEXT_PREFIX);
+    match graph.resolve(&[key.as_str()]) {
+        Some(Value::Text(t)) => Some(t.clone()),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,17 +246,30 @@ pub fn synthesize_link(title: &str, url_path: &str) -> DataGraph {
 
 /// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
+/// The graph is for published output: it carries no editor-only data.
 pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
-    build_article_graph_inner(doc, grammar, None)
+    build_article_graph_inner(doc, grammar, None, OutputMode::Published)
+}
+
+/// Like `build_article_graph`, for the given output. Editorial output also
+/// carries each heading slot's stored text (ADR-063).
+pub fn build_article_graph_for(doc: &Document, grammar: &Grammar, output: OutputMode) -> DataGraph {
+    build_article_graph_inner(doc, grammar, None, output)
 }
 
 /// Like `build_article_graph` but attaches a `data-presemble-md` attribute to
-/// every body element containing the original markdown source slice.
+/// every body element containing the original markdown source slice. This is
+/// editorial output, so heading slots also carry their stored text.
 pub fn build_article_graph_with_source(doc: &Document, grammar: &Grammar, source: &str) -> DataGraph {
-    build_article_graph_inner(doc, grammar, Some(source))
+    build_article_graph_inner(doc, grammar, Some(source), OutputMode::Editorial)
 }
 
-fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&str>) -> DataGraph {
+fn build_article_graph_inner(
+    doc: &Document,
+    grammar: &Grammar,
+    source: Option<&str>,
+    output: OutputMode,
+) -> DataGraph {
     let mut graph = DataGraph::new();
 
     // Iterate grammar preamble slots and map each to its DocumentSlot.
@@ -251,6 +288,12 @@ fn build_article_graph_inner(doc: &Document, grammar: &Grammar, source: Option<&
                 if let Some(spanned) = elements.front()
                     && let ContentElement::Heading { text, .. } = &spanned.node
                 {
+                    // The stored text, which the browser editor edits (ADR-063).
+                    if output == OutputMode::Editorial {
+                        let stored_key =
+                            format!("{}{slot_key}", crate::constants::KEY_STORED_TEXT_PREFIX);
+                        graph.insert(stored_key, Value::Text(text.clone()));
+                    }
                     graph.insert(slot_key, Value::Text(text.clone()));
                 }
             }
@@ -720,7 +763,7 @@ mod tests {
 
     #[test]
     fn synthesize_link_has_href_text_and_source_slot() {
-        let link = synthesize_link("Hello World", "/article/hello-world");
+        let link = synthesize_link("Hello World", "/article/hello-world", None);
         match link.resolve(&["href"]) {
             Some(Value::Text(v)) => assert_eq!(v, "/article/hello-world"),
             other => panic!("expected href text, got {other:?}"),

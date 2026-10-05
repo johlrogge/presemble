@@ -18,6 +18,10 @@ pub const ATTR_FILE: &str = "data-presemble-file";
 pub const ATTR_HINT: &str = "data-presemble-hint";
 pub const ATTR_MD: &str = "data-presemble-md";
 pub const ATTR_SOURCE_SLOT: &str = "data-presemble-source-slot";
+/// The slot's stored text, which the browser editor edits instead of the
+/// rendered text (ADR-063). Emitted on heading slots and on synthesized title
+/// links.
+pub const ATTR_TEXT: &str = "data-presemble-text";
 
 /// Class and message of the placeholder `serve` renders in place of a body
 /// HTML block (ADR-062 D2). The placeholder is not a slot.
@@ -28,6 +32,15 @@ pub const MSG_HTML_REMOVED: &str = "Raw HTML is not published. Remove it to publ
 /// The full key for slot "title" is `"_presemble_schema_constraints_title"`.
 /// The value is a `Value::Record` where each entry maps a constraint suffix to its string value.
 pub const KEY_SCHEMA_CONSTRAINTS_PREFIX: &str = "_presemble_schema_constraints_";
+
+/// DataGraph key prefix for a heading slot's stored text (ADR-063).
+/// The full key for slot "title" is `"_presemble_text_title"`.
+/// The value is a `Value::Text` holding the text as stored in the document.
+pub const KEY_STORED_TEXT_PREFIX: &str = "_presemble_text_";
+
+/// DataGraph key on a synthesized link record holding the stored text of the
+/// slot named by `_source_slot`.
+pub const KEY_SOURCE_TEXT: &str = "_source_text";
 
 /// HTML attribute names for schema-instance count data (emitted on the document root element
 /// during schema-mode rendering so the browser badge overlay can display them).
