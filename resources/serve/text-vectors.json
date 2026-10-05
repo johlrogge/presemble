@@ -9,6 +9,12 @@
     ["   ## x ###", "x"],
     ["## The `<div>` element", "The `<div>` element"]
   ],
+  "heading_block": [
+    ["Foo\n===", null],
+    ["Foo\n---", null],
+    ["# A #", "A"],
+    ["  ## B", "B"]
+  ],
   "normalize": [
     ["a  b", "a b"],
     [" a\nb\t", "a b"],

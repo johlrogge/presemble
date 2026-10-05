@@ -992,6 +992,24 @@ mod tests {
         assert_eq!(written("# Use \\<div>\n"), "# Use \\<div>");
     }
 
+    /// The parser stores the ATX content the shared vectors describe
+    /// (resources/serve/text-vectors.json, also checked by
+    /// tools/text-vectors.ts against inject.js).
+    #[test]
+    fn atx_vectors_read_through_the_parser() {
+        let all: serde_json::Value =
+            serde_json::from_str(include_str!("../../../resources/serve/text-vectors.json"))
+                .expect("text-vectors.json parses");
+        let vectors = all["atx"].as_array().expect("atx group");
+        assert!(!vectors.is_empty());
+        for pair in vectors {
+            let line = pair[0].as_str().unwrap();
+            let doc = parse_document(&format!("{line}\n")).unwrap();
+            assert_eq!(doc.elements.len(), 1, "{line:?}: {:#?}", doc.elements);
+            assert_eq!(doc.elements[0].node.text(), pair[1].as_str(), "{line:?}");
+        }
+    }
+
     #[test]
     fn heading_markup_round_trips() {
         assert_eq!(written("# **B** _i_ [l](/a)\n"), "# **B** _i_ [l](/a)");

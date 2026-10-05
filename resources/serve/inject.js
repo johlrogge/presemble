@@ -69,7 +69,7 @@ function bodySiblingsForFile(file) {
 // Single source of truth for the heading text used in structural anchors.
 // Used both when building selectors and when resolving anchors in the DOM.
 function _headingAnchorText(el) {
-  return el.innerText.trim().replace(/\s+/g, ' ');
+  return normalizeAnchorText(el.innerText);
 }
 function findPreviousHeadingForElement(sibs, targetEl) {
   var targetPos = sibs.indexOf(targetEl);
@@ -1225,6 +1225,35 @@ return { SearchReplace: { search: diff.search, replace: diff.replace } };
 
 var STRUCTURAL_SUGGEST_MSG = "Structural changes can't be suggested yet; use edit mode.";
 
+// BEGIN pure-text-helpers
+// Pure functions, no DOM: tools/text-vectors.ts evaluates this region and
+// checks it against resources/serve/text-vectors.json, as the Rust side does.
+
+// Whitespace-normalise anchor text the way the server does
+// (content::inline::normalize_plain_text, ned normalize_ws): split on Unicode
+// White_Space and join with one space. Not `\s`/trim(): they also strip
+// U+FEFF, which is not White_Space.
+function normalizeAnchorText(s) {
+return String(s).split(/\p{White_Space}+/u).filter(Boolean).join(' ');
+}
+
+// The content of an ATX heading line, as content::inline::atx_heading_content
+// reads it: up to three leading spaces, the `#{1,6}` run and the spaces or
+// tabs after it are stripped, then trailing spaces and tabs. A trailing `#`
+// run that is the whole remainder or follows a space or tab is a closing
+// sequence and is removed with that space or tab. `\#` is never part of a
+// closing run (the character before the run is then `\`).
+function _atxHeadingContent(line) {
+var m = /^ {0,3}(#{1,6})([ \t]+|$)/.exec(line);
+if (!m) return null;
+var rest = line.slice(m[0].length).replace(/[ \t]+$/, '');
+var beforeRun = rest.replace(/#+$/, '');
+if (beforeRun.length < rest.length && (beforeRun === '' || /[ \t]$/.test(beforeRun))) {
+rest = beforeRun;
+}
+return rest.replace(/^[ \t]+|[ \t]+$/g, '');
+}
+
 function _normMd(md) {
 return String(md).replace(/\r\n?/g, '\n');
 }
@@ -1236,10 +1265,14 @@ return String(md).replace(/\r\n?/g, '\n');
 function blockTextFromMd(kind, md) {
 var s = _normMd(md);
 switch (kind) {
-case 'heading':
-// Parser stores the heading text without the `#` marker or an optional
-// closing `#` sequence.
-return s.trim().replace(/^#{1,6}[ \t]+/, '').replace(/[ \t]+#+[ \t]*$/, '').trim();
+case 'heading': {
+// Parser stores the heading's source without the `#` markers or a
+// closing `#` sequence (ADR-063). An underlined (setext) heading has no
+// such line: null, as its stored text differs from its markdown until it
+// is saved as `#` heading (limit L19).
+var line = s.split('\n').filter(function(l) { return l.trim() !== ''; })[0] || '';
+return _atxHeadingContent(line);
+}
 case 'blockquote':
 // Parser stores the quoted text with soft breaks joined by a space.
 return s.trim().split('\n').map(function(l) {
@@ -1267,6 +1300,7 @@ default:
 return null;
 }
 }
+// END pure-text-helpers
 
 // Return an error message when `editedMd` is no longer a single block of the
 // same kind as `origMd` (a structural change), else null. The server checks
@@ -1275,6 +1309,9 @@ function blockShapeError(kind, origMd, editedMd) {
 var o = _normMd(origMd).trim();
 var e = _normMd(editedMd).trim();
 if (blockTextFromMd(kind, o) === null) {
+if (kind === 'heading') {
+return "Underlined (setext) headings can't be suggested on yet; use edit mode.";
+}
 return "This kind of block can't be suggested as text; use edit mode.";
 }
 if (!e) return STRUCTURAL_SUGGEST_MSG;

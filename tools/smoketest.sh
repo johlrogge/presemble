@@ -92,6 +92,7 @@ done
 # browser resources above.
 DENO_TOOL_FILES=(
     "tools/ws-smoke.ts"
+    "tools/text-vectors.ts"
 )
 
 for ts_file in "${DENO_TOOL_FILES[@]}"; do
@@ -103,6 +104,15 @@ for ts_file in "${DENO_TOOL_FILES[@]}"; do
         pass "deno check $ts_file"
     fi
 done
+
+# The browser's pure text helpers (inject.js) must agree with the server on
+# the shared vectors in resources/serve/text-vectors.json (ADR-063).
+if deno run --no-prompt --allow-read=. tools/text-vectors.ts 2>&1 | tee /tmp/presemble-text-vectors.log; then
+    pass "text vectors: inject.js agrees with the server"
+else
+    fail "text vectors: inject.js disagrees with the server"
+    JS_CHECK_FAILED=1
+fi
 
 if [ $JS_CHECK_FAILED -eq 1 ]; then
     echo -e "══════════════════════════════════════"
