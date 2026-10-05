@@ -100,6 +100,7 @@ comments are stripped and are not an Error.
     escaped, not reported, written escaped on save, until they store their
     source (ADR-057 OQ6). A heading is stable from the first save on; a
     multi-line blockquote from the second, when its lines are joined.
+    Resolved for headings by ADR-063; blockquotes pending in package Q.
   - **L14:** an HTML block of CommonMark types 1–5 (`<script>`, `<pre>`,
     `<style>`, `<textarea>`, comments, processing instructions, declarations,
     CDATA) with no end condition runs to the end of the file, as CommonMark
@@ -117,6 +118,7 @@ comments are stripped and are not an Error.
     save (``## The `<div>` element`` is written as `## The \<div> element`).
     This is fixed when headings and blockquotes store their markdown source
     (ADR-057 OQ6); raw HTML in them then becomes an Error too.
+    Resolved for headings by ADR-063; blockquotes pending in package Q.
 - An HTML comment between two same-kind lists keeps them separate, because the
   comment is trivia of the second list. Follow-up: when a save would put two
   same-kind lists next to each other with no comment between them (L10), the

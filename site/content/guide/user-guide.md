@@ -167,7 +167,7 @@ The body section supports the full range of markdown block and inline content:
 | Ordered list | `1. item` |
 | Code block | Triple-backtick fence |
 
-**Inline formatting within paragraphs:**
+**Inline formatting within paragraphs and headings:**
 
 | Format | Syntax |
 |---|---|
@@ -175,13 +175,15 @@ The body section supports the full range of markdown block and inline content:
 | Italic | `*text*` or `_text_` |
 | Inline code | `` `code` `` |
 
+Headings keep their markdown as written, so `` ## The `<div>` element `` is saved as it was typed. Underlined (setext) headings, a line of text with `===` or `---` below it, are rewritten as `#` headings when the file is saved; until then they cannot be suggested on in the browser.
+
 ### HTML and comments in content
 
 Presemble keeps content free of HTML, even though markdown allows it, like Hugo does by default (goldmark's `unsafe = false`). Presentation belongs in templates.
 
 - **HTML blocks** (a line that starts with a tag such as `<div>`) are kept in the file, but the page cannot be published until they are removed. In `presemble serve` a placeholder shows where the block is.
-- **Inline HTML** in paragraphs and lists (such as `<b>bold</b>` inside a sentence) also stops the page from publishing.
-- **In headings and blockquotes**, inline HTML is shown as text and saved escaped, for now.
+- **Inline HTML** in paragraphs, headings and lists (such as `<b>bold</b>` inside a sentence) also stops the page from publishing.
+- **In blockquotes**, inline HTML is shown as text and saved escaped, for now, until blockquotes keep their markdown as written.
 - **The fix:** delete the HTML, write `\<` for a literal `<`, or put code in backticks (`` `<div>` ``).
 - **HTML comments** (`<!-- … -->`) are kept in the file, move with the block that follows them, and are never published.
 
@@ -455,7 +457,7 @@ These directives only change the binding name; the underlying data is the same.
 
 | Path form | Example | Description |
 |---|---|---|
-| `input.field` | `input.title` | A named slot from the current page |
+| `input.field` | `input.title` | A named slot from the current page; for a heading slot such as `input.title`, the heading's plain text (markup removed) |
 | `input.field.subfield` | `input.author.name` | A nested reference (linked content) |
 | `input.url_path` | `input.url_path` | The current page's clean URL |
 | `input.body` | `input.body` | The current page's free-form body as HTML |
@@ -813,7 +815,7 @@ By default a link expression fills the next preamble slot by position, like any 
 
 A marked expression fills the named link slot wherever it appears in the preamble, so two adjacent slots that both accept any number of links each get their own expression. The text in brackets is display text only; it never chooses the slot. The marker goes on the same line as the link expression, after at least one space; a marker on the next line is reported. When the file is saved, markers are kept and slots are written in schema order. This works for every link-expression spelling, including `[text](:path)`.
 
-If a marker names no slot or a slot that is not a link slot, is invalid, is on its own line, follows a multi-line expression, or is on anything other than a link expression (text, an image, a plain link), the line is kept exactly as written but not used, and the page cannot be published until it is fixed. A line that is only `{#name}` is reported the same way. A paragraph ending in `{#name}` is reported the same way: paragraphs, headings, images and lists fill slots by position. To end a paragraph with a literal `{#name}`, write `\{#name}`. A heading ending in `{#name}` is reported the same way; there is no escape for headings yet, and a code span at the end of a heading does not help. If an unmarked expression's text equals the name of a link slot it did not land in, for example `[news](->> :post)` placed in `latest`, a hint suggests adding the marker: `[news](->> :post) {#news}`.
+If a marker names no slot or a slot that is not a link slot, is invalid, is on its own line, follows a multi-line expression, or is on anything other than a link expression (text, an image, a plain link), the line is kept exactly as written but not used, and the page cannot be published until it is fixed. A line that is only `{#name}` is reported the same way. A paragraph ending in `{#name}` is reported the same way: paragraphs, headings, images and lists fill slots by position. To end a paragraph with a literal `{#name}`, write `\{#name}`. A heading ending in `{#name}` is reported the same way; to end a heading with a literal `{#name}`, write `\{#name}`, or end the heading with a code span. If an unmarked expression's text equals the name of a link slot it did not land in, for example `[news](->> :post)` placed in `latest`, a hint suggests adding the marker: `[news](->> :post) {#news}`.
 
 ### Reverse references with `refs-to self`
 

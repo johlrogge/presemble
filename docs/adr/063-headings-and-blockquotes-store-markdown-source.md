@@ -107,9 +107,13 @@ suggestions that addressed decoded heading text may go Stale.
 - Inline markup in headings round-trips. Code spans keep their backticks.
 - Bare HTML in headings and blockquotes becomes an Error, like in paragraphs.
   Writing about HTML stays possible through code spans and `\<`.
+- A heading containing an inline image is now kept; it used to be lost on
+  load.
 - New known limit:
-  - **L19:** hard breaks in setext headings are canonicalised to spaces on
-    save, because an ATX heading is one line.
+  - **L19:** setext (underlined) headings are canonicalised to ATX on the
+    first save: an ATX heading is one line, so hard breaks become spaces, and
+    a heading ending in a `#` run gets an escaped `\#`. Suggestions on a
+    setext heading are refused until that first save.
 
 ## Amendments
 

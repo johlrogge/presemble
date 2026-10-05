@@ -332,6 +332,8 @@ memory `feedback_invalid_is_saveable`, `project_ned_exact_addressing`.
    `{#…}` (``# Title `{#x}` ``) are both reported. Code spans in headings
    already lose their backticks on save (ADR-062 L17). Both limits go away
    when headings store their source (ADR-057 OQ6).
+   Resolved by ADR-063: headings store their source, so `\{#name}` and a
+   closing code span are literal.
 
 ## Open questions
 

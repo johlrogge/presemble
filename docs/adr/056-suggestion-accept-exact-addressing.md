@@ -4,6 +4,9 @@
 
 Accepted
 
+Amended by ADR-063: SetText and SearchReplace on headings match their markdown
+source; `ned/heading-with-text` matches their plain text.
+
 ## Decision
 
 1. **Exact addressing.** Every NED suggestion's selection must resolve to

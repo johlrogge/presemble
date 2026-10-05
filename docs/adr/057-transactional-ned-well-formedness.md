@@ -70,3 +70,4 @@ ADR-040, ADR-054, ADR-056; memory `feedback_invalid_is_saveable`.
 4. **Well-formedness line.** Confirm: editorial transactions may not leave unknown block kinds or malformed blocks (e.g. a non-numeric heading level).
 5. **Lossy canonicalization.** For text markdown cannot represent: a newline in a heading → space, a blank line in a paragraph → soft break, a multi-paragraph blockquote → one line. Is canonicalization acceptable?
 6. **Inline markup in stored text.** The parser stores *literal* text (inline markup dropped: `*emph*` loses its emphasis on load). Keep literal text, with the serializer escaping inline characters, or store inline markdown source in the text nodes?
+   Resolved for headings by ADR-063 (they store their markdown source); blockquotes pending.
