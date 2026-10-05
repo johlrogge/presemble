@@ -1744,7 +1744,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello World</h1>"#);
@@ -1757,7 +1757,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(
@@ -1776,7 +1776,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.body" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, "<p>Body text</p>");
@@ -1795,7 +1795,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.author" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
@@ -1817,7 +1817,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.cover" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
@@ -1832,7 +1832,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.missing" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty());
     }
@@ -1843,7 +1843,7 @@ mod tests {
         let src = r#"<div><presemble:insert data="article.title" as="h1" /></div>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
@@ -1873,7 +1873,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<div class="wide"></div>"#);
@@ -1901,7 +1901,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<div class="base tall"></div>"#);
@@ -1917,7 +1917,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         // No class attribute when value is absent; presemble:class is removed
@@ -1935,7 +1935,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(!html.contains("presemble:class"), "presemble:class should not appear in output");
@@ -1957,7 +1957,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.summary" as="p" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
@@ -1987,7 +1987,7 @@ mod tests {
         let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, "<p>Has cover</p>");
@@ -1999,7 +1999,7 @@ mod tests {
         let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty());
     }
@@ -2010,7 +2010,7 @@ mod tests {
         let src = r#"<template data-slot="article.cover"><presemble:insert data="article.cover" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<img src="img.jpg" alt="Photo" class="article-cover" data-presemble-slot="cover" data-presemble-file="" />"#);
@@ -2035,7 +2035,7 @@ mod tests {
         let src = r#"<template data-each="articles"><presemble:insert data="item.title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(
@@ -2052,7 +2052,7 @@ mod tests {
         let src = r#"<template data-each="articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
     }
@@ -2064,7 +2064,7 @@ mod tests {
         let src = r#"<template data-each="articles"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty(), "expected empty output, got {result:?}");
     }
@@ -2079,7 +2079,7 @@ mod tests {
         let src = r#"<template data-each="articles"><presemble:insert data="item.title" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(!html.contains("<template"), "output should not contain <template>: {html}");
@@ -2119,7 +2119,7 @@ mod tests {
             name: "feature-card",
             src: r#"<li><presemble:insert data="title" as="h3" /></li>"#,
         };
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
 
         let src = r#"<presemble:apply template="feature-card" data="feature" />"#;
         let nodes = parse_template_xml(src).unwrap();
@@ -2133,7 +2133,7 @@ mod tests {
     fn apply_with_missing_template_attr_returns_error() {
         let graph = DataGraph::new();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let src = r#"<presemble:apply data="feature" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx);
@@ -2144,7 +2144,7 @@ mod tests {
     fn apply_with_missing_data_attr_returns_error() {
         let graph = DataGraph::new();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let src = r#"<presemble:apply template="feature-card" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx);
@@ -2156,7 +2156,7 @@ mod tests {
         let mut graph = DataGraph::new();
         graph.insert("feature", Value::Record(DataGraph::new()));
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let src = r#"<presemble:apply template="unknown-callable" data="feature" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx);
@@ -2170,7 +2170,7 @@ mod tests {
             name: "card",
             src: "<li>card</li>",
         };
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let src = r#"<presemble:apply template="card" data="missing.path" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx).unwrap();
@@ -2189,7 +2189,7 @@ mod tests {
             name: "author-card",
             src: r#"<span><presemble:insert data="name" as="strong" /></span>"#,
         };
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
 
         let src = r#"<presemble:apply template="author-card" data="author" />"#;
         let nodes = parse_template_xml(src).unwrap();
@@ -2210,7 +2210,7 @@ mod tests {
             name: "btn-template",
             src: r#"<button><presemble:insert data="presemble.self.label" as="span" /></button>"#,
         };
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
 
         let src = r#"<presemble:apply template="btn-template" data="btn" />"#;
         let nodes = parse_template_xml(src).unwrap();
@@ -2244,7 +2244,7 @@ mod tests {
         graph.insert("item", Value::Text("x".to_string()));
 
         let reg = SelfRefRegistry;
-        let mut ctx = RenderContext::new(&reg);
+        let mut ctx = RenderContext::editorial(&reg);
         ctx.max_depth = 5; // Low limit so the test is fast
 
         let src = r#"<presemble:apply template="recurse" data="item" />"#;
@@ -2259,7 +2259,7 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let graph = DataGraph::new();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx);
         assert!(result.is_err());
     }
@@ -2281,7 +2281,7 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let graph = DataGraph::new();
         let reg = MockReg;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(html.contains("<p>Hello</p>"), "included fragment should appear: {html}");
@@ -2309,7 +2309,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2337,7 +2337,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.title" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2363,7 +2363,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.cover" as="img" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2393,7 +2393,7 @@ mod tests {
         let src = r#"<presemble:insert data="article.author" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2423,7 +2423,7 @@ mod tests {
         let src = r#"<template data-slot="article.title"><presemble:insert data="article.title" as="h1" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2461,7 +2461,7 @@ mod tests {
         let src = r#"<presemble:insert data="link" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2485,7 +2485,7 @@ mod tests {
         let src = r#"<presemble:insert data="link" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2506,13 +2506,13 @@ mod tests {
     fn stored_text_graph(content_src: &str) -> DataGraph {
         let grammar = schema::parse_schema(STORED_TEXT_SCHEMA).expect("schema parses");
         let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
-        crate::data::build_article_graph_for(&doc, &grammar, crate::data::OutputMode::Editorial)
+        crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial)
     }
 
     fn render_with(graph: &dyn GraphView, src: &str) -> String {
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         serialize_nodes(&transform(nodes, graph, &ctx).unwrap())
     }
 
@@ -2608,7 +2608,7 @@ mod tests {
 
         let nodes = parse_template_xml(r#"<presemble:insert data="link" />"#).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg).with_output(crate::data::OutputMode::Published);
+        let ctx = RenderContext::published(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
         assert!(html.contains("Hello src"), "link should render: {html}");
         assert!(
@@ -2632,7 +2632,7 @@ mod tests {
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="title" as="h1" />"#).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg).with_output(crate::data::OutputMode::Published);
+        let ctx = RenderContext::published(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
         assert!(html.contains("My Heading"), "heading should render: {html}");
         assert!(
@@ -2690,7 +2690,7 @@ mod tests {
         let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2710,7 +2710,7 @@ mod tests {
         let src = r#"<presemble:insert data="title" as="h1" apply="text" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2728,7 +2728,7 @@ mod tests {
         let src = r#"<presemble:insert data="body" as="div" apply="text" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2749,7 +2749,7 @@ mod tests {
         let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2771,7 +2771,7 @@ mod tests {
         let src = r#"<presemble:insert data="title" apply="foo" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx);
 
         assert!(result.is_err(), "unknown :apply function should produce an error");
@@ -2788,7 +2788,7 @@ mod tests {
         let src = r#"<presemble:insert data="missing" apply="text" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
 
         assert!(result.is_empty(), "absent value with :apply text should produce no output");
@@ -2822,7 +2822,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2854,7 +2854,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2877,7 +2877,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2910,7 +2910,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
@@ -2970,7 +2970,7 @@ mod tests {
             children: vec![],
         })];
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(html.contains("short text"), "truncate should pass through short text: {html}");
@@ -3145,7 +3145,7 @@ mod tests {
         let src = r#"<presemble:insert data="title" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert_eq!(html, r#"<h1 class="title" data-presemble-slot="title" data-presemble-file="">Native Title</h1>"#);
@@ -3164,7 +3164,7 @@ mod tests {
         let src = r#"<presemble:insert data="count" as="span" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(html.contains("42"), "integer should render as text: {html}");
@@ -3184,7 +3184,7 @@ mod tests {
         let src = r#"<presemble:insert data="empty" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty(), "Nil node should produce no output");
     }
@@ -3213,7 +3213,7 @@ mod tests {
         let src = r#"<presemble:insert data="nav_link" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(html.contains(r#"href="/about""#), "link should have href: {html}");
@@ -3240,7 +3240,7 @@ mod tests {
         let src = r#"<presemble:insert data="items" as="li" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(html.contains("Item 1"), "first item should appear: {html}");
@@ -3266,7 +3266,7 @@ mod tests {
         let src = r#"<presemble:insert data="title" as="h2" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(html.contains("My Heading"), "heading text should be extracted: {html}");
@@ -3314,7 +3314,7 @@ mod tests {
         let src = r#"<presemble:insert data="body" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(
@@ -3362,7 +3362,7 @@ mod tests {
         let src = r#"<ul><template data-each="highlight"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         assert!(
@@ -3396,7 +3396,7 @@ mod tests {
         // the output of both templates concatenated in order.
         let graph = DataGraph::new();
         let reg = TwoTemplateRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
 
         let juxt_node = Node::Element(Element {
             name: "presemble:juxt".to_string(),
@@ -3441,7 +3441,7 @@ mod tests {
         }
 
         let reg = DataReadRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
 
         let juxt_node = Node::Element(Element {
             name: "presemble:juxt".to_string(),
@@ -3619,7 +3619,7 @@ mod tests {
         let src = r#"<presemble:insert data="body" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let transformer_html = serialize_nodes(&result);
 
@@ -3685,7 +3685,7 @@ mod tests {
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
     }
 
@@ -3775,7 +3775,7 @@ mod tests {
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
     }
 
@@ -3854,7 +3854,7 @@ mod tests {
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::new(&reg);
+        let ctx = RenderContext::editorial(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
         assert!(html.contains("Visible."), "got: {html}");
         assert!(!html.contains("secret") && !html.contains("<!--"), "got: {html}");

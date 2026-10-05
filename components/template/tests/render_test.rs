@@ -26,14 +26,14 @@ fn render_schema_derived_slot_emits_constraint_attributes() {
 
     let doc_input = "# My Article Title\n";
     let doc = parse_and_assign(doc_input, &grammar).expect("document should parse");
-    let slot_graph = template::build_article_graph(&doc, &grammar);
+    let slot_graph = template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial);
 
     // Wrap in a context the same way as the real render pipeline.
     let mut context = template::DataGraph::new();
     context.insert("input", template::Value::Record(slot_graph));
 
     let template_src = r#"<h1><presemble:insert data="input.title" /></h1>"#;
-    let html = template::render_template(template_src, &context)
+    let html = template::render_template(template_src, &context, template::OutputMode::Editorial)
         .expect("render should succeed");
 
     assert!(
@@ -51,11 +51,11 @@ fn render_article_with_dom_transformer() {
     let grammar = schema::parse_schema(schema_src).expect("schema parses");
     let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
 
-    let slot_graph = template::build_article_graph(&doc, &grammar);
+    let slot_graph = template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial);
     let mut context = template::DataGraph::new();
     context.insert("input", template::Value::Record(slot_graph));
 
-    let html = template::render_template(template_src, &context)
+    let html = template::render_template(template_src, &context, template::OutputMode::Editorial)
         .expect("render should succeed");
 
     // Title with semantic class
@@ -79,7 +79,7 @@ fn render_template_missing_slot_produces_empty_not_error() {
     // A slot that's absent should produce empty output, not a RenderError
     let template_src = r#"<div><presemble:insert data="input.missing" /></div>"#;
     let graph = template::DataGraph::new(); // empty graph
-    let html = template::render_template(template_src, &graph).expect("should not error");
+    let html = template::render_template(template_src, &graph, template::OutputMode::Editorial).expect("should not error");
     assert!(html.contains("<div>") && !html.contains("presemble"), "{html}");
 }
 
@@ -87,7 +87,7 @@ fn render_template_missing_slot_produces_empty_not_error() {
 fn render_template_data_slot_absent_removes_block() {
     let template_src = r#"<template data-slot="input.cover"><img src="x" /></template>"#;
     let graph = template::DataGraph::new();
-    let html = template::render_template(template_src, &graph).expect("should not error");
+    let html = template::render_template(template_src, &graph, template::OutputMode::Editorial).expect("should not error");
     assert!(html.is_empty() || !html.contains("img"), "{html}");
 }
 
@@ -102,7 +102,7 @@ fn attach_schema_instance_attrs_emits_count_and_sample_url() {
     let graph = template::DataGraph::new();
     let nodes = template::parse_template_xml(template_src).expect("template parse");
     let reg = template::NullRegistry;
-    let ctx = template::RenderContext::new(&reg);
+    let ctx = template::RenderContext::editorial(&reg);
     let transformed = template::transform(nodes, &graph, &ctx).expect("transform");
 
     // Attach badge data: 3 documents, first is /article/hello-world
@@ -131,7 +131,7 @@ fn attach_schema_instance_attrs_zero_count_omits_sample_url() {
     let graph = template::DataGraph::new();
     let nodes = template::parse_template_xml(template_src).expect("template parse");
     let reg = template::NullRegistry;
-    let ctx = template::RenderContext::new(&reg);
+    let ctx = template::RenderContext::editorial(&reg);
     let transformed = template::transform(nodes, &graph, &ctx).expect("transform");
 
     // Attach badge data: 0 documents, no sample URL
@@ -156,7 +156,7 @@ fn attach_schema_instance_attrs_targets_root_element_only() {
     let graph = template::DataGraph::new();
     let nodes = template::parse_template_xml(template_src).expect("template parse");
     let reg = template::NullRegistry;
-    let ctx = template::RenderContext::new(&reg);
+    let ctx = template::RenderContext::editorial(&reg);
     let transformed = template::transform(nodes, &graph, &ctx).expect("transform");
 
     let with_badge =
@@ -199,7 +199,7 @@ fn attach_schema_included_by_attr_emits_json_on_root_element() {
     let graph = template::DataGraph::new();
     let nodes = template::parse_template_xml(template_src).expect("template parse");
     let reg = template::NullRegistry;
-    let ctx = template::RenderContext::new(&reg);
+    let ctx = template::RenderContext::editorial(&reg);
     let transformed = template::transform(nodes, &graph, &ctx).expect("transform");
 
     // post and event both have TypeLink("author") — so they "include" this schema
@@ -231,7 +231,7 @@ fn attach_schema_included_by_attr_empty_emits_empty_json_array() {
     let graph = template::DataGraph::new();
     let nodes = template::parse_template_xml(template_src).expect("template parse");
     let reg = template::NullRegistry;
-    let ctx = template::RenderContext::new(&reg);
+    let ctx = template::RenderContext::editorial(&reg);
     let transformed = template::transform(nodes, &graph, &ctx).expect("transform");
 
     let with_back_refs = template::attach_schema_included_by_attr(transformed, &[]);
@@ -256,7 +256,7 @@ fn attach_schema_included_by_attr_targets_root_element_only() {
     let graph = template::DataGraph::new();
     let nodes = template::parse_template_xml(template_src).expect("template parse");
     let reg = template::NullRegistry;
-    let ctx = template::RenderContext::new(&reg);
+    let ctx = template::RenderContext::editorial(&reg);
     let transformed = template::transform(nodes, &graph, &ctx).expect("transform");
 
     let with_back_refs =
@@ -305,13 +305,13 @@ fn render_typelink_slot_produces_schema_href() {
     // Synthesize an empty document (as schema-mode does).
     let doc_input = "---\n";
     let doc = parse_and_assign(doc_input, &grammar).expect("empty doc should parse");
-    let slot_graph = template::build_article_graph(&doc, &grammar);
+    let slot_graph = template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial);
 
     let mut context = template::DataGraph::new();
     context.insert("input", template::Value::Record(slot_graph));
 
     let template_src = r#"<div><presemble:insert data="input.author" /></div>"#;
-    let html = template::render_template(template_src, &context)
+    let html = template::render_template(template_src, &context, template::OutputMode::Editorial)
         .expect("render should succeed");
 
     assert!(
@@ -338,7 +338,7 @@ fn schema_mode_post_processors_emit_both_attrs_in_sequence() {
     // structure; the exact field values don't matter for this test.
     let content_src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
     let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
-    let article_graph = template::build_article_graph(&doc, &grammar);
+    let article_graph = template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial);
 
     let mut context = template::DataGraph::new();
     context.insert("_presemble_stem", template::Value::Text("article".to_string()));
@@ -348,7 +348,7 @@ fn schema_mode_post_processors_emit_both_attrs_in_sequence() {
 
     let nodes = template::parse_template_xml(template_src).expect("template parse");
     let reg = template::NullRegistry;
-    let ctx = template::RenderContext::new(&reg);
+    let ctx = template::RenderContext::editorial(&reg);
     let (nodes, _local_defs) = template::extract_definitions(nodes);
     let transformed = template::transform(nodes, &context, &ctx).expect("transform");
 

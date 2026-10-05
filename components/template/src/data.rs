@@ -246,14 +246,9 @@ pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
 
 /// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
-/// The graph is for published output: it carries no editor-only data.
-pub fn build_article_graph(doc: &Document, grammar: &Grammar) -> DataGraph {
-    build_article_graph_inner(doc, grammar, None, OutputMode::Published)
-}
-
-/// Like `build_article_graph`, for the given output. Editorial output also
-/// carries each heading slot's stored text (ADR-063).
-pub fn build_article_graph_for(doc: &Document, grammar: &Grammar, output: OutputMode) -> DataGraph {
+/// Editorial output also carries each heading slot's stored text (ADR-063);
+/// published output carries no editor-only data.
+pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode) -> DataGraph {
     build_article_graph_inner(doc, grammar, None, output)
 }
 
@@ -643,6 +638,38 @@ mod tests {
     use content::parse_and_assign;
     use schema::{parse_schema, Span as SchemaSpan};
 
+    #[test]
+    fn published_graph_has_no_stored_text_keys() {
+        let grammar = parse_schema(
+            "# Post title {#title}\noccurs\n: exactly once\n\n\
+             Summary text. {#summary}\noccurs\n: exactly once\n",
+        )
+        .expect("schema parses");
+        let doc = parse_and_assign("# Title\n\nA summary.\n", &grammar).expect("content parses");
+        let key = format!("{}title", crate::constants::KEY_STORED_TEXT_PREFIX);
+
+        let published = build_article_graph(&doc, &grammar, OutputMode::Published);
+        assert!(
+            published.resolve(&[key.as_str()]).is_none(),
+            "published graph must not carry {key}"
+        );
+
+        let editorial = build_article_graph(&doc, &grammar, OutputMode::Editorial);
+        match editorial.resolve(&[key.as_str()]) {
+            Some(Value::Text(t)) => assert_eq!(t, "Title"),
+            other => panic!("editorial graph should carry {key}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthesize_link_without_source_text_has_no_source_text_key() {
+        let link = synthesize_link("T", "/x", None);
+        assert!(
+            link.resolve(&[crate::constants::KEY_SOURCE_TEXT]).is_none(),
+            "a link without source text must not carry _source_text"
+        );
+    }
+
     /// Wrap a plain `ContentElement` in a dummy `Spanned` for use in tests.
     fn spanned(node: ContentElement) -> Spanned<ContentElement> {
         Spanned { node, span: SchemaSpan { start: 0, end: 0 } }
@@ -670,7 +697,7 @@ mod tests {
             .expect("schema parses");
         let doc = parse_and_assign("# Title\n\n----\n\nBody text.\n", &grammar).expect("parses");
         assert_eq!(doc.body.len(), 1, "the content stays in the body");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         assert!(
             !graph.entries.contains_key("body"),
             "{:?}",
@@ -690,7 +717,7 @@ mod tests {
         )
         .expect("parses");
         assert_eq!(doc.unassigned.len(), 1);
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         let dump = format!("{:?}", graph.entries);
         assert!(!dump.contains("UNASSIGNED-TEXT"), "{dump}");
         assert!(dump.contains("Body text."), "{dump}");
@@ -814,7 +841,7 @@ mod tests {
     fn build_article_graph_title_matches_hello_world() {
         let doc = hello_world_doc();
         let grammar = article_grammar();
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         match graph.resolve(&["title"]) {
             Some(Value::Text(t)) => assert_eq!(
                 t,
@@ -828,7 +855,7 @@ mod tests {
     fn build_article_graph_body_is_present_and_non_empty() {
         let doc = hello_world_doc();
         let grammar = article_grammar();
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         match graph.resolve(&["body"]) {
             Some(Value::Html(html)) => assert!(!html.is_empty(), "body HTML should not be empty"),
             other => panic!("expected Some(Html) for body, got {other:?}"),
@@ -941,7 +968,7 @@ mod tests {
         };
 
         let doc = parse_and_assign(doc_input, &grammar).expect("document should parse");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         let body_html = match graph.resolve(&["body"]) {
             Some(Value::Html(html)) => html.clone(),
             other => panic!("expected Some(Html) for body, got {other:?}"),
@@ -1020,7 +1047,7 @@ mod tests {
 
         let grammar = parse_schema(schema_src).expect("schema parses");
         let doc = parse_and_assign(content_src, &grammar).expect("content parses");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         // tagline should be exactly one text value
         match graph.resolve(&["tagline"]) {
@@ -1113,7 +1140,7 @@ mod tests {
             comments: Default::default(),
         };
 
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         // The "related" slot should contain a Value::LinkExpression.
         match graph.resolve(&["related"]) {
@@ -1168,7 +1195,7 @@ mod tests {
         let doc_input = "----\n";
         let grammar = article_grammar();
         let doc = parse_and_assign(doc_input, &grammar).expect("empty doc should parse");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         // title — Heading suggestion
         match graph.resolve(&["title"]) {
@@ -1209,7 +1236,7 @@ mod tests {
     fn full_hello_world_doc_has_no_suggestions() {
         let doc = hello_world_doc();
         let grammar = article_grammar();
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         fn has_suggestion(value: &Value) -> bool {
             match value {
@@ -1234,7 +1261,7 @@ mod tests {
         let doc_input = "# My Title\n\nMy summary.\n\n[Jo Hlrogge](/author/jo)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
         let doc = parse_and_assign(doc_input, &grammar).expect("partial doc should parse");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         // title should be real
         match graph.resolve(&["title"]) {
@@ -1270,7 +1297,7 @@ mod tests {
 
         let grammar = parse_schema(schema_src).expect("schema parses");
         let doc = parse_and_assign(content_src, &grammar).expect("content parses");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         // Missing tagline now becomes a Suggestion placeholder rather than Absent.
         match graph.resolve(&["tagline"]) {
@@ -1572,7 +1599,7 @@ mod tests {
 
         let doc_input = "# My Title\n";
         let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         let constraint_key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, "title");
         match graph.resolve(&[constraint_key.as_str()]) {
@@ -1608,7 +1635,7 @@ mod tests {
 
         let doc_input = "# My Title\n";
         let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
-        let graph = build_article_graph(&doc, &grammar);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
         let constraint_key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, "title");
         // No constraints → no entry in graph.

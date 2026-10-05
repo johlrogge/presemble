@@ -1386,7 +1386,7 @@ mod tests {
         let template_src = r#"<h1><presemble:insert data="input.title" /></h1>"#;
         let nodes = template::parse_template_xml(template_src).expect("template parse");
         let reg = template::NullRegistry;
-        let ctx = template::RenderContext::new(&reg);
+        let ctx = template::RenderContext::editorial(&reg);
         let transformed = template::transform(nodes, &prefixed, &ctx)
             .expect("transform should succeed");
         let html = template::serialize_nodes(&transformed);

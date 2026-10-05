@@ -126,7 +126,7 @@ fn render_site(
     let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
     copy_site_assets(site_dir, &repo)?;
 
-    let (rebuilt, failed, errors) = conductor.build_all_pages_for(output);
+    let (rebuilt, failed, errors) = conductor.build_all_pages(output);
 
     let files_built = rebuilt.len();
     let files_failed = failed.len();

@@ -14,7 +14,7 @@ pub mod transformer;
 
 pub use ast::{Expr, Transform};
 pub use constraints::{constraint_attr_name, extract_slot_constraint_attrs, CONSTRAINT_ATTR_PREFIX};
-pub use data::{build_article_graph, build_article_graph_for, build_article_graph_with_source, build_schema_included_by_json, inject_schema_included_by, stored_text, synthesize_link, Callable, DataGraph, OutputMode, SuggestionKind, Value};
+pub use data::{build_article_graph, build_article_graph_with_source, build_schema_included_by_json, inject_schema_included_by, stored_text, synthesize_link, Callable, DataGraph, OutputMode, SuggestionKind, Value};
 pub use graph_view::{DataRef, GraphView, ResolvedNode};
 pub use error::TemplateError;
 pub use expr::parse_expr;
@@ -66,11 +66,15 @@ pub fn resolve_template_file(
 
 /// Parse, transform, and serialize an XML/XHTML template against a data graph.
 /// This is the primary entry point for template rendering.
-pub fn render_template(template_src: &str, graph: &DataGraph) -> Result<String, transformer::RenderError> {
+pub fn render_template(
+    template_src: &str,
+    graph: &DataGraph,
+    output: OutputMode,
+) -> Result<String, transformer::RenderError> {
     let nodes = dom::parse_template_xml(template_src)
         .map_err(|e| transformer::RenderError::Render(e.to_string()))?;
     let reg = NullRegistry;
-    let ctx = RenderContext::new(&reg);
+    let ctx = context_for(&reg, output);
     let transformed = transformer::transform(nodes, graph, &ctx)?;
     Ok(dom::serialize_nodes(&transformed))
 }
@@ -80,9 +84,13 @@ pub fn render_template(template_src: &str, graph: &DataGraph) -> Result<String, 
 /// Use this when you have already parsed the template (e.g., from a Hiccup file)
 /// and want to avoid re-parsing. The format-specific parsing step is separate from
 /// the transformation and serialization, which are format-agnostic.
-pub fn render_from_nodes(nodes: Vec<dom::Node>, graph: &DataGraph) -> Result<String, transformer::RenderError> {
+pub fn render_from_nodes(
+    nodes: Vec<dom::Node>,
+    graph: &DataGraph,
+    output: OutputMode,
+) -> Result<String, transformer::RenderError> {
     let reg = NullRegistry;
-    let ctx = RenderContext::new(&reg);
+    let ctx = context_for(&reg, output);
     let transformed = transformer::transform(nodes, graph, &ctx)?;
     Ok(dom::serialize_nodes(&transformed))
 }
@@ -94,10 +102,19 @@ pub fn render_from_nodes_with_registry(
     nodes: Vec<dom::Node>,
     graph: &DataGraph,
     registry: &dyn TemplateRegistry,
+    output: OutputMode,
 ) -> Result<String, transformer::RenderError> {
-    let ctx = RenderContext::new(registry);
+    let ctx = context_for(registry, output);
     let transformed = transformer::transform(nodes, graph, &ctx)?;
     Ok(dom::serialize_nodes(&transformed))
+}
+
+/// A render context for `output` with no local definitions.
+fn context_for(registry: &dyn TemplateRegistry, output: OutputMode) -> RenderContext<'_> {
+    match output {
+        OutputMode::Editorial => RenderContext::editorial(registry),
+        OutputMode::Published => RenderContext::published(registry),
+    }
 }
 
 /// Render pre-parsed template nodes using an existing `RenderContext`.

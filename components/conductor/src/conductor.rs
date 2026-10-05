@@ -239,7 +239,7 @@ impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let conductor = Self::load(site_dir)?;
         // Build all pages during startup so the output directory is populated immediately.
-        conductor.build_all_pages();
+        conductor.build_all_pages(template::OutputMode::Editorial);
         Ok(conductor)
     }
 
@@ -258,7 +258,7 @@ impl Conductor {
     pub fn with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
         let conductor = Self::load_with_repo(site_dir, repo)?;
         // Build all pages during startup so the output directory is populated immediately.
-        conductor.build_all_pages();
+        conductor.build_all_pages(template::OutputMode::Editorial);
         Ok(conductor)
     }
 
@@ -1151,7 +1151,7 @@ impl Conductor {
         let mut data = if let Some(ref src) = grammar_src
             && let Ok(grammar) = schema::parse_schema(src)
         {
-            template::build_article_graph_for(&doc, &grammar, template::OutputMode::Editorial)
+            template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial)
         } else {
             // No grammar (template-only page like the legacy root index).
             // Return an empty DataGraph; collection injection in build_all_pages
@@ -1297,15 +1297,12 @@ impl Conductor {
     /// `build_expression_indexes_from_store` once per page) with a single O(n)
     /// pipeline where each phase visits every page exactly once.
     ///
+    /// `presemble build` renders [`template::OutputMode::Published`] pages,
+    /// which carry no editor-only data (ADR-063); serve renders editorial
+    /// pages.
+    ///
     /// Returns `(rebuilt_pages, failed_pages, errors)`.
-    pub fn build_all_pages(&self) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
-        self.build_all_pages_for(template::OutputMode::Editorial)
-    }
-
-    /// [`Conductor::build_all_pages`] for the given output. `presemble build`
-    /// renders [`template::OutputMode::Published`] pages, which carry no
-    /// editor-only data (ADR-063); serve renders editorial pages.
-    pub fn build_all_pages_for(
+    pub fn build_all_pages(
         &self,
         output: template::OutputMode,
     ) -> (Vec<String>, Vec<String>, HashMap<String, Vec<String>>) {
@@ -1435,8 +1432,7 @@ impl Conductor {
                 };
 
                 let (nodes, local_defs) = template::extract_definitions(raw_nodes);
-                let ctx = template::RenderContext::with_local_defs(&registry, &local_defs)
-                    .with_output(output);
+                let ctx = template::RenderContext::with_local_defs(&registry, &local_defs, output);
 
                 // Use PrefixedGraphView — templates access data via input.field paths
                 let view = node_store_bridge::NodeStoreView::new(&store, *sem_root);
@@ -1745,7 +1741,11 @@ impl Conductor {
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
         let registry = template_registry::FileTemplateRegistry::new(fresh_repo);
-        let ctx = template::RenderContext::with_local_defs(&registry, &local_defs);
+        let ctx = template::RenderContext::with_local_defs(
+            &registry,
+            &local_defs,
+            template::OutputMode::Editorial,
+        );
 
         // Render via PrefixedGraphView — same as build_all_pages Phase 2f
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
@@ -2750,7 +2750,7 @@ impl Conductor {
                 let grammar = schema::parse_schema(&grammar_src)
                     .map_err(|e| format!("schema parse: {e}"))?;
                 let doc = node_store_bridge::synthesize_schema_document(&grammar, kind);
-                let article_graph = template::build_article_graph_for(
+                let article_graph = template::build_article_graph(
                     &doc,
                     &grammar,
                     template::OutputMode::Editorial,
@@ -2778,7 +2778,11 @@ impl Conductor {
                 };
                 let reg = template_registry::FileTemplateRegistry::new(fresh_repo);
                 let (nodes, local_defs) = template::extract_definitions(raw);
-                let render_ctx = template::RenderContext::with_local_defs(&reg, &local_defs);
+                let render_ctx = template::RenderContext::with_local_defs(
+                    &reg,
+                    &local_defs,
+                    template::OutputMode::Editorial,
+                );
                 let transformed = template::transform(nodes, &ctx_graph, &render_ctx)
                     .map_err(|e| format!("render: {e}"))?;
 
@@ -2941,7 +2945,7 @@ impl Conductor {
                 };
 
                 // 6. Batch-render all pages using O(n) pipeline
-                let (rebuilt_pages, failed_pages, new_errors) = self.build_all_pages();
+                let (rebuilt_pages, failed_pages, new_errors) = self.build_all_pages(template::OutputMode::Editorial);
 
                 // 7-8. Update build errors and build events
                 let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, has_stylesheet_change);
@@ -3275,7 +3279,7 @@ impl Conductor {
                                 self.populate_node_store();
 
                                 // Batch-render all pages using O(n) pipeline
-                                let (rebuilt, failed, errors) = self.build_all_pages();
+                                let (rebuilt, failed, errors) = self.build_all_pages(template::OutputMode::Editorial);
                                 let events = self.finalize_render(rebuilt, failed, errors, false);
 
                                 if events.is_empty() {
@@ -4986,7 +4990,11 @@ mod feature_card_rendering_tests {
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
         let reg = template::NullRegistry;
-        let ctx = template::RenderContext::with_local_defs(&reg, &local_defs);
+        let ctx = template::RenderContext::with_local_defs(
+            &reg,
+            &local_defs,
+            template::OutputMode::Editorial,
+        );
 
         let view = node_store_bridge::NodeStoreView::new(&store, index_sem);
         let prefixed = node_store_bridge::PrefixedGraphView::new("input".to_string(), view);

@@ -163,7 +163,11 @@ pub fn build_graph(
                 SourceAttachment::Attach => {
                     template::build_article_graph_with_source(&doc, &grammar, &content_src)
                 }
-                SourceAttachment::Omit => template::build_article_graph(&doc, &grammar),
+                SourceAttachment::Omit => template::build_article_graph(
+                    &doc,
+                    &grammar,
+                    template::OutputMode::Published,
+                ),
             };
 
             // Inject metadata
@@ -273,7 +277,7 @@ pub fn build_graph(
             diagnostics.insert(url_path_str, msgs);
         }
 
-        let mut data = template::build_article_graph_for(
+        let mut data = template::build_article_graph(
             &collection_doc,
             &collection_grammar,
             source_attachment.output_mode(),
@@ -356,7 +360,7 @@ pub fn build_graph(
                 && let Some(content_src) = repo.collection_content_source(&root_stem)
                 && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
             {
-                root_graph = template::build_article_graph_for(
+                root_graph = template::build_article_graph(
                     &doc,
                     &grammar,
                     source_attachment.output_mode(),
@@ -493,7 +497,8 @@ mod tests {
         let result = build_graph(&repo, &output, attachment);
         let node = result.graph.get(&UrlPath::new("/post/hello")).expect("item page");
         let pd = node.page_data().expect("page node");
-        template::render_template(TITLE_AND_LINK_TEMPLATE, &pd.data).expect("renders")
+        template::render_template(TITLE_AND_LINK_TEMPLATE, &pd.data, attachment.output_mode())
+            .expect("renders")
     }
 
     #[test]

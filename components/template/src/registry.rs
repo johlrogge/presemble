@@ -36,19 +36,29 @@ pub struct RenderContext<'a> {
     pub local_defs: Option<&'a HashMap<String, Vec<Node>>>,
     /// Whether the output is for editing (serve) or for publishing (build).
     /// Editor-only data such as `data-presemble-text` is emitted only in
-    /// editorial output. Defaults to [`OutputMode::Editorial`].
+    /// editorial output. There is no default: every render names its output.
     pub output: OutputMode,
 }
 
 impl<'a> RenderContext<'a> {
-    pub fn new(registry: &'a dyn TemplateRegistry) -> Self {
-        Self { registry, depth: 0, max_depth: 32, local_defs: None, output: OutputMode::Editorial }
+    /// A context for editorial output (serve): pages carry what the browser
+    /// editor needs.
+    pub fn editorial(registry: &'a dyn TemplateRegistry) -> Self {
+        Self::for_output(registry, None, OutputMode::Editorial)
     }
 
-    /// This context, rendering for `output`.
-    pub fn with_output(mut self, output: OutputMode) -> Self {
-        self.output = output;
-        self
+    /// A context for published output (`presemble build`): pages carry no
+    /// editor-only data.
+    pub fn published(registry: &'a dyn TemplateRegistry) -> Self {
+        Self::for_output(registry, None, OutputMode::Published)
+    }
+
+    fn for_output(
+        registry: &'a dyn TemplateRegistry,
+        local_defs: Option<&'a HashMap<String, Vec<Node>>>,
+        output: OutputMode,
+    ) -> Self {
+        Self { registry, depth: 0, max_depth: 32, local_defs, output }
     }
 
     /// Returns a new context with depth incremented by 1.
@@ -67,13 +77,14 @@ impl<'a> RenderContext<'a> {
         self.depth >= self.max_depth
     }
 
-    /// Create a context with local callable definitions.
+    /// Create a context with local callable definitions, rendering for `output`.
     /// Used when rendering a template that defines inline callables via `presemble:define`.
     pub fn with_local_defs(
         registry: &'a dyn TemplateRegistry,
         defs: &'a HashMap<String, Vec<Node>>,
+        output: OutputMode,
     ) -> Self {
-        Self { registry, depth: 0, max_depth: 32, local_defs: Some(defs), output: OutputMode::Editorial }
+        Self::for_output(registry, Some(defs), output)
     }
 
     /// Resolve a callable template by name.
@@ -147,7 +158,7 @@ mod tests {
     #[test]
     fn render_context_starts_at_depth_zero() {
         let r = NullRegistry;
-        let ctx = RenderContext::new(&r);
+        let ctx = RenderContext::editorial(&r);
         assert_eq!(ctx.depth, 0);
         assert!(!ctx.is_too_deep());
     }
@@ -155,7 +166,7 @@ mod tests {
     #[test]
     fn render_context_descend_increments_depth() {
         let r = NullRegistry;
-        let ctx = RenderContext::new(&r);
+        let ctx = RenderContext::editorial(&r);
         let ctx2 = ctx.descend();
         assert_eq!(ctx2.depth, 1);
     }
@@ -163,7 +174,7 @@ mod tests {
     #[test]
     fn render_context_is_too_deep_at_max_depth() {
         let r = NullRegistry;
-        let mut ctx = RenderContext::new(&r);
+        let mut ctx = RenderContext::editorial(&r);
         ctx.depth = ctx.max_depth;
         assert!(ctx.is_too_deep());
     }
@@ -236,7 +247,7 @@ mod tests {
         defs.insert("local-card".to_string(), parse_template_xml("<p>local</p>").unwrap());
 
         let reg = RecordingRegistry { resolved: std::sync::atomic::AtomicBool::new(false) };
-        let ctx = RenderContext::with_local_defs(&reg, &defs);
+        let ctx = RenderContext::with_local_defs(&reg, &defs, OutputMode::Editorial);
 
         let result = ctx.resolve_callable("local-card");
         assert!(result.is_some(), "local def should be found");
@@ -260,7 +271,7 @@ mod tests {
 
         let defs: HashMap<String, Vec<crate::dom::Node>> = HashMap::new();
         let reg = FixedRegistry;
-        let ctx = RenderContext::with_local_defs(&reg, &defs);
+        let ctx = RenderContext::with_local_defs(&reg, &defs, OutputMode::Editorial);
 
         assert!(ctx.resolve_callable("from-registry").is_some());
         assert!(ctx.resolve_callable("unknown").is_none());
