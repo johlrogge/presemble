@@ -762,7 +762,7 @@ fn escape_unescapable(s: &str, end_is_punct: bool, always: impl Fn(char) -> bool
 
 /// Whether `tail` (the text after an `&`) completes an entity reference:
 /// `name;`, `#digits;` (1-7) or `#xhex;` (1-6).
-fn starts_entity(tail: &str) -> bool {
+pub(crate) fn starts_entity(tail: &str) -> bool {
     let Some(semi) = tail.find(';') else { return false };
     let body = &tail[..semi];
     if let Some(num) = body.strip_prefix('#') {

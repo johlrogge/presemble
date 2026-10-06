@@ -78,8 +78,8 @@ fn normalise_in(items: Vec<Inline>, mode: Mode) -> Vec<Inline> {
                     out.push(Inline::Code(s));
                 }
             }
-            Inline::Emph(inner) => push_emphasis(&mut out, inner, mode, Inline::Emph),
-            Inline::Strong(inner) => push_emphasis(&mut out, inner, mode, Inline::Strong),
+            Inline::Emph(inner) => push_emphasis(&mut out, inner, mode, Kind::Emph),
+            Inline::Strong(inner) => push_emphasis(&mut out, inner, mode, Kind::Strong),
             Inline::Link { destination, title, text } => {
                 let text = normalise_in(text.into_items(), mode.nested(InlineContext::LinkText));
                 out.push(Inline::Link { destination, title, text: Inlines::from_normal(text) });
@@ -93,12 +93,40 @@ fn normalise_in(items: Vec<Inline>, mode: Mode) -> Vec<Inline> {
     }
 
     // Text is final only once neighbours are merged.
-    for item in &mut out {
-        if let Inline::Text(s) = item {
-            *s = tidy_line_breaks(s, mode.single_line);
+    let mut result: Vec<Inline> = Vec::with_capacity(out.len());
+    let mut after_break = false;
+    for item in out {
+        match item {
+            Inline::Text(s) => {
+                let s = tidy_line_breaks(&s, mode.single_line);
+                // N5: a reader strips the spaces that start a line.
+                let s = if after_break { s.trim_start_matches([' ', '\t']).to_string() } else { s };
+                if !s.is_empty() {
+                    result.push(Inline::Text(s));
+                }
+                after_break = false;
+            }
+            other => {
+                after_break = matches!(other, Inline::LineBreak);
+                result.push(other);
+            }
         }
     }
-    out
+    result
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Emph,
+    Strong,
+}
+
+fn emphasis(kind: Kind, content: Vec<Inline>) -> Inline {
+    let content = Inlines::from_normal(content);
+    match kind {
+        Kind::Emph => Inline::Emph(content),
+        Kind::Strong => Inline::Strong(content),
+    }
 }
 
 /// Replace what `mode` does not allow at this level by its content.
@@ -121,20 +149,61 @@ fn flatten(items: Vec<Inline>, mode: Mode, out: &mut Vec<Inline>) {
 
 /// Add `inner` as emphasis built by `make`: normalised, with edge whitespace
 /// moved outside, and dropped if nothing is left.
-fn push_emphasis(
-    out: &mut Vec<Inline>,
-    inner: Inlines,
-    mode: Mode,
-    make: fn(Inlines) -> Inline,
-) {
+fn push_emphasis(out: &mut Vec<Inline>, inner: Inlines, mode: Mode, kind: Kind) {
     let mut inner = normalise_in(inner.into_items(), mode);
     let lead = take_leading_whitespace(&mut inner);
     let trail = take_trailing_whitespace(&mut inner);
     push_text(out, lead);
-    if !inner.is_empty() {
-        out.push(make(Inlines::from_normal(inner)));
-    }
+    push_emphasis_node(out, inner, kind, mode);
     push_text(out, trail);
+}
+
+/// Add emphasis of `kind` around `inner` (already normal), applying N8: the
+/// shapes below render the same as their replacements, and the replacements
+/// are the ones that can be written.
+///
+/// - `Emph` of one `Emph`, and `Strong` of one `Strong`, are one node (`**x**`
+///   would read as strong, and `****x****` as a mess);
+/// - `Strong` of one `Emph` is `Emph` of `Strong` (`***x***` reads that way).
+///
+/// And N9: emphasis of the same kind right before it merges with it (`*a**b*`
+/// would read as something else); the merged content is normalised again.
+fn push_emphasis_node(out: &mut Vec<Inline>, mut inner: Vec<Inline>, mut kind: Kind, mode: Mode) {
+    if inner.is_empty() {
+        return;
+    }
+    if let [only @ (Inline::Emph(_) | Inline::Strong(_))] = inner.as_slice() {
+        let only_kind = if matches!(only, Inline::Emph(_)) { Kind::Emph } else { Kind::Strong };
+        let content = match inner.pop() {
+            Some(Inline::Emph(c) | Inline::Strong(c)) => c.into_items(),
+            _ => unreachable!("checked above"),
+        };
+        match (kind, only_kind) {
+            (Kind::Emph, Kind::Emph) | (Kind::Strong, Kind::Strong) => {
+                return push_emphasis_node(out, content, kind, mode);
+            }
+            (Kind::Strong, Kind::Emph) => {
+                let mut strong = Vec::new();
+                push_emphasis_node(&mut strong, content, Kind::Strong, mode);
+                inner = strong;
+                kind = Kind::Emph;
+            }
+            (Kind::Emph, Kind::Strong) => inner.push(emphasis(Kind::Strong, content)),
+        }
+    }
+    let touches = matches!(
+        (kind, out.last()),
+        (Kind::Emph, Some(Inline::Emph(_))) | (Kind::Strong, Some(Inline::Strong(_)))
+    );
+    if touches {
+        let Some(Inline::Emph(previous) | Inline::Strong(previous)) = out.pop() else {
+            unreachable!("checked above")
+        };
+        let mut merged = previous.into_items();
+        merged.extend(inner);
+        return push_emphasis_node(out, normalise_in(merged, mode), kind, mode);
+    }
+    out.push(emphasis(kind, inner));
 }
 
 /// Append `s` to `out`, merging with a preceding text node and ignoring empty
@@ -269,7 +338,8 @@ mod tests {
         );
         assert_eq!(got, vec![t("a  b")]);
 
-        // Nested: whitespace travels out through every level.
+        // Nested: whitespace travels out through every level (and N8 turns
+        // `Strong` of one `Emph` into `Emph` of `Strong`).
         let inner = Inline::Emph(raw(vec![t(" x")]));
         let got = norm(
             vec![t("a"), Inline::Strong(raw(vec![inner]))],
@@ -277,7 +347,7 @@ mod tests {
         );
         assert_eq!(
             got,
-            vec![t("a "), Inline::Strong(p(vec![Inline::Emph(p(vec![t("x")]))]))]
+            vec![t("a "), Inline::Emph(p(vec![Inline::Strong(p(vec![t("x")]))]))]
         );
     }
 
@@ -358,6 +428,112 @@ mod tests {
         let got = norm(vec![link], InlineContext::Paragraph);
         let [Inline::Link { text, .. }] = got.as_slice() else { panic!("{got:?}") };
         assert_eq!(text.as_slice(), &[t(" x ")]);
+    }
+
+    #[test]
+    fn nested_emphasis_of_one_child_is_rewritten_n8() {
+        let em = |c: Vec<Inline>| Inline::Emph(raw(c));
+        let strong = |c: Vec<Inline>| Inline::Strong(raw(c));
+        let x = || vec![t("x")];
+        let para = InlineContext::Paragraph;
+        // Emph of Emph, Strong of Strong: one node.
+        assert_eq!(norm(vec![em(vec![em(x())])], para), vec![em(x())]);
+        assert_eq!(norm(vec![strong(vec![strong(x())])], para), vec![strong(x())]);
+        // Strong of Emph: Emph of Strong.
+        assert_eq!(norm(vec![strong(vec![em(x())])], para), vec![em(vec![strong(x())])]);
+        // Emph of Strong stays; so does a node with more than one child.
+        assert_eq!(norm(vec![em(vec![strong(x())])], para), vec![em(vec![strong(x())])]);
+        let two = vec![em(x()), t(" y")];
+        assert_eq!(norm(vec![strong(two.clone())], para), vec![strong(two)]);
+        // Through every level.
+        assert_eq!(
+            norm(vec![strong(vec![em(vec![strong(x())])])], para),
+            vec![em(vec![strong(x())])]
+        );
+        assert_eq!(norm(vec![em(vec![em(vec![em(x())])])], para), vec![em(x())]);
+    }
+
+    #[test]
+    fn touching_same_kind_emphasis_merges() {
+        let em = |c: Vec<Inline>| Inline::Emph(raw(c));
+        let strong = |c: Vec<Inline>| Inline::Strong(raw(c));
+        let para = InlineContext::Paragraph;
+        assert_eq!(norm(vec![em(vec![t("a")]), em(vec![t("b")])], para), vec![em(vec![t("ab")])]);
+        assert_eq!(
+            norm(vec![strong(vec![t("a")]), strong(vec![t("b")])], para),
+            vec![strong(vec![t("ab")])]
+        );
+        // Empty text between them does not keep them apart; three merge into one.
+        assert_eq!(
+            norm(vec![em(vec![t("a")]), t(""), em(vec![t("b")]), em(vec![t("c")])], para),
+            vec![em(vec![t("abc")])]
+        );
+        // Different kinds, or anything between, stay apart.
+        let mixed = vec![em(vec![t("a")]), strong(vec![t("b")])];
+        assert_eq!(norm(mixed.clone(), para), mixed);
+        let apart = vec![em(vec![t("a")]), t(" "), em(vec![t("b")])];
+        assert_eq!(norm(apart.clone(), para), apart);
+        // The merged content is normalised again: nested touching emphasis
+        // merges, at every level.
+        assert_eq!(
+            norm(vec![em(vec![t("x "), em(vec![t("a")]), em(vec![t("b")])])], para),
+            vec![em(vec![t("x "), em(vec![t("ab")])])]
+        );
+        assert_eq!(
+            norm(
+                vec![em(vec![strong(vec![t("a")])]), em(vec![strong(vec![t("b")])])],
+                para
+            ),
+            vec![em(vec![strong(vec![t("ab")])])]
+        );
+        // Together with N8: two `Strong(Emph)` become `Emph(Strong)` and merge.
+        assert_eq!(
+            norm(
+                vec![strong(vec![em(vec![t("x")])]), strong(vec![em(vec![t("y")])])],
+                para
+            ),
+            vec![em(vec![strong(vec![t("xy")])])]
+        );
+        // Whitespace inside moves out first, so the two no longer touch.
+        assert_eq!(
+            norm(vec![em(vec![t("a ")]), em(vec![t("b")])], para),
+            vec![em(vec![t("a")]), t(" "), em(vec![t("b")])]
+        );
+    }
+
+    #[test]
+    fn whitespace_after_hard_break_is_trimmed() {
+        let code = Inline::Code("x".into());
+        assert_eq!(
+            norm(vec![t("a"), Inline::LineBreak, t("  \tb")], InlineContext::Paragraph),
+            vec![t("a"), Inline::LineBreak, t("b")]
+        );
+        // Text that is only whitespace goes, and so does what moves outside.
+        assert_eq!(
+            norm(vec![t("a"), Inline::LineBreak, t(" "), code.clone()], InlineContext::Paragraph),
+            vec![t("a"), Inline::LineBreak, code]
+        );
+        assert_eq!(
+            norm(
+                vec![t("a"), Inline::LineBreak, Inline::Emph(raw(vec![t(" x")]))],
+                InlineContext::Paragraph
+            ),
+            vec![t("a"), Inline::LineBreak, Inline::Emph(raw(vec![t("x")]))]
+        );
+        // Whitespace before the break stays.
+        assert_eq!(
+            norm(vec![t("a "), Inline::LineBreak, t("b")], InlineContext::Paragraph),
+            vec![t("a "), Inline::LineBreak, t("b")]
+        );
+        // Inside nested runs, too.
+        let link = Inline::Link {
+            destination: super::super::LinkDestination::new("/x"),
+            title: None,
+            text: raw(vec![t("a"), Inline::LineBreak, t(" b")]),
+        };
+        let got = norm(vec![link], InlineContext::Paragraph);
+        let [Inline::Link { text, .. }] = got.as_slice() else { panic!("{got:?}") };
+        assert_eq!(text.as_slice(), &[t("a"), Inline::LineBreak, t("b")]);
     }
 
     #[test]

@@ -117,6 +117,12 @@ Content domain (`content::inline`):
     `\n\n`. Heading and cell Text never hold `\n` (normalisation turns it into
     a space).
   - N6: `code` Text is non-empty and holds no `\n`.
+  - N8: `emph` whose only child is `emph`, and `strong` whose only child is
+    `strong`, are one node; `strong` whose only child is `emph` becomes `emph`
+    of `strong`. These shapes render the same, and the rewrite makes the
+    parsed tree writable (`**_x_**` is read as `strong(emph(x))` but written
+    `***x***`, which reads back as `emph(strong(x))`).
+  - N9: adjacent emphasis (or strong) siblings merge.
   - N7: in the Heading, Paragraph and Cell contexts, the top-level run has no
     leading or trailing space, tab, `\n` or `line-break`. U+00A0 is kept,
     because CommonMark strips only spaces and tabs at block edges.
@@ -167,7 +173,7 @@ Content domain (`content::inline`):
 **Parsing.** Inlines are built from the same pulldown pass that finds blocks.
 Reference-style links are resolved at parse time. `parse_inlines` fails on
 input that is not inline content of its context; it never reinterprets block
-syntax.
+syntax. Every tree the parser produces is writable (P4).
 
 **Canonical forms.** The serializer always writes:
 

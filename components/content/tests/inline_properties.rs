@@ -4,9 +4,53 @@
 //!
 //! Every seed produces one raw (not yet normal) run of inlines, which is
 //! checked in every context.
+//!
+//! Properties:
+//!
+//! - N1-N7 and idempotence of `Inlines::new` over raw trees;
+//! - plain text agrees with the text-content rule (ADR-059 §8);
+//! - P1, `inline_round_trip_on_generated_writable_trees`: for trees from the
+//!   writable generator, `parse(serialize(t)) == t` and `check_writable` says
+//!   so;
+//! - P2, `inline_source_is_fixed_point_after_one_save`: for markdown read from
+//!   disk, `serialize(parse(serialize(parse(s)))) == serialize(parse(s))`.
+//!
+//! ## Writable generator, and what it leaves out (P1)
+//!
+//! Trees are built by construction, not filtered by `check_writable`. They mix
+//! every inline kind, in every context, with texts that need every kind of
+//! escape (`*`, `_`, backtick, `[`, `]`, `<`, `&amp;`, `\`, `{#x}`, line-start
+//! openers, `|`, NBSP and other invisible characters). Shapes that CommonMark
+//! cannot read back, and that `check_writable` refuses (ADR-059 §7), are
+//! excluded:
+//!
+//! - emphasis whose content does not start and end with an alphanumeric text
+//!   (flanking: `a*.b*c`, ``a*`x`*``);
+//! - emphasis next to emphasis, or nested in emphasis without a space on both
+//!   sides (`*a**b*`, `*a*b*c*`, `***x***` read as the other nesting);
+//! - a hard break at the end of emphasis, or next to another hard break;
+//! - two code spans that touch (they would share a fence);
+//! - raw HTML or a comment at the start of a paragraph or a line, or alone on
+//!   its line (it would open an HTML block);
+//! - raw HTML and comments outside the top-level run of a paragraph or heading;
+//! - a link whose destination reads as a link expression (`->>`, `:path`), which
+//!   a paragraph reads as a link expression, not a link;
+//! - a backslash before a pipe in cell code, a destination holding a newline, a
+//!   U+0000 (read back as U+FFFD).
+//!
+//! ## Parsed trees (P4) and the limits that remain
+//!
+//! `parsed_trees_are_writable` checks that every tree `parse_inlines` produces
+//! can be written. N8 (nested emphasis of one child) makes `**_x_**`,
+//! `_**x**_`, `*_x_*` and `__*x*__` writable, and N9 (touching emphasis of the
+//! same kind merges) does the same for `_a_*b*` and `**a**__b__`. No limit
+//! remains: P2 and P4 run over every source that is inline content. What the
+//! parser never produces stays outside the domain: two touching code spans
+//! (mutations that would produce them are refused as `NotWritable`).
 
 use content::inline::{
-    parse_inlines, AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination,
+    parse_inlines, serialize_inlines, AssetRef, Inline, InlineContext, InlineHtml, Inlines,
+    LinkDestination,
 };
 use content::{AsPlainText, Comment};
 
@@ -44,6 +88,10 @@ impl Rng {
 
     fn pick<'a>(&mut self, pool: &[&'a str]) -> &'a str {
         pool[self.below(pool.len())]
+    }
+
+    fn pick_option(&mut self, pool: &[Option<&str>]) -> Option<String> {
+        pool[self.below(pool.len())].map(str::to_string)
     }
 }
 
@@ -109,10 +157,31 @@ fn assert_normal(items: &[Inline], ctx: InlineContext, single_line: bool, seed: 
                     assert!(!s.contains(bad), "N5 {bad:?} in {s:?} seed {seed}");
                 }
                 assert!(!(single_line && s.contains('\n')), "N5 newline in {ctx:?} seed {seed}");
+                if i > 0 && items[i - 1] == Inline::LineBreak {
+                    assert!(!s.starts_with([' ', '\t']), "N5 after break {s:?} seed {seed}");
+                }
             }
             Inline::Emph(c) | Inline::Strong(c) => {
+                // N9: no emphasis of the same kind right next to it.
+                let touching = matches!(
+                    (item, items.get(i + 1)),
+                    (Inline::Emph(_), Some(Inline::Emph(_)))
+                        | (Inline::Strong(_), Some(Inline::Strong(_)))
+                );
+                assert!(!touching, "N9 {item:?} seed {seed}");
                 let inner = c.as_slice();
                 assert!(!inner.is_empty(), "N3 seed {seed}");
+                // N8: no emphasis of one emphasis of the same kind, and no
+                // strong of one emph.
+                if let [only] = inner {
+                    let bad = matches!(
+                        (item, only),
+                        (Inline::Emph(_), Inline::Emph(_))
+                            | (Inline::Strong(_), Inline::Strong(_))
+                            | (Inline::Strong(_), Inline::Emph(_))
+                    );
+                    assert!(!bad, "N8 {item:?} seed {seed}");
+                }
                 if let Some(Inline::Text(s)) = inner.first() {
                     assert!(!s.starts_with(char::is_whitespace), "N4 {s:?} seed {seed}");
                 }
@@ -253,4 +322,307 @@ fn plain_text_equals_normalised_text_content_rule() {
             assert_eq!(inlines.plain_text(), expected, "seed {seed} in {ctx:?}");
         }
     }
+}
+
+// ── Writable trees (P1) ─────────────────────────────────────────────────────
+
+/// Seeds for the writable generator; each runs in every context.
+const WRITABLE_SEEDS: std::ops::Range<u64> = 0..1000;
+
+const WORDS: &[&str] = &["a", "word", "x1", "\u{e9}", "Bc"];
+
+/// Texts that need escapes, or look like markup, and are fine as text.
+const SPECIAL_TEXTS: &[&str] = &[
+    "a", "word", "b c", "\u{e9}", "x1", " lead", "trail ", "a  b", "*", " * ", "a*b", "_", "a_b",
+    "_x", "x_", "`", "[x]", "]", "<b>", "a < b", "&amp;", "a & b", "AT&T", "\\", "x\\y", "\\*",
+    "{#x}", "see {#x}", "a {#x} b", "#", "# h", "1. n", "- n", "+ n", "> q", "---", "***", "```",
+    "~~~", "[x](->> :post)", "[r]: /u", "a|b", "!", "a!", "\u{a0}", "a\u{a0}b", "\u{200b}",
+    "\ta", "x\n- y", "x\n# y", "x\n1. y", "x\n> q", "x\n---", "x\n===", "x\n***", "x\n```",
+    "a | b\n--|--", "x\n\\", "x\n+ y", "1) y", "x\n1) y", "&#35;", "&nbsp;", "\u{2003}x",
+];
+const WRITABLE_CODES: &[&str] =
+    &["x", "a b", "a`b", "``", " x ", "  ", "`", "a|b", " ", "*x*", "<b>", "x\\"];
+const LINK_DESTS: &[&str] = &[
+    "/a", "https://x.y/p", "a b", "a(b)", "x\\y", "x\\", "a&amp;b", "<x>", "#frag", "",
+    "mailto:me@example.com", "\u{e9}.png",
+];
+const IMAGE_SOURCES: &[&str] = &["i.png", "a b.png", "x(1).png", "\u{e9}.png"];
+const TITLES: &[Option<&str>] = &[None, None, Some("t"), Some("a \"q\" b"), Some("x&amp;y"), Some("a\\b")];
+const WRITABLE_HTMLS: &[&str] = &["<b>", "</b>", "<img src=x>", "<span class=\"x\">"];
+const WRITABLE_COMMENTS: &[&str] = &["<!-- c -->", "<!---->"];
+const AFTER_BREAK: &[&str] = &["b", " b", "- b", "# h", "\tb", "1. b"];
+
+/// What a run may hold, which depends on where it sits.
+#[derive(Clone, Copy)]
+struct Shape {
+    links: bool,
+    images: bool,
+    html: bool,
+    breaks: bool,
+}
+
+fn shape_of(ctx: InlineContext) -> Shape {
+    match ctx {
+        InlineContext::Paragraph => Shape { links: true, images: true, html: true, breaks: true },
+        InlineContext::Heading => Shape { links: true, images: true, html: true, breaks: false },
+        InlineContext::Cell => Shape { links: true, images: true, html: false, breaks: false },
+        InlineContext::LinkText => Shape { links: false, images: true, html: false, breaks: true },
+        InlineContext::Alt => Shape { links: false, images: false, html: false, breaks: true },
+    }
+}
+
+fn text(s: &str) -> Inline {
+    Inline::Text(s.to_string())
+}
+
+fn gen_writable_run(rng: &mut Rng, depth: usize, shape: Shape) -> Vec<Inline> {
+    let count = rng.below(5);
+    let mut items = Vec::new();
+    for _ in 0..count {
+        gen_writable_atom(rng, depth, shape, &mut items);
+    }
+    items
+}
+
+/// Emphasis content: an alphanumeric text at each edge, anything in between.
+fn gen_emphasis_content(rng: &mut Rng, depth: usize, shape: Shape) -> Inlines {
+    let mut content = vec![text(rng.pick(WORDS))];
+    content.extend(gen_writable_run(rng, depth + 1, Shape { html: false, ..shape }));
+    content.push(text(rng.pick(WORDS)));
+    Inlines::new(content, InlineContext::Paragraph)
+}
+
+fn gen_writable_atom(rng: &mut Rng, depth: usize, shape: Shape, items: &mut Vec<Inline>) {
+    let nested = Shape { links: false, images: shape.images, html: false, breaks: false };
+    match rng.below(100) {
+        0..=39 => items.push(text(rng.pick(SPECIAL_TEXTS))),
+        40..=54 if depth < 2 => {
+            // A space on both sides keeps emphasis apart from emphasis; at
+            // the top level a word also does (`a*b*c`).
+            let sep = if depth == 0 && rng.below(2) == 0 { rng.pick(WORDS) } else { " " };
+            let content = gen_emphasis_content(rng, depth, shape);
+            items.push(text(sep));
+            items.push(if rng.below(2) == 0 { Inline::Emph(content) } else { Inline::Strong(content) });
+            items.push(text(sep));
+        }
+        55..=62 => {
+            // Two code spans that touch would share a fence.
+            items.push(Inline::Code(rng.pick(WRITABLE_CODES).to_string()));
+            items.push(text(" "));
+        }
+        63..=71 if shape.links && depth < 2 => items.push(Inline::Link {
+            destination: LinkDestination::new(rng.pick(LINK_DESTS)),
+            title: rng.pick_option(TITLES),
+            text: Inlines::new(gen_writable_run(rng, depth + 1, nested), InlineContext::LinkText),
+        }),
+        72..=78 if shape.images && depth < 2 => items.push(Inline::Image {
+            source: AssetRef::new(rng.pick(IMAGE_SOURCES)),
+            title: rng.pick_option(TITLES),
+            alt: Inlines::new(
+                gen_writable_run(rng, depth + 1, Shape { images: false, ..nested }),
+                InlineContext::Alt,
+            ),
+        }),
+        79..=83 if shape.breaks => {
+            items.push(text(rng.pick(WORDS)));
+            items.push(Inline::LineBreak);
+            items.push(text(rng.pick(AFTER_BREAK)));
+        }
+        84..=88 if shape.html && depth == 0 => {
+            items.push(text(rng.pick(WORDS)));
+            items.push(Inline::Html(
+                InlineHtml::new(rng.pick(WRITABLE_HTMLS)).expect("not a comment"),
+            ));
+        }
+        89..=91 if shape.html && depth == 0 => {
+            items.push(text(rng.pick(WORDS)));
+            items.push(Inline::Comment(content::Comment::new(rng.pick(WRITABLE_COMMENTS)).expect("a comment")));
+        }
+        92..=95 if shape.links && depth < 2 => {
+            // C4: an autolink.
+            let (destination, label) = if rng.below(2) == 0 {
+                ("https://x.y/p", "https://x.y/p")
+            } else {
+                ("mailto:me@example.com", "me@example.com")
+            };
+            items.push(text(" "));
+            items.push(Inline::Link {
+                destination: LinkDestination::new(destination),
+                title: None,
+                text: Inlines::new(vec![text(label)], InlineContext::LinkText),
+            });
+        }
+        _ => items.push(text(rng.pick(WORDS))),
+    }
+}
+
+#[test]
+fn inline_round_trip_on_generated_writable_trees() {
+    let started = std::time::Instant::now();
+    let mut count = 0usize;
+    for seed in WRITABLE_SEEDS {
+        for (i, ctx) in CONTEXTS.into_iter().enumerate() {
+            let mut rng = Rng::new(seed * CONTEXTS.len() as u64 + i as u64);
+            let tree = Inlines::new(gen_writable_run(&mut rng, 0, shape_of(ctx)), ctx);
+            let written = serialize_inlines(&tree, ctx);
+            match parse_inlines(&written, ctx) {
+                Ok(back) => assert_eq!(back, tree, "seed {seed} in {ctx:?}: wrote {written:?}"),
+                Err(e) => panic!("seed {seed} in {ctx:?}: {e}: wrote {written:?} for {tree:?}"),
+            }
+            assert_eq!(tree.check_writable(ctx), Ok(()), "seed {seed} in {ctx:?}: {written:?}");
+            count += 1;
+        }
+    }
+    eprintln!(
+        "inline_round_trip_on_generated_writable_trees: {} seeds, {count} trees, {:?}",
+        WRITABLE_SEEDS.end - WRITABLE_SEEDS.start,
+        started.elapsed()
+    );
+}
+
+// ── Fixed point (P2) ────────────────────────────────────────────────────────
+
+const CORPUS: &[&str] = &[
+    "",
+    "plain text",
+    "*a* _b_ **c** __d__ ***e*** ___f___",
+    "a *b **c** d* e",
+    "`code` and ``a`b`` and `` `x` ``",
+    "[a](/x) [b](/y \"t\") [c](<d e>) [f][g]\n\n[g]: /g 'T'",
+    "![a](i.png) ![b *c*](j.png \"t\")",
+    "<https://x.y> <me@example.com> [https://x.y](https://x.y)",
+    "a  \nb\\\nc\nd",
+    "&amp; &lt; &copy; &#35; &nbsp; &#x200B; &#8195; a\u{a0}b",
+    "\\* \\_ \\` \\[ \\< \\& \\\\ \\# \\- \\> \\{#x}",
+    "a <b>x</b> <!-- c --> d",
+    "x <span class=\"y\">z</span>",
+    "see {#x}",
+    "\\# not a heading",
+    "1\\. not a list",
+    "a\n\\- not a list",
+    "[x](->> :post)",
+    "\\[x](->> :post)",
+    "a * b _ c",
+    "snake_case and 2*3*4",
+    "a\\\n\\\nb",
+    "tab\tinside",
+    "  leading spaces",
+    "trailing spaces  ",
+    "*a*\n*b*",
+    "**a**\n**b**",
+    "a\n\nb",
+    "- list",
+    "# heading",
+    "> quote",
+    "<div>block</div>",
+    "<!-- only a comment -->",
+    "| a | b |\n| - | - |",
+    "line one\nline two\nline three",
+    "[link with *emph* and `code`](/u)",
+    "[![img](i.png)](/u)",
+    "a [b] c [d]",
+    "a [b](c) [d](e)f",
+    "!!!bang [x](/y)",
+    "*[a](/b)*",
+    "**`code`**",
+    "_a_b_ and *a*b*",
+];
+
+const FRAGMENTS: &[&str] = &[
+    "word", "two words", "*em*", "**strong**", "_em_", "__strong__", "***both***", "`code`",
+    "``a`b``", "[l](/u)", "[l](/u \"t\")", "![alt](i.png)", "<me@e.com>", "<https://x.y>", "<b>",
+    "</b>", "<!-- c -->", "\\*", "\\_", "&amp;", "&nbsp;", "&#x200B;", "&copy;", "a_b", "5 * 3",
+    "x\\\\", "[not a link]", "\\[x\\]", "{#x}", "~~", "&", "<", ">", "#", "1.", "-", "+", "=", "|",
+    "!", "*", "_", "`", "\\", "\u{a0}", "\t", "**_x_**", "_**x**_", "*_x_*", "__*x*__",
+];
+const SEPARATORS: &[&str] = &[" ", "", "\n", "\\\n", "  \n", " "];
+
+/// Markdown made of random fragments, one source per seed.
+fn generated_sources() -> Vec<String> {
+    WRITABLE_SEEDS
+        .map(|seed| {
+            let mut rng = Rng::new(seed);
+            let mut source = String::new();
+            for i in 0..=rng.below(8) {
+                if i > 0 {
+                    source.push_str(rng.pick(SEPARATORS));
+                }
+                source.push_str(rng.pick(FRAGMENTS));
+            }
+            source
+        })
+        .collect()
+}
+
+/// `false` when `source` is not inline content (block syntax).
+fn check_fixed_point(source: &str) -> bool {
+    let Ok(first) = parse_inlines(source, InlineContext::Paragraph) else {
+        return false;
+    };
+    let written = serialize_inlines(&first, InlineContext::Paragraph);
+    let second = parse_inlines(&written, InlineContext::Paragraph)
+        .unwrap_or_else(|e| panic!("{source:?} wrote {written:?}, which is {e}"));
+    let rewritten = serialize_inlines(&second, InlineContext::Paragraph);
+    assert_eq!(rewritten, written, "{source:?}");
+    true
+}
+
+#[test]
+fn inline_source_is_fixed_point_after_one_save() {
+    let started = std::time::Instant::now();
+    let corpus_ok = CORPUS.iter().filter(|source| check_fixed_point(source)).count();
+    assert!(corpus_ok >= CORPUS.len() - 10, "only {corpus_ok} corpus entries are inline content");
+
+    let generated_ok =
+        generated_sources().iter().filter(|source| check_fixed_point(source)).count();
+    assert!(generated_ok > 500, "only {generated_ok} generated sources are inline content");
+    eprintln!(
+        "inline_source_is_fixed_point_after_one_save: {corpus_ok} corpus, {generated_ok} generated, {:?}",
+        started.elapsed()
+    );
+}
+
+// ── Parsed trees are writable (P4) ──────────────────────────────────────────
+
+/// Every tree the parser produces is writable (ADR-059 §7): a paragraph read
+/// from disk can be edited and saved.
+#[test]
+fn parsed_trees_are_writable() {
+    let started = std::time::Instant::now();
+    let mut sources: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
+    sources.extend(
+        ["**_x_**", "_**x**_", "*_x_*", "__*x*__", "_a_*b*", "**a**__b__", "*a**b*_c_"]
+            .map(String::from),
+    );
+    let corpus_len = sources.len();
+    sources.extend(generated_sources());
+
+    let mut checked = 0usize;
+    let mut failures = Vec::new();
+    for source in &sources {
+        for ctx in [InlineContext::Paragraph, InlineContext::Heading, InlineContext::Cell] {
+            let Ok(tree) = parse_inlines(source, ctx) else { continue };
+            checked += 1;
+            if tree.check_writable(ctx).is_err() {
+                failures.push(format!(
+                    "{source:?} in {ctx:?}: parsed {tree:?}, wrote {:?}",
+                    serialize_inlines(&tree, ctx)
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "parsed_trees_are_writable: {corpus_len} corpus + {} generated sources, {checked} trees, {} not writable, {:?}",
+        sources.len() - corpus_len,
+        failures.len(),
+        started.elapsed()
+    );
+    assert!(checked > 1000, "only {checked} trees were checked");
+    assert!(
+        failures.is_empty(),
+        "{} parsed trees are not writable; first {}:\n{}",
+        failures.len(),
+        failures.len().min(12),
+        failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+    );
 }

@@ -1,6 +1,7 @@
 //! The inline vocabulary (ADR-059 §2–§4).
 
 use super::normal;
+use super::serialize::{self, NotWritable};
 use super::text::{edit_text, EditText};
 use crate::Comment;
 
@@ -77,6 +78,14 @@ impl Inlines {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Whether the tree reads back as itself when written in `ctx`:
+    /// `parse(serialize(t)) == t` (ADR-059 §7). Some normal-form trees cannot
+    /// be written, because of CommonMark's flanking rules (`a` + emph(`.b`) +
+    /// `c`), because raw HTML would open an HTML block, and so on.
+    pub fn check_writable(&self, ctx: InlineContext) -> Result<(), NotWritable> {
+        serialize::check_writable(self, ctx)
     }
 
     /// The text for SearchReplace and edit lowering, with an offset map back
