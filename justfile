@@ -89,6 +89,26 @@ site-snapshot dir="site":
     cp -r "$out/." "$snap/"
     echo "Snapshot: $snap"
 
+# Builds site/ as it is at git <ref> (a commit, tag or branch) in a throwaway
+# worktree and snapshots the output, like site-snapshot does for the working
+# tree. The worktree is removed afterwards; the snapshot is kept and its path
+# printed, ready for output-diff (for example `just snapshot-ref HEAD` against
+# `just site-snapshot` to prove a change leaves published output untouched).
+# Uses its own target dir inside the worktree (a full build): sharing the main
+# one lets the ref's binary overwrite target/debug/presemble, which cargo then
+# mistakes for the working tree's up-to-date binary.
+# Snapshot the published output of site/ at a git ref.
+snapshot-ref ref:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    wt="$(mktemp -d -t presemble-ref.XXXXXX)"
+    cleanup() { git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"; git worktree prune; }
+    trap cleanup EXIT
+    git worktree add --detach "$wt" "{{ ref }}" >&2
+    out="$(cd "$wt" && {{ just_executable() }} site-snapshot site)"
+    echo "$out" >&2
+    echo "$out" | sed -n 's/^Snapshot: //p' | tail -n 1 | sed 's/^/Snapshot: /'
+
 # mode=exact: `diff -r`. mode=ws: report files present on one side only, and
 # files whose contents differ once all whitespace is removed (formatting
 # newlines between tags count as equal; check suspicious files in exact mode).
