@@ -4,6 +4,10 @@
 
 Proposed
 
+Amended by ADR-059 (Proposed): package Q (blockquotes store source) is
+dropped; blockquotes become block containers (ADR-059 §13). Headings move to
+inline nodes in ADR-059 stage 4.
+
 ## Context
 
 - ADR-057 OQ6 asks whether text nodes store literal (decoded) text or inline

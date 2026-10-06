@@ -1289,6 +1289,51 @@ headings
         assert_eq!(blocks("x\n[a]: /y"), vec![para("x\n[a]: /y")]);
     }
 
+    /// L23: table column alignment is not stored; saving writes `---` for every
+    /// column. Cell content is kept. Resolved by ADR-059 stage 6.
+    #[test]
+    fn table_alignment_is_lost_on_save_l23() {
+        let src = "| a | b |\n|:--|--:|\n| 1 | 2 |\n";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        let saved = serialize_elements(&flat.elements);
+        assert_eq!(saved, "| a | b |\n| --- | --- |\n| 1 | 2 |");
+        assert!(!saved.contains(':'), "alignment markers are lost: {saved:?}");
+        // Content survives; only alignment is lost.
+        assert_eq!(
+            reparse_one(&saved),
+            ContentElement::Table {
+                headers: vec!["a".to_string(), "b".to_string()],
+                rows: vec![vec!["1".to_string(), "2".to_string()]],
+            }
+        );
+    }
+
+    /// L24: link reference definitions are not kept. An unused definition is
+    /// dropped. A definition used inside running text is dropped too, while the
+    /// paragraph keeps its `[a][r]` source, so the link is lost on save. (A
+    /// paragraph that is only `[a][r]` becomes a Link block with the resolved
+    /// href, so it is not affected.) ADR-059 stage 5 resolves the used case
+    /// (C3: written inline); dropping unused definitions is canonical.
+    #[test]
+    fn unused_reference_definition_behaviour_is_pinned_l24() {
+        let src = "See [a][r].\n\n[r]: /x\n\nText.\n\n[u]: /unused\n";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        assert_eq!(blocks(src), vec![para("See [a][r]."), para("Text.")]);
+        let saved = serialize_elements(&flat.elements);
+        assert_eq!(saved, "See [a][r].\n\nText.");
+        // Before the save the paragraph links to /x; after it, it links nowhere.
+        assert_eq!(crate::parser::paragraph_link_destinations(src), vec!["/x".to_string()]);
+        assert!(
+            crate::parser::paragraph_link_destinations(&saved).is_empty(),
+            "the used definition is lost on save: {saved:?}"
+        );
+        // A paragraph that is only `[a][r]` resolves to a Link block.
+        assert_eq!(
+            blocks("[a][r]\n\n[r]: /x\n"),
+            vec![ContentElement::Link { text: "a".to_string(), href: "/x".to_string() }]
+        );
+    }
+
     #[test]
     fn paragraph_table_delimiter_row_is_escaped() {
         let cases = [
