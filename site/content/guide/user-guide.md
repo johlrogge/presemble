@@ -474,7 +474,7 @@ Collections are accessed by the singular schema stem in `data-each`. A schema na
 </template>
 ```
 
-Every page template sees all collections — a guide page can iterate all posts, and a post page can iterate all guides. Loops extend the parent context, so `input` and other collections remain accessible inside a loop.
+Every page template sees all collections — a guide page can iterate all posts, and a post page can iterate all guides. Loops extend the parent context, so `input` and other collections remain accessible inside a loop. Items are listed in URL order.
 
 Because the schema defines which paths exist, the template vocabulary is finite and verified at build time. A template that references a non-existent path fails the build.
 

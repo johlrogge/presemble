@@ -1290,6 +1290,20 @@ impl Conductor {
         (url, stem)
     }
 
+    /// Every `(url, semantic root)` pair, URL ascending, so collection
+    /// injection and rendering see the same order on every build.
+    fn semantic_pairs_by_url(&self) -> Vec<(String, node_store::NodeId)> {
+        let mut pairs: Vec<(String, node_store::NodeId)> = self
+            .url_to_semantic
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(url, &sem)| (url.clone(), sem))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
+    }
+
     /// Batch-render all pages in the site.
     ///
     /// Replaces the O(n²) pattern of `render_pages` (which called
@@ -1310,11 +1324,7 @@ impl Conductor {
         // The legacy DataGraph pipeline below still runs for rendering.
         // TODO: Phase C — use NodeStoreView for rendering, remove DataGraph pipeline.
         {
-            let semantic_pairs: Vec<(String, node_store::NodeId)> = {
-                let url_to_semantic =
-                    self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
-                url_to_semantic.iter().map(|(url, &sem)| (url.clone(), sem)).collect()
-            };
+            let semantic_pairs = self.semantic_pairs_by_url();
 
             if !semantic_pairs.is_empty() {
                 let (node_url_index, node_stem_index) = {
@@ -1356,10 +1366,7 @@ impl Conductor {
         let registry = template_registry::FileTemplateRegistry::new(fresh_repo.clone());
 
         // Iterate over semantic content roots instead of DataGraphs.
-        let semantic_pairs: Vec<(String, node_store::NodeId)> = {
-            let url_to_semantic = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
-            url_to_semantic.iter().map(|(url, &sem)| (url.clone(), sem)).collect()
-        };
+        let semantic_pairs = self.semantic_pairs_by_url();
 
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
 
@@ -1702,10 +1709,7 @@ impl Conductor {
             );
             // Inject collections: build from cached stem index
             // We need ALL semantic roots for collection injection
-            let all_roots: Vec<(String, node_store::NodeId)> = {
-                let url_to_sem = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner());
-                url_to_sem.iter().map(|(u, &s)| (u.clone(), s)).collect()
-            };
+            let all_roots = self.semantic_pairs_by_url();
             node_store_bridge::store_pipeline::inject_collections_in_store(
                 &mut store, &all_roots, &node_stem_index,
             );

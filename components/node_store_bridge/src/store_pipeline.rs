@@ -12,6 +12,7 @@ pub type NodeStemIndex = HashMap<String, Vec<(String, NodeId)>>;
 ///
 /// `roots` is a list of (url, semantic_root_id) pairs.
 /// Only "item" pages go into the indexes (not "collection" pages).
+/// Each stem's items are in URL ascending order, whatever the order of `roots`.
 pub fn build_indexes_from_store(
     store: &NodeStore,
     roots: &[(String, NodeId)],
@@ -33,6 +34,12 @@ pub fn build_indexes_from_store(
                 .or_default()
                 .push((url.clone(), *sem_root));
         }
+    }
+
+    // URL ascending (ADR-058 D2): collection order must not depend on the
+    // order of `roots`, which callers often take from a HashMap.
+    for items in stem_index.values_mut() {
+        items.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
     (url_index, stem_index)
@@ -978,6 +985,81 @@ mod tests {
                 .count();
             assert_eq!(post_ref_count, 1, "each root should have exactly one 'post' reference after idempotent calls");
         }
+    }
+
+    /// Add a semantic root with `stem`, `url`, `page-kind` attributes and a
+    /// `title` reference; returns the root.
+    fn add_page(store: &mut NodeStore, stem: &str, url: &str, kind: &str, title: &str) -> NodeId {
+        let page_name = store.intern("page");
+        let sem = store.add_node(Node::Element(page_name));
+        for (attr, value) in [("stem", stem), ("url", url), ("page-kind", kind)] {
+            let name = store.intern(attr);
+            let value = store.add_node(Node::Text(value.into()));
+            store.add_edge(sem, Edge::Attribute { name, value });
+        }
+        let title_name = store.intern("title");
+        let title_val = store.add_node(Node::Text(title.into()));
+        store.add_edge(sem, Edge::Reference { name: title_name, target: title_val });
+        sem
+    }
+
+    #[test]
+    fn build_indexes_from_store_is_independent_of_root_order() {
+        let mut store = NodeStore::new();
+        let a = add_page(&mut store, "post", "/post/a", "item", "A");
+        let b = add_page(&mut store, "post", "/post/b", "item", "B");
+        let c = add_page(&mut store, "post", "/post/c", "item", "C");
+        let forward = vec![
+            ("/post/a".to_string(), a),
+            ("/post/b".to_string(), b),
+            ("/post/c".to_string(), c),
+        ];
+        let reversed: Vec<_> = forward.iter().rev().cloned().collect();
+
+        let (_, from_forward) = build_indexes_from_store(&store, &forward);
+        let (_, from_reversed) = build_indexes_from_store(&store, &reversed);
+
+        assert_eq!(from_forward["post"], forward, "stem_index must be URL ascending");
+        assert_eq!(
+            from_reversed["post"], from_forward["post"],
+            "stem_index must not depend on root order"
+        );
+    }
+
+    #[test]
+    fn collection_page_lists_items_in_url_order() {
+        let mut store = NodeStore::new();
+        // Inserted (and passed) in an order that differs from URL order.
+        let c = add_page(&mut store, "post", "/post/c", "item", "Gamma");
+        let a = add_page(&mut store, "post", "/post/a", "item", "Alpha");
+        let b = add_page(&mut store, "post", "/post/b", "item", "Beta");
+        let index = add_page(&mut store, "post", "/post/", "collection", "Posts");
+        let roots = vec![
+            ("/post/".to_string(), index),
+            ("/post/c".to_string(), c),
+            ("/post/a".to_string(), a),
+            ("/post/b".to_string(), b),
+        ];
+
+        let (_, stem_idx) = build_indexes_from_store(&store, &roots);
+        inject_collections_in_store(&mut store, &roots, &stem_idx);
+
+        let view = crate::NodeStoreView::new(&store, index);
+        let prefixed = crate::PrefixedGraphView::new("input".to_string(), view);
+        let nodes = template::parse_template_xml(
+            r#"<ul><template data-each="input.post"><presemble:insert data="item.title" as="li" /></template></ul>"#,
+        )
+        .unwrap();
+        let reg = template::NullRegistry;
+        let ctx = template::RenderContext::editorial(&reg);
+        let html =
+            template::serialize_nodes(&template::transform(nodes, &prefixed, &ctx).unwrap());
+
+        let pos = |t: &str| html.find(t).unwrap_or_else(|| panic!("{t} missing in {html}"));
+        assert!(
+            pos("Alpha") < pos("Beta") && pos("Beta") < pos("Gamma"),
+            "items must be listed in URL order: {html}"
+        );
     }
 
     #[test]

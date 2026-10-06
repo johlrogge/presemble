@@ -12,6 +12,8 @@ COOKIE_JAR=""
 WS_ERR=""
 PID=""
 KEY_CHECK_DIR=""
+REPRO_A=""
+REPRO_B=""
 PASS=0
 FAIL=0
 ERRORS=""
@@ -36,6 +38,8 @@ cleanup() {
     [ -n "$COOKIE_JAR" ] && rm -f "$COOKIE_JAR"
     [ -n "$WS_ERR" ] && rm -f "$WS_ERR"
     [ -n "$KEY_CHECK_DIR" ] && rm -rf "$KEY_CHECK_DIR"
+    [ -n "$REPRO_A" ] && rm -rf "$REPRO_A"
+    [ -n "$REPRO_B" ] && rm -rf "$REPRO_B"
     # Clean up nrepl port file
     rm -f "$(dirname "${SITE_DIR:-/tmp/x}")/.nrepl-port" 2>/dev/null || true
 }
@@ -240,6 +244,25 @@ assert_rep() {
 
 log "Building presemble ($PROFILE profile)..."
 cargo polylith cargo --profile "$PROFILE" build --bin presemble -q 2>/dev/null
+
+# ── Test: Reproducible build ───────────────────────────────────────────────
+# Builds site/ twice via the just recipes (site-snapshot, output-diff exact):
+# the outputs must be byte-identical (e.g. collection item order).
+
+log "Checking that building site/ twice gives identical output..."
+snapshot() {   # prints the snapshot dir of a fresh `just site-snapshot site`
+    just site-snapshot site 2>/dev/null | sed -n 's/^Snapshot: //p' | tail -n 1
+}
+REPRO_A=$(snapshot || true)
+REPRO_B=$(snapshot || true)
+if [ -z "$REPRO_A" ] || [ -z "$REPRO_B" ]; then
+    fail "reproducible build: just site-snapshot site failed"
+elif REPRO_DIFF=$(just output-diff "$REPRO_A" "$REPRO_B" exact 2>&1); then
+    pass "reproducible build: two builds of site/ are identical"
+else
+    fail "reproducible build: two builds of site/ differ"
+    head -n 40 <<< "$REPRO_DIFF"
+fi
 
 SITE_DIR=$(mktemp -d /tmp/presemble-smoke-XXXXXX)
 # Cookie jar lives outside $SITE_DIR so the file watcher never sees it.
