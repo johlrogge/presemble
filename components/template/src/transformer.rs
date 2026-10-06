@@ -230,7 +230,8 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
             match resolved.as_ref().map(|r| r.as_value()) {
                 Some(Value::Text(t)) => t.clone(),
                 Some(Value::Absent) | None => String::new(),
-                Some(Value::Html(h)) => h.clone(),
+                // Nodes in a string context are their text, never markup (ADR-064).
+                Some(v @ Value::Nodes(_)) => v.display_text().unwrap_or_default(),
                 Some(Value::List(items)) => items
                     .first()
                     .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
@@ -539,9 +540,9 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
             Ok(vec![Node::Element(element)])
         }
 
-        Some(Value::Html(html)) => {
-            let nodes = crate::dom::parse_template_xml(&html)
-                .map_err(|e| RenderError::Render(e.to_string()))?;
+        Some(Value::Nodes(nodes)) => {
+            let mut nodes = nodes.to_vec();
+            crate::body_nodes::stamp_file(&mut nodes, &presemble_file);
             Ok(nodes)
         }
 
@@ -785,167 +786,12 @@ fn render_insert_native(
                     let mut body_nodes = Vec::new();
                     for child_id in store.children(id) {
                         match store.get(child_id) {
-                            Some(node_store::Node::Element(child_name)) => {
-                                let child_element_name = store.resolve_name(*child_name);
-                                let body_attrs = vec![
-                                    (crate::constants::ATTR_SLOT.to_string(), Form::Str("body".to_string())),
-                                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                                ];
-
-                                match child_element_name {
-                                    "heading" => {
-                                        let text = first_child_text(store, child_id);
-                                        let level = node_attr_int(store, child_id, "level").unwrap_or(2) as u8;
-                                        body_nodes.push(Node::Element(Element {
-                                            name: format!("h{level}"),
-                                            attrs: body_attrs.clone(),
-                                            children: crate::markdown_nodes::inline_children(&text),
-                                        }));
-                                    }
-                                    "paragraph" => {
-                                        let text = first_child_text(store, child_id);
-                                        body_nodes.push(Node::Element(Element {
-                                            name: "p".to_string(),
-                                            attrs: body_attrs.clone(),
-                                            children: crate::markdown_nodes::inline_children(&text),
-                                        }));
-                                    }
-                                    "blockquote" => {
-                                        let text = first_child_text(store, child_id);
-                                        body_nodes.push(Node::Element(Element {
-                                            name: "blockquote".to_string(),
-                                            attrs: body_attrs.clone(),
-                                            children: crate::markdown_nodes::inline_children(&text),
-                                        }));
-                                    }
-                                    "code-block" => {
-                                        let code = first_child_text(store, child_id);
-                                        let lang = node_attr_str(store, child_id, "language");
-                                        let code_attrs = if let Some(lang) = lang {
-                                            vec![("class".to_string(), Form::Str(format!("language-{lang}")))]
-                                        } else {
-                                            vec![]
-                                        };
-                                        body_nodes.push(Node::Element(Element {
-                                            name: "pre".to_string(),
-                                            attrs: body_attrs.clone(),
-                                            children: vec![Node::Element(Element {
-                                                name: "code".to_string(),
-                                                attrs: code_attrs,
-                                                children: vec![Node::Text(code)],
-                                            })],
-                                        }));
-                                    }
-                                    "image" => {
-                                        let src = node_attr_str(store, child_id, "path").unwrap_or_default();
-                                        let alt = node_attr_str(store, child_id, "alt").unwrap_or_default();
-                                        let mut img_attrs = vec![
-                                            ("src".to_string(), Form::Str(src)),
-                                            ("alt".to_string(), Form::Str(alt)),
-                                        ];
-                                        img_attrs.extend(body_attrs.clone());
-                                        body_nodes.push(Node::Element(Element {
-                                            name: "img".to_string(),
-                                            attrs: img_attrs,
-                                            children: vec![],
-                                        }));
-                                    }
-                                    "table" => {
-                                        // Render table from headers + rows children
-                                        let mut table_children = Vec::new();
-                                        if let Some(headers_id) = store.children(child_id).into_iter().find(|&c| {
-                                            matches!(store.get(c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "headers")
-                                        }) {
-                                            let mut header_cells = Vec::new();
-                                            for h in store.children(headers_id) {
-                                                if let Some(node_store::Node::Text(t)) = store.get(h) {
-                                                    header_cells.push(Node::Element(Element {
-                                                        name: "th".to_string(), attrs: vec![],
-                                                        children: crate::markdown_nodes::table_cell_nodes(t),
-                                                    }));
-                                                }
-                                            }
-                                            table_children.push(Node::Element(Element {
-                                                name: "thead".to_string(), attrs: vec![],
-                                                children: vec![Node::Element(Element {
-                                                    name: "tr".to_string(), attrs: vec![], children: header_cells,
-                                                })],
-                                            }));
-                                        }
-                                        // Rows sit under `rows`: `table > rows > row > Text*`
-                                        // (the shape `content_bridge` builds and decodes).
-                                        let row_ids = store.children(child_id).into_iter().filter(|&c| {
-                                            matches!(store.get(c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "rows")
-                                        }).flat_map(|rows_id| store.children(rows_id));
-                                        let mut body_rows = Vec::new();
-                                        for row_id in row_ids {
-                                            if matches!(store.get(row_id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "row") {
-                                                let mut cells = Vec::new();
-                                                for cell in store.children(row_id) {
-                                                    if let Some(node_store::Node::Text(t)) = store.get(cell) {
-                                                        cells.push(Node::Element(Element {
-                                                            name: "td".to_string(), attrs: vec![],
-                                                            children: crate::markdown_nodes::table_cell_nodes(t),
-                                                        }));
-                                                    }
-                                                }
-                                                body_rows.push(Node::Element(Element {
-                                                    name: "tr".to_string(), attrs: vec![], children: cells,
-                                                }));
-                                            }
-                                        }
-                                        if !body_rows.is_empty() {
-                                            table_children.push(Node::Element(Element {
-                                                name: "tbody".to_string(), attrs: vec![], children: body_rows,
-                                            }));
-                                        }
-                                        body_nodes.push(Node::Element(Element {
-                                            name: "table".to_string(),
-                                            attrs: body_attrs.clone(),
-                                            children: table_children,
-                                        }));
-                                    }
-                                    "html-block" => {
-                                        // Never rendered (ADR-062 D2): a placeholder that is not a slot.
-                                        body_nodes.push(Node::Element(Element {
-                                            name: "div".to_string(),
-                                            attrs: vec![(
-                                                "class".to_string(),
-                                                Form::Str(crate::constants::CLASS_HTML_REMOVED.to_string()),
-                                            )],
-                                            children: vec![Node::Text(crate::constants::MSG_HTML_REMOVED.to_string())],
-                                        }));
-                                    }
-                                    "list" => {
-                                        // List stored as raw markdown source
-                                        let source = first_child_text(store, child_id);
-                                        body_nodes.push(Node::Element(Element {
-                                            name: "div".to_string(),
-                                            attrs: body_attrs.clone(),
-                                            children: crate::markdown_nodes::inline_children(&source),
-                                        }));
-                                    }
-                                    "link" | "link-expression" => {
-                                        // Links in body — render as anchor
-                                        let href = node_attr_str(store, child_id, "href").unwrap_or_default();
-                                        let text = node_attr_str(store, child_id, "text")
-                                            .or_else(|| Some(first_child_text(store, child_id)))
-                                            .unwrap_or_default();
-                                        if !href.is_empty() {
-                                            body_nodes.push(Node::Element(Element {
-                                                name: "a".to_string(),
-                                                attrs: {
-                                                    let mut a = vec![("href".to_string(), Form::Str(href))];
-                                                    a.extend(body_attrs.clone());
-                                                    a
-                                                },
-                                                children: vec![Node::Text(text)],
-                                            }));
-                                        }
-                                    }
-                                    _ => {
-                                        // Unknown body element — skip
-                                    }
+                            Some(node_store::Node::Element(_)) => {
+                                if let Some(block) = native_block(store, child_id) {
+                                    body_nodes.extend(crate::body_nodes::block_nodes(
+                                        &block,
+                                        &crate::body_nodes::BlockCtx { md: None },
+                                    ));
                                 }
                             }
                             Some(node_store::Node::Text(t)) => {
@@ -954,6 +800,7 @@ fn render_insert_native(
                             _ => {}
                         }
                     }
+                    crate::body_nodes::stamp_file(&mut body_nodes, presemble_file);
                     return Ok(Some(body_nodes));
                 }
 
@@ -1194,6 +1041,79 @@ fn first_child_text(store: &node_store::NodeStore, id: node_store::NodeId) -> St
     store.children(id).into_iter().find_map(|c| {
         if let Some(node_store::Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
     }).unwrap_or_default()
+}
+
+/// Read a body block out of the store as a [`content::ContentElement`], so the
+/// native path renders it through the same `block_nodes` as the legacy path.
+///
+/// This duplicates part of `node_store_bridge::content_bridge::block_from_node`
+/// (the canonical decoder). `template` cannot depend on `node_store_bridge`, so
+/// the duplicate stays until ADR-059 stage 2 settles where the decoder lives.
+///
+/// `None` for what renders nothing: unknown kinds, a link without `href`, and
+/// link expressions (ADR-058 section 4: ignored in the body).
+fn native_block(store: &node_store::NodeStore, id: node_store::NodeId) -> Option<content::ContentElement> {
+    use content::ContentElement;
+    let Some(node_store::Node::Element(name)) = store.get(id) else {
+        return None;
+    };
+    let named_children = |parent: node_store::NodeId, wanted: &str| -> Vec<node_store::NodeId> {
+        store
+            .children(parent)
+            .into_iter()
+            .filter(|&c| matches!(store.get(c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == wanted))
+            .collect()
+    };
+    let text_children = |parent: node_store::NodeId| -> Vec<String> {
+        store
+            .children(parent)
+            .into_iter()
+            .filter_map(|c| match store.get(c) {
+                Some(node_store::Node::Text(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    match store.resolve_name(*name) {
+        "heading" => {
+            let level = node_attr_int(store, id, "level").unwrap_or(2);
+            let level = u8::try_from(level).ok().and_then(schema::HeadingLevel::new)?;
+            Some(ContentElement::Heading { level, source: first_child_text(store, id).into() })
+        }
+        "paragraph" => Some(ContentElement::Paragraph { text: first_child_text(store, id) }),
+        "blockquote" => Some(ContentElement::Blockquote { text: first_child_text(store, id) }),
+        "code-block" => Some(ContentElement::CodeBlock {
+            language: node_attr_str(store, id, "language"),
+            code: first_child_text(store, id),
+        }),
+        "image" => Some(ContentElement::Image {
+            path: node_attr_str(store, id, "path").unwrap_or_default(),
+            alt: node_attr_str(store, id, "alt"),
+        }),
+        "table" => {
+            let headers = named_children(id, "headers")
+                .first()
+                .map(|&h| text_children(h))
+                .unwrap_or_default();
+            // Rows sit under `rows`: `table > rows > row > Text*`
+            // (the shape `content_bridge` builds and decodes).
+            let rows = named_children(id, "rows")
+                .into_iter()
+                .flat_map(|rows_id| named_children(rows_id, "row"))
+                .map(text_children)
+                .collect();
+            Some(ContentElement::Table { headers, rows })
+        }
+        "html-block" => Some(ContentElement::HtmlBlock { source: first_child_text(store, id) }),
+        "list" => Some(ContentElement::List { source: first_child_text(store, id) }),
+        "separator" => Some(ContentElement::Separator),
+        "link" => {
+            let href = node_attr_str(store, id, "href").filter(|h| !h.is_empty())?;
+            let text = node_attr_str(store, id, "text").unwrap_or_else(|| first_child_text(store, id));
+            Some(ContentElement::Link { text, href })
+        }
+        _ => None,
+    }
 }
 
 /// Get a string attribute value from a node.
@@ -1529,9 +1449,9 @@ fn render_list_item(
             Ok(vec![Node::Element(element)])
         }
 
-        Value::Html(html) => {
-            let nodes = crate::dom::parse_template_xml(html)
-                .map_err(|e| RenderError::Render(e.to_string()))?;
+        Value::Nodes(nodes) => {
+            let mut nodes = nodes.to_vec();
+            crate::body_nodes::stamp_file(&mut nodes, file);
             Ok(nodes)
         }
 
@@ -1762,10 +1682,10 @@ mod tests {
     }
 
     #[test]
-    fn insert_html_value_renders_nodes() {
+    fn insert_nodes_value_renders_nodes() {
         let mut graph = DataGraph::new();
         let mut article = DataGraph::new();
-        article.insert("body", Value::Html("<p>Body text</p>".to_string()));
+        article.insert("body", Value::Nodes(parse_template_xml("<p>Body text</p>").unwrap().into()));
         graph.insert("article", Value::Record(article));
 
         let src = r#"<presemble:insert data="article.body" />"#;
@@ -2851,10 +2771,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_text_on_html_strips_tags() {
-        // An HTML value with :apply text should strip tags.
+    fn apply_text_on_nodes_strips_tags() {
+        // A nodes value with :apply text is its text.
         let mut graph = DataGraph::new();
-        graph.insert("body", Value::Html("<p>Hello <strong>world</strong></p>".to_string()));
+        graph.insert(
+            "body",
+            Value::Nodes(parse_template_xml("<p>Hello <strong>world</strong></p>").unwrap().into()),
+        );
 
         let src = r#"<presemble:insert data="body" as="div" apply="text" />"#;
         let nodes = parse_template_xml(src).unwrap();
@@ -3132,7 +3055,13 @@ mod tests {
     }
 
     impl GraphView for NodeStoreGraphView {
-        fn resolve(&self, _path: &[&str]) -> Option<crate::graph_view::DataRef<'_>> {
+        fn resolve(&self, path: &[&str]) -> Option<crate::graph_view::DataRef<'_>> {
+            // The content file, as the root's `file` attribute (what
+            // `resolve_presemble_file` reads on NodeStore-backed graphs).
+            if path == ["file"] {
+                return node_attr_str(&self.store, self.root, "file")
+                    .map(|f| crate::graph_view::DataRef::Owned(Value::Text(f)));
+            }
             None
         }
         fn iter_keys(&self) -> Vec<String> {
@@ -3682,6 +3611,187 @@ mod tests {
     // Phase C symmetry test: data.rs and transformer.rs body rendering agree
     // ---------------------------------------------------------------------------
 
+    const BODY_FILE: &str = "content/page.md";
+
+    /// The body rendered through the legacy `DataGraph` path: `Value::Nodes`
+    /// built by `render_body_nodes`, inserted by `transform`.
+    fn legacy_body_html(elements: &im::Vector<schema::Spanned<content::ContentElement>>) -> String {
+        let mut graph = DataGraph::new();
+        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(BODY_FILE.to_string()));
+        graph.insert(
+            "body",
+            Value::Nodes(crate::body_nodes::render_body_nodes(elements, None).into()),
+        );
+        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::editorial(&reg);
+        serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
+    }
+
+    /// Add one body block to `store` in the shape `content_bridge` builds.
+    fn add_native_block(
+        store: &mut node_store::NodeStore,
+        body: node_store::NodeId,
+        el: &content::ContentElement,
+    ) {
+        use content::ContentElement;
+        fn element(store: &mut node_store::NodeStore, name: &str) -> node_store::NodeId {
+            let n = store.intern(name);
+            store.add_node(node_store::Node::Element(n))
+        }
+        fn text_child(store: &mut node_store::NodeStore, parent: node_store::NodeId, text: &str) {
+            let t = store.add_node(node_store::Node::Text(text.into()));
+            store.add_edge(parent, node_store::Edge::Child(t));
+        }
+        fn text_attr(store: &mut node_store::NodeStore, host: node_store::NodeId, name: &str, v: &str) {
+            let name = store.intern(name);
+            let value = store.add_node(node_store::Node::Text(v.into()));
+            store.add_edge(host, node_store::Edge::Attribute { name, value });
+        }
+        let block = match el {
+            ContentElement::Heading { level, source } => {
+                let b = element(store, "heading");
+                let name = store.intern("level");
+                let value = store.add_node(node_store::Node::Integer(i64::from(level.value())));
+                store.add_edge(b, node_store::Edge::Attribute { name, value });
+                text_child(store, b, source.as_str());
+                b
+            }
+            ContentElement::Paragraph { text } => {
+                let b = element(store, "paragraph");
+                text_child(store, b, text);
+                b
+            }
+            ContentElement::Blockquote { text } => {
+                let b = element(store, "blockquote");
+                text_child(store, b, text);
+                b
+            }
+            ContentElement::List { source } => {
+                let b = element(store, "list");
+                text_child(store, b, source);
+                b
+            }
+            ContentElement::HtmlBlock { source } => {
+                let b = element(store, "html-block");
+                text_child(store, b, source);
+                b
+            }
+            ContentElement::CodeBlock { language, code } => {
+                let b = element(store, "code-block");
+                if let Some(lang) = language {
+                    text_attr(store, b, "language", lang);
+                }
+                text_child(store, b, code);
+                b
+            }
+            ContentElement::Image { path, alt } => {
+                let b = element(store, "image");
+                text_attr(store, b, "path", path);
+                if let Some(alt) = alt {
+                    text_attr(store, b, "alt", alt);
+                }
+                b
+            }
+            ContentElement::Link { text, href } => {
+                let b = element(store, "link");
+                text_attr(store, b, "href", href);
+                text_child(store, b, text);
+                b
+            }
+            ContentElement::Separator => element(store, "separator"),
+            ContentElement::Table { headers, rows } => {
+                let b = element(store, "table");
+                let h = element(store, "headers");
+                store.add_edge(b, node_store::Edge::Child(h));
+                for header in headers {
+                    text_child(store, h, header);
+                }
+                let r = element(store, "rows");
+                store.add_edge(b, node_store::Edge::Child(r));
+                for row in rows {
+                    let row_node = element(store, "row");
+                    store.add_edge(r, node_store::Edge::Child(row_node));
+                    for cell in row {
+                        text_child(store, row_node, cell);
+                    }
+                }
+                b
+            }
+            // Encoded without children: the native path renders nothing for it.
+            ContentElement::LinkExpression { .. } => element(store, "link-expression"),
+        };
+        store.add_edge(body, node_store::Edge::Child(block));
+    }
+
+    /// The body rendered through the native NodeStore path.
+    fn native_body_html(elements: &[content::ContentElement]) -> String {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let file_name = store.intern("file");
+        let file_val = store.add_node(node_store::Node::Text(BODY_FILE.into()));
+        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        let body_name = store.intern("body");
+        let body = store.add_node(node_store::Node::Element(body_name));
+        for el in elements {
+            add_native_block(&mut store, body, el);
+        }
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_name, part: body });
+
+        let graph = NodeStoreGraphView { store, root };
+        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::editorial(&reg);
+        serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
+    }
+
+    /// Every block kind, including the ones whose output the two paths used to
+    /// disagree on (separator, table with no rows, image without alt).
+    fn every_block_kind() -> Vec<content::ContentElement> {
+        use content::{ContentElement as C, LinkTarget, LinkText};
+        vec![
+            C::Heading { level: schema::HeadingLevel::new(3).unwrap(), source: "Head *em* <b>x</b>".into() },
+            C::Paragraph { text: "a <script>x</script> **b** `c<d` [l](/a \"t\")".to_string() },
+            C::Separator,
+            C::HtmlBlock { source: "<div>secret</div>".to_string() },
+            C::Link { text: "A link".to_string(), href: "/a?x=1&y=2".to_string() },
+            C::Image { alt: Some("An image".to_string()), path: "/i.png".to_string() },
+            C::Image { alt: None, path: "/j.png".to_string() },
+            C::Table {
+                headers: vec!["`a|b`".to_string(), "**H**".to_string()],
+                rows: vec![vec!["x".to_string(), "<i>y</i>".to_string()], vec!["-".to_string(), "".to_string()]],
+            },
+            C::Table { headers: vec!["only".to_string()], rows: vec![] },
+            C::List { source: "- one\n- **two**\n\n3. x\n".to_string() },
+            C::Blockquote { text: "> quoted *x*\n> more\n".to_string() },
+            C::CodeBlock { language: Some("rust".to_string()), code: "fn x() { 1 < 2 }\n".to_string() },
+            C::CodeBlock { language: None, code: "plain\n".to_string() },
+            C::LinkExpression {
+                text: LinkText::Static("label".to_string()),
+                target: LinkTarget::PathRef("post".to_string()),
+                slot: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn legacy_and_native_body_paths_render_the_same_for_every_block_kind() {
+        let elements = every_block_kind();
+        let spanned: im::Vector<_> = elements
+            .iter()
+            .cloned()
+            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .collect();
+        let legacy = legacy_body_html(&spanned);
+        let native = native_body_html(&elements);
+        use crate::markdown_nodes::tests::normalise_html;
+        assert_eq!(normalise_html(&legacy), normalise_html(&native), "legacy: {legacy}\nnative: {native}");
+        // Both carry the file on every slot element, and nothing for the link expression.
+        assert!(legacy.contains(r#"data-presemble-file="content/page.md""#), "{legacy}");
+        assert!(!legacy.contains("label") && !native.contains("label"), "{legacy}\n{native}");
+    }
+
     #[test]
     fn render_body_html_and_transformer_body_render_agree_on_id_omission_and_slot_marker() {
         use schema::{Span as SchemaSpan, Spanned};
@@ -3706,12 +3816,15 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let data_html = crate::data::render_body_html(&elements, None);
+        let data_html = legacy_body_html(&elements);
 
         // --- transformer.rs path (native NodeStore) ---
         let mut store = node_store::NodeStore::new();
         let root_name = store.intern("page");
         let root = store.add_node(node_store::Node::Element(root_name));
+        let file_name = store.intern("file");
+        let file_val = store.add_node(node_store::Node::Text("content/page.md".into()));
+        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
 
         let body_name = store.intern("body");
         let body = store.add_node(node_store::Node::Element(body_name));
@@ -3787,39 +3900,13 @@ mod tests {
 
         // TODO(post-Phase-C): assert data-presemble-md parity once transformer.rs emits it
 
-        // Same tree on both paths, modulo D1–D8 and KNOWN_PATH_DIFFERENCES.
+        // Same tree on both paths, modulo D1–D8.
+        use crate::markdown_nodes::tests::normalise_html;
         assert_eq!(
-            normalise_without_known_path_differences(&data_html),
-            normalise_without_known_path_differences(&transformer_html),
+            normalise_html(&data_html),
+            normalise_html(&transformer_html),
             "data.rs: {data_html}\ntransformer.rs: {transformer_html}"
         );
-    }
-
-    /// Attributes the legacy body (`data.rs`) does not emit yet. N3 builds the
-    /// legacy body as nodes with the same attributes and removes this list.
-    const KNOWN_PATH_DIFFERENCES: &[&str] = &["data-presemble-file"];
-
-    /// `normalise_html`, with the attributes in `KNOWN_PATH_DIFFERENCES`
-    /// removed at every level.
-    fn normalise_without_known_path_differences(html: &str) -> Vec<crate::markdown_nodes::tests::Norm> {
-        use crate::markdown_nodes::tests::{normalise_html, Norm};
-        fn strip(nodes: Vec<Norm>) -> Vec<Norm> {
-            nodes
-                .into_iter()
-                .map(|n| match n {
-                    Norm::El(name, attrs, children) => Norm::El(
-                        name,
-                        attrs
-                            .into_iter()
-                            .filter(|(k, _)| !KNOWN_PATH_DIFFERENCES.contains(&k.as_str()))
-                            .collect(),
-                        strip(children),
-                    ),
-                    text => text,
-                })
-                .collect()
-        }
-        strip(normalise_html(html))
     }
 
     // ---------------------------------------------------------------------------
@@ -4049,7 +4136,7 @@ mod tests {
     fn characterise_native_paragraph_inline_markup() {
         assert_renders_as(
             &render_native_body_block("paragraph", "*em* `c<d` [l](/a \"t\")", None),
-            r#"<p data-presemble-slot="body" data-presemble-file=""><em>em</em> <code>c&lt;d</code> <a href="/a" title="t">l</a></p>"#,
+            r#"<p data-presemble-slot="body"><em>em</em> <code>c&lt;d</code> <a href="/a" title="t">l</a></p>"#,
         );
     }
 
@@ -4057,7 +4144,7 @@ mod tests {
     fn characterise_native_list() {
         assert_renders_as(
             &render_native_body_block("list", "- one\n- **two**\n", None),
-            "<div data-presemble-slot=\"body\" data-presemble-file=\"\"><ul>\n<li>one</li>\n<li><strong>two</strong></li>\n</ul></div>",
+            "<div data-presemble-slot=\"body\"><ul>\n<li>one</li>\n<li><strong>two</strong></li>\n</ul></div>",
         );
     }
 
@@ -4065,7 +4152,7 @@ mod tests {
     fn characterise_native_blockquote() {
         assert_renders_as(
             &render_native_body_block("blockquote", "> quoted *x*\n> more\n", None),
-            "<blockquote data-presemble-slot=\"body\" data-presemble-file=\"\"><blockquote>\n<p>quoted <em>x</em>\nmore</p>\n</blockquote></blockquote>",
+            "<blockquote data-presemble-slot=\"body\"><blockquote>\n<p>quoted <em>x</em>\nmore</p>\n</blockquote></blockquote>",
         );
     }
 
@@ -4073,7 +4160,7 @@ mod tests {
     fn characterise_native_heading() {
         assert_renders_as(
             &render_native_body_block("heading", "Head *em* `c`", Some(3)),
-            r#"<h3 data-presemble-slot="body" data-presemble-file="">Head <em>em</em> <code>c</code></h3>"#,
+            r#"<h3 data-presemble-slot="body">Head <em>em</em> <code>c</code></h3>"#,
         );
     }
 
@@ -4081,7 +4168,7 @@ mod tests {
     fn characterise_native_table_with_inline_code_cell() {
         assert_renders_as(
             &render_native_table(&["`a<b`", "H"], &[&["x", "`y`"]]),
-            r#"<table data-presemble-slot="body" data-presemble-file=""><thead><tr><th><code>a&lt;b</code></th><th>H</th></tr></thead><tbody><tr><td>x</td><td><code>y</code></td></tr></tbody></table>"#,
+            r#"<table data-presemble-slot="body"><thead><tr><th><code>a&lt;b</code></th><th>H</th></tr></thead><tbody><tr><td>x</td><td><code>y</code></td></tr></tbody></table>"#,
         );
     }
 
@@ -4089,7 +4176,7 @@ mod tests {
     fn characterise_native_script_is_text() {
         assert_renders_as(
             &render_native_body_block("paragraph", "a <script>x</script> b", None),
-            r#"<p data-presemble-slot="body" data-presemble-file="">a &lt;script&gt;x&lt;/script&gt; b</p>"#,
+            r#"<p data-presemble-slot="body">a &lt;script&gt;x&lt;/script&gt; b</p>"#,
         );
     }
 
@@ -4097,7 +4184,7 @@ mod tests {
     fn characterise_native_comment_is_dropped() {
         assert_renders_as(
             &render_native_body_block("paragraph", "a <!-- secret --> b", None),
-            r#"<p data-presemble-slot="body" data-presemble-file="">a  b</p>"#,
+            r#"<p data-presemble-slot="body">a  b</p>"#,
         );
     }
 
@@ -4109,7 +4196,7 @@ mod tests {
     fn native_link_with_apostrophe_in_url() {
         assert_renders_as(
             &render_native_body_block("paragraph", "[a](/it's)", None),
-            r#"<p data-presemble-slot="body" data-presemble-file=""><a href="/it's">a</a></p>"#,
+            r#"<p data-presemble-slot="body"><a href="/it's">a</a></p>"#,
         );
     }
 
@@ -4117,7 +4204,7 @@ mod tests {
     fn native_link_with_apostrophe_in_title() {
         assert_renders_as(
             &render_native_body_block("paragraph", "[a](/x \"it's\")", None),
-            r#"<p data-presemble-slot="body" data-presemble-file=""><a href="/x" title="it's">a</a></p>"#,
+            r#"<p data-presemble-slot="body"><a href="/x" title="it's">a</a></p>"#,
         );
     }
 
@@ -4125,7 +4212,7 @@ mod tests {
     fn native_non_ascii_next_to_entities() {
         assert_renders_as(
             &render_native_body_block("paragraph", "é&amp;ü &lt;x&gt;ñ &copy;", None),
-            r#"<p data-presemble-slot="body" data-presemble-file="">é&amp;ü &lt;x&gt;ñ ©</p>"#,
+            r#"<p data-presemble-slot="body">é&amp;ü &lt;x&gt;ñ ©</p>"#,
         );
     }
 

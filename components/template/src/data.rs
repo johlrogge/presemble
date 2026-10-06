@@ -1,5 +1,5 @@
 use content::{AsPlainText, ContentElement, Document};
-use schema::{Element, Grammar, Spanned};
+use schema::{Element, Grammar};
 use std::sync::Arc;
 
 /// Trait for callable values (closures and primitive functions).
@@ -9,21 +9,6 @@ pub trait Callable: Send + Sync + std::fmt::Debug {
     fn name(&self) -> Option<&str>;
     /// Downcast hook — allows evaluator to detect Closure behind Arc<dyn Callable>.
     fn as_any(&self) -> &dyn std::any::Any;
-}
-
-/// Strip HTML tags from a string, returning only text content.
-fn strip_html_tags(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result
 }
 
 /// The kind of schema element a suggestion represents.
@@ -42,8 +27,9 @@ pub enum SuggestionKind {
 pub enum Value {
     /// Plain text (heading text, paragraph text, etc.)
     Text(String),
-    /// Pre-rendered HTML (body content converted from markdown)
-    Html(String),
+    /// A node tree (body content built from markdown). Templates get nodes,
+    /// never HTML (ADR-064).
+    Nodes(Arc<[crate::dom::Node]>),
     /// A structured record with named sub-fields (e.g., author, cover)
     Record(DataGraph),
     /// A list of values (multi-occurrence slots like summary)
@@ -82,7 +68,7 @@ impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Text(s) => write!(f, "Text({s:?})"),
-            Value::Html(s) => write!(f, "Html({s:?})"),
+            Value::Nodes(n) => write!(f, "Nodes({} nodes)", n.len()),
             Value::Record(g) => write!(f, "Record({g:?})"),
             Value::List(items) => write!(f, "List({items:?})"),
             Value::Absent => write!(f, "Absent"),
@@ -111,10 +97,9 @@ impl Value {
                 graph.resolve(&["text"])
                     .and_then(|v| v.display_text())
             }
-            Value::Html(html) => {
-                // Strip HTML tags, return text content
-                Some(strip_html_tags(html))
-            }
+            Value::Nodes(nodes) => Some(content::inline::normalize_plain_text(
+                &crate::markdown_nodes::text_content(nodes),
+            )),
             Value::List(items) => {
                 // Join Display of each item with space
                 let texts: Vec<String> = items.iter()
@@ -389,9 +374,9 @@ fn build_article_graph_inner(
     // body: content below `----` is invalid and never rendered (ADR-060 P1).
     // `doc.unassigned` never reaches the data graph.
     if grammar.body.is_some() {
-        let body_html = render_body_html(&doc.body, source);
-        if !body_html.is_empty() {
-            graph.insert("body", Value::Html(body_html));
+        let body = crate::body_nodes::render_body_nodes(&doc.body, source);
+        if !body.is_empty() {
+            graph.insert("body", Value::Nodes(body.into()));
         }
     }
 
@@ -514,123 +499,6 @@ pub fn inject_schema_included_by(graph: &mut DataGraph, included: &[(&str, &str)
     graph.insert(crate::constants::KEY_SCHEMA_INCLUDED_BY, Value::Text(json));
 }
 
-/// Render a single paragraph's markdown text to inline HTML, stripping the
-/// outer `<p>` wrapper. HTML in the text is never passed through (ADR-062).
-fn render_inline_markdown(text: &str) -> String {
-    crate::markdown_html::safe_inline_html(text)
-}
-
-pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, source: Option<&str>) -> String {
-    let attr_slot = crate::constants::ATTR_SLOT;
-    let attr_md = crate::constants::ATTR_MD;
-    let mut parts: Vec<String> = Vec::new();
-    for spanned in elements.iter() {
-        let md_attr = source.map(|s| {
-            let raw = &s[spanned.span.start..spanned.span.end];
-            format!(r#" {attr_md}="{}""#, crate::dom::html_escape_attr(raw))
-        }).unwrap_or_default();
-        let html = match &spanned.node {
-            ContentElement::Heading { level, source } => {
-                let l = level.value();
-                // Body headings: unchanged until package N (ADR-064).
-                let inner = render_inline_markdown(source.as_str());
-                format!("<h{l} {attr_slot}=\"body\"{md_attr}>{inner}</h{l}>")
-            }
-            ContentElement::Paragraph { text } => {
-                let inner = render_inline_markdown(text);
-                format!("<p {attr_slot}=\"body\"{md_attr}>{inner}</p>")
-            }
-            ContentElement::Image { path, alt } => {
-                let alt_text = alt.as_deref().unwrap_or("");
-                format!(
-                    "<img {attr_slot}=\"body\"{md_attr} src=\"{}\" alt=\"{}\">",
-                    crate::dom::html_escape_text(path),
-                    crate::dom::html_escape_text(alt_text)
-                )
-            }
-            ContentElement::Link { text, href } => {
-                format!(
-                    "<a {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
-                    crate::dom::html_escape_text(href),
-                    crate::dom::html_escape_text(text)
-                )
-            }
-            ContentElement::CodeBlock { language, code } => {
-                let escaped = crate::dom::html_escape_text(code);
-                match language {
-                    Some(lang) => format!(
-                        "<pre {attr_slot}=\"body\"{md_attr}><code class=\"language-{}\">{}</code></pre>",
-                        crate::dom::html_escape_text(lang),
-                        escaped
-                    ),
-                    None => format!("<pre {attr_slot}=\"body\"{md_attr}><code>{}</code></pre>", escaped),
-                }
-            }
-            ContentElement::Separator => {
-                format!("<span {attr_slot}=\"body\" hidden></span>")
-            }
-            ContentElement::HtmlBlock { .. } => {
-                // Never rendered (ADR-062 D2): a placeholder that is not a slot.
-                format!(
-                    "<div class=\"{}\">{}</div>",
-                    crate::constants::CLASS_HTML_REMOVED,
-                    crate::constants::MSG_HTML_REMOVED
-                )
-            }
-            ContentElement::Blockquote { text } => {
-                let inner = render_inline_markdown(text);
-                format!("<blockquote {attr_slot}=\"body\"{md_attr}>{inner}</blockquote>")
-            }
-            ContentElement::List { source } => {
-                // Render the raw markdown list source to HTML via pulldown-cmark.
-                let html = render_inline_markdown(source);
-                format!("<div {attr_slot}=\"body\"{md_attr}>{html}</div>")
-            }
-            ContentElement::LinkExpression { text, target, .. } => {
-                use content::{LinkTarget, LinkText};
-                let display_text = match text {
-                    LinkText::Empty => String::new(),
-                    LinkText::Static(s) => crate::dom::html_escape_text(s),
-                    LinkText::Label(l) => crate::dom::html_escape_text(l),
-                };
-                let href = match target {
-                    LinkTarget::PathRef(path) => crate::dom::html_escape_text(path),
-                    LinkTarget::ThreadExpr { source, .. } => crate::dom::html_escape_text(source.as_str()),
-                };
-                format!(
-                    "<a {attr_slot}=\"body\"{md_attr} href=\"{}\">{}</a>",
-                    href, display_text
-                )
-            }
-            ContentElement::Table { headers, rows } => {
-                let header_cells = headers
-                    .iter()
-                    .map(|h| format!("<th>{}</th>", crate::markdown_html::safe_table_cell_html(h)))
-                    .collect::<Vec<_>>()
-                    .join("");
-                let body_rows = rows
-                    .iter()
-                    .map(|row| {
-                        let cells = row
-                            .iter()
-                            .map(|c| format!("<td>{}</td>", crate::markdown_html::safe_table_cell_html(c)))
-                            .collect::<Vec<_>>()
-                            .join("");
-                        format!("<tr>{}</tr>", cells)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!(
-                    "<table {attr_slot}=\"body\"{md_attr}><thead><tr>{}</tr></thead><tbody>{}</tbody></table>",
-                    header_cells, body_rows
-                )
-            }
-        };
-        parts.push(html);
-    }
-    parts.join("\n")
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -639,7 +507,7 @@ pub(crate) fn render_body_html(elements: &im::Vector<Spanned<ContentElement>>, s
 mod tests {
     use super::*;
     use content::parse_and_assign;
-    use schema::{parse_schema, Span as SchemaSpan};
+    use schema::{parse_schema, Span as SchemaSpan, Spanned};
 
     #[test]
     fn published_graph_has_no_stored_text_keys() {
@@ -671,6 +539,22 @@ mod tests {
             link.resolve(&[crate::constants::KEY_SOURCE_TEXT]).is_none(),
             "a link without source text must not carry _source_text"
         );
+    }
+
+    /// The body as serialized HTML, for asserting on rendered output.
+    fn render_body_html(
+        elements: &im::Vector<Spanned<ContentElement>>,
+        source: Option<&str>,
+    ) -> String {
+        crate::dom::serialize_nodes(&crate::body_nodes::render_body_nodes(elements, source))
+    }
+
+    /// The body of a graph as serialized HTML.
+    fn body_html_of(graph: &DataGraph) -> String {
+        match graph.resolve(&["body"]) {
+            Some(Value::Nodes(nodes)) => crate::dom::serialize_nodes(nodes),
+            other => panic!("expected Some(Nodes) for body, got {other:?}"),
+        }
     }
 
     /// Wrap a plain `ContentElement` in a dummy `Spanned` for use in tests.
@@ -721,7 +605,8 @@ mod tests {
         .expect("parses");
         assert_eq!(doc.unassigned.len(), 1);
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
-        let dump = format!("{:?}", graph.entries);
+        // `Value::Nodes` debug-prints a count, so look at the body's text too.
+        let dump = format!("{:?} {}", graph.entries, body_html_of(&graph));
         assert!(!dump.contains("UNASSIGNED-TEXT"), "{dump}");
         assert!(dump.contains("Body text."), "{dump}");
     }
@@ -746,9 +631,70 @@ mod tests {
     }
 
     #[test]
-    fn display_text_for_html_strips_tags() {
-        let v = Value::Html("<p>Hello <strong>world</strong></p>".to_string());
+    fn display_text_for_nodes_is_their_text() {
+        let nodes = crate::dom::parse_template_xml("<p>Hello <strong>world</strong></p>").unwrap();
+        let v = Value::Nodes(nodes.into());
         assert_eq!(v.display_text(), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn nodes_debug_prints_the_node_count() {
+        let nodes = crate::dom::parse_template_xml("<p>a</p><p>b</p>").unwrap();
+        assert_eq!(format!("{:?}", Value::Nodes(nodes.into())), "Nodes(2 nodes)");
+    }
+
+    fn graph_for_body(body_md: &str) -> DataGraph {
+        let grammar = parse_schema("# Title {#title}\n\n----\n\nBody.\n").expect("schema");
+        let src = format!("# Title\n\n----\n\n{body_md}");
+        let doc = parse_and_assign(&src, &grammar).expect("parses");
+        build_article_graph(&doc, &grammar, OutputMode::Published)
+    }
+
+    #[test]
+    fn body_display_text_decodes_entities() {
+        let graph = graph_for_body("a &amp; b\n");
+        let body = graph.resolve(&["body"]).expect("body present");
+        assert_eq!(body.display_text(), Some("a & b".to_string()));
+    }
+
+    #[test]
+    fn body_in_string_context_is_text_not_markup() {
+        let graph = graph_for_body("a *b* &amp; c\n");
+        let expr = crate::ast::Expr::Lookup(vec!["body".to_string()]);
+        let text = crate::transformer::eval_expr_to_string(&expr, &graph);
+        assert_eq!(text, "a b & c");
+        assert!(!text.contains('<'), "string context must be plain text: {text:?}");
+    }
+
+    #[test]
+    fn body_link_expression_is_not_rendered() {
+        // ADR-058 §4: a link expression in the body is ignored.
+        let mut graph = DataGraph::new();
+        let body: im::Vector<_> = vec![
+            spanned(ContentElement::Paragraph { text: "before".to_string() }),
+            spanned(ContentElement::LinkExpression {
+                text: content::LinkText::Static("label".to_string()),
+                target: content::LinkTarget::PathRef("post".to_string()),
+                slot: None,
+            }),
+        ]
+        .into_iter()
+        .collect();
+        let doc = Document {
+            preamble: Default::default(),
+            body,
+            has_separator: true,
+            separator_span: None,
+            unassigned: Default::default(),
+            comments: Default::default(),
+        };
+        let grammar = parse_schema("# Title {#title}\n\n----\n\nBody.\n").expect("schema");
+        graph.merge_from(&build_article_graph(&doc, &grammar, OutputMode::Published), &[]);
+        let nodes = crate::dom::parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let html = crate::render_from_nodes(nodes, &graph, OutputMode::Published).unwrap();
+        assert!(html.contains("before"), "{html}");
+        assert!(!html.contains("<a"), "a body link expression must not render: {html}");
+        assert!(!html.contains("label"), "{html}");
     }
 
     #[test]
@@ -860,8 +806,8 @@ mod tests {
         let grammar = article_grammar();
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         match graph.resolve(&["body"]) {
-            Some(Value::Html(html)) => assert!(!html.is_empty(), "body HTML should not be empty"),
-            other => panic!("expected Some(Html) for body, got {other:?}"),
+            Some(Value::Nodes(nodes)) => assert!(!nodes.is_empty(), "body nodes should not be empty"),
+            other => panic!("expected Some(Nodes) for body, got {other:?}"),
         }
     }
 
@@ -871,7 +817,7 @@ mod tests {
             language: Some("rust".to_string()),
             code: "fn main() {}\n".to_string(),
         });
-        let html = super::render_body_html(&im::vector![code_block], None);
+        let html = render_body_html(&im::vector![code_block], None);
         assert!(
             html.contains("<pre data-presemble-slot=\"body\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
@@ -888,7 +834,7 @@ mod tests {
             language: None,
             code: "some code\n".to_string(),
         });
-        let html = super::render_body_html(&im::vector![code_block], None);
+        let html = render_body_html(&im::vector![code_block], None);
         assert!(
             html.contains("<pre data-presemble-slot=\"body\"><code>"),
             "expected plain pre/code in output; got: {html}"
@@ -927,7 +873,7 @@ mod tests {
             "render_body_html must not emit legacy presemble-body-N ids; got: {html}");
         let count = html.matches("data-presemble-slot=\"body\"").count();
         assert_eq!(count, 3, "expected 3 body-slot markers (P, Sep-marker, P); got {count} in: {html}");
-        assert!(html.contains("hidden></span>"), "separator should emit hidden marker; got: {html}");
+        assert!(html.contains("hidden=\"\"></span>"), "separator should emit hidden marker; got: {html}");
     }
 
     #[test]
@@ -972,10 +918,7 @@ mod tests {
 
         let doc = parse_and_assign(doc_input, &grammar).expect("document should parse");
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
-        let body_html = match graph.resolve(&["body"]) {
-            Some(Value::Html(html)) => html.clone(),
-            other => panic!("expected Some(Html) for body, got {other:?}"),
-        };
+        let body_html = body_html_of(&graph);
 
         // The body HTML must not contain literal unescaped angle brackets.
         assert!(
@@ -1565,15 +1508,11 @@ mod tests {
 
         let doc = parse_and_assign(source, &grammar).expect("document should parse");
         let graph = super::build_article_graph_with_source(&doc, &grammar, source);
-        match graph.resolve(&["body"]) {
-            Some(Value::Html(html)) => {
-                assert!(
-                    html.contains("data-presemble-md="),
-                    "expected data-presemble-md attribute in body HTML from build_article_graph_with_source; got: {html}"
-                );
-            }
-            other => panic!("expected Some(Html) for body, got {other:?}"),
-        }
+        let html = body_html_of(&graph);
+        assert!(
+            html.contains("data-presemble-md="),
+            "expected data-presemble-md attribute in body HTML from build_article_graph_with_source; got: {html}"
+        );
     }
 
     // -------------------------------------------------------------------------

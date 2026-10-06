@@ -90,21 +90,68 @@ pub(crate) fn inline_children(src: &str) -> Vec<Node> {
 }
 
 /// Nodes for a table cell's markdown source, read exactly as a GFM table
-/// cell (see [`crate::markdown_html::single_body_cell`]). A source that does
-/// not read back as one cell becomes a single text node.
+/// cell (see [`single_body_cell`]). A source that does not read back as one
+/// cell becomes a single text node.
+///
+/// The source is parsed inside a one-column wrapper table
+/// (`| x |\n| - |\n| {src} |\n`), so block markers (`-`, `#`, `1.`, `>`,
+/// `***`) stay text and `\|` is a pipe, also inside code spans.
 pub(crate) fn table_cell_nodes(src: &str) -> Vec<Node> {
     let wrapper = format!("| x |\n| - |\n| {src} |\n");
-    match crate::markdown_html::single_body_cell(&wrapper) {
+    match single_body_cell(&wrapper) {
         Some(events) => events_to_nodes(events),
         None => vec![Node::Text(src.to_string())],
     }
 }
 
+/// The events inside the one body cell of a one-column wrapper table, or
+/// `None` unless the input is exactly one table with one body row of one cell
+/// that runs to the wrapper's closing pipe.
+///
+/// GFM silently drops cells beyond the header's column count, so a source
+/// with an unescaped `|` would still read as one cell. The cell's range must
+/// therefore end right before the wrapper's final `|`.
+fn single_body_cell(wrapper: &str) -> Option<Vec<Event<'_>>> {
+    if wrapper.matches(['\n', '\r']).count() != 3 {
+        return None;
+    }
+    let mut events = Parser::new_ext(wrapper, MARKDOWN_OPTIONS).into_offset_iter();
+    if !matches!(events.next(), Some((Event::Start(Tag::Table(_)), _))) {
+        return None;
+    }
+    // Skip the header.
+    for (event, _) in events.by_ref() {
+        if matches!(event, Event::End(TagEnd::TableHead)) {
+            break;
+        }
+    }
+    if !matches!(events.next(), Some((Event::Start(Tag::TableRow), _))) {
+        return None;
+    }
+    if !matches!(events.next(), Some((Event::Start(Tag::TableCell), _))) {
+        return None;
+    }
+    let mut cell = Vec::new();
+    let mut cell_end = None;
+    for (event, range) in events.by_ref() {
+        match event {
+            Event::End(TagEnd::TableCell) => {
+                cell_end = Some(range.end);
+                break;
+            }
+            other => cell.push(other),
+        }
+    }
+    let rest: Vec<_> = events.map(|(event, _)| event).collect();
+    let closes_row = matches!(
+        rest.as_slice(),
+        [Event::End(TagEnd::TableRow), Event::End(TagEnd::Table)]
+    );
+    let runs_to_last_pipe = cell_end.is_some_and(|end| wrapper[end..].trim() == "|");
+    (closes_row && runs_to_last_pipe).then_some(cell)
+}
+
 /// The concatenated text of every `Text` node, in document order.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "N3: `display_text` of `Value::Nodes` reads it")
-)]
 pub(crate) fn text_content(nodes: &[Node]) -> String {
     fn walk(nodes: &[Node], out: &mut String) {
         for node in nodes {
@@ -460,10 +507,8 @@ fn blockquote_class(kind: BlockQuoteKind) -> &'static str {
 ///   against versions that split it. A comment still open when any other
 ///   event arrives is emitted as text.
 ///
-/// Node building calls this itself ([`events_to_nodes`]). It is `pub(crate)`
-/// only for the legacy `markdown_html` push_html path, which goes away in N3;
-/// make it private then.
-pub(crate) fn neutralise_html<'a>(input: impl IntoIterator<Item = Event<'a>>) -> Vec<Event<'a>> {
+/// Node building calls this itself ([`events_to_nodes`]).
+fn neutralise_html<'a>(input: impl IntoIterator<Item = Event<'a>>) -> Vec<Event<'a>> {
     let mut events: Vec<Event<'a>> = Vec::new();
     let mut html_block: Option<String> = None;
     let mut open_comment: Option<String> = None;
@@ -1062,7 +1107,7 @@ pub(crate) mod tests {
     ];
 
     /// Multi-block sources rendered as a whole body.
-    const BLOCK_CORPUS: &[&str] = &[
+    pub(crate) const BLOCK_CORPUS: &[&str] = &[
         "para one\n\npara two\n",
         "# H1\n\n## H2 `code`\n\ntext\n",
         "- a\n\n- b\n\n  continued\n",
@@ -1111,10 +1156,21 @@ pub(crate) mod tests {
         }
     }
 
+    /// Test-only reference for inline content: `push_html` over neutralised
+    /// events, trimmed, with the outer `<p>` unwrapped (D4, D7).
+    fn push_html_inline(md: &str) -> String {
+        let html = push_html(md);
+        let html = html.trim();
+        html.strip_prefix("<p>")
+            .and_then(|s| s.strip_suffix("</p>"))
+            .unwrap_or(html)
+            .to_string()
+    }
+
     #[test]
     fn parity_with_safe_inline_html() {
         for src in INLINE_CORPUS {
-            let expected = reference(&crate::markdown_html::safe_inline_html(src));
+            let expected = reference(&push_html_inline(src));
             let got = ours_html(serialize_nodes(&unwrap_single_p(nodes(src))).trim());
             assert_eq!(got, expected, "source: {src:?}");
         }
@@ -1133,9 +1189,11 @@ pub(crate) mod tests {
     fn parity_with_safe_table_cell_html() {
         for src in CELL_CORPUS {
             let wrapper = format!("| x |\n| - |\n| {src} |\n");
-            let cell = crate::markdown_html::single_body_cell(&wrapper)
+            let cell = single_body_cell(&wrapper)
                 .unwrap_or_else(|| panic!("one cell expected: {src:?}"));
-            let expected = reference(&crate::markdown_html::safe_table_cell_html(src));
+            let mut html = String::new();
+            pulldown_cmark::html::push_html(&mut html, neutralise_html(cell.clone()).into_iter());
+            let expected = reference(&html);
             let got = ours(&events_to_nodes(cell));
             assert_eq!(got, expected, "source: {src:?}");
         }

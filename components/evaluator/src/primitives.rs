@@ -459,7 +459,7 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Record(_) => "map",
             Value::Fn(_) => "fn",
             Value::Absent => "nil",
-            Value::Html(_) => "string",
+            Value::Nodes(_) => "nodes",
             Value::Suggestion { .. } => "nil",
             Value::LinkExpression { .. } => "nil",
             Value::Opaque(_) => "opaque",

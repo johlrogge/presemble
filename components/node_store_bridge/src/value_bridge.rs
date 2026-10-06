@@ -163,6 +163,35 @@ fn materialize_reference_shallow(store: &NodeStore, id: NodeId) -> template::Val
     }
 }
 
+/// Insert a template DOM node as a store subtree: an element becomes
+/// `Node::Element(name)` with Attribute edges (a `Form::Str` as Text, a
+/// `Form::Integer` as Integer, any other form as Text of its HTML value) and
+/// Child edges; text becomes `Node::Text`.
+fn dom_node_to_store(store: &mut NodeStore, node: &template::dom::Node) -> NodeId {
+    use template::dom::{Form, Node as DomNode};
+    match node {
+        DomNode::Text(t) => store.add_node(Node::Text(t.clone())),
+        DomNode::Element(el) => {
+            let name = store.intern(&el.name);
+            let element = store.add_node(Node::Element(name));
+            for (attr, form) in &el.attrs {
+                let attr_name = store.intern(attr);
+                let value = match form {
+                    Form::Integer(n) => store.add_node(Node::Integer(*n)),
+                    Form::Str(s) => store.add_node(Node::Text(s.clone())),
+                    other => store.add_node(Node::Text(other.to_html_value())),
+                };
+                store.add_edge(element, Edge::Attribute { name: attr_name, value });
+            }
+            for child in &el.children {
+                let child_id = dom_node_to_store(store, child);
+                store.add_edge(element, Edge::Child(child_id));
+            }
+            element
+        }
+    }
+}
+
 /// Convert a template::Value into a NodeStore subtree.
 /// Returns the root NodeId of the inserted subtree.
 pub fn value_to_node(store: &mut NodeStore, value: &template::Value) -> NodeId {
@@ -193,9 +222,14 @@ pub fn value_to_node(store: &mut NodeStore, value: &template::Value) -> NodeId {
             }
             element
         }
-        template::Value::Html(s) => {
-            // HTML is just text in the node model — serialization handles rendering
-            store.add_node(Node::Text(s.clone()))
+        template::Value::Nodes(nodes) => {
+            // A tree of nodes: one element tree per top-level node, in a collection.
+            let collection = store.add_node(Node::Collection);
+            for node in nodes.iter() {
+                let child = dom_node_to_store(store, node);
+                store.add_edge(collection, Edge::Child(child));
+            }
+            collection
         }
         template::Value::Fn(callable) => {
             let arc: std::sync::Arc<dyn std::any::Any + Send + Sync> =
@@ -279,6 +313,42 @@ mod tests {
         } else {
             panic!("expected Record");
         }
+    }
+
+    #[test]
+    fn nodes_value_maps_to_element_tree() {
+        let nodes = template::parse_template_hiccup(
+            r#"[:ol {:start 3 :class "x"} [:li "a " [:em "b"]]]"#,
+        )
+        .expect("hiccup parses");
+        let mut store = NodeStore::new();
+        let id = value_to_node(&mut store, &template::Value::Nodes(nodes.into()));
+
+        // One top-level node, in a collection.
+        assert!(matches!(store.get(id), Some(Node::Collection)));
+        let roots = store.children(id);
+        assert_eq!(roots.len(), 1);
+        let ol = roots[0];
+        assert!(matches!(store.get(ol), Some(Node::Element(n)) if store.resolve_name(*n) == "ol"));
+
+        // Attributes: an integer form stays an integer, a string stays text.
+        let attrs: Vec<(String, &Node)> = store
+            .attributes(ol)
+            .iter()
+            .map(|(n, v)| (store.resolve_name(*n).to_string(), store.get(*v).expect("value")))
+            .collect();
+        assert!(attrs.iter().any(|(n, v)| n == "start" && matches!(v, Node::Integer(3))), "{attrs:?}");
+        assert!(attrs.iter().any(|(n, v)| n == "class" && matches!(v, Node::Text(t) if t == "x")), "{attrs:?}");
+
+        // Children: li > ["a ", em > "b"]
+        let li = store.children(ol)[0];
+        assert!(matches!(store.get(li), Some(Node::Element(n)) if store.resolve_name(*n) == "li"));
+        let kids = store.children(li);
+        assert_eq!(kids.len(), 2);
+        assert!(matches!(store.get(kids[0]), Some(Node::Text(t)) if t == "a "));
+        let em = kids[1];
+        assert!(matches!(store.get(em), Some(Node::Element(n)) if store.resolve_name(*n) == "em"));
+        assert!(matches!(store.get(store.children(em)[0]), Some(Node::Text(t)) if t == "b"));
     }
 
     #[test]

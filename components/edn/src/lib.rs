@@ -2,7 +2,14 @@
 pub fn value_to_edn(value: &template::Value) -> String {
     match value {
         template::Value::Text(s) => format!("\"{}\"", escape_edn_string(s)),
-        template::Value::Html(s) => format!("\"{}\"", escape_edn_string(s)),
+        // Nodes are written as hiccup: a vector of one form per top-level node.
+        template::Value::Nodes(nodes) => {
+            let forms: Vec<String> = nodes
+                .iter()
+                .map(|n| template::serialize_to_hiccup(std::slice::from_ref(n)))
+                .collect();
+            format!("[{}]", forms.join(" "))
+        }
         template::Value::Record(graph) => data_graph_to_edn(graph),
         template::Value::List(items) => {
             let inner: Vec<String> = items.iter().map(value_to_edn).collect();
@@ -66,11 +73,10 @@ mod tests {
     }
 
     #[test]
-    fn html_value_is_quoted_string() {
-        assert_eq!(
-            value_to_edn(&Value::Html("<p>hi</p>".into())),
-            "\"<p>hi</p>\""
-        );
+    fn nodes_value_is_a_vector_of_hiccup_forms() {
+        let nodes = template::parse_template_xml("<p>hi</p><hr />").unwrap();
+        assert_eq!(value_to_edn(&Value::Nodes(nodes.into())), "[[:p \"hi\"] [:hr]]");
+        assert_eq!(value_to_edn(&Value::Nodes(Vec::new().into())), "[]");
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub mod expr;
 pub mod graph_view;
 pub mod hiccup;
 mod hiccup_serializer;
-mod markdown_html;
+mod body_nodes;
 mod markdown_nodes;
 pub mod registry;
 pub mod transformer;
