@@ -500,8 +500,8 @@ impl Conductor {
                     content_diagnostics(&mut report, &file, &src, &parsed, grammar);
                     if let Ok(doc) = parsed {
                         let slug_str = slug.as_str();
-                        let url = format!("/{stem_str}/{slug_str}");
-                        let file = format!("content/{stem_str}/{slug_str}.md");
+                        let url = site_index::url_for_stem_slug(stem_str, slug_str);
+                        let file = site_index::content_file_path(stem_str, slug_str);
                         let meta = node_store_bridge::content_bridge::DocumentMeta {
                             url: url.clone(),
                             stem: stem_str.to_string(),
@@ -548,11 +548,7 @@ impl Conductor {
                 };
                 if let Some(doc) = parsed {
                     let url = site_index::url_for_stem_slug(stem_str, "index");
-                    let file = if stem_str.is_empty() {
-                        "content/index.md".to_string()
-                    } else {
-                        format!("content/{stem_str}/index.md")
-                    };
+                    let file = site_index::content_file_path(stem_str, "index");
                     let meta = node_store_bridge::content_bridge::DocumentMeta {
                         url: url.clone(),
                         stem: stem_str.to_string(),
@@ -1040,7 +1036,7 @@ impl Conductor {
     /// Parses the `/_schema/<stem>/<index|item>` path to extract `(stem, kind)`, then:
     /// - For `index`/root: returns `Some("/")`
     /// - For `index`/named stem: returns `Some("/<stem>/")` if that collection page exists
-    /// - For `item`: walks all roots for the stem, picks the first item URL (sorted)
+    /// - For `item`: walks all roots for the stem, picks the first item URL in URL order
     ///
     /// Returns `None` for malformed or unknown schema URLs.
     pub fn page_url_for_schema(&self, schema_url: &str) -> Option<String> {
@@ -1072,20 +1068,14 @@ impl Conductor {
                 let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
                 let roots = self.documents_for_stem(&stem);
 
-                let mut item_urls: Vec<String> = roots
-                    .iter()
-                    .filter_map(|&root| {
-                        let pk =
-                            node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
-                        if pk != "item" {
-                            return None;
-                        }
-                        node_store_bridge::content_bridge::find_attr_text(&store, root, "url")
-                    })
-                    .collect();
-                drop(store);
-                item_urls.sort();
-                item_urls.into_iter().next()
+                // `documents_for_stem` is already in URL order.
+                roots.iter().find_map(|&root| {
+                    let pk = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                    if pk != "item" {
+                        return None;
+                    }
+                    node_store_bridge::content_bridge::find_attr_text(&store, root, "url")
+                })
             }
         }
     }
@@ -4634,6 +4624,30 @@ mod update_document_in_store_tests {
             .filter_map(|&r| node_store_bridge::content_bridge::find_attr_text(&store, r, "url"))
             .collect();
         assert_eq!(urls, ["/post/a", "/post/b", "/post/c"]);
+    }
+
+    #[test]
+    fn root_stem_item_is_not_duplicated_by_an_edit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("schemas")).expect("create schemas");
+        std::fs::create_dir_all(root.join("templates")).expect("create templates");
+        std::fs::create_dir_all(root.join("content")).expect("create content");
+        std::fs::write(root.join("schemas/item.md"), SCHEMA_SRC).expect("write schema");
+        std::fs::write(root.join("templates/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("content/about.md"), CONTENT_V1).expect("write content");
+        let conductor = make_conductor(&tmp);
+
+        let grammar = schema::parse_schema(SCHEMA_SRC).expect("parse schema");
+        conductor
+            .update_document_in_store("/about", "", "about", CONTENT_V2, &grammar)
+            .expect("update_document_in_store should succeed");
+
+        let roots = conductor.documents_for_stem("");
+        let new_root = conductor
+            .document_by_url("/about")
+            .expect("/about should be indexed");
+        assert_eq!(roots, vec![new_root], "root stem must list the edited item exactly once");
     }
 
     /// The new document root should reflect the updated document text.
