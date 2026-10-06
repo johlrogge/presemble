@@ -15,6 +15,13 @@ const SUPERSEDED_DOCUMENT_KIND: &str = "superseded-document";
 /// documents in URL order (ADR-058 D2), however they were added or edited.
 type StemRoots = HashMap<String, BTreeMap<String, node_store::NodeId>>;
 
+/// URL of the collection page for `stem` (`"/"` for the root stem).
+///
+/// Delegates to `site_index::url_for_stem_slug` so no URL is built by hand.
+fn collection_url(stem: &str) -> String {
+    site_index::url_for_stem_slug(stem, "index")
+}
+
 /// `stem_roots` in the `stem → roots` shape
 /// `content_bridge::create_semantic_content` takes, each list in URL order.
 fn stem_root_lists(stem_roots: &StemRoots) -> HashMap<String, Vec<node_store::NodeId>> {
@@ -1046,29 +1053,21 @@ impl Conductor {
 
         match kind {
             schema::SchemaKind::Index => {
-                if stem.is_empty() {
-                    Some("/".to_string())
-                } else {
-                    let collection_url = format!("/{stem}/");
-                    if url_to_root.contains_key(&collection_url) {
-                        Some(collection_url)
-                    } else {
-                        None
-                    }
-                }
+                let url = collection_url(&stem);
+                // The root collection page always exists.
+                (stem.is_empty() || url_to_root.contains_key(&url)).then_some(url)
             }
             schema::SchemaKind::Item => {
                 // Try the parent collection page first
-                let collection_url = format!("/{stem}/");
-                if url_to_root.contains_key(&collection_url) {
-                    return Some(collection_url);
+                let url = collection_url(&stem);
+                if url_to_root.contains_key(&url) {
+                    return Some(url);
                 }
 
-                // Fall back to first item by lexical URL sort
                 let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
                 let roots = self.documents_for_stem(&stem);
 
-                // `documents_for_stem` is already in URL order.
+                // First item in URL order (documents_for_stem is URL-ordered).
                 roots.iter().find_map(|&root| {
                     let pk = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
                     if pk != "item" {
@@ -7410,6 +7409,13 @@ mod schema_url_routing_tests {
             url.starts_with("/post/"),
             "result should be under /post/, got: {url}"
         );
+    }
+
+    #[test]
+    fn collection_url_is_canonical_for_root_and_named_stems() {
+        // Root stem's collection URL is "/", never "//"; named stems get "/{stem}/".
+        assert_eq!(collection_url(""), "/");
+        assert_eq!(collection_url("post"), "/post/");
     }
 
     #[test]
