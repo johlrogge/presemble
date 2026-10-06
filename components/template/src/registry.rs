@@ -35,7 +35,8 @@ pub struct RenderContext<'a> {
     /// Bare names resolve here first before falling back to the registry.
     pub local_defs: Option<&'a HashMap<String, Vec<Node>>>,
     /// Whether the output is for editing (serve) or for publishing (build).
-    /// Editor-only data such as `data-presemble-text` is emitted only in
+    /// Editor-only data such as `data-presemble-md` and
+    /// `data-presemble-address` is emitted only in
     /// editorial output. There is no default: every render names its output.
     pub output: OutputMode,
 }

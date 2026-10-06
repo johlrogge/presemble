@@ -186,8 +186,9 @@ impl DataGraph {
     }
 }
 
-/// Who the output is for. Editor-only data (the stored text a browser editor
-/// edits, ADR-063) is part of editorial output only, never of published pages.
+/// Who the output is for. Editor-only data (the markdown and address a browser
+/// editor works from, ADR-059 section 10) is part of editorial output only,
+/// never of published pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     /// `presemble build`: the pages that are published.
@@ -203,7 +204,8 @@ pub enum OutputMode {
 /// Create a synthesized link record for a content item.
 /// The `_source_slot` field tells the browser editor which grammar slot
 /// to write back to when the link text is edited. `source_text` is the
-/// title's stored text, which the editor edits instead of the rendered text.
+/// title's stored source, from which the title link's editor markdown is
+/// derived.
 pub fn synthesize_link(title: &str, url_path: &str, source_text: Option<&str>) -> DataGraph {
     let mut link = DataGraph::new();
     link.insert("href", Value::Text(url_path.to_string()));
@@ -217,6 +219,10 @@ pub fn synthesize_link(title: &str, url_path: &str, source_text: Option<&str>) -
 
 /// The stored text of heading slot `slot`, as inserted by
 /// `build_article_graph` under `KEY_STORED_TEXT_PREFIX` + slot name.
+///
+/// This, `KEY_STORED_TEXT_PREFIX` and `KEY_SOURCE_TEXT` go in ADR-059 stage 4,
+/// when the title link takes its md and address from the title heading's
+/// projection.
 pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
     let key = format!("{}{slot}", crate::constants::KEY_STORED_TEXT_PREFIX);
     match graph.resolve(&[key.as_str()]) {
@@ -231,8 +237,9 @@ pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
 
 /// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
-/// Editorial output also carries each heading slot's stored text (ADR-063);
-/// published output carries no editor-only data.
+/// Editorial output also carries each heading slot's stored source (ADR-063),
+/// the input of a synthesized title link's markdown; published output carries
+/// no editor-only data.
 /// Editorial output also carries the editor attributes of each body block and
 /// slot element: its canonical markdown and its address (ADR-059 section 10).
 pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode) -> DataGraph {

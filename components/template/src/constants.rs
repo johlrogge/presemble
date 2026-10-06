@@ -20,10 +20,6 @@ pub const ATTR_MD: &str = "data-presemble-md";
 /// The NED selection that resolves to exactly this block (editorial output).
 pub const ATTR_ADDRESS: &str = "data-presemble-address";
 pub const ATTR_SOURCE_SLOT: &str = "data-presemble-source-slot";
-/// The slot's stored text, which the browser editor edits instead of the
-/// rendered text (ADR-063). Emitted on heading slots and on synthesized title
-/// links.
-pub const ATTR_TEXT: &str = "data-presemble-text";
 
 /// Class and message of the placeholder `serve` renders in place of a body
 /// HTML block (ADR-062 D2). The placeholder is not a slot.

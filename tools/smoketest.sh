@@ -2,8 +2,17 @@
 # Presemble smoke test — exercises the full workflow via curl and rep.
 # Usage: ./tools/smoketest.sh [dev|live]
 # Default: dev profile
+#
+# The whole run is also written to /tmp/presemble-smoketest.log (override with
+# SMOKETEST_LOG). This is a workaround for metadev#28: the `just` MCP returns
+# only the exit status of a failed recipe, not its output, so callers read the
+# log instead.
 
 set -euo pipefail
+
+# Keep a copy of the whole run: callers that only see the exit status (the
+# `just` MCP) can read the log. Override the path with SMOKETEST_LOG.
+exec > >(tee "${SMOKETEST_LOG:-/tmp/presemble-smoketest.log}") 2>&1
 
 PROFILE="${1:-dev}"
 PORT=3000
@@ -97,6 +106,7 @@ done
 DENO_TOOL_FILES=(
     "tools/ws-smoke.ts"
     "tools/text-vectors.ts"
+    "tools/protocol-fixtures.ts"
 )
 
 for ts_file in "${DENO_TOOL_FILES[@]}"; do
@@ -116,6 +126,19 @@ if deno run --no-prompt --allow-read=. tools/text-vectors.ts 2>&1 | tee /tmp/pre
 else
     fail "text vectors: inject.js disagrees with the server"
     JS_CHECK_FAILED=1
+fi
+
+# The browser's block-edit request builder (inject.js) must produce exactly the
+# requests in resources/serve/protocol/*.json, which the server is tested
+# against too (ADR-059 section 10).
+PF_RC=0
+PF_OUT=$(deno run --no-prompt --allow-read=. tools/protocol-fixtures.ts 2>&1) || PF_RC=$?
+if [ "$PF_RC" -ne 0 ] || ! grep -q '^PASS' <<< "$PF_OUT"; then
+    echo "$PF_OUT"
+    fail "protocol fixtures: inject.js builds different requests than the fixtures (exit $PF_RC)"
+    JS_CHECK_FAILED=1
+else
+    pass "protocol fixtures: inject.js builds the fixture requests ($(grep -c '^PASS' <<< "$PF_OUT") fixtures)"
 fi
 
 if [ $JS_CHECK_FAILED -eq 1 ]; then
@@ -216,15 +239,40 @@ assert_ws_status() {   # desc path expected [curl args...]
     fi
 }
 
-# Build the /apply JSON body exactly as inject.js bsave does (cljStr + program
-# shape), so this exercises the browser's body-edit wire format.
+# Build a /_presemble/block-edit request exactly as the browser does: find the
+# editable element in the editorial page, take its emitted data-presemble-address
+# and data-presemble-md, and call inject.js's buildBlockEditRequest (its
+# `protocol-builders` region) on them.
+#   block_edit_request <page-html> <file> <slot> <match> <old> <new> <intent>
+# <match> picks the element (its markdown contains it); <new> replaces <old> in
+# that markdown to give the proposed text. Prints the request JSON; exits
+# non-zero (with a message on stderr) when there is no such editable element or
+# inject.js has no builder.
 # deno eval runs with all permissions implicitly, so no --allow-env is needed.
-bsave_body() {
-    SCHEMA_SRC="$1" SEL="$2" BVALUE="$3" deno eval '
-const cljStr = (s) => "\"" + String(s).replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"";
-const program = "(let [g (ned/parse-grammar " + cljStr(Deno.env.get("SCHEMA_SRC")) + ")]\n  (ned/replace\n    "
-  + Deno.env.get("SEL") + "\n    (ned/parse-body " + cljStr(Deno.env.get("BVALUE")) + " g)))";
-console.log(JSON.stringify({ program }));'
+block_edit_request() {
+    PAGE_HTML="$1" FILE="$2" SLOT="$3" MATCH="$4" OLD="$5" NEW="$6" INTENT="$7" deno eval '
+const env = (k) => Deno.env.get(k) ?? "";
+const src = Deno.readTextFileSync("resources/serve/inject.js");
+const a = src.indexOf("// BEGIN protocol-builders");
+const b = src.indexOf("// END protocol-builders");
+if (a < 0 || b < a) { console.error("inject.js has no protocol-builders region"); Deno.exit(2); }
+const { buildBlockEditRequest, editTarget } = new Function(
+  src.slice(a, b) + "\nreturn { buildBlockEditRequest: buildBlockEditRequest, editTarget: editTarget };")();
+const unesc = (s) => s.replace(/&quot;/g, "\"").replace(/&#0?39;|&#x27;/g, "\x27")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+const attr = (tag, name) => {
+  const m = new RegExp("\\s" + name + "=\"([^\"]*)\"").exec(tag);
+  return m ? unesc(m[1]) : null;
+};
+const tags = env("PAGE_HTML").match(/<[a-zA-Z][a-zA-Z0-9]*\s[^>]*data-presemble-address="[^"]*"[^>]*>/g) ?? [];
+const hit = tags
+  .map((t) => ({ file: attr(t, "data-presemble-file"), slot: attr(t, "data-presemble-slot"),
+                 target: editTarget(attr(t, "data-presemble-address"), attr(t, "data-presemble-md")) }))
+  .find((h) => h.file === env("FILE") && h.slot === env("SLOT") && h.target !== null && h.target.md.includes(env("MATCH")));
+if (!hit) { console.error("no editable element in slot " + env("SLOT") + " containing " + env("MATCH")); Deno.exit(1); }
+if (!hit.target.md.includes(env("OLD"))) { console.error("element markdown lacks " + env("OLD") + ": " + hit.target.md); Deno.exit(1); }
+const proposed = hit.target.md.split(env("OLD")).join(env("NEW"));
+console.log(JSON.stringify(buildBlockEditRequest(hit.file, hit.target.address, hit.target.md, proposed, env("INTENT"))));'
 }
 
 # Assert rep expression contains expected text
@@ -404,9 +452,12 @@ assert_curl "index page has data-presemble-file attr" "/" GET "" 'data-presemble
 assert_curl "collection page has index data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/index.md"'
 assert_curl "collection page has item data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/hello-world.md"'
 assert_curl "leaf page has data-presemble-file attr" "/post/hello-world" GET "" 'data-presemble-file="content/post/hello-world.md"'
-# The title is edited from its stored text, not its rendered text (ADR-063).
-assert_curl "post title element carries its stored text" "/post/hello-world" GET "" \
-    'data-presemble-slot="title" data-presemble-file="content/post/hello-world.md" data-presemble-text="Hello, World: Your First Post"'
+# The browser edits the canonical markdown and addresses by the emitted
+# address (ADR-059 section 10); the old stored-text attribute is gone.
+assert_curl "post title element carries its markdown" "/post/hello-world" GET "" \
+    'data-presemble-slot="title" data-presemble-file="content/post/hello-world.md" data-presemble-md="Hello, World: Your First Post"'
+assert_curl "post title element carries its address" "/post/hello-world" GET "" 'data-presemble-address='
+assert_curl_not_contains "editorial page carries no data-presemble-text" "/post/hello-world" 'data-presemble-text'
 
 # ── Test: Reader vs editor injection (ADR-054) ────────────────────────────
 # Lives here, not in the auth-boundary section: /post/hello-world only exists
@@ -544,30 +595,73 @@ assert_contains "mutating selection rejected" "$R" '"ok":false'
 assert_contains "mutating selection could not be evaluated" "$R" 'could not be evaluated'
 assert_curl "doc intact after mutating selection" "/_presemble/render?path=/post/hello-world&mode=view" GET "" "Getting Started"
 
-# D. A browser-style body edit (the bsave shape) via /apply survives save
-log "Testing bsave-shaped body edit..."
-SCHEMA_SRC=$(acurl "http://127.0.0.1:$PORT/_presemble/grammar?stem=post")
-assert_contains "grammar for post fetched" "$SCHEMA_SRC" "{#title}"
-BSAVE_SEL='(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path "content/post/hello-world.md") "body")) "What to Edit") "paragraph" 0)'
-BSAVE_BODY=$(bsave_body "$SCHEMA_SRC" "$BSAVE_SEL" "Smoke body edit via bsave.") || {
-    fail "deno eval failed to build bsave body"
-    BSAVE_BODY='{}'
+# D. The browser's four editors through POST /_presemble/block-edit
+# (ADR-059 section 10). Each request is built from the editorial page's emitted
+# data-presemble-address / data-presemble-md by inject.js's own builder
+# (block_edit_request above), so these exercise the browser's wire format.
+log "Testing block-edit requests built by inject.js..."
+BE_FILE="content/post/hello-world.md"
+# POST the block-edit for <slot> <match> <old> <new> <intent>; prints the response.
+be_post() {
+    local page req
+    page=$(acurl "http://127.0.0.1:$PORT/post/hello-world")
+    req=$(block_edit_request "$page" "$BE_FILE" "$1" "$2" "$3" "$4" "$5" 2>&1) || {
+        echo "BUILD_FAILED: $req"
+        return 0
+    }
+    post_json /_presemble/block-edit "$req"
 }
-R=$(post_json /_presemble/apply "$BSAVE_BODY")
-assert_contains "bsave-shaped apply ok" "$R" '"ok":true'
-assert_contains "bsave-shaped apply dirties one doc" "$R" '"dirtyPaths":1'
 
-assert_curl "bsave edit rendered" "/post/hello-world" GET "" "Smoke body edit via bsave."
+# D1. Body edit (apply): the paragraph under "What to Edit".
+R=$(be_post body "Replace this file with your own story" \
+    "Replace this file with your own story. Update the title, summary, author link, and body to match your content." \
+    "Smoke body edit via bsave." apply)
+assert_contains "body edit (apply) is applied" "$R" '"applied"'
+assert_contains "body edit (apply) rebuilds the page" "$R" '/post/hello-world'
+assert_curl "body edit rendered" "/post/hello-world" GET "" "Smoke body edit via bsave."
 assert_curl "sibling heading intact" "/post/hello-world" GET "" "What to Edit"
 assert_curl "other body para intact" "/post/hello-world" GET "" "Open the"
-assert_curl "bsave marks dirty" "/_presemble/dirty-buffers" GET "" "content/post/hello-world.md"
-assert_curl "save after bsave" "/_presemble/save-all" POST "" '"ok":true'
+assert_curl "block-edit marks dirty" "/_presemble/dirty-buffers" GET "" "content/post/hello-world.md"
+
+# D2. Slot edit (apply): the title heading.
+R=$(be_post title "Accepted Smoke Title" "Accepted Smoke Title" "Accepted Smoke Title, slot-edited" apply)
+assert_contains "slot edit (apply) is applied" "$R" '"applied"'
+assert_curl "slot edit rendered" "/post/hello-world" GET "" "Accepted Smoke Title, slot-edited"
+
+# D3. Body suggest: stored, not applied.
+R=$(be_post body "Open the" "Open the" "Open up the" suggest)
+assert_contains "body suggest creates a suggestion" "$R" '"suggestion-created"'
+assert_contains "body suggest returns an id" "$R" '"id":"sug-'
+assert_curl_not_contains "body suggest does not change the page" "/post/hello-world" "Open up the"
+
+# D4. Slot suggest: stored, not applied.
+R=$(be_post title "slot-edited" "slot-edited" "slot-suggested" suggest)
+assert_contains "slot suggest creates a suggestion" "$R" '"suggestion-created"'
+assert_curl_not_contains "slot suggest does not change the page" "/post/hello-world" "slot-suggested"
+
+# D5. Structural suggest: one paragraph into two lowers to a Replace
+# suggestion whose preview (base and proposed markdown) the review UI diffs.
+R=$(be_post body "Open the" ". Each file follows" ".
+
+Each file follows" suggest)
+assert_contains "structural suggest creates a suggestion" "$R" '"suggestion-created"'
+LIST=$(acurl "http://127.0.0.1:$PORT/_presemble/ned-suggestions?file=$BE_FILE")
+assert_contains "structural suggest is stored as a Replace" "$LIST" '"Replace"'
+assert_contains "structural suggest carries its preview (base)" "$LIST" '"preview":{"base":{"markdown":"Open the'
+assert_contains "structural suggest preview holds the proposed markdown" "$LIST" '"proposed":{"markdown":"Open the'
+
+# D6. A refusal is a 200 with a typed message, and changes nothing.
+R=$(be_post body "Smoke body edit via bsave" "Smoke body edit via bsave." "" apply)
+assert_contains "block-edit refuses an empty block" "$R" '"refused"'
+assert_curl "refused edit left the paragraph" "/post/hello-world" GET "" "Smoke body edit via bsave."
+
+assert_curl "save after block-edit" "/_presemble/save-all" POST "" '"ok":true'
 
 F="$SITE_DIR/content/post/hello-world.md"
 if grep -qF 'Smoke body edit via bsave.' "$F"; then
-    pass "bsave edit survives save"
+    pass "block-edit edit survives save"
 else
-    fail "bsave edit survives save (not found in $F)"
+    fail "block-edit edit survives save (not found in $F)"
 fi
 if grep -qF '# Accepted Smoke Title' "$F"; then
     pass "accepted title survives save"
@@ -579,7 +673,7 @@ if [ "$(grep -c '^## What to Edit$' "$F" || true)" -eq 1 ]; then
 else
     fail "heading not duplicated on save ($(grep -c '^## What to Edit$' "$F" || true) occurrences in $F)"
 fi
-assert_curl "no dirty buffers after bsave save" "/_presemble/dirty-buffers" GET "" "[]"
+assert_curl "no dirty buffers after block-edit save" "/_presemble/dirty-buffers" GET "" "[]"
 
 # E. Legacy (pre-ADR-056) suggestions seeded before serve
 log "Testing legacy suggestions..."

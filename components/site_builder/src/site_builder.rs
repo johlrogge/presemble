@@ -499,7 +499,7 @@ mod tests {
         let html = render_item(SourceAttachment::Omit);
         assert!(html.contains("Hello World"), "title should render: {html}");
         assert!(
-            !html.contains(template::constants::ATTR_TEXT),
+            !html.contains("data-presemble-text"),
             "published output must not carry stored text: {html}"
         );
     }
@@ -517,11 +517,14 @@ mod tests {
     }
 
     #[test]
-    fn editorial_build_carries_stored_text_attribute() {
+    fn editorial_build_has_no_stored_text_attribute() {
+        // The browser edits `data-presemble-md` (ADR-059 section 10); the
+        // stored-text attribute is gone.
         let html = render_item(SourceAttachment::Attach);
+        assert!(html.contains("Hello World"), "title should render: {html}");
         assert!(
-            html.contains(r#"data-presemble-text="Hello World""#),
-            "editorial output should carry the title's stored text: {html}"
+            !html.contains("data-presemble-text"),
+            "editorial output must not carry stored text: {html}"
         );
     }
 

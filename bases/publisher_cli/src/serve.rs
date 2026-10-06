@@ -2002,6 +2002,10 @@ struct NedSuggestionJson {
     status: editorial_types::NedSuggestionStatus,
     created_at: String,
     anchor: AnchorJson,
+    /// The base and proposed markdown of a block-edit suggestion, which the
+    /// review UI shows as a diff. Omitted when the suggestion has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<editorial_types::SuggestionPreview>,
 }
 
 impl From<&editorial_types::NedSuggestion> for NedSuggestionJson {
@@ -2017,6 +2021,7 @@ impl From<&editorial_types::NedSuggestion> for NedSuggestionJson {
             status: s.status.clone(),
             created_at: s.created_at.clone(),
             anchor: derive_anchor(&s.selection),
+            preview: s.preview.clone(),
         }
     }
 }
@@ -3535,6 +3540,61 @@ mod tests {
         let app = test_app(client);
         let (status, _) = post_block_edit(&app, serde_json::json!({"file": 1})).await;
         assert!(status.is_client_error(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn ned_suggestion_list_carries_preview() {
+        use tower::ServiceExt;
+        let (client, _tmp) = start_test_conductor();
+        let app = test_app(client);
+        let (_, val) = post_block_edit(
+            &app,
+            serde_json::json!({
+                "file": "content/test/doc.md",
+                "selection": TITLE_HEADING,
+                "base": {"markdown": "Test Title"},
+                "proposed": {"markdown": "Better Title"},
+                "intent": "suggest",
+            }),
+        )
+        .await;
+        assert!(val["done"]["suggestion-created"]["id"].is_string(), "{val}");
+
+        // A suggestion made without a preview must omit the key.
+        let plain = serde_json::json!({
+            "file": "content/test/doc.md",
+            "selection": r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#,
+            "mutation": {"SetText": "Plain"},
+            "reason": "no preview"
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/ned-suggestions")
+            .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::from(serde_json::to_vec(&plain).unwrap()))
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap();
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_presemble/ned-suggestions?file=content/test/doc.md")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let list = list.as_array().expect("array");
+        assert_eq!(list.len(), 2, "{list:?}");
+        let with = list.iter().find(|s| s["reason"] != "no preview").expect("block-edit one");
+        assert_eq!(
+            with["preview"],
+            serde_json::json!({"base": {"markdown": "Test Title"}, "proposed": {"markdown": "Better Title"}}),
+            "{with}"
+        );
+        let without = list.iter().find(|s| s["reason"] == "no preview").expect("plain one");
+        assert!(without.get("preview").is_none(), "{without}");
     }
 
     #[tokio::test]

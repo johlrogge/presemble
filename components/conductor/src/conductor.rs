@@ -7517,7 +7517,7 @@ mod body_structural_bsave_tests {
         spanned(ContentElement::Paragraph { text: text.to_string() })
     }
 
-    /// Mirror of `cljStr` in inject.js.
+    /// A Clojure string literal for `s` (see `content::address::clj_str`).
     fn clj_str(s: &str) -> String {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }

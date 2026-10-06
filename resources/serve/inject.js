@@ -1,211 +1,60 @@
 (function(){
-// Phase B5: edit-mode handlers emit NED programs via /_presemble/apply. Suggestion paths remain on legacy endpoints pending Phase C.
+// ADR-059 section 10: the server addresses every editable element
+// (data-presemble-address) and projects its canonical markdown
+// (data-presemble-md). The browser edits that markdown and sends it back
+// through POST /_presemble/block-edit; it builds no selections and no NED
+// programs of its own.
 
-// Escape a JS string for embedding as a Clojure string literal.
-// Handles backslash and double-quote. Keep this in sync with the server's
-// clj_str_escape helper.
-function cljStr(s) {
-  return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
-}
+// BEGIN protocol-builders
+// Pure functions, no DOM: tools/protocol-fixtures.ts evaluates this region and
+// checks it against resources/serve/protocol/*.json, as the Rust side does.
 
-// --- Phase 2: Structural-anchor selectors (dead code; Phase 4 wires callers) ---
-// Composer helpers — build NED Clojure source strings.
-function nedDoc(file) {
-  return '(ned/doc-by-path '+cljStr(file)+')';
-}
-function nedSlot(file, slot) {
-  return '(ned/slot '+nedDoc(file)+' '+cljStr(slot)+')';
-}
-function nedChildrenSlot(file, slot) {
-  return '(ned/children '+nedSlot(file, slot)+')';
-}
-function nedHeadingWithText(slotChildrenExpr, text) {
-  return '(ned/heading-with-text '+slotChildrenExpr+' '+cljStr(text)+')';
-}
-function nedNthAfter(anchorExpr, kind, idx) {
-  return '(ned/nth-after '+anchorExpr+' '+cljStr(kind)+' '+idx+')';
-}
-function nedNthOfKind(selExpr, kind, idx) {
-  return '(ned/nth-of-kind '+selExpr+' '+cljStr(kind)+' '+idx+')';
-}
-// Narrow a block address to its single text node (ADR-056). Every text
-// mutation (SetText, SearchReplace) must address text through this; the
-// builders below always return block addresses, never text nodes.
-function nedTextIn(blockExpr) {
-  return '(ned/text-in '+blockExpr+')';
+// The editable target of an element, from its emitted attributes
+// (`getAttribute` results, so null when absent). An element without both an
+// address and markdown is not editable: there is no fallback.
+function editTarget(address, md) {
+  if (address === null || address === undefined || address === '') return null;
+  if (md === null || md === undefined) return null;
+  return { address: address, md: md };
 }
 
-// Map a DOM element to its NodeStore element-name (kind) per content_bridge.
-function kindFromTag(el) {
-  var t = el.tagName;
-  if (/^H[1-6]$/.test(t)) return 'heading';
-  if (t === 'P') return 'paragraph';
-  if (t === 'PRE') return 'code-block';
-  if (t === 'BLOCKQUOTE') return 'blockquote';
-  if (t === 'IMG') return 'image';
-  if (t === 'TABLE') return 'table';
-  if (t === 'UL' || t === 'OL') return 'list';
-  if (t === 'DIV') {
-    var md = el.getAttribute('data-presemble-md') || '';
-    if (/^\s*([-*+]|\d+\.)\s/.test(md)) return 'list';
-    // HTML blocks are never text-editable (ADR-062 D4).
-    return null;
+// The POST /_presemble/block-edit request for one edit. `intent` is 'apply' or
+// 'suggest'; `reason` is optional.
+function buildBlockEditRequest(file, selection, baseMarkdown, proposedMarkdown, intent, reason) {
+  var req = {
+    file: file,
+    selection: selection,
+    base: { markdown: baseMarkdown },
+    proposed: { markdown: proposedMarkdown },
+    intent: intent
+  };
+  if (reason) req.reason = reason;
+  return req;
+}
+
+// Read a block-edit response into what the browser acts on:
+//   {kind:'applied', pages}        the edit was applied
+//   {kind:'suggestion-created', id} stored as a pending suggestion
+//   {kind:'no-change'}             nothing to do
+//   {kind:'refused', cause, message} not done; the editor stays open
+function interpretBlockEditResponse(response) {
+  if (response && response.refused) {
+    return { kind: 'refused', cause: response.refused.cause, message: response.refused.message };
   }
-  return null;
+  var done = response && response.done;
+  if (done === 'no-change') return { kind: 'no-change' };
+  if (done && done['applied']) return { kind: 'applied', pages: done['applied'].pages };
+  if (done && done['suggestion-created']) {
+    return { kind: 'suggestion-created', id: done['suggestion-created'].id };
+  }
+  return { kind: 'refused', cause: 'unknown', message: 'Unexpected response from the server.' };
 }
+// END protocol-builders
 
-// Collect all body-slot elements for a given file in document order.
-function bodySiblingsForFile(file) {
-  return Array.prototype.slice.call(
-    document.querySelectorAll('[data-presemble-slot="body"][data-presemble-file="'+file+'"]')
-  );
-}
-
-// Find the most-recent heading at or before `targetEl` within `sibs` (an
-// ordered list of body-slot elements). Returns {el, text, anchorPos, targetPos}
-// or null when targetEl has no preceding heading. anchorPos/targetPos are
-// indices into sibs. Text is whitespace-normalised to match
-// ned/heading-with-text's exact-equality semantics.
-// Single source of truth for the heading text used in structural anchors.
-// Used both when building selectors and when resolving anchors in the DOM.
+// Single source of truth for the heading text used in scroll anchors (ADR-046).
+// Used when resolving anchors in the DOM.
 function _headingAnchorText(el) {
   return normalizeAnchorText(el.innerText);
-}
-function findPreviousHeadingForElement(sibs, targetEl) {
-  var targetPos = sibs.indexOf(targetEl);
-  if (targetPos < 0) return null;
-  for (var i = targetPos; i >= 0; i--) {
-    if (/^H[1-6]$/.test(sibs[i].tagName)) {
-      return {
-        el: sibs[i],
-        text: _headingAnchorText(sibs[i]),
-        anchorPos: i,
-        targetPos: targetPos
-      };
-    }
-  }
-  return null;
-}
-
-// Count elements in sibs[fromExclusive..toExclusive) whose kind matches.
-function countKindInRange(sibs, fromExclusive, toExclusive, kind) {
-  var count = 0;
-  for (var i = fromExclusive + 1; i < toExclusive; i++) {
-    if (kindFromTag(sibs[i]) === kind) count++;
-  }
-  return count;
-}
-
-// Count elements in sibs[0..toExclusive) whose kind matches.
-function countKindBeforeIndex(sibs, toExclusive, kind) {
-  var count = 0;
-  for (var i = 0; i < toExclusive; i++) {
-    if (kindFromTag(sibs[i]) === kind) count++;
-  }
-  return count;
-}
-
-// Build a NED selection for a body-slot element, anchored on the nearest
-// preceding heading when possible. Pure DOM-relative — no positional IDs.
-function buildBodyAnchor(el, file) {
-  var bodyEl = el.closest('[data-presemble-slot="body"]') || el;
-  var sibs = bodySiblingsForFile(file);
-  var targetPos = sibs.indexOf(bodyEl);
-  if (targetPos < 0) {
-    console.warn('buildBodyAnchor: target not in body slot list; refusing to guess', bodyEl);
-    return null;
-  }
-  var kind = kindFromTag(bodyEl);
-  if (kind === null) {
-    console.warn('buildBodyAnchor: unknown kind from tag', bodyEl.tagName);
-    return null;
-  }
-  var slotChildren = nedChildrenSlot(file, 'body');
-  var anchor = findPreviousHeadingForElement(sibs, bodyEl);
-  if (anchor && anchor.anchorPos === targetPos) {
-    // Editing the heading itself.
-    return nedHeadingWithText(slotChildren, anchor.text);
-  }
-  if (anchor) {
-    var relIdx = countKindInRange(sibs, anchor.anchorPos, targetPos, kind);
-    return nedNthAfter(nedHeadingWithText(slotChildren, anchor.text), kind, relIdx);
-  }
-  // No preceding heading — slot-boundary fallback.
-  var preIdx = countKindBeforeIndex(sibs, targetPos, kind);
-  return nedNthOfKind(slotChildren, kind, preIdx);
-}
-
-// Build a NED selection for a preamble-slot element.
-function buildPreambleAnchor(el, file, slot) {
-  el = el.closest('[data-presemble-slot]') || el;
-  var bySlot = Array.prototype.slice.call(
-    document.querySelectorAll('[data-presemble-slot="'+slot+'"][data-presemble-file="'+file+'"]')
-  );
-  var bySource = Array.prototype.slice.call(
-    document.querySelectorAll('[data-presemble-source-slot="'+slot+'"][data-presemble-file="'+file+'"]')
-  );
-  var sibs = bySlot.slice();
-  for (var i = 0; i < bySource.length; i++) {
-    if (sibs.indexOf(bySource[i]) === -1) sibs.push(bySource[i]);
-  }
-  sibs.sort(function(a, b) {
-    var pos = a.compareDocumentPosition(b);
-    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
-    return 0;
-  });
-  var kind = kindFromTag(el);
-  // Single-child slot: address the slot's only block — NEVER the slot itself
-  // (ADR-056 exact addressing). Text edits wrap this with nedTextIn.
-  // Unknown kind: address all of the slot's children. This is exact when the
-  // slot holds one block and Ambiguous (refused server-side) when it holds
-  // several — it never guesses.
-  if (sibs.length === 1) {
-    if (kind === null) return nedChildrenSlot(file, slot);
-    return nedNthOfKind(nedChildrenSlot(file, slot), kind, 0);
-  }
-  if (kind === null) {
-    console.warn('buildPreambleAnchor: unknown kind for', el.tagName);
-    return null;
-  }
-  var idx = 0;
-  for (var m = 0; m < sibs.length; m++) {
-    if (sibs[m] === el) break;
-    if (kindFromTag(sibs[m]) === kind) idx++;
-  }
-  return nedNthOfKind(nedChildrenSlot(file, slot), kind, idx);
-}
-
-// Top-level dispatcher. Returns null when the element cannot be addressed
-// exactly (missing file/slot data, unknown kind, not found among siblings).
-// Callers must refuse the mutation on null — never fall back to a positional
-// guess (ADR-056).
-function buildStructuralSelection(el) {
-  var fileEl = el.closest('[data-presemble-file]');
-  if (!fileEl) return null;
-  var file = fileEl.getAttribute('data-presemble-file');
-  var slot = el.getAttribute('data-presemble-source-slot') || el.getAttribute('data-presemble-slot');
-  if (!file || !slot) return null;
-  if (slot === 'body') return buildBodyAnchor(el, file);
-  return buildPreambleAnchor(el, file, slot);
-}
-// --- end Phase 2 helpers ---
-
-// Guardrails: if the server ever emits data-presemble-file="" these helpers
-// fail fast rather than issuing /_presemble/grammar?stem=undefined requests.
-
-var grammarCache = {};
-
-async function fetchGrammar(stem) {
-  if (stem === undefined || stem === null) {
-    throw new Error('fetchGrammar called with undefined/null stem — check stemFromFile');
-  }
-  if (grammarCache[stem] !== undefined) return grammarCache[stem];
-  var resp = await fetch('/_presemble/grammar?stem=' + encodeURIComponent(stem));
-  if (!resp.ok) throw new Error('no grammar for stem "' + stem + '" (status ' + resp.status + ')');
-  var src = await resp.text();
-  grammarCache[stem] = src;
-  return src;
 }
 
 // Fetch a URL and parse the response body as JSON.
@@ -223,16 +72,6 @@ async function fetchJson(url, opts) {
     throw new Error('Expected JSON from ' + url + ' (HTTP ' + r.status + ')');
   }
   if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
-  return data;
-}
-
-async function applyNed(program) {
-  var data = await fetchJson('/_presemble/apply', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({program: program}),
-  });
-  if (!data || !data.ok) throw new Error((data && data.error) || 'apply failed');
   return data;
 }
 
@@ -272,13 +111,41 @@ function _showEditError(afterEl, prev, msg) {
   return d;
 }
 
-function stemFromFile(file) {
-  // content/<stem>/<slug>.md -> "<stem>"
-  // content/<slug>.md -> "" (root collection)
-  if (!file) return ''; // empty / null / undefined → root collection
-  var parts = String(file).split('/');
-  if (parts.length <= 2) return ''; // content/<slug>.md OR single segment → root
-  return parts[1]; // content/<stem>/...
+// The server's address and markdown for an element, or null when it lacks
+// either (not editable: there is no fallback).
+var _NOT_EDITABLE_MSG = 'This element cannot be edited here: the server gave it no address.';
+function _editTargetOf(el) {
+  return editTarget(el.getAttribute('data-presemble-address'), el.getAttribute('data-presemble-md'));
+}
+// Markdown equal for editing purposes: line endings and surrounding blank
+// space do not count.
+function _sameMd(a, b) {
+  function norm(s) { return String(s).replace(/\r\n?/g, '\n').trim(); }
+  return norm(a) === norm(b);
+}
+// The text of a contenteditable element as typed (non-breaking spaces are
+// what the browser inserts for runs of spaces).
+function _editedText(el) {
+  return el.innerText.replace(/\xa0/g, ' ').trim();
+}
+// POST one block edit and read the response (see interpretBlockEditResponse).
+// Rejects on a transport or server error; a refusal resolves as kind 'refused'.
+function _postBlockEdit(req) {
+  return fetchJson('/_presemble/block-edit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(req),
+  }).then(interpretBlockEditResponse);
+}
+// After a suggestion was stored: enter suggest mode on it, or refresh the
+// count. Nothing to do when the edit changed nothing.
+function _afterSuggest(outcome) {
+  if (outcome.kind === 'suggestion-created'
+      && document.body.classList.contains('presemble-suggest-mode') && window._suggestEnter) {
+    window._suggestEnter(outcome.id);
+  } else if (window._fetchSuggestionCount) {
+    window._fetchSuggestionCount();
+  }
 }
 
 // --- Phase D: URL-fragment mode helpers (ADR-042) ---
@@ -786,9 +653,13 @@ el.classList.remove('presemble-suggest-stale');
 }
 el.scrollIntoView({behavior:'smooth',block:'center'});
 el.setAttribute('data-presemble-original-html',el.innerHTML);
-// NED suggestions: render diff from SearchReplace mutation.
+// NED suggestions: a suggestion made through a block edit carries a preview
+// (the base and proposed markdown): show the change from base to proposed.
+// Otherwise render the diff from the SearchReplace or SetText mutation.
 // Built from DOM nodes with textContent only — suggestion text is untrusted.
-if(sug._source==='ned'&&sug.mutation&&sug.mutation.SearchReplace){
+if(sug._source==='ned'&&sug.preview&&sug.preview.base&&sug.preview.proposed){
+_renderPreviewDiff(el,String(sug.preview.base.markdown||''),String(sug.preview.proposed.markdown||''));
+}else if(sug._source==='ned'&&sug.mutation&&sug.mutation.SearchReplace){
 var sr=sug.mutation.SearchReplace;
 _renderSearchReplaceDiff(el,String(sr.search||''),String(sr.replace||''));
 }else if(sug._source==='ned'&&sug.mutation&&sug.mutation.SetText){
@@ -806,6 +677,17 @@ var n=document.createElement(tag);
 n.className=tag==='del'?'presemble-diff-del':'presemble-diff-ins';
 n.textContent=text;
 return n;
+}
+// The change a block-edit suggestion proposes: the base markdown struck out,
+// the proposed markdown after it (blocks keep their line breaks, so a
+// structural change such as one paragraph into two reads as such).
+function _renderPreviewDiff(el,base,proposed){
+el.textContent='';
+var del=_diffNode('del',base);
+var ins=_diffNode('ins',proposed);
+[del,ins].forEach(function(n){n.style.display='block';n.style.whiteSpace='pre-wrap';});
+el.appendChild(del);
+el.appendChild(ins);
 }
 // Prefer an in-place split of the single text node containing `search`
 // (preserves surrounding markup); otherwise fall back to a flat text rendering.
@@ -1143,88 +1025,6 @@ window._suggestEnter=_suggestEnter;
 window._fetchSuggestionFiles=_fetchSuggestionFiles;
 window._foldToggle=function(el){_foldToggle(el);};
 })();
-function minimalDiff(original, edited) {
-if (original === edited) return null;
-
-// Find first differing character
-var prefixLen = 0;
-var minLen = Math.min(original.length, edited.length);
-while (prefixLen < minLen && original[prefixLen] === edited[prefixLen]) {
-prefixLen++;
-}
-
-// Find last differing character (from end), don't overlap prefix
-var suffixLen = 0;
-while (suffixLen < (minLen - prefixLen)
-       && original[original.length - 1 - suffixLen] === edited[edited.length - 1 - suffixLen]) {
-suffixLen++;
-}
-
-var sr = expandToUnique(original, edited, prefixLen, suffixLen);
-// Empty base: there is nothing to search for, so the caller sends SetText.
-if (sr === null) return { setText: edited };
-return sr;
-}
-
-// Count occurrences of `needle` in `hay`, including overlapping ones, stopping
-// early once `limit` is exceeded.
-function _countOccurrences(hay, needle, limit) {
-var count = 0;
-var idx = -1;
-while ((idx = hay.indexOf(needle, idx + 1)) !== -1) {
-count++;
-if (count > limit) break;
-}
-return count;
-}
-
-// Given a common prefix/suffix of `base` and `edited` (non-overlapping in
-// both strings), grow the changed span outward, snapping to word boundaries,
-// until the search string is non-empty and occurs exactly once in `base`.
-// Returns {search, replace}, or null when `base` is empty (nothing can be
-// searched for — the caller must send SetText instead).
-function expandToUnique(base, edited, prefixLen, suffixLen) {
-if (!base) return null;
-var ctxLeft = 0;
-var ctxRight = 0;
-var maxLeft = prefixLen;
-var maxRight = suffixLen;
-while (true) {
-var candidate = base.slice(prefixLen - ctxLeft, base.length - suffixLen + ctxRight);
-if (candidate && _countOccurrences(base, candidate, 1) === 1) break;
-// Fully expanded: the candidate is the whole (non-empty) base, unique.
-if (ctxLeft >= maxLeft && ctxRight >= maxRight) break;
-// Expand by snapping to word boundaries (~10 chars at a time)
-if (ctxLeft < maxLeft) {
-ctxLeft = Math.min(ctxLeft + 10, maxLeft);
-// Snap to word boundary (space/newline) on left
-while (ctxLeft < maxLeft && base[prefixLen - ctxLeft] !== ' ' && base[prefixLen - ctxLeft] !== '\n') {
-ctxLeft++;
-}
-}
-if (ctxRight < maxRight) {
-ctxRight = Math.min(ctxRight + 10, maxRight);
-// Snap to word boundary on right
-while (ctxRight < maxRight && base[base.length - suffixLen + ctxRight - 1] !== ' ' && base[base.length - suffixLen + ctxRight - 1] !== '\n') {
-ctxRight++;
-}
-}
-}
-var start = prefixLen - ctxLeft;
-return {
-search: base.slice(start, base.length - suffixLen + ctxRight),
-replace: edited.slice(start, edited.length - suffixLen + ctxRight)
-};
-}
-
-// Build the NED suggestion mutation for a minimalDiff result.
-function nedTextMutation(diff) {
-if (diff.setText !== undefined) return { SetText: diff.setText };
-return { SearchReplace: { search: diff.search, replace: diff.replace } };
-}
-
-var STRUCTURAL_SUGGEST_MSG = "Structural changes can't be suggested yet; use edit mode.";
-
 // BEGIN pure-text-helpers
 // Pure functions, no DOM: tools/text-vectors.ts evaluates this region and
 // checks it against resources/serve/text-vectors.json, as the Rust side does.
@@ -1237,130 +1037,7 @@ function normalizeAnchorText(s) {
 return String(s).split(/\p{White_Space}+/u).filter(Boolean).join(' ');
 }
 
-// The content of an ATX heading line, as content::inline::atx_heading_content
-// reads it: up to three leading spaces, the `#{1,6}` run and the spaces or
-// tabs after it are stripped, then trailing spaces and tabs. A trailing `#`
-// run that is the whole remainder or follows a space or tab is a closing
-// sequence and is removed with that space or tab. `\#` is never part of a
-// closing run (the character before the run is then `\`).
-function _atxHeadingContent(line) {
-var m = /^ {0,3}(#{1,6})([ \t]+|$)/.exec(line);
-if (!m) return null;
-var rest = line.slice(m[0].length).replace(/[ \t]+$/, '');
-var beforeRun = rest.replace(/#+$/, '');
-if (beforeRun.length < rest.length && (beforeRun === '' || /[ \t]$/.test(beforeRun))) {
-rest = beforeRun;
-}
-return rest.replace(/^[ \t]+|[ \t]+$/g, '');
-}
-
-function _normMd(md) {
-return String(md).replace(/\r\n?/g, '\n');
-}
-
-// Map a block's markdown source slice (data-presemble-md, or the textarea
-// contents edited from it) to the text stored in the block's single Text node
-// (content parser -> content_bridge::content_element_to_store). Returns null
-// for kinds that have no single text node (image, table, ...).
-function blockTextFromMd(kind, md) {
-var s = _normMd(md);
-switch (kind) {
-case 'heading': {
-// Parser stores the heading's source without the `#` markers or a
-// closing `#` sequence (ADR-063). An underlined (setext) heading has no
-// such line: null, as its stored text differs from its markdown until it
-// is saved as `#` heading (limit L19).
-var line = s.split('\n').filter(function(l) { return l.trim() !== ''; })[0] || '';
-return _atxHeadingContent(line);
-}
-case 'blockquote':
-// Parser stores the quoted text with soft breaks joined by a space.
-return s.trim().split('\n').map(function(l) {
-return l.replace(/^[ \t]{0,3}>[ \t]?/, '').trim();
-}).filter(function(l) { return l !== ''; }).join(' ');
-case 'code-block': {
-// Parser stores the code between the fences, without the final newline.
-var lines = s.replace(/^\n+/, '').replace(/\s+$/, '').split('\n');
-var open = lines[0].match(/^[ \t]{0,3}(`{3,}|~{3,})/);
-if (open) {
-lines = lines.slice(1);
-if (lines.length && /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/.test(lines[lines.length - 1])) {
-lines = lines.slice(0, -1);
-}
-return lines.join('\n');
-}
-// Indented code block: drop the 4-space (or tab) indent.
-return lines.map(function(l) { return l.replace(/^( {4}|\t)/, ''); }).join('\n');
-}
-case 'paragraph':
-case 'list':
-// Parser stores the trimmed raw markdown source.
-return s.trim();
-default:
-return null;
-}
-}
 // END pure-text-helpers
-
-// Return an error message when `editedMd` is no longer a single block of the
-// same kind as `origMd` (a structural change), else null. The server checks
-// the round-trip too; this catches the common cases before sending.
-function blockShapeError(kind, origMd, editedMd) {
-var o = _normMd(origMd).trim();
-var e = _normMd(editedMd).trim();
-if (blockTextFromMd(kind, o) === null) {
-if (kind === 'heading') {
-return "Underlined (setext) headings can't be suggested on yet; use edit mode.";
-}
-return "This kind of block can't be suggested as text; use edit mode.";
-}
-if (!e) return STRUCTURAL_SUGGEST_MSG;
-var blankLine = /\n[ \t]*\n/.test(e);
-var lines = e.split('\n');
-switch (kind) {
-case 'heading': {
-var om = o.match(/^(#{1,6})[ \t]/);
-var em = e.match(/^(#{1,6})[ \t]+\S/);
-if (!om || !em || om[1].length !== em[1].length || lines.length !== 1) return STRUCTURAL_SUGGEST_MSG;
-return null;
-}
-case 'paragraph':
-if (blankLine) return STRUCTURAL_SUGGEST_MSG;
-// Any line that would start another block (heading, quote, fence, list
-// item, setext underline, thematic break).
-if (/^[ \t]{0,3}(#{1,6}([ \t]|$)|>|```|~~~|[-*+][ \t]|\d{1,9}[.)][ \t]|=+[ \t]*$|-+[ \t]*$|(\*[ \t]*){3,}$|(_[ \t]*){3,}$)/m.test(e)) {
-return STRUCTURAL_SUGGEST_MSG;
-}
-return null;
-case 'blockquote':
-if (blankLine) return STRUCTURAL_SUGGEST_MSG;
-for (var i = 0; i < lines.length; i++) {
-if (!/^[ \t]{0,3}>/.test(lines[i])) return STRUCTURAL_SUGGEST_MSG;
-}
-return null;
-case 'list':
-if (!/^[ \t]{0,3}([-*+]|\d{1,9}[.)])[ \t]/.test(lines[0])) return STRUCTURAL_SUGGEST_MSG;
-return null;
-case 'code-block': {
-var oFence = o.split('\n')[0].match(/^[ \t]{0,3}(`{3,}|~{3,})/);
-if (!oFence) {
-// Indented code: every non-blank line must stay indented.
-for (var j = 0; j < lines.length; j++) {
-if (lines[j].trim() && !/^( {4}|\t)/.test(lines[j])) return STRUCTURAL_SUGGEST_MSG;
-}
-return null;
-}
-// Fenced: same opening line (fence and language), closed by a fence.
-if (lines.length < 2 || lines[0].trim() !== o.split('\n')[0].trim()) return STRUCTURAL_SUGGEST_MSG;
-var ch = oFence[1].charAt(0);
-var last = lines[lines.length - 1].trim();
-if (last.length < oFence[1].length || last.split(ch).join('') !== '') return STRUCTURAL_SUGGEST_MSG;
-return null;
-}
-default:
-return null;
-}
-}
 document.addEventListener('click',function(e){
 if(!document.body.classList.contains('presemble-edit-mode')){return;}
 var el=e.target.closest('[data-presemble-slot]');
@@ -1388,7 +1065,10 @@ if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(wind
 e.preventDefault();
 var bfile=el.getAttribute('data-presemble-file');
 if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-var bmd=el.getAttribute('data-presemble-md')||el.innerText;
+// The server's address and markdown for this block; without both it is not editable.
+var btarget=_editTargetOf(el);
+if(!btarget){_toast(_NOT_EDITABLE_MSG);return;}
+var bmd=btarget.md;
 el.style.display='none';
 var ta=document.createElement('textarea');
 ta.className='presemble-body-editor';
@@ -1425,24 +1105,16 @@ ta.focus();
 function bsave(){
 if(bbusy){return;}
 var bvalue=ta.value;
-if(bvalue===bmd||!bvalue.trim()){bcleanup();return;}
+if(_sameMd(bvalue,bmd)){bcleanup();return;}
 if(!bfile){console.error('bsave called without bfile',el);bfail('Cannot save: missing file attribute on element. This is a bug — please report.');return;}
 bbusy=true;
 _setToolbarBusy(btoolbar,true);
 ta.readOnly=true;
-var bstem=stemFromFile(bfile);
-fetchGrammar(bstem).then(function(schemaSrc){
-var sel = buildStructuralSelection(el);
-if (sel === null) {
-  console.error('buildStructuralSelection returned null for body element', el);
-  throw new Error('Cannot save: could not locate this element in the document.');
-}
-var program = '(let [g (ned/parse-grammar '+cljStr(schemaSrc)+')]\n  (ned/replace\n    '+sel+'\n    (ned/parse-body '+cljStr(bvalue)+' g)))';
-return applyNed(program);
-}).then(function(){
+_postBlockEdit(buildBlockEditRequest(bfile,btarget.address,bmd,bvalue,'apply')).then(function(outcome){
+if(outcome.kind==='refused'){bfail(outcome.message||'Edit refused');return;}
 bbusy=false;
 bcleanup();
-if(window._fetchDirtyCount){window._fetchDirtyCount();}
+if(outcome.kind==='applied'&&window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(err){
 bfail(err.message||'Edit failed');
 });
@@ -1506,13 +1178,15 @@ e.preventDefault();
 var pfile=el.getAttribute('data-presemble-file');
 var slot=el.getAttribute('data-presemble-slot');
 if(!pfile||!slot){return;}
-// A slot carrying its stored text (ADR-063) is edited as that text, not as
-// the rendered text; cancelling restores the rendered markup.
-var storedText=el.getAttribute('data-presemble-text');
+// The element is edited as the server's markdown for it, addressed by the
+// server's address; without both it is not editable. Cancelling restores the
+// rendered markup.
+var target=_editTargetOf(el);
+if(!target){_toast(_NOT_EDITABLE_MSG);return;}
 var savedHtml=el.innerHTML;
-var original=storedText!==null?storedText:el.innerText;
-function restore(){if(storedText!==null){el.innerHTML=savedHtml;}else{el.innerText=original;}}
-if(storedText!==null){el.innerText=storedText;}
+var original=target.md;
+function restore(){el.innerHTML=savedHtml;}
+el.innerText=original;
 el.contentEditable='true';
 el.classList.add('presemble-editing');
 el.focus();
@@ -1544,19 +1218,18 @@ el.focus();
 }
 function save(){
 if(busy){return;}
-var value=el.innerText.trim();
-if(value===original||!value){if(storedText!==null){restore();}cleanup();return;}
+var value=_editedText(el);
+if(_sameMd(value,original)){restore();cleanup();return;}
 if(!pfile){console.error('save called without pfile',el);fail('Cannot save: missing file attribute on element. This is a bug — please report.');return;}
-var sel = buildStructuralSelection(el);
-if (sel === null) {fail('Cannot edit: this element cannot be addressed precisely in the document.');return;}
-var program ='(ned/set-text '+nedTextIn(sel)+' '+cljStr(value)+')';
 busy=true;
 _setToolbarBusy(toolbar,true);
 el.contentEditable='false';
-applyNed(program).then(function(){
+_postBlockEdit(buildBlockEditRequest(pfile,target.address,original,value,'apply')).then(function(outcome){
+if(outcome.kind==='refused'){fail(outcome.message||'Edit refused');return;}
 busy=false;
+if(outcome.kind==='no-change'){restore();}
 cleanup();
-if(window._fetchDirtyCount){window._fetchDirtyCount();}
+if(outcome.kind==='applied'&&window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(e){
 fail(e.message||'Edit failed');
 });
@@ -1579,7 +1252,10 @@ if(slot==='body'){
 e.preventDefault();
 var bfile=el.getAttribute('data-presemble-file');
 if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-var bmd=el.getAttribute('data-presemble-md')||el.innerText;
+// The server's address and markdown for this block; without both it is not editable.
+var btarget=_editTargetOf(el);
+if(!btarget){_toast(_NOT_EDITABLE_MSG);return;}
+var bmd=btarget.md;
 el.style.display='none';
 var ta=document.createElement('textarea');
 ta.className='presemble-body-editor';
@@ -1610,44 +1286,16 @@ ta.focus();
 function bsuggest(){
 if(bbusy){return;}
 var bvalue=ta.value;
-// Diff on the block's stored text, not on the markdown slice: the search
-// string must occur in the text node that nedTextIn(sel) addresses.
-var base, edited;
-if(el.getAttribute('data-presemble-md')){
-if(_normMd(bvalue).trim()===_normMd(bmd).trim()){bcleanup();return;}
-var bkind=kindFromTag(el);
-var shapeErr=blockShapeError(bkind,bmd,bvalue);
-if(shapeErr){bfail(shapeErr);return;}
-base=blockTextFromMd(bkind,bmd);
-edited=blockTextFromMd(bkind,bvalue);
-}else{
-// No markdown source on the element: the textarea holds rendered text.
-base=bmd.trim();
-edited=bvalue.trim();
-if(base!==edited&&(!edited||/\n[ \t]*\n/.test(edited))){bfail(STRUCTURAL_SUGGEST_MSG);return;}
-}
-var diff=minimalDiff(base,edited);
-if(!diff){bcleanup();return;}
-var sel = buildStructuralSelection(el);
-if (sel === null) {
-  console.error('buildStructuralSelection returned null for body element', el);
-  bfail('Cannot suggest: this element cannot be addressed precisely; use edit mode.');
-  return;
-}
+if(_sameMd(bvalue,bmd)){bcleanup();return;}
+if(!bfile){console.error('bsuggest called without bfile',el);bfail('Cannot suggest: missing file attribute on element. This is a bug — please report.');return;}
 bbusy=true;
 _setToolbarBusy(btoolbar,true);
 ta.readOnly=true;
-fetchJson('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:bfile,selection:nedTextIn(sel),mutation:nedTextMutation(diff),reason:''})
-}).then(function(data){
-if(!data.ok){throw new Error(data.error||'Suggest failed');}
+_postBlockEdit(buildBlockEditRequest(bfile,btarget.address,bmd,bvalue,'suggest')).then(function(outcome){
+if(outcome.kind==='refused'){bfail(outcome.message||'Suggest refused');return;}
 bbusy=false;
 bcleanup();
-if(data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
-window._suggestEnter(data.id);
-}else if(window._fetchSuggestionCount){
-window._fetchSuggestionCount();
-}
+_afterSuggest(outcome);
 }).catch(function(err){bfail(err.message||'Suggest failed');});
 }
 btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
@@ -1655,17 +1303,19 @@ btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagatio
 ta.addEventListener('keydown',function(ev){if(ev.key==='Escape'&&!bbusy){bcleanup();}},{signal:bac.signal});
 return;
 }
+if(el.tagName==='IMG'){return;}
 var pfile=el.getAttribute('data-presemble-file');
-var editSlot=el.getAttribute('data-presemble-source-slot')||slot;
-if(!pfile||!editSlot){return;}
+if(!pfile){return;}
 e.preventDefault();
-// A slot carrying its stored text (ADR-063) is suggested against that text,
-// not the rendered text; closing restores the rendered markup.
-var storedText=el.getAttribute('data-presemble-text');
+// The element is suggested against the server's markdown for it, addressed by
+// the server's address; without both it is not editable. Closing restores the
+// rendered markup.
+var target=_editTargetOf(el);
+if(!target){_toast(_NOT_EDITABLE_MSG);return;}
 var savedHtml=el.innerHTML;
-var original=storedText!==null?storedText:el.innerText;
-function restore(){if(storedText!==null){el.innerHTML=savedHtml;}else{el.innerText=original;}}
-if(storedText!==null){el.innerText=storedText;}
+var original=target.md;
+function restore(){el.innerHTML=savedHtml;}
+el.innerText=original;
 el.contentEditable='true';
 el.classList.add('presemble-editing');
 el.focus();
@@ -1697,29 +1347,18 @@ el.focus();
 }
 function suggest(){
 if(busy){return;}
-var value=el.innerText.trim().replace(/\u00a0/g,' ');
-var origText=original.replace(/\u00a0/g,' ').trim();
-if(!origText){fail("Empty fields can't be suggested yet.");return;}
-var diff=minimalDiff(origText,value);
-if(!diff){if(storedText!==null){restore();}cleanup();return;}
-var sel = buildStructuralSelection(el);
-if (sel === null) {fail("Cannot suggest: this element cannot be addressed precisely; use edit mode.");return;}
+var value=_editedText(el);
+if(_sameMd(value,original)){restore();cleanup();return;}
 busy=true;
 _setToolbarBusy(toolbar,true);
 el.contentEditable='false';
-fetchJson('/_presemble/ned-suggestions',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:pfile,selection:nedTextIn(sel),mutation:nedTextMutation(diff),reason:''})
-}).then(function(data){
-if(!data.ok){throw new Error(data.error||'Suggest failed');}
-// A suggestion is not an edit: restore the original text before closing.
+_postBlockEdit(buildBlockEditRequest(pfile,target.address,original,value,'suggest')).then(function(outcome){
+if(outcome.kind==='refused'){fail(outcome.message||'Suggest refused');return;}
+// A suggestion is not an edit: restore the original markup before closing.
 busy=false;
 restore();
 cleanup();
-if(data.id&&document.body.classList.contains('presemble-suggest-mode')&&window._suggestEnter){
-window._suggestEnter(data.id);
-}else if(window._fetchSuggestionCount){
-window._fetchSuggestionCount();
-}
+_afterSuggest(outcome);
 }).catch(function(e){
 fail(e.message||'Suggest failed');
 });

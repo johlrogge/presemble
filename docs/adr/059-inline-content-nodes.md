@@ -278,37 +278,80 @@ All addressing stays exact (ADR-056).
 
 ### 10. Browser editing and suggesting
 
-- In editorial output only, the server renders each inline container's
-  canonical markdown as `data-presemble-md`.
-- The browser edits that markdown and sends a typed request:
+- In editorial output only, the server renders two attributes on every
+  editable element (each body block and each slot element):
+  - `data-presemble-md`: the element's canonical markdown (§7), a `Block`
+    projection for body blocks and a `Content` projection for slot elements;
+  - `data-presemble-address`: the NED selection that resolves to exactly that
+    block. The server builds it (`content::block_addresses`); the browser
+    never builds a selection. An element whose address would be ambiguous
+    (duplicate heading text) has none and is not editable.
+- The browser edits the markdown and sends a typed request,
+  `POST /_presemble/block-edit`:
 
-      BlockEdit { selection, base_markdown, markdown, intent: Apply | Suggest }
+      BlockEdit {
+        file,
+        selection,                  // the element's data-presemble-address
+        base:     BlockText,        // the element's data-presemble-md
+        proposed: BlockText,        // the edited markdown
+        intent:   Apply | Suggest,
+        reason?
+      }
+      BlockText = Markdown(String)  // {"markdown": "..."} on the wire
 
+  `BlockText` is a surface of the block, not the block. Markdown is the only
+  one until another surface has a codec.
+- The response is `Done` or `Refused`:
+
+      Done(Applied { pages } | SuggestionCreated { id } | NoChange)
+      Refused { cause: Drifted | Unaddressable | NotEditable | Invalid,
+                message }
+
+  A refusal is a normal response, not an error: the browser shows `message`
+  and keeps the editor open with the user's text. An element without both
+  attributes is not editable, and the browser says so; there is no fallback.
 - The server first resolves the selection. It is query-only (ADR-056 §4) and
   must resolve to exactly one block.
-- If `base_markdown` differs from that block's canonical markdown, the
-  request is refused as Drifted.
-- `markdown` must parse as one block of a compatible kind. A heading's level
-  may not change. Heading to paragraph, and any other change of block kind,
-  is refused as structural. Paragraph shape changes are not structural (§12).
+- If `base` differs from that block's canonical markdown, the request is
+  refused as `Drifted`.
+- `proposed` must parse as blocks the kind allows. A payload kind that may not
+  be written through a block edit (html-block, separator, link-expression) is
+  refused as `Invalid`; the message says which.
 - The server then lowers the request:
   - **No change:** `NoChange`.
   - **Only Text contents differ** (same element skeleton, same atoms): a
     container-scoped SearchReplace with a minimal unique diff on the edit
     text.
-  - **Anything else:** SetInlines.
-- Apply uses SetInlines with the base check. Suggest persists the lowered
-  mutation.
+  - **Same block kind, anything else:** SetInlines.
+  - **A structural change** (block kind, heading level, several blocks):
+    Replace.
+- Apply and Suggest share one lowering and produce the same mutation; they
+  differ only in when it is applied. Apply applies it now; Suggest stores it
+  until someone approves it. A structural change (block kind, heading level,
+  several blocks) lowers to Replace in both cases. Payload kinds are the same
+  for both.
+- Every lowered suggestion stores a preview (the base and proposed markdown).
+  Replace, SetText and SetInlines suggestions go Stale as `Drifted` when their
+  block no longer matches the base. Rebasing suggestions onto later edits is
+  the subject of a follow-up ADR (see "Follow-ups").
+- The review UI shows any suggestion that has a preview as a change from
+  `preview.base` to `preview.proposed`.
 - Block kinds not yet converted are lowered to their current behaviour:
   SetText or SearchReplace on the single Text node.
 - Removed from the browser:
-  - `data-presemble-text`, `blockTextFromMd` and `_atxHeadingContent`;
+  - `data-presemble-text`, `blockTextFromMd`, `_atxHeadingContent` and
+    `blockShapeError`;
   - the client-side `minimalDiff` and `expandToUnique`;
-  - `ned/set-text` programs built on the client.
+  - the address builders (`buildStructuralSelection` and the `ned*`
+    composers);
+  - the `ned/set-text`, `ned/replace` and `ned/parse-body` programs built on
+    the client, and the grammar fetch that fed them.
 - The protocol is defined in `editorial_types` (serde). JSON fixtures in
-  `resources/serve/protocol/` are checked by Rust and by the JavaScript vector
-  runner. Wave 3 (TypeScript) types those same fixtures; it does not change
-  the protocol.
+  `resources/serve/protocol/` are checked by Rust and by
+  `tools/protocol-fixtures.ts`, which runs the browser's request builder
+  (`buildBlockEditRequest`, the `protocol-builders` region of `inject.js`)
+  against them. Wave 3 (TypeScript) types those same fixtures; it does not
+  change the protocol.
 
 ### 11. References
 
@@ -564,7 +607,10 @@ Every stage leaves the tree green and shippable.
 
 **Follow-ups:**
 - the split-paragraph command;
-- an Error for excess table cells on read (L16).
+- an Error for excess table cells on read (L16);
+- suggestions follow their target: a pending suggestion is amended (rebased)
+  when its target changes by a manual edit or an accepted suggestion, not only
+  marked Stale.
 
 ## Alternatives considered
 
