@@ -8,6 +8,7 @@ members = [
     "components/conductor",
     "components/content",
     "components/content_editor",
+    "components/content_store",
     "components/dep_graph",
     "components/editorial_types",
     "components/edn",
@@ -22,19 +23,19 @@ members = [
     "components/node_store",
     "components/node_store_bridge",
     "components/nrepl",
+    "components/provisioning",
     "components/reader",
     "components/repl_tui",
     "components/schema",
     "components/serve_ui",
     "components/site_builder",
     "components/site_index",
+    "components/site_registry",
     "components/site_templates",
     "components/stylesheet",
     "components/template",
     "components/template_registry",
     "components/validation",
-    "components/provisioning",
-    "components/site_registry",
     "bases/control_plane",
     "bases/editor_server",
     "bases/mcp_server",
@@ -57,6 +58,7 @@ bencode = { path = "components/bencode" }
 conductor = { path = "components/conductor" }
 content = { path = "components/content" }
 content_editor = { path = "components/content_editor" }
+content_store = { path = "components/content_store" }
 control_plane = { path = "bases/control_plane" }
 dep_graph = { path = "components/dep_graph" }
 editor_server = { path = "bases/editor_server" }
@@ -90,9 +92,13 @@ stylesheet = { path = "components/stylesheet" }
 template = { path = "components/template" }
 template_registry = { path = "components/template_registry" }
 validation = { path = "components/validation" }
+async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 im = "15"
 nng = "1"
 notify = "7"
@@ -105,9 +111,5 @@ serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
-tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync", "process", "fs", "time"] }
+tokio = { version = "1", features = ["fs", "io-std", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tower-lsp = "0.20"
-async-trait = "0.1"
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio", "http1"] }
-http-body-util = "0.1"

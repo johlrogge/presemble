@@ -432,6 +432,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "content_store"
+version = "0.35.0"
+dependencies = [
+ "content",
+ "ned",
+ "node_store",
+ "schema",
+]
+
+[[package]]
 name = "control-plane-bin"
 version = "0.1.0"
 dependencies = [
@@ -1637,6 +1647,7 @@ name = "node_store_bridge"
 version = "0.35.0"
 dependencies = [
  "content",
+ "content_store",
  "editorial_types",
  "expressions",
  "im",
@@ -2566,6 +2577,7 @@ name = "template"
 version = "0.35.0"
 dependencies = [
  "content",
+ "content_store",
  "im",
  "node_store",
  "pulldown-cmark",

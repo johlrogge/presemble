@@ -842,14 +842,14 @@ fn render_insert_native(
                     let blocks: Vec<content::ContentElement> = children
                         .iter()
                         .filter(|c| matches!(store.get(**c), Some(node_store::Node::Element(_))))
-                        .filter_map(|c| native_block(store, *c))
+                        .filter_map(|c| body_block(store, *c))
                         .collect();
                     let addresses = crate::body_nodes::body_addresses(&blocks, editorial);
                     let mut next_block = 0;
                     for child_id in children {
                         match store.get(child_id) {
                             Some(node_store::Node::Element(_)) => {
-                                if native_block(store, child_id).is_some() {
+                                if body_block(store, child_id).is_some() {
                                     body_nodes.extend(crate::body_nodes::body_block_nodes(
                                         &blocks[next_block],
                                         editorial,
@@ -1147,80 +1147,14 @@ fn first_child_text(store: &node_store::NodeStore, id: node_store::NodeId) -> St
 }
 
 /// Read a body block out of the store as a [`content::ContentElement`], so the
-/// native path renders it through the same `block_nodes` as the legacy path.
+/// body path renders it through the same `block_nodes` as the legacy path.
 ///
-/// This duplicates part of `node_store_bridge::content_bridge::block_from_node`
-/// (the canonical decoder). `template` cannot depend on `node_store_bridge`, so
-/// the duplicate stays until ADR-059 stage 2 settles where the decoder lives.
-///
-/// `None` for what renders nothing: unknown kinds, a link without `href`, and
-/// link expressions (ADR-058 section 4: ignored in the body).
-///
-/// A heading level outside 1..=6 renders nothing. This cannot happen for a live
-/// document: the parser builds a typed `HeadingLevel`, and every editorial
-/// transaction passes the ADR-057 §4 gate (`InvalidHeadingLevel`).
-fn native_block(store: &node_store::NodeStore, id: node_store::NodeId) -> Option<content::ContentElement> {
-    use content::ContentElement;
-    let Some(node_store::Node::Element(name)) = store.get(id) else {
-        return None;
-    };
-    let named_children = |parent: node_store::NodeId, wanted: &str| -> Vec<node_store::NodeId> {
-        store
-            .children(parent)
-            .into_iter()
-            .filter(|&c| matches!(store.get(c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == wanted))
-            .collect()
-    };
-    let text_children = |parent: node_store::NodeId| -> Vec<String> {
-        store
-            .children(parent)
-            .into_iter()
-            .filter_map(|c| match store.get(c) {
-                Some(node_store::Node::Text(t)) => Some(t.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-    match store.resolve_name(*name) {
-        "heading" => {
-            let level = node_attr_int(store, id, "level").unwrap_or(2);
-            let level = u8::try_from(level).ok().and_then(schema::HeadingLevel::new)?;
-            Some(ContentElement::Heading { level, source: first_child_text(store, id).into() })
-        }
-        "paragraph" => Some(ContentElement::Paragraph { text: first_child_text(store, id) }),
-        "blockquote" => Some(ContentElement::Blockquote { text: first_child_text(store, id) }),
-        "code-block" => Some(ContentElement::CodeBlock {
-            language: node_attr_str(store, id, "language"),
-            code: first_child_text(store, id),
-        }),
-        "image" => Some(ContentElement::Image {
-            path: node_attr_str(store, id, "path").unwrap_or_default(),
-            alt: node_attr_str(store, id, "alt"),
-        }),
-        "table" => {
-            let headers = named_children(id, "headers")
-                .first()
-                .map(|&h| text_children(h))
-                .unwrap_or_default();
-            // Rows sit under `rows`: `table > rows > row > Text*`
-            // (the shape `content_bridge` builds and decodes).
-            let rows = named_children(id, "rows")
-                .into_iter()
-                .flat_map(|rows_id| named_children(rows_id, "row"))
-                .map(text_children)
-                .collect();
-            Some(ContentElement::Table { headers, rows })
-        }
-        "html-block" => Some(ContentElement::HtmlBlock { source: first_child_text(store, id) }),
-        "list" => Some(ContentElement::List { source: first_child_text(store, id) }),
-        "separator" => Some(ContentElement::Separator),
-        "link" => {
-            let href = node_attr_str(store, id, "href").filter(|h| !h.is_empty())?;
-            let text = node_attr_str(store, id, "text").unwrap_or_else(|| first_child_text(store, id));
-            Some(ContentElement::Link { text, href })
-        }
-        _ => None,
-    }
+/// The block is read by the one canonical decoder,
+/// `content_store::block_from_node`. `None` for what renders nothing: a node
+/// that does not decode. Link expressions decode and render nothing in
+/// `block_nodes` (ADR-058 section 4: ignored in the body).
+fn body_block(store: &node_store::NodeStore, id: node_store::NodeId) -> Option<content::ContentElement> {
+    content_store::block_from_node(store, id).ok()
 }
 
 /// The `slot` element `block` sits under, if any.
@@ -1309,7 +1243,7 @@ fn native_block_bundle(
     store: &node_store::NodeStore,
     block: node_store::NodeId,
 ) -> Option<Vec<(String, Form)>> {
-    let element = native_block(store, block)?;
+    let element = body_block(store, block)?;
     let md = content::project_markdown(&element, content::Projection::Content);
     let address = (|| {
         let slot = parent_slot(store, block)?;
@@ -1318,7 +1252,7 @@ fn native_block_bundle(
         let siblings: Vec<(node_store::NodeId, content::ContentElement)> = store
             .children(slot)
             .into_iter()
-            .filter_map(|c| native_block(store, c).map(|el| (c, el)))
+            .filter_map(|c| body_block(store, c).map(|el| (c, el)))
             .collect();
         let position = siblings.iter().position(|(c, _)| *c == block)?;
         let elements: Vec<content::ContentElement> = siblings.into_iter().map(|(_, el)| el).collect();
@@ -1338,14 +1272,6 @@ fn node_attr_str(store: &node_store::NodeStore, id: node_store::NodeId, name: &s
     })
 }
 
-/// Get an integer attribute value from a node.
-fn node_attr_int(store: &node_store::NodeStore, id: node_store::NodeId, name: &str) -> Option<i64> {
-    store.attributes(id).iter().find_map(|(n, v)| {
-        if store.resolve_name(*n) == name {
-            if let Some(node_store::Node::Integer(i)) = store.get(*v) { Some(*i) } else { None }
-        } else { None }
-    })
-}
 
 fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> String {
     let key_file = crate::constants::KEY_PRESEMBLE_FILE;
@@ -2852,6 +2778,9 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let heading_name = store.intern("heading");
         let heading = store.add_node(node_store::Node::Element(heading_name));
+        let level_name = store.intern("level");
+        let level = store.add_node(node_store::Node::Integer(1));
+        store.add_edge(heading, node_store::Edge::Attribute { name: level_name, value: level });
         let text = store.add_node(node_store::Node::Text(source.into()));
         store.add_edge(heading, node_store::Edge::Child(text));
         let title_name = store.intern("title");
@@ -4399,6 +4328,11 @@ mod tests {
         for (slot, kind, text) in [("title", "heading", "My *Title*"), ("summary", "paragraph", "A summary.")] {
             let kind_name = store.intern(kind);
             let el = store.add_node(node_store::Node::Element(kind_name));
+            if kind == "heading" {
+                let level_name = store.intern("level");
+                let level = store.add_node(node_store::Node::Integer(1));
+                store.add_edge(el, node_store::Edge::Attribute { name: level_name, value: level });
+            }
             let t = store.add_node(node_store::Node::Text(text.into()));
             store.add_edge(el, node_store::Edge::Child(t));
             let slot_element = store.intern("slot");
@@ -4512,6 +4446,9 @@ mod tests {
         if with_title {
             let title_slot = slot(&mut store, "title");
             let heading = element(&mut store, "heading");
+            let level_name = store.intern("level");
+            let level = store.add_node(node_store::Node::Integer(1));
+            store.add_edge(heading, node_store::Edge::Attribute { name: level_name, value: level });
             let source = store.add_node(node_store::Node::Text("A title".into()));
             store.add_edge(heading, node_store::Edge::Child(source));
             store.add_edge(title_slot, node_store::Edge::Child(heading));
@@ -4524,7 +4461,8 @@ mod tests {
         for (text, href) in links {
             let block = element(&mut store, "link");
             text_attr(&mut store, block, "href", href);
-            text_attr(&mut store, block, "text", text);
+            let block_text = store.add_node(node_store::Node::Text((*text).into()));
+            store.add_edge(block, node_store::Edge::Child(block_text));
             store.add_edge(author_slot, node_store::Edge::Child(block));
             // The target page: the semantic content with its synthesized link.
             let target = element(&mut store, "semantic-content");
@@ -4752,6 +4690,53 @@ mod tests {
         // Published: these tests are about how a block renders, not the editor's md.
         let ctx = RenderContext::published(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
+    }
+
+    /// The canonical decoder (`content_store::block_from_node`) accepts a
+    /// heading `level` stored as Text; the native body path must read the same
+    /// block, not its own lenient copy of the decoder.
+    #[test]
+    fn native_body_renders_what_the_canonical_decoder_reads() {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let body_name = store.intern("body");
+        let body = store.add_node(node_store::Node::Element(body_name));
+        let heading_name = store.intern("heading");
+        let block = store.add_node(node_store::Node::Element(heading_name));
+        let level_name = store.intern("level");
+        let level_val = store.add_node(node_store::Node::Text("3".into()));
+        store.add_edge(block, node_store::Edge::Attribute { name: level_name, value: level_val });
+        let text_node = store.add_node(node_store::Node::Text("Title".into()));
+        store.add_edge(block, node_store::Edge::Child(text_node));
+        store.add_edge(body, node_store::Edge::Child(block));
+        let body_co_name = store.intern("body");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+
+        let graph = NodeStoreGraphView { store, root };
+        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::published(&reg);
+        let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
+        assert!(html.contains("<h3") && html.contains("Title"), "expected an h3; got: {html}");
+    }
+
+    #[test]
+    fn native_body_renders_an_empty_href_link_like_legacy() {
+        let elements = vec![content::ContentElement::Link {
+            text: "x".to_string(),
+            href: String::new(),
+        }];
+        let spanned: im::Vector<_> = elements
+            .iter()
+            .cloned()
+            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .collect();
+        let legacy = legacy_body_html(&spanned);
+        let native = native_body_html(&elements);
+        assert!(legacy.contains(r#"href="""#), "legacy renders the link: {legacy}");
+        use crate::markdown_nodes::tests::normalise_html;
+        assert_eq!(normalise_html(&legacy), normalise_html(&native), "legacy: {legacy}\nnative: {native}");
     }
 
     #[test]

@@ -10,6 +10,7 @@ interface = "node_store_bridge"
 node_store = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }
+content_store = { workspace = true }
 template = { workspace = true }
 expressions = { workspace = true }
 ned = { workspace = true }

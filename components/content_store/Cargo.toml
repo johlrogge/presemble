@@ -1,0 +1,13 @@
+[package]
+name = "content_store"
+version = "0.35.0"
+edition = "2024"
+
+[package.metadata.polylith]
+interface = "content_store"
+
+[dependencies]
+content = { workspace = true }
+node_store = { workspace = true }
+ned = { workspace = true }
+schema = { workspace = true }
