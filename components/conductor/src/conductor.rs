@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -10,6 +10,19 @@ use crate::suggestion_apply::{self, DOCUMENT_KIND};
 /// Element kind given to a document root that has been superseded by a
 /// re-ingest of the same file (ADR-056). See `Conductor::retire_document_root`.
 const SUPERSEDED_DOCUMENT_KIND: &str = "superseded-document";
+
+/// Stem → URL → document root. Keyed by URL so every reader sees a stem's
+/// documents in URL order (ADR-058 D2), however they were added or edited.
+type StemRoots = HashMap<String, BTreeMap<String, node_store::NodeId>>;
+
+/// `stem_roots` in the `stem → roots` shape
+/// `content_bridge::create_semantic_content` takes, each list in URL order.
+fn stem_root_lists(stem_roots: &StemRoots) -> HashMap<String, Vec<node_store::NodeId>> {
+    stem_roots
+        .iter()
+        .map(|(stem, roots)| (stem.clone(), roots.values().copied().collect()))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Clojure string literal escaping
@@ -157,7 +170,7 @@ pub struct Conductor {
     node_store: Arc<RwLock<node_store::NodeStore>>,
     url_to_root: RwLock<HashMap<String, node_store::NodeId>>,
     url_to_semantic: RwLock<HashMap<String, node_store::NodeId>>,
-    stem_to_roots: RwLock<HashMap<String, Vec<node_store::NodeId>>>,
+    stem_to_roots: RwLock<StemRoots>,
     // NodeStore-native cached indexes (Phase D)
     cached_node_url_index: RwLock<node_store_bridge::store_pipeline::NodeUrlIndex>,
     cached_node_stem_index: RwLock<node_store_bridge::store_pipeline::NodeStemIndex>,
@@ -372,7 +385,7 @@ impl Conductor {
 
         let mut url_index: HashMap<String, node_store::NodeId> = HashMap::new();
         let mut semantic_index: HashMap<String, node_store::NodeId> = HashMap::new();
-        let mut stem_index: HashMap<String, Vec<node_store::NodeId>> = HashMap::new();
+        let mut stem_index = StemRoots::new();
 
         // Validation diagnostics for every schema and content file (ADR-061).
         let mut report = validation::ValidationReport::default();
@@ -497,7 +510,7 @@ impl Conductor {
                         };
                         let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
                         url_index.insert(url.clone(), root);
-                        stem_index.entry(stem_str.to_string()).or_default().push(root);
+                        stem_index.entry(stem_str.to_string()).or_default().insert(url.clone(), root);
                         doc_entries.push(DocEntry { url, root, grammar_key, meta });
                     }
                 }
@@ -548,7 +561,7 @@ impl Conductor {
                     };
                     let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
                     url_index.insert(url.clone(), root);
-                    stem_index.entry(stem_str.to_string()).or_default().push(root);
+                    stem_index.entry(stem_str.to_string()).or_default().insert(url.clone(), root);
                     doc_entries.push(DocEntry { url, root, grammar_key, meta });
                 }
             }
@@ -557,13 +570,14 @@ impl Conductor {
         // Pass 2: Create semantic content. Process items before collections
         // so that collection pages' link slots can resolve to item semantic roots.
         doc_entries.sort_by_key(|e| if e.meta.page_kind == "collection" { 1 } else { 0 });
+        let stem_lists = stem_root_lists(&stem_index);
         for entry in &doc_entries {
             if let Some(grammar) = grammars.get(&entry.grammar_key)
                 .or_else(|| grammars.get(&entry.meta.stem))
             {
                 let sem = node_store_bridge::content_bridge::create_semantic_content(
                     &mut store, entry.root, grammar, &entry.meta,
-                    &stem_index, &url_index, Some(&semantic_index),
+                    &stem_lists, &url_index, Some(&semantic_index),
                 );
                 semantic_index.insert(entry.url.clone(), sem);
             }
@@ -633,7 +647,7 @@ impl Conductor {
                 let body = store.add_node(node_store::Node::Element(body_name));
                 store.add_edge(root, node_store::Edge::Child(body));
                 url_index.insert("/".to_string(), root);
-                stem_index.entry(String::new()).or_default().push(root);
+                stem_index.entry(String::new()).or_default().insert("/".to_string(), root);
 
                 // Create semantic content for this synthetic collection page.
                 // Phase C needs all renderable pages in url_to_semantic.
@@ -1056,9 +1070,7 @@ impl Conductor {
 
                 // Fall back to first item by lexical URL sort
                 let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                let stem_to_roots = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
-                let roots = stem_to_roots.get(&stem).cloned().unwrap_or_default();
-                drop(stem_to_roots);
+                let roots = self.documents_for_stem(&stem);
 
                 let mut item_urls: Vec<String> = roots
                     .iter()
@@ -1092,13 +1104,13 @@ impl Conductor {
         self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
     }
 
-    /// Get all document root NodeIds for a given schema stem.
+    /// Get all document root NodeIds for a given schema stem, in URL order.
     pub fn documents_for_stem(&self, stem: &str) -> Vec<node_store::NodeId> {
         self.stem_to_roots
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(stem)
-            .cloned()
+            .map(|roots| roots.values().copied().collect())
             .unwrap_or_default()
     }
 
@@ -1238,7 +1250,7 @@ impl Conductor {
             stem_to_roots
                 .iter()
                 .flat_map(|(stem_str, roots)| {
-                    roots.iter().filter_map(|&root| {
+                    roots.values().filter_map(|&root| {
                         let page_kind =
                             node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind");
                         if page_kind.as_deref() != Some("item") {
@@ -1523,7 +1535,7 @@ impl Conductor {
         drop(store);
         if let Some(stem) = stem {
             self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner())
-                .entry(stem).or_default().push(root);
+                .entry(stem).or_default().insert(url.to_string(), root);
         }
         if let Some(file) = file {
             self.path_to_doc_root.write().unwrap_or_else(|e| e.into_inner())
@@ -1981,26 +1993,11 @@ impl Conductor {
             map
         };
 
-        let stem_to_roots_snapshot: HashMap<String, Vec<node_store::NodeId>> = {
-            let existing = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
-            let old_root_for_url = self
-                .url_to_root
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(url)
-                .copied();
-
-            let mut map: HashMap<String, Vec<node_store::NodeId>> = existing
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-
-            let stem_roots = map.entry(stem.to_string()).or_default();
-            // Remove the old root for this URL if present
-            if let Some(old_root) = old_root_for_url {
-                stem_roots.retain(|r| *r != old_root);
-            }
-            stem_roots.push(root);
+        // Keyed by URL: inserting replaces this URL's old root in place, so
+        // the stem's documents stay in URL order.
+        let stem_to_roots_snapshot: StemRoots = {
+            let mut map = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner()).clone();
+            map.entry(stem.to_string()).or_default().insert(url.to_string(), root);
             map
         };
 
@@ -2016,7 +2013,7 @@ impl Conductor {
             root,
             grammar,
             &meta,
-            &stem_to_roots_snapshot,
+            &stem_root_lists(&stem_to_roots_snapshot),
             &url_to_root_snapshot,
             Some(&sem_snapshot),
         );
@@ -2037,8 +2034,8 @@ impl Conductor {
         {
             let mut stem_roots = self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner());
             let roots = stem_roots.entry(stem.to_string()).or_default();
-            // The snapshot already has the correct list (old root removed, new root added).
-            // Replace the live entry with the snapshot value.
+            // The snapshot already has the correct roots (this URL's root
+            // replaced). Replace the live entry with the snapshot value.
             *roots = stem_to_roots_snapshot
                 .get(stem)
                 .cloned()
@@ -4613,6 +4610,30 @@ mod update_document_in_store_tests {
             "stem_to_roots['post'] should have exactly 1 root after update (no duplicates), got {}",
             roots.len()
         );
+    }
+
+    #[test]
+    fn documents_for_stem_stays_in_url_order_after_an_edit() {
+        let tmp = build_single_post_site();
+        let dir = tmp.path().join("content/post");
+        std::fs::remove_file(dir.join("hello.md")).expect("remove hello.md");
+        for slug in ["a", "b", "c"] {
+            std::fs::write(dir.join(format!("{slug}.md")), CONTENT_V1).expect("write post");
+        }
+        let conductor = make_conductor(&tmp);
+
+        let grammar = schema::parse_schema(SCHEMA_SRC).expect("parse schema");
+        conductor
+            .update_document_in_store("/post/a", "post", "a", CONTENT_V2, &grammar)
+            .expect("update_document_in_store should succeed");
+
+        let roots = conductor.documents_for_stem("post");
+        let store = conductor.node_store.read().unwrap();
+        let urls: Vec<String> = roots
+            .iter()
+            .filter_map(|&r| node_store_bridge::content_bridge::find_attr_text(&store, r, "url"))
+            .collect();
+        assert_eq!(urls, ["/post/a", "/post/b", "/post/c"]);
     }
 
     /// The new document root should reflect the updated document text.
