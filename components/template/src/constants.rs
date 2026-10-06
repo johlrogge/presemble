@@ -17,6 +17,8 @@ pub const ATTR_SLOT: &str = "data-presemble-slot";
 pub const ATTR_FILE: &str = "data-presemble-file";
 pub const ATTR_HINT: &str = "data-presemble-hint";
 pub const ATTR_MD: &str = "data-presemble-md";
+/// The NED selection that resolves to exactly this block (editorial output).
+pub const ATTR_ADDRESS: &str = "data-presemble-address";
 pub const ATTR_SOURCE_SLOT: &str = "data-presemble-source-slot";
 /// The slot's stored text, which the browser editor edits instead of the
 /// rendered text (ADR-063). Emitted on heading slots and on synthesized title
@@ -38,12 +40,18 @@ pub const KEY_SCHEMA_CONSTRAINTS_PREFIX: &str = "_presemble_schema_constraints_"
 /// The value is a `Value::Text` holding the text as stored in the document.
 pub const KEY_STORED_TEXT_PREFIX: &str = "_presemble_text_";
 
-/// DataGraph key prefix for a slot's canonical markdown (ADR-059 section 10),
-/// the `Content` projection of its element. The full key for slot "title" is
-/// `"_presemble_md_title"`. Present in editorial graphs only, for heading and
-/// single-value paragraph slots.
-pub const KEY_MD_PREFIX: &str = "_presemble_md_";
-
+/// DataGraph key prefix for a slot's editor attributes (ADR-059 section 10).
+/// The full key for slot "title" is `"_presemble_editor_title"`. The value is
+/// a `Record` (a single-value slot) or a `List` of records, one per rendered
+/// item (a multi-value slot), each holding [`KEY_EDITOR_ADDRESS`] and
+/// [`KEY_EDITOR_MD`] as `Text`, either absent when the element has none.
+/// Present in editorial graphs only. The address is built without a file (the
+/// graph does not know it yet) and filled in at render time.
+pub const KEY_EDITOR_PREFIX: &str = "_presemble_editor_";
+/// Key of the address inside an editor record.
+pub const KEY_EDITOR_ADDRESS: &str = "address";
+/// Key of the canonical markdown inside an editor record.
+pub const KEY_EDITOR_MD: &str = "md";
 /// DataGraph key on a synthesized link record holding the stored text of the
 /// slot named by `_source_slot`.
 pub const KEY_SOURCE_TEXT: &str = "_source_text";

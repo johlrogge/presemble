@@ -475,10 +475,24 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
 
     // :apply needs Value — go to legacy path immediately
     if apply_form.is_none() {
+        // The page link the store pipeline adds stands for its page's title
+        // heading, which sits beside it.
+        let title = (editorial && path_segments.last() == Some(&"link"))
+            .then(|| {
+                let mut sibling = path_segments[..path_segments.len() - 1].to_vec();
+                sibling.push("title");
+                graph.resolve_node(&sibling).map(|r| r.id)
+            })
+            .flatten();
+        let editor_mode = if editorial {
+            EditorAttrs::Computed { title }
+        } else {
+            EditorAttrs::Published
+        };
         // Try the fast NodeId path first (avoids Value materialization).
         // Falls back to legacy Value path for unhandled node types (e.g. body).
         if let Some(ref resolved) = graph.resolve_node(&path_segments)
-            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs, editorial)?
+            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs, editor_mode)?
         {
             return Ok(nodes);
         }
@@ -495,7 +509,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
                 let mut attrs = vec![
                     ("class".to_string(), Form::Str(class)),
                     (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file)),
+                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
                 ];
                 // Preserve _source_slot from record values for browser editing
                 if let Some(Value::Record(sub_graph)) = &value
@@ -503,7 +517,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
                 {
                     attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
                     if editorial {
-                        attrs.extend(source_text_attrs(source, sub_graph));
+                        attrs.extend(source_text_attrs(source, sub_graph, &presemble_file));
                     }
                 }
                 attrs.extend(constraint_attrs);
@@ -530,7 +544,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
             ];
             if editorial {
                 attrs.extend(resolve_stored_text_attr(data_path, graph));
-                attrs.extend(resolve_md_attr(data_path, graph));
+                attrs.extend(resolve_editor_attrs(data_path, graph, &presemble_file));
             }
             attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
@@ -549,15 +563,26 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
 
         Some(Value::Record(sub_graph)) => {
             let slot = slot_name_from_path(data_path);
-            render_record(&sub_graph, as_tag, &class, &slot, &presemble_file, editorial)
+            let editor = if editorial {
+                resolve_editor_attrs(data_path, graph, &presemble_file)
+            } else {
+                Vec::new()
+            };
+            render_record(&sub_graph, as_tag, &class, &slot, &presemble_file, editorial, &editor)
         }
 
         Some(Value::List(items)) => {
             let tag = as_tag.unwrap_or("span");
             let slot = slot_name_from_path(data_path);
+            let editors = if editorial {
+                resolve_editor_list(data_path, graph, &presemble_file)
+            } else {
+                Vec::new()
+            };
             let mut result = Vec::new();
-            for item in &items {
-                let mut rendered = render_list_item(item, tag, &class, &slot, &presemble_file, graph, editorial)?;
+            for (i, item) in items.iter().enumerate() {
+                let editor = editors.get(i).map(Vec::as_slice).unwrap_or_default();
+                let mut rendered = render_list_item(item, tag, &class, &slot, &presemble_file, editorial, editor)?;
                 result.append(&mut rendered);
             }
             Ok(result)
@@ -681,6 +706,19 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
 // Native NodeStore render path (no Value materialization)
 // ---------------------------------------------------------------------------
 
+/// Where the native renderer gets an element's editor attributes
+/// (`data-presemble-md`, `data-presemble-address`).
+#[derive(Clone, Copy)]
+enum EditorAttrs {
+    /// Published output: none.
+    Published,
+    /// Editorial output: computed from the block node itself
+    /// (`native_block_bundle`). `title` is the title heading of the page the
+    /// rendered node belongs to, for the page link the store pipeline adds,
+    /// which stands for it.
+    Computed { title: Option<node_store::NodeId>, },
+}
+
 /// Render a presemble:insert element using direct NodeStore access (no Value materialization).
 /// Called when `graph.resolve_node()` returns `Some` — the fast path for NodeStore-backed graphs.
 fn render_insert_native(
@@ -690,10 +728,18 @@ fn render_insert_native(
     data_path: &str,
     presemble_file: &str,
     constraint_attrs: &[(String, Form)],
-    editorial: bool,
+    editor: EditorAttrs,
 ) -> Result<Option<Vec<Node>>, RenderError> {
     let store = resolved.store;
     let id = resolved.id;
+    let editorial = !matches!(editor, EditorAttrs::Published);
+    // The editor attributes of this element, editorial output only.
+    let editor_here = || -> Vec<(String, Form)> {
+        match editor {
+            EditorAttrs::Published => Vec::new(),
+            EditorAttrs::Computed { .. } => native_block_bundle(store, id).unwrap_or_default(),
+        }
+    };
 
     match store.get(id) {
         None => Ok(Some(Vec::new())),
@@ -769,9 +815,14 @@ fn render_insert_native(
                 // List of items — render each child natively
                 let tag = as_tag.unwrap_or("span");
                 let mut result = Vec::new();
+                let child_editor_mode = if editorial {
+                    EditorAttrs::Computed { title: None }
+                } else {
+                    EditorAttrs::Published
+                };
                 for child_id in store.children(id) {
                     let child_resolved = ResolvedNode { id: child_id, store };
-                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file, &[], editorial)? {
+                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file, &[], child_editor_mode)? {
                         result.append(&mut rendered);
                     }
                 }
@@ -785,14 +836,24 @@ fn render_insert_native(
                 // markdown events (ADR-064)
                 if element_name == "body" {
                     let mut body_nodes = Vec::new();
-                    for child_id in store.children(id) {
+                    let children = store.children(id);
+                    let blocks: Vec<content::ContentElement> = children
+                        .iter()
+                        .filter(|c| matches!(store.get(**c), Some(node_store::Node::Element(_))))
+                        .filter_map(|c| native_block(store, *c))
+                        .collect();
+                    let addresses = crate::body_nodes::body_addresses(&blocks, editorial);
+                    let mut next_block = 0;
+                    for child_id in children {
                         match store.get(child_id) {
                             Some(node_store::Node::Element(_)) => {
-                                if let Some(block) = native_block(store, child_id) {
+                                if native_block(store, child_id).is_some() {
                                     body_nodes.extend(crate::body_nodes::body_block_nodes(
-                                        &block,
+                                        &blocks[next_block],
                                         editorial,
+                                        addresses[next_block].as_deref(),
                                     ));
+                                    next_block += 1;
                                 }
                             }
                             Some(node_store::Node::Text(t)) => {
@@ -852,14 +913,7 @@ fn render_insert_native(
                         } else {
                             text
                         };
-                        // The slot element's canonical markdown: the `Content`
-                        // projection of the element itself.
-                        if editorial
-                            && let Some(md) = native_block(store, id)
-                                .and_then(|el| content::project_markdown(&el, content::Projection::Content))
-                        {
-                            elem_attrs.push(md_attr(md));
-                        }
+                        elem_attrs.extend(editor_here());
                         elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
                             name: tag,
@@ -924,6 +978,34 @@ fn render_insert_native(
                         }
                     });
 
+                    // What makes this link editable: a link of the document
+                    // (under a slot) is a block with its own bundle; a
+                    // synthesized link stands for its source slot, the title,
+                    // and takes that slot's bundle.
+                    let mut source_attrs: Vec<(String, Form)> = Vec::new();
+                    let mut link_editor: Vec<(String, Form)> = Vec::new();
+                    if let Some(source) = source_slot {
+                        // A synthesized title link carries the title's stored text (ADR-063).
+                        let source_text = (editorial && source == "title")
+                            .then(|| node_attr_str(store, id, crate::constants::KEY_SOURCE_TEXT))
+                            .flatten();
+                        source_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
+                        link_editor.extend(
+                            source_text
+                                .into_iter()
+                                .flat_map(|t| title_text_attrs(t, presemble_file)),
+                        );
+                    } else if parent_slot(store, id).is_some() {
+                        link_editor.extend(editor_here());
+                    } else if let EditorAttrs::Computed { title: Some(title_id) } = editor {
+                        // The page link the store pipeline adds to every page.
+                        source_attrs.push((
+                            crate::constants::ATTR_SOURCE_SLOT.to_string(),
+                            Form::Str("title".to_string()),
+                        ));
+                        link_editor.extend(title_text_attrs(first_child_text(store, title_id), presemble_file));
+                    }
+
                     return match effective_tag {
                         "a" => {
                             let mut elem_attrs = vec![
@@ -932,14 +1014,8 @@ fn render_insert_native(
                                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
                                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                             ];
-                            if let Some(source) = source_slot {
-                                // A synthesized title link carries the title's stored text (ADR-063).
-                                let source_text = (editorial && source == "title")
-                                    .then(|| node_attr_str(store, id, crate::constants::KEY_SOURCE_TEXT))
-                                    .flatten();
-                                elem_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
-                                elem_attrs.extend(source_text.into_iter().flat_map(title_text_attrs));
-                            }
+                            elem_attrs.extend(source_attrs);
+                            elem_attrs.extend(link_editor);
                             elem_attrs.extend(constraint_attrs.iter().cloned());
                             Ok(Some(vec![Node::Element(Element {
                                 name: "a".to_string(),
@@ -953,6 +1029,8 @@ fn render_insert_native(
                                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
                                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                             ];
+                            inner_attrs.extend(source_attrs);
+                            inner_attrs.extend(link_editor);
                             inner_attrs.extend(constraint_attrs.iter().cloned());
                             let inner = Element {
                                 name: effective_tag.to_string(),
@@ -989,6 +1067,7 @@ fn render_insert_native(
                         (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
                         (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                     ];
+                    img_attrs.extend(editor_here());
                     img_attrs.extend(constraint_attrs.iter().cloned());
                     let element = Element {
                         name: tag,
@@ -1127,6 +1206,56 @@ fn native_block(store: &node_store::NodeStore, id: node_store::NodeId) -> Option
         }
         _ => None,
     }
+}
+
+/// The `slot` element `block` sits under, if any.
+fn parent_slot(store: &node_store::NodeStore, block: node_store::NodeId) -> Option<node_store::NodeId> {
+    store.parents(block).into_iter().find(|p| {
+        matches!(store.get(*p), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "slot")
+    })
+}
+
+/// The `file` of the document that owns `node`: the nearest ancestor that
+/// names one.
+fn owning_file(store: &node_store::NodeStore, node: node_store::NodeId) -> Option<String> {
+    let mut current = node;
+    // Documents are shallow; the bound only guards against a cycle.
+    for _ in 0..16 {
+        if let Some(file) = node_attr_str(store, current, "file").filter(|f| !f.is_empty()) {
+            return Some(file);
+        }
+        current = store.parents(current).into_iter().next()?;
+    }
+    None
+}
+
+/// The editor attributes of the content block `block`, whichever document it
+/// belongs to: its canonical markdown (the `Content` projection) and, when it
+/// sits under a `slot` of a document that names its file, the address of the
+/// block there: its slot, and its position among the slot's blocks of its
+/// kind. `None` when `block` is not a content block.
+fn native_block_bundle(
+    store: &node_store::NodeStore,
+    block: node_store::NodeId,
+) -> Option<Vec<(String, Form)>> {
+    let element = native_block(store, block)?;
+    let md = content::project_markdown(&element, content::Projection::Content);
+    let address = (|| {
+        let slot = parent_slot(store, block)?;
+        let slot_name = node_attr_str(store, slot, "name")?;
+        let file = owning_file(store, slot)?;
+        let siblings: Vec<(node_store::NodeId, content::ContentElement)> = store
+            .children(slot)
+            .into_iter()
+            .filter_map(|c| native_block(store, c).map(|el| (c, el)))
+            .collect();
+        let position = siblings.iter().position(|(c, _)| *c == block)?;
+        let elements: Vec<content::ContentElement> = siblings.into_iter().map(|(_, el)| el).collect();
+        content::block_addresses(&file, content::AddressContainer::Slot(&slot_name), &elements)
+            .into_iter()
+            .nth(position)?
+    })();
+    Some(editor_attrs(address, md))
 }
 
 /// Get a string attribute value from a node.
@@ -1319,6 +1448,7 @@ fn record_attrs(
     file: &str,
     sub_graph: &DataGraph,
     editorial: bool,
+    editor: &[(String, Form)],
 ) -> Vec<(String, Form)> {
     let mut attrs = vec![
         ("class".to_string(), Form::Str(class.to_string())),
@@ -1328,57 +1458,102 @@ fn record_attrs(
     if let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT]) {
         attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
         if editorial {
-            attrs.extend(source_text_attrs(source, sub_graph));
+            attrs.extend(source_text_attrs(source, sub_graph, file));
         }
     }
+    attrs.extend(editor.iter().cloned());
     attrs
 }
 
-/// A synthesized title link carries the title's stored text (ADR-063).
-/// Callers emit it only in editorial output: the render mode alone decides,
-/// whatever the record was built for.
-fn source_text_attrs(source_slot: &str, sub_graph: &DataGraph) -> Vec<(String, Form)> {
+/// A synthesized title link carries the title's stored text (ADR-063) and its
+/// editor attributes. Callers emit it only in editorial output: the render
+/// mode alone decides, whatever the record was built for.
+fn source_text_attrs(source_slot: &str, sub_graph: &DataGraph, file: &str) -> Vec<(String, Form)> {
     if source_slot != "title" {
         return Vec::new();
     }
     match sub_graph.resolve(&[crate::constants::KEY_SOURCE_TEXT]) {
-        Some(Value::Text(text)) => title_text_attrs(text.clone()),
+        Some(Value::Text(text)) => title_text_attrs(text.clone(), file),
         _ => Vec::new(),
     }
 }
 
-/// The editor attributes of a synthesized title link: the title's stored text
-/// and its canonical markdown, the `Content` projection of the title heading.
-fn title_text_attrs(stored: String) -> Vec<(String, Form)> {
-    let md = heading_content_md(&stored).map(md_attr);
-    std::iter::once(stored_text_attr(stored)).chain(md).collect()
+/// The attributes of a synthesized title link: the title's stored text, and
+/// the editor attributes of the title heading it stands for. Its markdown is
+/// the `Content` projection of the heading and its address that of the first
+/// heading of the `title` slot of `file`.
+fn title_text_attrs(stored: String, file: &str) -> Vec<(String, Form)> {
+    let heading = schema::HeadingLevel::new(1).map(|level| content::ContentElement::Heading {
+        level,
+        source: stored.as_str().into(),
+    });
+    let md = heading
+        .as_ref()
+        .and_then(|h| content::project_markdown(h, content::Projection::Content));
+    let address = heading.as_ref().and_then(|h| {
+        let addresses = content::block_addresses(
+            file,
+            content::AddressContainer::Slot("title"),
+            std::slice::from_ref(h),
+        );
+        addresses.into_iter().next().flatten().filter(|_| !file.is_empty())
+    });
+    std::iter::once(stored_text_attr(stored))
+        .chain(editor_attrs(address, md))
+        .collect()
 }
 
-/// The `Content` projection of a heading whose markdown source is `source`.
-/// The level is irrelevant: the projection drops the markers.
-fn heading_content_md(source: &str) -> Option<String> {
-    let level = schema::HeadingLevel::new(1)?;
-    let heading = content::ContentElement::Heading { level, source: source.into() };
-    content::project_markdown(&heading, content::Projection::Content)
+/// The editor attributes of one element: `data-presemble-md` and
+/// `data-presemble-address`, each only when there is one.
+fn editor_attrs(address: Option<String>, md: Option<String>) -> Vec<(String, Form)> {
+    let md = md.map(|md| (crate::constants::ATTR_MD.to_string(), Form::Str(md)));
+    let address = address.map(|a| (crate::constants::ATTR_ADDRESS.to_string(), Form::Str(a)));
+    md.into_iter().chain(address).collect()
 }
 
-/// The `data-presemble-md` attribute holding `md`.
-fn md_attr(md: String) -> (String, Form) {
-    (crate::constants::ATTR_MD.to_string(), Form::Str(md))
+/// The editor attributes of the element an editor record (a legacy graph's
+/// `KEY_EDITOR_PREFIX` value) describes. Its address is built without a file;
+/// `file` fills it in.
+fn editor_record_attrs(record: &DataGraph, file: &str) -> Vec<(String, Form)> {
+    let text = |key: &str| match record.resolve(&[key]) {
+        Some(Value::Text(t)) => Some(t.clone()),
+        _ => None,
+    };
+    let address = text(crate::constants::KEY_EDITOR_ADDRESS)
+        .and_then(|a| content::address::with_file(&a, file));
+    editor_attrs(address, text(crate::constants::KEY_EDITOR_MD))
 }
 
-/// Look up the canonical markdown of slot `data_path` in its parent record,
-/// as a `data-presemble-md` attribute. Like the stored text there is no
-/// top-level fallback.
-fn resolve_md_attr(data_path: &str, graph: &dyn GraphView) -> Option<(String, Form)> {
-    let key = format!("{}{}", crate::constants::KEY_MD_PREFIX, slot_name_from_path(data_path));
+/// The editor value of slot `data_path` in its parent record: a record, or a
+/// list of records. Like the stored text there is no top-level fallback.
+fn resolve_editor_value(data_path: &str, graph: &dyn GraphView) -> Option<Value> {
+    let key = format!("{}{}", crate::constants::KEY_EDITOR_PREFIX, slot_name_from_path(data_path));
     let mut scoped: Vec<&str> = data_path.split('.').collect();
     if let Some(last) = scoped.last_mut() {
         *last = key.as_str();
     }
-    match graph.resolve(&scoped)?.into_owned() {
-        Value::Text(t) => Some(md_attr(t)),
-        _ => None,
+    Some(graph.resolve(&scoped)?.into_owned())
+}
+
+/// The editor attributes of a single-value slot.
+fn resolve_editor_attrs(data_path: &str, graph: &dyn GraphView, file: &str) -> Vec<(String, Form)> {
+    match resolve_editor_value(data_path, graph) {
+        Some(Value::Record(record)) => editor_record_attrs(&record, file),
+        _ => Vec::new(),
+    }
+}
+
+/// The editor attributes of each item of a multi-value slot, in order.
+fn resolve_editor_list(data_path: &str, graph: &dyn GraphView, file: &str) -> Vec<Vec<(String, Form)>> {
+    match resolve_editor_value(data_path, graph) {
+        Some(Value::List(records)) => records
+            .iter()
+            .map(|r| match r {
+                Value::Record(record) => editor_record_attrs(record, file),
+                _ => Vec::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1390,6 +1565,7 @@ fn render_record(
     slot: &str,
     file: &str,
     editorial: bool,
+    editor: &[(String, Form)],
 ) -> Result<Vec<Node>, RenderError> {
     let has_href = sub_graph.resolve(&["href"]).is_some();
     let has_path = sub_graph.resolve(&["path"]).is_some();
@@ -1413,7 +1589,7 @@ fn render_record(
         "a" => {
             let href = extract_text(sub_graph, "href").unwrap_or_default();
             let text = extract_text(sub_graph, "text").unwrap_or_default();
-            let mut attrs = record_attrs(class, slot, file, sub_graph, editorial);
+            let mut attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
             attrs.insert(0, ("href".to_string(), Form::Str(href)));
             let element = Element {
                 name: "a".to_string(),
@@ -1426,7 +1602,7 @@ fn render_record(
         "img" => {
             let src = extract_text(sub_graph, "path").unwrap_or_default();
             let alt = extract_text(sub_graph, "alt").unwrap_or_default();
-            let mut attrs = record_attrs(class, slot, file, sub_graph, editorial);
+            let mut attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
             attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
             attrs.insert(0, ("src".to_string(), Form::Str(src)));
             let element = Element {
@@ -1442,7 +1618,7 @@ fn render_record(
             if has_href {
                 let href = extract_text(sub_graph, "href").unwrap_or_default();
                 let text = extract_text(sub_graph, "text").unwrap_or_default();
-                let attrs = record_attrs(class, slot, file, sub_graph, editorial);
+                let attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
                 let inner = Element {
                     name: effective_tag.to_string(),
                     attrs,
@@ -1457,7 +1633,7 @@ fn render_record(
             } else if has_path {
                 let src = extract_text(sub_graph, "path").unwrap_or_default();
                 let alt = extract_text(sub_graph, "alt").unwrap_or_default();
-                let mut attrs = record_attrs(class, slot, file, sub_graph, editorial);
+                let mut attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
                 attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
                 attrs.insert(0, ("src".to_string(), Form::Str(src)));
                 let element = Element {
@@ -1480,18 +1656,20 @@ fn render_list_item(
     class: &str,
     slot: &str,
     file: &str,
-    _graph: &dyn GraphView,
     editorial: bool,
+    editor: &[(String, Form)],
 ) -> Result<Vec<Node>, RenderError> {
     match item {
         Value::Text(text) => {
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class.to_string())),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+            ];
+            attrs.extend(editor.iter().cloned());
             let element = Element {
                 name: tag.to_string(),
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
-                ],
+                attrs,
                 children: vec![Node::Text(text.clone())],
             };
             Ok(vec![Node::Element(element)])
@@ -1503,7 +1681,9 @@ fn render_list_item(
             Ok(nodes)
         }
 
-        Value::Record(sub_graph) => render_record(sub_graph, Some(tag), class, slot, file, editorial),
+        Value::Record(sub_graph) => {
+            render_record(sub_graph, Some(tag), class, slot, file, editorial, editor)
+        }
 
         Value::Absent => Ok(Vec::new()),
 
@@ -4081,6 +4261,227 @@ mod tests {
             Editorial,
         );
         assert!(link.contains(&want), "{link}");
+    }
+
+    // ── Server-emitted addresses (ADR-059 section 10) ───────────────────────
+
+    /// The values of attribute `name`, in document order, HTML-unescaped.
+    fn attr_values(html: &str, name: &str) -> Vec<String> {
+        let needle = format!("{name}=\"");
+        html.split(&needle)
+            .skip(1)
+            .map(|rest| {
+                rest.split('"')
+                    .next()
+                    .unwrap_or("")
+                    .replace("&quot;", "\"")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&amp;", "&")
+            })
+            .collect()
+    }
+
+    const ADDRESS_FILE: &str = "content/post/x.md";
+    const ADDRESS_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\n\
+        Summary text. {#summary}\noccurs\n: exactly once\n\n----\n\nBody.\n";
+    const ADDRESS_CONTENT: &str =
+        "# My *Title*\n\nA summary.\n\n----\n\nIntro text.\n\n## Intro\n\nPara one.\n\nPara two.\n";
+
+    fn doc_slot(slot: &str) -> String {
+        format!(r#"(ned/children (ned/slot (ned/doc-by-path "{ADDRESS_FILE}") "{slot}"))"#)
+    }
+
+    fn expected_body_addresses() -> Vec<String> {
+        let intro = format!(r#"(ned/heading-with-text {} "Intro")"#, doc_slot("body"));
+        vec![
+            format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("body")),
+            intro.clone(),
+            format!(r#"(ned/nth-after {intro} "paragraph" 0)"#),
+            format!(r#"(ned/nth-after {intro} "paragraph" 1)"#),
+        ]
+    }
+
+    #[test]
+    fn editorial_body_and_slots_carry_addresses() {
+        let title_addr = format!(r#"(ned/nth-of-kind {} "heading" 0)"#, doc_slot("title"));
+        let summary_addr = format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("summary"));
+
+        // Legacy: a graph built from the document.
+        let grammar = schema::parse_schema(ADDRESS_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign(ADDRESS_CONTENT, &grammar).expect("content parses");
+        let mut graph =
+            crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial);
+        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        let html = render_with(
+            &graph,
+            r#"<presemble:insert data="title" as="h1" /><presemble:insert data="summary" as="p" /><presemble:insert data="body" />"#,
+        );
+        let got = attr_values(&html, "data-presemble-address");
+        let mut want = vec![title_addr.clone(), summary_addr.clone()];
+        want.extend(expected_body_addresses());
+        assert_eq!(got, want, "legacy: {html}");
+
+        // Native: the same body in a store, and slot elements.
+        let elements = vec![
+            content::ContentElement::Paragraph { text: "Intro text.".to_string() },
+            heading_el(2, "Intro"),
+            content::ContentElement::Paragraph { text: "Para one.".to_string() },
+            content::ContentElement::Paragraph { text: "Para two.".to_string() },
+        ];
+        let native = native_body_html(&elements);
+        let file_free = |a: String| a.replace("content/post/x.md", BODY_FILE);
+        assert_eq!(
+            attr_values(&native, "data-presemble-address"),
+            expected_body_addresses().into_iter().map(file_free).collect::<Vec<_>>(),
+            "{native}"
+        );
+
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let file_name = store.intern("file");
+        let file_val = store.add_node(node_store::Node::Text(ADDRESS_FILE.into()));
+        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        // The document shape: `preamble > slot(name) > block`, and the page
+        // reaches each block through a `ConsistsOf` of the slot's name.
+        let preamble_name = store.intern("preamble");
+        let preamble = store.add_node(node_store::Node::Element(preamble_name));
+        store.add_edge(root, node_store::Edge::Child(preamble));
+        for (slot, kind, text) in [("title", "heading", "My *Title*"), ("summary", "paragraph", "A summary.")] {
+            let kind_name = store.intern(kind);
+            let el = store.add_node(node_store::Node::Element(kind_name));
+            let t = store.add_node(node_store::Node::Text(text.into()));
+            store.add_edge(el, node_store::Edge::Child(t));
+            let slot_element = store.intern("slot");
+            let slot_node = store.add_node(node_store::Node::Element(slot_element));
+            let name_key = store.intern("name");
+            let name_val = store.add_node(node_store::Node::Text(slot.into()));
+            store.add_edge(slot_node, node_store::Edge::Attribute { name: name_key, value: name_val });
+            store.add_edge(preamble, node_store::Edge::Child(slot_node));
+            store.add_edge(slot_node, node_store::Edge::Child(el));
+            let slot_name = store.intern(slot);
+            store.add_edge(root, node_store::Edge::ConsistsOf { name: slot_name, part: el });
+        }
+        let graph = NodeStoreGraphView { store, root };
+        let html = render_with(
+            &graph,
+            r#"<presemble:insert data="title" as="h1" /><presemble:insert data="summary" as="p" />"#,
+        );
+        assert_eq!(
+            attr_values(&html, "data-presemble-address"),
+            vec![title_addr, summary_addr],
+            "native slots: {html}"
+        );
+    }
+
+    /// The title heading's address in `file`.
+    fn title_address(file: &str) -> String {
+        format!(
+            r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "{file}") "title")) "heading" 0)"#
+        )
+    }
+
+    #[test]
+    fn data_each_items_carry_their_documents_addresses() {
+        // Item graphs as the site builder makes them: one per document.
+        let grammar = schema::parse_schema(ADDRESS_SCHEMA).expect("schema parses");
+        let mut items = Vec::new();
+        for (file, title) in [("content/post/a.md", "Alpha"), ("content/post/b.md", "Beta")] {
+            let doc = content::parse_and_assign(
+                &format!("# {title}\n\nSummary of {title}.\n\n----\n\nBody.\n"),
+                &grammar,
+            )
+            .expect("content parses");
+            let mut item =
+                crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial);
+            item.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(file.to_string()));
+            let stored = crate::data::stored_text(&item, "title");
+            item.insert(
+                "link",
+                Value::Record(crate::data::synthesize_link(title, "/x", stored.as_deref())),
+            );
+            items.push(Value::Record(item));
+        }
+        let mut graph = DataGraph::new();
+        graph.insert("items", Value::List(items));
+        let html = render_with(
+            &graph,
+            r#"<template data-each="items"><presemble:insert data="item.title" as="h3" /><presemble:insert data="item.summary" as="p" /></template>"#,
+        );
+        let summary = |file: &str| {
+            format!(
+                r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "{file}") "summary")) "paragraph" 0)"#
+            )
+        };
+        assert_eq!(
+            attr_values(&html, "data-presemble-address"),
+            vec![
+                title_address("content/post/a.md"),
+                summary("content/post/a.md"),
+                title_address("content/post/b.md"),
+                summary("content/post/b.md"),
+            ],
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn synthesized_page_link_carries_title_address() {
+        use crate::data::OutputMode::Editorial;
+        let want_md = md_attr("Plain *em* title");
+        // Legacy: the link record beside the document's slots.
+        let mut graph = DataGraph::new();
+        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        graph.insert(
+            "link",
+            Value::Record(crate::data::synthesize_link("Plain em title", "/x", Some("Plain *em* title"))),
+        );
+        let legacy = render_for(&graph, r#"<presemble:insert data="link" />"#, Editorial);
+        assert_eq!(attr_values(&legacy, "data-presemble-address"), vec![title_address(ADDRESS_FILE)], "{legacy}");
+        assert!(legacy.contains(&want_md), "{legacy}");
+
+        // Native: the link the store pipeline adds has href and text only; it
+        // sits beside the title heading of its own page.
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let file_name = store.intern("file");
+        let file_val = store.add_node(node_store::Node::Text(ADDRESS_FILE.into()));
+        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        let heading_name = store.intern("heading");
+        let heading = store.add_node(node_store::Node::Element(heading_name));
+        let text = store.add_node(node_store::Node::Text("Plain *em* title".into()));
+        store.add_edge(heading, node_store::Edge::Child(text));
+        let title_name = store.intern("title");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+        let link_name = store.intern("link");
+        let link = store.add_node(node_store::Node::Element(link_name));
+        for (key, value) in [("href", "/x"), ("text", "Plain em title")] {
+            let name = store.intern(key);
+            let val = store.add_node(node_store::Node::Text(value.into()));
+            store.add_edge(link, node_store::Edge::Attribute { name, value: val });
+        }
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: link });
+        let native = render_for(&NodeStoreGraphView { store, root }, r#"<presemble:insert data="link" />"#, Editorial);
+        assert_eq!(attr_values(&native, "data-presemble-address"), vec![title_address(ADDRESS_FILE)], "{native}");
+        assert!(native.contains(&want_md), "{native}");
+    }
+
+    #[test]
+    fn published_output_has_no_address_attrs() {
+        use crate::data::OutputMode::Published;
+        let grammar = schema::parse_schema(ADDRESS_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign(ADDRESS_CONTENT, &grammar).expect("content parses");
+        let mut graph = crate::data::build_article_graph(&doc, &grammar, Published);
+        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        let html = render_for(
+            &graph,
+            r#"<presemble:insert data="title" as="h1" /><presemble:insert data="summary" as="p" /><presemble:insert data="body" />"#,
+            Published,
+        );
+        assert!(html.contains("Para two."), "{html}");
+        assert!(!html.contains("data-presemble-address"), "{html}");
     }
 
     #[test]

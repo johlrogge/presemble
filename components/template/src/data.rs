@@ -1,5 +1,5 @@
 use content::{AsPlainText, ContentElement, Document};
-use schema::{Element, Grammar};
+use schema::{Element, Grammar, Spanned};
 use std::sync::Arc;
 
 /// Trait for callable values (closures and primitive functions).
@@ -233,21 +233,59 @@ pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
 /// Slot names become top-level keys. Body content is rendered as HTML.
 /// Editorial output also carries each heading slot's stored text (ADR-063);
 /// published output carries no editor-only data.
-/// Editorial output also carries each body block's and slot's canonical
-/// markdown for the browser editor (ADR-059 section 10).
+/// Editorial output also carries the editor attributes of each body block and
+/// slot element: its canonical markdown and its address (ADR-059 section 10).
 pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode) -> DataGraph {
     let mut graph = DataGraph::new();
     let editorial = output == OutputMode::Editorial;
-    // The canonical markdown of a slot element, under the `Content` projection.
-    let insert_md = |graph: &mut DataGraph, slot_key: &str, el: &ContentElement| {
-        if editorial
-            && let Some(md) = content::project_markdown(el, content::Projection::Content)
-        {
-            graph.insert(
-                format!("{}{slot_key}", crate::constants::KEY_MD_PREFIX),
-                Value::Text(md),
-            );
+    // The editor record of the element at `index` of a slot's `all` elements:
+    // its address (built without a file; see `KEY_EDITOR_PREFIX`) and its
+    // canonical markdown under the `Content` projection.
+    let editor_record = |all: &[ContentElement], addresses: &[Option<String>], index: usize| {
+        let mut record = DataGraph::new();
+        if let Some(Some(address)) = addresses.get(index) {
+            record.insert(crate::constants::KEY_EDITOR_ADDRESS, Value::Text(address.clone()));
         }
+        if let Some(md) = content::project_markdown(&all[index], content::Projection::Content) {
+            record.insert(crate::constants::KEY_EDITOR_MD, Value::Text(md));
+        }
+        Value::Record(record)
+    };
+    // Store the editor records of the elements at `indices` under the slot's
+    // editor key: one record for a single-value slot, else a list.
+    let insert_editor = |graph: &mut DataGraph,
+                         slot_key: &str,
+                         elements: &im::Vector<Spanned<ContentElement>>,
+                         indices: Vec<usize>,
+                         single: bool| {
+        if !editorial {
+            return;
+        }
+        let all: Vec<ContentElement> = elements.iter().map(|s| s.node.clone()).collect();
+        let addresses =
+            content::block_addresses("", content::AddressContainer::Slot(slot_key), &all);
+        let mut records: Vec<Value> =
+            indices.into_iter().map(|i| editor_record(&all, &addresses, i)).collect();
+        let value = if single {
+            match records.drain(..).next() {
+                Some(record) => record,
+                None => return,
+            }
+        } else {
+            Value::List(records)
+        };
+        graph.insert(format!("{}{slot_key}", crate::constants::KEY_EDITOR_PREFIX), value);
+    };
+    let positions = |elements: &im::Vector<Spanned<ContentElement>>,
+                     wanted: &dyn Fn(&ContentElement) -> bool,
+                     max: usize| {
+        elements
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| wanted(&s.node))
+            .map(|(i, _)| i)
+            .take(max)
+            .collect::<Vec<usize>>()
     };
 
     // Iterate grammar preamble slots and map each to its DocumentSlot.
@@ -266,7 +304,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                 if let Some(spanned) = elements.front()
                     && let ContentElement::Heading { source, .. } = &spanned.node
                 {
-                    insert_md(&mut graph, &slot_key, &spanned.node);
+                    insert_editor(&mut graph, &slot_key, elements, vec![0], true);
                     // The stored source, which the browser editor edits (ADR-063).
                     if editorial {
                         let stored_key =
@@ -295,13 +333,13 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
 
                 // For single-value slots (exactly once), store as Text not List
                 // so templates don't need `as` to avoid span concatenation.
+                let indices = positions(
+                    elements,
+                    &|el| matches!(el, ContentElement::Paragraph { .. }),
+                    max,
+                );
+                insert_editor(&mut graph, &slot_key, elements, indices, max == 1);
                 let value = if max == 1 {
-                    if let Some(first) = elements
-                        .iter()
-                        .find(|s| matches!(s.node, ContentElement::Paragraph { .. }))
-                    {
-                        insert_md(&mut graph, &slot_key, &first.node);
-                    }
                     paragraphs.into_iter().next().unwrap_or(Value::Absent)
                 } else {
                     Value::List(paragraphs)
@@ -331,6 +369,14 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                     .take(max)
                     .collect();
 
+                let indices = positions(
+                    elements,
+                    &|el| {
+                        matches!(el, ContentElement::Link { .. } | ContentElement::LinkExpression { .. })
+                    },
+                    max,
+                );
+                insert_editor(&mut graph, &slot_key, elements, indices, max == 1);
                 let value = if max == 1 {
                     links.into_iter().next().unwrap_or(Value::Absent)
                 } else {
@@ -350,6 +396,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                         None => Value::Absent,
                     };
                     record.insert("alt", alt_value);
+                    insert_editor(&mut graph, &slot_key, elements, vec![0], true);
                     graph.insert(slot_key, Value::Record(record));
                 }
             }
@@ -1510,12 +1557,20 @@ mod tests {
             "expected data-presemble-md attribute in editorial body HTML; got: {html}"
         );
         assert!(
-            graph.resolve(&["_presemble_md_title"]).is_some(),
-            "editorial graph carries the title slot's md"
+            matches!(
+                graph.resolve(&["_presemble_editor_title", "md"]),
+                Some(Value::Text(t)) if t == "My Title"
+            ),
+            "editorial graph carries the title slot's editor record"
+        );
+        assert!(
+            graph.resolve(&["_presemble_editor_title", "address"]).is_some(),
+            "and its address"
         );
         let published = build_article_graph(&doc, &grammar, OutputMode::Published);
         assert!(!body_html_of(&published).contains("data-presemble-md"));
-        assert!(published.resolve(&["_presemble_md_title"]).is_none());
+        assert!(!body_html_of(&published).contains("data-presemble-address"));
+        assert!(published.resolve(&["_presemble_editor_title"]).is_none());
     }
 
     // -------------------------------------------------------------------------

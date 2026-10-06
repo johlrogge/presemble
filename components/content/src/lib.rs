@@ -1,4 +1,5 @@
 mod adapters;
+pub mod address;
 mod block;
 mod diff;
 mod document;
@@ -17,6 +18,7 @@ pub use adapters::{
     diff_to_dom_patches, diff_to_source_edits, DomPatch, FileWriter, FullDocumentWriter,
     SourceEdit,
 };
+pub use address::{block_addresses, clj_str, AddressContainer};
 pub use block::{check_block_round_trip, parse_markdown_projection, project_markdown, Projection, RoundTripError};
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{

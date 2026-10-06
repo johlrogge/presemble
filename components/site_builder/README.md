@@ -14,7 +14,7 @@ Extracts the three shared graph-building phases that previously existed in dupli
 
 Link expressions are evaluated in the NodeStore pipeline (`node_store_bridge::store_pipeline`, ADR-058 "Evaluation and invalidation"), not on the `SiteGraph`.
 
-The `SourceAttachment` enum selects the output mode. `Attach` is editorial output: each body block and slot element carries its canonical markdown (`content::project_markdown`) as `data-presemble-md`, which the browser editor reads. `Omit` is published output, with no editor-only data. The conductor passes `Attach`; the CLI passes `Omit`.
+The `SourceAttachment` enum selects the output mode. `Attach` is editorial output: each body block and slot element carries its canonical markdown (`content::project_markdown`) as `data-presemble-md`, and the NED selection that resolves to exactly that block (`content::block_addresses`) as `data-presemble-address`; the browser editor reads both. `Omit` is published output, with no editor-only data. The conductor passes `Attach`; the CLI passes `Omit`.
 
 Build policy (what to do with diagnostics, rendering, dep_graph, file output) remains in the CLI. `site_builder` returns raw `GraphBuildResult` values and does no I/O beyond reading from the `SiteRepository`.
 

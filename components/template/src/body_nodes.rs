@@ -6,7 +6,7 @@
 //! decoded from the store. Escaping and void-element syntax belong to the
 //! HTML serializer; nothing here builds an HTML string.
 
-use crate::constants::{ATTR_FILE, ATTR_MD, ATTR_SLOT, CLASS_HTML_REMOVED, MSG_HTML_REMOVED};
+use crate::constants::{ATTR_ADDRESS, ATTR_FILE, ATTR_MD, ATTR_SLOT, CLASS_HTML_REMOVED, MSG_HTML_REMOVED};
 use crate::dom::{Element, Form, Node};
 use crate::markdown_nodes::{inline_children, table_cell_nodes};
 use content::ContentElement;
@@ -17,6 +17,9 @@ pub(crate) struct BlockCtx<'a> {
     /// The canonical markdown of the block, emitted as `data-presemble-md`.
     /// Editorial output only.
     pub md: Option<&'a str>,
+    /// The block's address, emitted as `data-presemble-address`. Editorial
+    /// output only; built without a file (see [`stamp_file`]).
+    pub address: Option<&'a str>,
 }
 
 fn attr(name: &str, value: impl Into<String>) -> (String, Form) {
@@ -28,11 +31,14 @@ fn el(name: &str, attrs: Vec<(String, Form)>, children: Vec<Node>) -> Node {
 }
 
 /// The attributes that make an element the `body` slot: the slot marker, then
-/// the markdown source when there is one.
+/// the editor attributes when there are any.
 fn slot_attrs(ctx: &BlockCtx) -> Vec<(String, Form)> {
     let mut attrs = vec![attr(ATTR_SLOT, "body")];
     if let Some(md) = ctx.md {
         attrs.push(attr(ATTR_MD, md));
+    }
+    if let Some(address) = ctx.address {
+        attrs.push(attr(ATTR_ADDRESS, address));
     }
     attrs
 }
@@ -76,11 +82,11 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             )]
         }
         // A marker, not content: hidden, but addressable as a body slot.
-        ContentElement::Separator => vec![el(
-            "span",
-            vec![attr(ATTR_SLOT, "body"), attr("hidden", "")],
-            Vec::new(),
-        )],
+        ContentElement::Separator => {
+            let mut attrs = slot_attrs(ctx);
+            attrs.push(attr("hidden", ""));
+            vec![el("span", attrs, Vec::new())]
+        }
         // Never rendered (ADR-062 D2): a placeholder that is not a slot.
         ContentElement::HtmlBlock { .. } => vec![el(
             "div",
@@ -107,14 +113,30 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
 }
 
 /// The nodes for one body block. In editorial output the block carries its
-/// canonical block markdown as `data-presemble-md` (ADR-059 section 10); a
-/// block that cannot be edited as markdown carries none. Published output
-/// carries no editor-only data.
-pub(crate) fn body_block_nodes(element: &ContentElement, editorial: bool) -> Vec<Node> {
-    let md = editorial
-        .then(|| content::project_markdown(element, content::Projection::Block))
-        .flatten();
-    block_nodes(element, &BlockCtx { md: md.as_deref() })
+/// editor attributes (ADR-059 section 10): its canonical block markdown as
+/// `data-presemble-md`, when it has one, and `address` as
+/// `data-presemble-address`. Published output carries no editor-only data.
+///
+/// `address` is built without a file; [`stamp_file`] fills it in.
+pub(crate) fn body_block_nodes(
+    element: &ContentElement,
+    editorial: bool,
+    address: Option<&str>,
+) -> Vec<Node> {
+    if !editorial {
+        return block_nodes(element, &BlockCtx { md: None, address: None });
+    }
+    let md = content::project_markdown(element, content::Projection::Block);
+    block_nodes(element, &BlockCtx { md: md.as_deref(), address })
+}
+
+/// The editor addresses of body blocks, one per block, built without a file.
+pub(crate) fn body_addresses(blocks: &[ContentElement], editorial: bool) -> Vec<Option<String>> {
+    if editorial {
+        content::block_addresses("", content::AddressContainer::Body, blocks)
+    } else {
+        vec![None; blocks.len()]
+    }
 }
 
 /// The nodes for a whole body, each block through [`body_block_nodes`].
@@ -122,23 +144,39 @@ pub(crate) fn render_body_nodes(
     elements: &im::Vector<Spanned<ContentElement>>,
     editorial: bool,
 ) -> Vec<Node> {
-    elements
+    let blocks: Vec<ContentElement> = elements.iter().map(|s| s.node.clone()).collect();
+    let addresses = body_addresses(&blocks, editorial);
+    blocks
         .iter()
-        .flat_map(|spanned| body_block_nodes(&spanned.node, editorial))
+        .zip(&addresses)
+        .flat_map(|(block, address)| body_block_nodes(block, editorial, address.as_deref()))
         .collect()
 }
 
-/// Add `data-presemble-file` to every top-level element that carries
-/// `data-presemble-slot`, when `file` is non-empty.
+/// Finish the file-dependent attributes of every top-level element that
+/// carries `data-presemble-slot`: add `data-presemble-file` and fill the file
+/// into `data-presemble-address`. When `file` is empty there is no file to
+/// add, and an address without a file is dropped.
 pub(crate) fn stamp_file(nodes: &mut [Node], file: &str) {
-    if file.is_empty() {
-        return;
-    }
     for node in nodes {
         if let Node::Element(e) = node
             && e.attr(ATTR_SLOT).is_some()
         {
-            e.attrs.push(attr(ATTR_FILE, file));
+            if let Some(pos) = e.attrs.iter().position(|(name, _)| name == ATTR_ADDRESS) {
+                let filled = match &e.attrs[pos].1 {
+                    Form::Str(address) => content::address::with_file(address, file),
+                    _ => None,
+                };
+                match filled {
+                    Some(address) => e.attrs[pos].1 = Form::Str(address),
+                    None => {
+                        e.attrs.remove(pos);
+                    }
+                }
+            }
+            if !file.is_empty() {
+                e.attrs.push(attr(ATTR_FILE, file));
+            }
         }
     }
 }
@@ -156,7 +194,7 @@ mod tests {
     }
 
     fn render(el: ContentElement) -> String {
-        serialize_nodes(&block_nodes(&el, &BlockCtx { md: None }))
+        serialize_nodes(&block_nodes(&el, &BlockCtx { md: None, address: None }))
     }
 
     #[test]
@@ -167,7 +205,7 @@ mod tests {
                 target: LinkTarget::PathRef("post".to_string()),
                 slot: None,
             },
-            &BlockCtx { md: None },
+            &BlockCtx { md: None, address: None },
         );
         assert!(nodes.is_empty(), "{nodes:?}");
     }

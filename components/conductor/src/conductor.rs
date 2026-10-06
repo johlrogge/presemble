@@ -35,26 +35,10 @@ fn stem_root_lists(stem_roots: &StemRoots) -> HashMap<String, Vec<node_store::No
 // Clojure string literal escaping
 // ---------------------------------------------------------------------------
 
-/// Escape a Rust string for use as a Clojure string literal body.
-/// Handles `\\` and `\"`. Strips `\r` (CR) and null bytes rather than panicking.
-/// Returns the escaped content without surrounding quotes.
-fn clj_str_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for ch in s.chars() {
-        match ch {
-            '\0' | '\r' => {} // strip CR and null
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-/// Wrap a Rust string as a Clojure string literal (with surrounding quotes).
-pub(crate) fn clj_str(s: &str) -> String {
-    format!("\"{}\"", clj_str_escape(s))
-}
+// A Rust string as a Clojure string literal (with surrounding quotes): `\` and
+// `"` escaped, CR and NUL stripped. One definition, shared with the addresses
+// the server emits.
+pub(crate) use content::clj_str;
 
 /// The result of handling a command: a response to send back, plus
 /// zero or more events to broadcast to all subscribers.
@@ -8837,5 +8821,227 @@ mod link_expression_pipeline_tests {
         let posts = slot_urls(&conductor, "/author/a", "posts");
         assert_eq!(count(&posts, "/post/p7"), 1, "{posts:?}");
         assert_eq!(posts, urls(&["/post/p1", "/post/p3", "/post/p7"]));
+    }
+}
+
+/// ADR-059 section 10: every address the server emits resolves to the block
+/// that carries it, and the element's markdown is that block's markdown.
+#[cfg(test)]
+mod emitted_address_tests {
+    use super::*;
+
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// A copy of the example site (`site/`): content, schemas, templates.
+    fn example_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site");
+        for dir in ["content", "schemas", "templates"] {
+            copy_dir(&source.join(dir), &tmp.path().join(dir));
+        }
+        tmp
+    }
+
+    /// The value of attribute `name` in a start tag, HTML-unescaped.
+    fn attr(tag: &str, name: &str) -> Option<String> {
+        let needle = format!(" {name}=\"");
+        let rest = &tag[tag.find(&needle)? + needle.len()..];
+        let value = &rest[..rest.find('"')?];
+        Some(
+            value
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&"),
+        )
+    }
+
+    /// The store kind a rendered element stands for.
+    fn kind_of(tag: &str) -> &'static str {
+        let name = tag.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+        match name {
+            "p" => "paragraph",
+            "pre" => "code-block",
+            "blockquote" => "blockquote",
+            "img" => "image",
+            "table" => "table",
+            "div" => "list",
+            "span" if tag.contains("hidden=") => "separator",
+            // A synthesized title link stands for the title heading.
+            "a" if tag.contains("data-presemble-source-slot=\"title\"") => "heading",
+            "a" => "link",
+            h if h.len() == 2 && h.starts_with('h') => "heading",
+            // Slot elements rendered with another tag (`as="span"`...) carry
+            // their kind in the address.
+            _ => "",
+        }
+    }
+
+    /// The home page lists features and posts with `data-each`; each item's
+    /// title, summary and page link is editable from there, so each carries the
+    /// address of its own document's block.
+    #[test]
+    fn data_each_items_carry_their_documents_addresses() {
+        let tmp = example_site();
+        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let conductor = Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor");
+        let html = conductor.render_page("/", &RenderMode::View).expect("home page");
+        let mut seen = std::collections::BTreeSet::new();
+        for chunk in html.split('<').skip(1) {
+            let Some(tag) = chunk.split('>').next() else { continue };
+            let file = attr(tag, "data-presemble-file").unwrap_or_default();
+            let slot = attr(tag, "data-presemble-slot").unwrap_or_default();
+            if !(file.starts_with("content/feature/") || file.starts_with("content/post/")) {
+                continue;
+            }
+            let address = attr(tag, "data-presemble-address")
+                .unwrap_or_else(|| panic!("<{tag}> of {file} carries no address"));
+            assert!(address.contains(&format!("(ned/doc-by-path \"{file}\")")), "{address}");
+            // Titles and their page links address the title heading; text slots their own.
+            if slot == "title" || slot == "link" {
+                assert!(address.contains("\"title\")) \"heading\" 0)"), "{address}");
+            }
+            let selection = conductor.eval_selection(&address).expect("evaluates");
+            assert_eq!(selection.len(), 1, "{address}");
+            seen.insert((file, slot));
+        }
+        let slots: std::collections::BTreeSet<_> = seen.iter().map(|(_, s)| s.as_str()).collect();
+        assert!(slots.contains("title") && slots.contains("link"), "{slots:?}");
+        assert!(seen.len() >= 4, "only {seen:?}");
+    }
+
+    #[test]
+    fn every_emitted_address_resolves_to_its_block() {
+        let tmp = example_site();
+        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let conductor = Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor");
+
+        let mut urls: Vec<String> = conductor.url_to_root_index().into_keys().collect();
+        urls.sort();
+        let mut checked = 0;
+        let mut with_md = 0;
+        let mut editable_count = 0;
+        let mut reference_links = 0;
+        let mut missing: Vec<String> = Vec::new();
+        for url in urls {
+            let Ok(html) = conductor.render_page(&url, &RenderMode::View) else {
+                continue;
+            };
+            for chunk in html.split('<').skip(1) {
+                let Some(tag) = chunk.split('>').next() else { continue };
+                // Coverage: an element of a document's slot (it names the file
+                // and the slot) must carry that block's address. A suggestion
+                // placeholder renders no block.
+                let editable = attr(tag, "data-presemble-file").is_some_and(|f| !f.is_empty())
+                    && (attr(tag, "data-presemble-slot").is_some()
+                        || attr(tag, "data-presemble-source-slot").is_some())
+                    && attr(tag, "data-presemble-hint").is_none();
+                if editable {
+                    editable_count += 1;
+                    if attr(tag, "data-presemble-address").is_none() {
+                        // Accepted exclusion: a reference link slot renders the
+                        // *target* page's link, and the slot's own block is a
+                        // link expression in the referencing document, which
+                        // is not a block edit's to write (ADR-062 D4).
+                        let file = attr(tag, "data-presemble-file").unwrap_or_default();
+                        let slot = attr(tag, "data-presemble-slot").unwrap_or_default();
+                        let slot_blocks = conductor.eval_selection(&format!(
+                            "(ned/children (ned/slot (ned/doc-by-path {}) {}))",
+                            content::address::clj_str(&file),
+                            content::address::clj_str(&slot)
+                        ));
+                        let store = conductor.node_store.read().unwrap();
+                        let is_link_slot = slot_blocks.is_ok_and(|s| {
+                            !s.is_empty()
+                                && s.iter().all(|n| {
+                                    matches!(
+                                        node_store_bridge::content_bridge::block_from_node(&store, n),
+                                        Ok(content::ContentElement::Link { .. }
+                                            | content::ContentElement::LinkExpression { .. })
+                                    )
+                                })
+                        });
+                        if is_link_slot {
+                            reference_links += 1;
+                        } else {
+                            missing.push(format!("{url}: <{}", tag.chars().take(160).collect::<String>()));
+                        }
+                    }
+                }
+                let Some(address) = attr(tag, "data-presemble-address") else { continue };
+                checked += 1;
+                let file = attr(tag, "data-presemble-file").unwrap_or_default();
+                assert!(
+                    address.contains(&format!("(ned/doc-by-path \"{file}\")")),
+                    "{url}: the address names the file {file}: {address}"
+                );
+
+                // It resolves to exactly one node.
+                let selection = conductor
+                    .eval_selection(&address)
+                    .unwrap_or_else(|e| panic!("{url}: {address} does not evaluate: {e:?}"));
+                assert_eq!(selection.len(), 1, "{url}: {address} resolves to {} nodes", selection.len());
+                let node = selection.iter().next().unwrap();
+
+                // The node is the block that rendered it.
+                let store = conductor.node_store.read().unwrap();
+                let element = node_store_bridge::content_bridge::block_from_node(&store, node)
+                    .unwrap_or_else(|e| panic!("{url}: {address} is not a block: {e}"));
+                let kind = content::address::kind_name(&element);
+                // Only a body block's tag says what it is; a template may render
+                // a slot with any tag (`as="p"` for a heading slot).
+                let rendered_kind = if attr(tag, "data-presemble-slot").as_deref() == Some("body") {
+                    kind_of(tag)
+                } else {
+                    ""
+                };
+                assert!(
+                    rendered_kind.is_empty() || rendered_kind == kind,
+                    "{url}: <{tag}> resolves to a {kind}: {address}"
+                );
+
+                // The element's markdown is that block's markdown.
+                let projection = if address.contains("\"body\"))") {
+                    content::Projection::Block
+                } else {
+                    content::Projection::Content
+                };
+                if let Some(md) = attr(tag, "data-presemble-md") {
+                    with_md += 1;
+                    assert_eq!(
+                        content::project_markdown(&element, projection),
+                        Some(md),
+                        "{url}: md of <{tag}>"
+                    );
+                } else {
+                    assert_eq!(
+                        content::project_markdown(&element, projection),
+                        None,
+                        "{url}: <{tag}> has no md but its block has some"
+                    );
+                }
+            }
+        }
+        assert!(checked > 20, "only {checked} addresses were emitted");
+        assert!(with_md > 20, "only {with_md} elements carried md");
+        assert!(
+            missing.is_empty(),
+            "{} of {editable_count} editable elements have no address ({checked} have one):\n{}",
+            missing.len(),
+            missing.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+        );
+        // Every editable element is covered, but the reference-link slots.
+        assert_eq!(checked + reference_links, editable_count);
     }
 }
