@@ -6,14 +6,12 @@
 //! other HTML becomes text), then [`events_to_nodes`] builds the tree.
 //! Escaping and void-element syntax belong to the HTML serializer.
 
-// Package N step N1 is additive: readers switch to `events_to_nodes` in
-// N2/N3. Remove this allow then.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use crate::dom::{Element, Form, Node};
 use content::html::is_comment_only;
+use content::MARKDOWN_OPTIONS;
 use pulldown_cmark::{
-    Alignment, BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Parser, Tag,
+    TagEnd,
 };
 
 /// Build template nodes from raw markdown parser events.
@@ -76,7 +74,37 @@ fn percent_encode_url(url: &str) -> String {
     out
 }
 
+/// Nodes for a content text's markdown source, parsed as a whole document.
+///
+/// A result that is exactly one `p` is unwrapped to its children, so inline
+/// content can go straight into a slot element (the `<p>` strip of the former
+/// HTML path, parity difference D4).
+pub(crate) fn inline_children(src: &str) -> Vec<Node> {
+    let mut nodes = events_to_nodes(Parser::new_ext(src, MARKDOWN_OPTIONS));
+    if let [Node::Element(p)] = nodes.as_mut_slice()
+        && p.name == "p"
+    {
+        return std::mem::take(&mut p.children);
+    }
+    nodes
+}
+
+/// Nodes for a table cell's markdown source, read exactly as a GFM table
+/// cell (see [`crate::markdown_html::single_body_cell`]). A source that does
+/// not read back as one cell becomes a single text node.
+pub(crate) fn table_cell_nodes(src: &str) -> Vec<Node> {
+    let wrapper = format!("| x |\n| - |\n| {src} |\n");
+    match crate::markdown_html::single_body_cell(&wrapper) {
+        Some(events) => events_to_nodes(events),
+        None => vec![Node::Text(src.to_string())],
+    }
+}
+
 /// The concatenated text of every `Text` node, in document order.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "N3: `display_text` of `Value::Nodes` reads it")
+)]
 pub(crate) fn text_content(nodes: &[Node]) -> String {
     fn walk(nodes: &[Node], out: &mut String) {
         for node in nodes {
@@ -372,11 +400,19 @@ impl Builder {
         }
     }
 
+    /// Append `node` to the innermost open element. Adjacent text is merged:
+    /// pulldown-cmark splits text at entities, escapes and soft breaks, but
+    /// a run of text is one `Text` node.
     fn push(&mut self, node: Node) {
-        match self.open.last_mut() {
-            Some(parent) => parent.children.push(node),
-            None => self.root.push(node),
+        let siblings = match self.open.last_mut() {
+            Some(parent) => &mut parent.children,
+            None => &mut self.root,
+        };
+        if let (Node::Text(new), Some(Node::Text(last))) = (&node, siblings.last_mut()) {
+            last.push_str(new);
+            return;
         }
+        siblings.push(node);
     }
 
     fn finish(mut self) -> Vec<Node> {
@@ -490,7 +526,7 @@ fn push_neutralised<'a>(events: &mut Vec<Event<'a>>, source: CowStr<'a>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::dom::{parse_template_xml, serialize_nodes, Element, Form};
     use content::MARKDOWN_OPTIONS;
@@ -814,10 +850,50 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["strong", "\" \"", "em", "\" \"", "code", "br", "\"next\"", "\"\\n\"", "\"line\""]
+            ["strong", "\" \"", "em", "\" \"", "code", "br", "\"next\\nline\""]
         );
         assert_eq!(text_content(&el(&got[2]).children), "H e");
         assert_eq!(el(&el(&got[3]).children[0]).name, "p");
+    }
+
+    fn text(t: &str) -> Node {
+        Node::Text(t.to_string())
+    }
+
+    fn elem(name: &str, children: Vec<Node>) -> Node {
+        Node::Element(Element { name: name.to_string(), attrs: vec![], children })
+    }
+
+    #[test]
+    fn escaped_angle_brackets_stay_text() {
+        // Moved from transformer's `parse_html_fragment` test: entities are
+        // characters in text nodes, never markup.
+        assert_eq!(inline_children("a &lt;script&gt; &amp; b"), vec![text("a <script> & b")]);
+        assert_eq!(
+            inline_children("*a* &lt;script&gt; b"),
+            vec![elem("em", vec![text("a")]), text(" <script> b")]
+        );
+        assert_eq!(
+            serialize_nodes(&inline_children("*a* &lt;script&gt; b")),
+            "<em>a</em> &lt;script&gt; b"
+        );
+    }
+
+    #[test]
+    fn inline_children_unwraps_only_a_single_paragraph() {
+        assert_eq!(inline_children("**b**"), vec![elem("strong", vec![text("b")])]);
+        let got = inline_children("- a\n");
+        assert_eq!(got, vec![elem("ul", vec![elem("li", vec![text("a")])])]);
+        let got = inline_children("a\n\nb\n");
+        assert_eq!(got, vec![elem("p", vec![text("a")]), elem("p", vec![text("b")])]);
+    }
+
+    #[test]
+    fn table_cell_nodes_read_the_source_as_one_cell() {
+        assert_eq!(table_cell_nodes("`a\\|b`"), vec![elem("code", vec![text("a|b")])]);
+        assert_eq!(table_cell_nodes("- x"), vec![text("- x")]);
+        assert_eq!(table_cell_nodes("a | b"), vec![text("a | b")]);
+        assert_eq!(table_cell_nodes("a\n<b>"), vec![text("a\n<b>")]);
     }
 
     #[test]
@@ -862,8 +938,14 @@ mod tests {
     //   (`<li>a\n<ul>`). Newlines at the edge of text that touches a block
     //   element are dropped on both sides.
 
+    /// An HTML string parsed and normalised with the agreed differences
+    /// D1–D8, for comparing rendered output across the HTML and node paths.
+    pub(crate) fn normalise_html(html: &str) -> Vec<Norm> {
+        reference(html)
+    }
+
     #[derive(Debug, PartialEq)]
-    enum Norm {
+    pub(crate) enum Norm {
         El(String, Vec<(String, String)>, Vec<Norm>),
         Text(String),
     }

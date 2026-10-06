@@ -72,7 +72,7 @@ impl Form {
 }
 
 /// A node in the template DOM tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     /// An XML element with a name, attributes, and children.
     Element(Element),
@@ -81,7 +81,7 @@ pub enum Node {
 }
 
 /// An XML element node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Element {
     /// The full element name, e.g. "presemble:insert" or "div".
     pub name: String,

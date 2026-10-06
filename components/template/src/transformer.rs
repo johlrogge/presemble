@@ -779,7 +779,8 @@ fn render_insert_native(
             node_store::Node::Element(name) => {
                 let element_name = store.resolve_name(*name).to_string();
 
-                // Body element — render children as HTML
+                // Body element — render children as nodes built from their
+                // markdown events (ADR-064)
                 if element_name == "body" {
                     let mut body_nodes = Vec::new();
                     for child_id in store.children(id) {
@@ -795,29 +796,26 @@ fn render_insert_native(
                                     "heading" => {
                                         let text = first_child_text(store, child_id);
                                         let level = node_attr_int(store, child_id, "level").unwrap_or(2) as u8;
-                                        let inner = render_inline_md(&text);
                                         body_nodes.push(Node::Element(Element {
                                             name: format!("h{level}"),
                                             attrs: body_attrs.clone(),
-                                            children: parse_html_fragment(&inner),
+                                            children: crate::markdown_nodes::inline_children(&text),
                                         }));
                                     }
                                     "paragraph" => {
                                         let text = first_child_text(store, child_id);
-                                        let inner = render_inline_md(&text);
                                         body_nodes.push(Node::Element(Element {
                                             name: "p".to_string(),
                                             attrs: body_attrs.clone(),
-                                            children: parse_html_fragment(&inner),
+                                            children: crate::markdown_nodes::inline_children(&text),
                                         }));
                                     }
                                     "blockquote" => {
                                         let text = first_child_text(store, child_id);
-                                        let inner = render_inline_md(&text);
                                         body_nodes.push(Node::Element(Element {
                                             name: "blockquote".to_string(),
                                             attrs: body_attrs.clone(),
-                                            children: parse_html_fragment(&inner),
+                                            children: crate::markdown_nodes::inline_children(&text),
                                         }));
                                     }
                                     "code-block" => {
@@ -863,7 +861,7 @@ fn render_insert_native(
                                                 if let Some(node_store::Node::Text(t)) = store.get(h) {
                                                     header_cells.push(Node::Element(Element {
                                                         name: "th".to_string(), attrs: vec![],
-                                                        children: parse_html_fragment(&crate::markdown_html::safe_table_cell_html(t)),
+                                                        children: crate::markdown_nodes::table_cell_nodes(t),
                                                     }));
                                                 }
                                             }
@@ -887,7 +885,7 @@ fn render_insert_native(
                                                     if let Some(node_store::Node::Text(t)) = store.get(cell) {
                                                         cells.push(Node::Element(Element {
                                                             name: "td".to_string(), attrs: vec![],
-                                                            children: parse_html_fragment(&crate::markdown_html::safe_table_cell_html(t)),
+                                                            children: crate::markdown_nodes::table_cell_nodes(t),
                                                         }));
                                                     }
                                                 }
@@ -921,11 +919,10 @@ fn render_insert_native(
                                     "list" => {
                                         // List stored as raw markdown source
                                         let source = first_child_text(store, child_id);
-                                        let html = render_inline_md(&source);
                                         body_nodes.push(Node::Element(Element {
                                             name: "div".to_string(),
                                             attrs: body_attrs.clone(),
-                                            children: parse_html_fragment(&html),
+                                            children: crate::markdown_nodes::inline_children(&source),
                                         }));
                                     }
                                     "link" | "link-expression" => {
@@ -1215,22 +1212,6 @@ fn node_attr_int(store: &node_store::NodeStore, id: node_store::NodeId, name: &s
             if let Some(node_store::Node::Integer(i)) = store.get(*v) { Some(*i) } else { None }
         } else { None }
     })
-}
-
-/// Render inline markdown (bold, italic, links) to HTML, stripping outer <p>
-/// wrapper. HTML in the text is never passed through (ADR-062).
-fn render_inline_md(text: &str) -> String {
-    crate::markdown_html::safe_inline_html(text)
-}
-
-/// Parse an HTML fragment into dom nodes, falling back to text if parsing fails.
-///
-/// The fragment is always parsed, so entities (`&lt;`, `&amp;`) become their
-/// characters in text nodes; the serializer escapes them again. Text nodes
-/// are never HTML, so `&lt;` stays text.
-fn parse_html_fragment(html: &str) -> Vec<Node> {
-    crate::dom::parse_template_xml(html)
-        .unwrap_or_else(|_| vec![Node::Text(html.to_string())])
 }
 
 fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> String {
@@ -3805,6 +3786,40 @@ mod tests {
         assert!(transformer_html.contains("<pre"), "transformer.rs path: expected <pre tag; got: {transformer_html}");
 
         // TODO(post-Phase-C): assert data-presemble-md parity once transformer.rs emits it
+
+        // Same tree on both paths, modulo D1–D8 and KNOWN_PATH_DIFFERENCES.
+        assert_eq!(
+            normalise_without_known_path_differences(&data_html),
+            normalise_without_known_path_differences(&transformer_html),
+            "data.rs: {data_html}\ntransformer.rs: {transformer_html}"
+        );
+    }
+
+    /// Attributes the legacy body (`data.rs`) does not emit yet. N3 builds the
+    /// legacy body as nodes with the same attributes and removes this list.
+    const KNOWN_PATH_DIFFERENCES: &[&str] = &["data-presemble-file"];
+
+    /// `normalise_html`, with the attributes in `KNOWN_PATH_DIFFERENCES`
+    /// removed at every level.
+    fn normalise_without_known_path_differences(html: &str) -> Vec<crate::markdown_nodes::tests::Norm> {
+        use crate::markdown_nodes::tests::{normalise_html, Norm};
+        fn strip(nodes: Vec<Norm>) -> Vec<Norm> {
+            nodes
+                .into_iter()
+                .map(|n| match n {
+                    Norm::El(name, attrs, children) => Norm::El(
+                        name,
+                        attrs
+                            .into_iter()
+                            .filter(|(k, _)| !KNOWN_PATH_DIFFERENCES.contains(&k.as_str()))
+                            .collect(),
+                        strip(children),
+                    ),
+                    text => text,
+                })
+                .collect()
+        }
+        strip(normalise_html(html))
     }
 
     // ---------------------------------------------------------------------------
@@ -4017,18 +4032,101 @@ mod tests {
         assert!(!html.contains("&amp;lt;"), "must not double-escape; got: {html}");
     }
 
+    // ── N2 characterisation: native body arms ───────────────────────────────
+    //
+    // The expected strings are the exact output of the HTML round trip
+    // (`render_inline_md` + `parse_html_fragment`) captured before N2. They
+    // are compared through the N1 parity normaliser (agreed differences
+    // D1–D8), so push_html's formatting newlines may go away and nothing else
+    // may change.
+
+    fn assert_renders_as(html: &str, expected: &str) {
+        use crate::markdown_nodes::tests::normalise_html;
+        assert_eq!(normalise_html(html), normalise_html(expected), "got: {html}");
+    }
+
     #[test]
-    fn parse_html_fragment_keeps_escaped_angle_brackets_as_text() {
-        // Without tags.
-        let nodes = parse_html_fragment("a &lt;script&gt; &amp; b");
-        assert_eq!(serialize_nodes(&nodes), "a &lt;script&gt; &amp; b");
-        assert!(nodes.iter().all(|n| matches!(n, Node::Text(_))), "expected only text nodes: {nodes:?}");
-        // With tags.
-        let nodes = parse_html_fragment("<em>a</em> &lt;script&gt; b");
-        assert_eq!(serialize_nodes(&nodes), "<em>a</em> &lt;script&gt; b");
-        assert!(
-            matches!(nodes.as_slice(), [Node::Element(_), Node::Text(t)] if t == " <script> b"),
-            "escaped angle brackets must stay one text node: {nodes:?}"
+    fn characterise_native_paragraph_inline_markup() {
+        assert_renders_as(
+            &render_native_body_block("paragraph", "*em* `c<d` [l](/a \"t\")", None),
+            r#"<p data-presemble-slot="body" data-presemble-file=""><em>em</em> <code>c&lt;d</code> <a href="/a" title="t">l</a></p>"#,
         );
     }
+
+    #[test]
+    fn characterise_native_list() {
+        assert_renders_as(
+            &render_native_body_block("list", "- one\n- **two**\n", None),
+            "<div data-presemble-slot=\"body\" data-presemble-file=\"\"><ul>\n<li>one</li>\n<li><strong>two</strong></li>\n</ul></div>",
+        );
+    }
+
+    #[test]
+    fn characterise_native_blockquote() {
+        assert_renders_as(
+            &render_native_body_block("blockquote", "> quoted *x*\n> more\n", None),
+            "<blockquote data-presemble-slot=\"body\" data-presemble-file=\"\"><blockquote>\n<p>quoted <em>x</em>\nmore</p>\n</blockquote></blockquote>",
+        );
+    }
+
+    #[test]
+    fn characterise_native_heading() {
+        assert_renders_as(
+            &render_native_body_block("heading", "Head *em* `c`", Some(3)),
+            r#"<h3 data-presemble-slot="body" data-presemble-file="">Head <em>em</em> <code>c</code></h3>"#,
+        );
+    }
+
+    #[test]
+    fn characterise_native_table_with_inline_code_cell() {
+        assert_renders_as(
+            &render_native_table(&["`a<b`", "H"], &[&["x", "`y`"]]),
+            r#"<table data-presemble-slot="body" data-presemble-file=""><thead><tr><th><code>a&lt;b</code></th><th>H</th></tr></thead><tbody><tr><td>x</td><td><code>y</code></td></tr></tbody></table>"#,
+        );
+    }
+
+    #[test]
+    fn characterise_native_script_is_text() {
+        assert_renders_as(
+            &render_native_body_block("paragraph", "a <script>x</script> b", None),
+            r#"<p data-presemble-slot="body" data-presemble-file="">a &lt;script&gt;x&lt;/script&gt; b</p>"#,
+        );
+    }
+
+    #[test]
+    fn characterise_native_comment_is_dropped() {
+        assert_renders_as(
+            &render_native_body_block("paragraph", "a <!-- secret --> b", None),
+            r#"<p data-presemble-slot="body" data-presemble-file="">a  b</p>"#,
+        );
+    }
+
+    // ── N2 probes: cases where an HTML round trip could mangle output. None
+    // fails before N2: push_html's `&#x27;` decodes back to `'`, and entities
+    // next to non-ASCII text parse cleanly. Kept as pins. ─────────────────
+
+    #[test]
+    fn native_link_with_apostrophe_in_url() {
+        assert_renders_as(
+            &render_native_body_block("paragraph", "[a](/it's)", None),
+            r#"<p data-presemble-slot="body" data-presemble-file=""><a href="/it's">a</a></p>"#,
+        );
+    }
+
+    #[test]
+    fn native_link_with_apostrophe_in_title() {
+        assert_renders_as(
+            &render_native_body_block("paragraph", "[a](/x \"it's\")", None),
+            r#"<p data-presemble-slot="body" data-presemble-file=""><a href="/x" title="it's">a</a></p>"#,
+        );
+    }
+
+    #[test]
+    fn native_non_ascii_next_to_entities() {
+        assert_renders_as(
+            &render_native_body_block("paragraph", "é&amp;ü &lt;x&gt;ñ &copy;", None),
+            r#"<p data-presemble-slot="body" data-presemble-file="">é&amp;ü &lt;x&gt;ñ ©</p>"#,
+        );
+    }
+
 }

@@ -74,6 +74,57 @@ site-build-example name="blog":
     {{ just_executable() }} --justfile {{ justfile() }} site-build "$site"
     echo "Temp output: $tmp/output/{{ name }}"
 
+# Copies the build output of <dir> (built with site-build) into a fresh temp
+# dir and prints its path. Use it to keep a "before" output: `presemble build`
+# always writes to <parent-of-dir>/output/<dir-name>/, which the next build
+# overwrites.
+# Build a site and snapshot its output for a later output-diff.
+site-snapshot dir="site":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{ just_executable() }} --justfile {{ justfile() }} site-build {{ dir }}
+    out="$(dirname "$(realpath {{ dir }})")/output/$(basename "$(realpath {{ dir }})")"
+    test -d "$out" || { echo "missing build output $out" >&2; exit 1; }
+    snap="$(mktemp -d -t presemble-snapshot-$(basename "$(realpath {{ dir }})").XXXXXX)"
+    cp -r "$out/." "$snap/"
+    echo "Snapshot: $snap"
+
+# mode=exact: `diff -r`. mode=ws: report files present on one side only, and
+# files whose contents differ once all whitespace is removed (formatting
+# newlines between tags count as equal; check suspicious files in exact mode).
+# Exits 0 when equal, 1 when different, 2 on usage errors.
+# Compare two build outputs.
+output-diff a b mode="exact":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    test -d "{{ a }}" || { echo "missing {{ a }}" >&2; exit 2; }
+    test -d "{{ b }}" || { echo "missing {{ b }}" >&2; exit 2; }
+    case "{{ mode }}" in
+      exact)
+        diff -r "{{ a }}" "{{ b }}"
+        ;;
+      ws)
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        (cd "{{ a }}" && find . -type f | sort) > "$tmp/a"
+        (cd "{{ b }}" && find . -type f | sort) > "$tmp/b"
+        status=0
+        diff "$tmp/a" "$tmp/b" || status=1
+        while IFS= read -r f; do
+          [ -f "{{ b }}/$f" ] || continue
+          if ! cmp -s <(tr -d '[:space:]' < "{{ a }}/$f") <(tr -d '[:space:]' < "{{ b }}/$f"); then
+            echo "differs beyond whitespace: $f"
+            status=1
+          fi
+        done < "$tmp/a"
+        exit "$status"
+        ;;
+      *)
+        echo "mode must be exact or ws" >&2
+        exit 2
+        ;;
+    esac
+
 # Run the smoketest (tools/smoketest.sh) against the given polylith profile.
 smoketest profile="dev":
     ./tools/smoketest.sh {{ profile }}
