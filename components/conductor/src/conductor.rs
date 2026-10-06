@@ -2542,13 +2542,20 @@ impl Conductor {
     ///
     /// The target must lie in `expected_file` (the suggestion's file); a
     /// selection that now resolves into another document is `Unresolved`.
+    ///
+    /// A `preview` is checked for drift before validating (see
+    /// [`suggestion_apply::check_drift`]).
     fn resolve_validate_apply(
         store: &mut node_store::NodeStore,
         sel: &ned::Selection,
         mutation: &editorial_types::NedMutation,
         expected_file: &Path,
+        preview: Option<&editorial_types::SuggestionPreview>,
     ) -> Result<PathBuf, editorial_types::StaleCause> {
         let target = suggestion_apply::resolve_target(store, sel, mutation.target_kind())?;
+        if let Some(preview) = preview {
+            suggestion_apply::check_drift(store, &target, mutation, preview)?;
+        }
         let plan = suggestion_apply::validate(store, &target, mutation)?;
         let path = PathBuf::from(
             node_store_bridge::content_bridge::find_attr_text(store, target.document(), "file")
@@ -2559,6 +2566,248 @@ impl Conductor {
         }
         suggestion_apply::apply(store, plan)?;
         Ok(path)
+    }
+
+    /// Evaluate `selection`, then resolve, check drift, validate and apply
+    /// `mutation` under one store write lock, mark the document dirty and
+    /// re-render its page. The one path both suggestion accept and a block
+    /// edit's Apply use.
+    ///
+    /// Returns `(rebuilt_urls, failed_urls)`, or why the mutation cannot be
+    /// applied. Must be called without holding a store lock.
+    fn apply_ned_mutation(
+        &self,
+        selection: &str,
+        mutation: &editorial_types::NedMutation,
+        file: &Path,
+        preview: Option<&editorial_types::SuggestionPreview>,
+    ) -> Result<(Vec<String>, Vec<String>), editorial_types::StaleCause> {
+        let sel = self.eval_selection(selection)?;
+        let path = {
+            let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+            Self::resolve_validate_apply(&mut store, &sel, mutation, file, preview)?
+        };
+        // `path` equals `file` (checked in `resolve_validate_apply`).
+        Ok(self.mark_dirty_and_rebuild(&[path]))
+    }
+
+    /// Validate and store a pending NED suggestion (ADR-056): the selection
+    /// must address exactly one node of the kind the mutation needs, in
+    /// `file`, and the mutation must be valid there. `preview` is display and
+    /// drift-check data only.
+    fn create_ned_suggestion(
+        &self,
+        file: &Path,
+        selection: String,
+        mutation: editorial_types::NedMutation,
+        reason: String,
+        author: editorial_types::Author,
+        preview: Option<editorial_types::SuggestionPreview>,
+    ) -> CommandResult {
+        let kind = mutation.target_kind();
+        let sel = match self.eval_selection(&selection) {
+            Ok(sel) => sel,
+            Err(cause) => return Self::creation_error(&cause, kind),
+        };
+        let checked: Result<String, editorial_types::StaleCause> = {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            suggestion_apply::resolve_target(&store, &sel, kind)
+                .map_err(editorial_types::StaleCause::from)
+                .and_then(|target| {
+                    suggestion_apply::validate(&store, &target, &mutation)?;
+                    Ok(node_store_bridge::content_bridge::find_attr_text(
+                        &store,
+                        target.document(),
+                        "file",
+                    )
+                    .unwrap_or_default())
+                })
+        };
+        match checked {
+            Err(cause) => return Self::creation_error(&cause, kind),
+            Ok(doc_file) if Path::new(&doc_file) != file => {
+                return CommandResult::error(format!(
+                    "selection resolves into {doc_file}, not {}",
+                    file.display()
+                ));
+            }
+            Ok(_) => {}
+        }
+
+        let id = editorial_types::SuggestionId::new();
+        let sug = editorial_types::NedSuggestion {
+            id: id.clone(),
+            author,
+            file: editorial_types::ContentPath::new(file.to_string_lossy()),
+            selection,
+            mutation,
+            workspace_hash: self.workspace_hash(),
+            reason,
+            status: editorial_types::NedSuggestionStatus::Pending,
+            created_at: Self::iso8601_now(),
+            preview,
+        };
+
+        if let Err(e) = self.persist_ned_suggestion(&sug) {
+            return CommandResult::error(format!("persist error: {e}"));
+        }
+        self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), sug.clone());
+
+        CommandResult {
+            response: Response::SuggestionCreated(id),
+            events: vec![ConductorEvent::NedSuggestionCreated { suggestion: sug }],
+        }
+    }
+
+    /// Resolve a block edit's selection to one block in the request's file
+    /// and lower the edit. The same for both intents (ADR-059 §10).
+    fn lower_block_edit(
+        &self,
+        req: &editorial_types::BlockEditRequest,
+    ) -> Result<node_store_bridge::block_edit::Lowering, editorial_types::BlockEditError> {
+        use editorial_types::{BlockEditCause, BlockEditError, TargetKind};
+        let refuse = |cause, message: String| BlockEditError { cause, message };
+        let sel = self
+            .eval_selection(&req.selection)
+            .map_err(|c| refuse(BlockEditCause::Unaddressable, c.to_string()))?;
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let target = suggestion_apply::resolve_target(&store, &sel, TargetKind::Block)
+            .map_err(|e| refuse(BlockEditCause::Unaddressable, e.to_string()))?;
+        let suggestion_apply::ResolvedTarget::Block { block, document, .. } = target else {
+            return Err(refuse(
+                BlockEditCause::Unaddressable,
+                "the selection does not address a block".to_string(),
+            ));
+        };
+        let doc_file =
+            node_store_bridge::content_bridge::find_attr_text(&store, document, "file")
+                .unwrap_or_default();
+        if Path::new(&doc_file) != Path::new(req.file.as_str()) {
+            return Err(refuse(
+                BlockEditCause::Unaddressable,
+                format!("the selection resolves into {doc_file}, not {}", req.file),
+            ));
+        }
+        node_store_bridge::block_edit::lower(
+            &store,
+            block,
+            &req.selection,
+            &req.base,
+            &req.proposed,
+        )
+    }
+
+    /// Handle [`Command::BlockEdit`]: lower, then apply now or store a
+    /// suggestion. All decisions are made in `node_store_bridge::block_edit`.
+    fn block_edit(&self, req: &editorial_types::BlockEditRequest) -> CommandResult {
+        use editorial_types::{BlockEditOutcome, BlockEditResponse};
+        match self.lower_block_edit(req) {
+            Ok(node_store_bridge::block_edit::Lowering::Lowered(lowered)) => self.run_lowered(
+                req.intent,
+                Path::new(req.file.as_str()),
+                lowered,
+                req.reason.clone(),
+            ),
+            Ok(node_store_bridge::block_edit::Lowering::NoChange) => CommandResult {
+                response: Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::NoChange)),
+                events: vec![],
+            },
+            Err(e) => CommandResult {
+                response: Response::BlockEdited(BlockEditResponse::Refused(e)),
+                events: vec![],
+            },
+        }
+    }
+
+    /// The refusal cause for an Apply that could not run. A search that no
+    /// longer matches means the block changed since the lowering: drift.
+    fn apply_refusal_cause(
+        cause: &editorial_types::StaleCause,
+    ) -> editorial_types::BlockEditCause {
+        use editorial_types::{BlockEditCause, StaleCause};
+        match cause {
+            StaleCause::Drifted
+            | StaleCause::SearchNotFound
+            | StaleCause::SearchNotUnique { .. } => BlockEditCause::Drifted,
+            StaleCause::Unresolved
+            | StaleCause::Ambiguous { .. }
+            | StaleCause::WrongKind { .. }
+            | StaleCause::EvalError { .. } => BlockEditCause::Unaddressable,
+            _ => BlockEditCause::Invalid,
+        }
+    }
+
+    /// Run a lowered block edit: apply it now or store it as a suggestion.
+    ///
+    /// Apply passes the preview to the write-locked apply, so the base is
+    /// re-checked there: the block cannot change between the read-locked
+    /// lowering and the mutation.
+    fn run_lowered(
+        &self,
+        intent: editorial_types::BlockEditIntent,
+        file: &Path,
+        lowered: node_store_bridge::block_edit::Lowered,
+        reason: Option<String>,
+    ) -> CommandResult {
+        use editorial_types::{
+            BlockEditCause, BlockEditError, BlockEditIntent, BlockEditOutcome, BlockEditResponse,
+        };
+        let respond = |response: BlockEditResponse, events: Vec<ConductorEvent>| CommandResult {
+            response: Response::BlockEdited(response),
+            events,
+        };
+        let refused = |cause, message: String| {
+            respond(BlockEditResponse::Refused(BlockEditError { cause, message }), vec![])
+        };
+
+        match intent {
+            BlockEditIntent::Apply => {
+                match self.apply_ned_mutation(
+                    &lowered.selection,
+                    &lowered.mutation,
+                    file,
+                    Some(&lowered.preview),
+                ) {
+                    Ok((pages, failed)) => {
+                        let mut events = Vec::new();
+                        if !pages.is_empty() {
+                            events.push(ConductorEvent::PagesRebuilt {
+                                pages: pages.clone(),
+                                anchor: None,
+                            });
+                        }
+                        if !failed.is_empty() {
+                            events.push(ConductorEvent::BuildFailed { error_pages: failed });
+                        }
+                        respond(BlockEditResponse::Done(BlockEditOutcome::Applied { pages }), events)
+                    }
+                    Err(cause) => refused(Self::apply_refusal_cause(&cause), cause.to_string()),
+                }
+            }
+            BlockEditIntent::Suggest => {
+                let created = self.create_ned_suggestion(
+                    file,
+                    lowered.selection,
+                    lowered.mutation,
+                    reason.unwrap_or_default(),
+                    // TODO: carry session/user id when multiplayer suggestions land
+                    editorial_types::Author::Human("browser".to_string()),
+                    Some(lowered.preview),
+                );
+                match created.response {
+                    Response::SuggestionCreated(id) => respond(
+                        BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated { id }),
+                        created.events,
+                    ),
+                    Response::Error(message) => refused(BlockEditCause::Invalid, message),
+                    other => refused(
+                        BlockEditCause::Invalid,
+                        format!("unexpected conductor response: {other:?}"),
+                    ),
+                }
+            }
+        }
     }
 
     /// Format a creation-time rejection: the cause as a sentence, plus a hint
@@ -3387,67 +3636,9 @@ impl Conductor {
             }
 
             // ── NED suggestion commands ───────────────────────────────────────
+            Command::BlockEdit(req) => self.block_edit(&req),
             Command::CreateNedSuggestion { file, selection, mutation, reason, author } => {
-                // ADR-056: the selection must address exactly one node of the
-                // kind the mutation needs, and the mutation must be valid there.
-                let kind = mutation.target_kind();
-                let sel = match self.eval_selection(&selection) {
-                    Ok(sel) => sel,
-                    Err(cause) => return Self::creation_error(&cause, kind),
-                };
-                let checked: Result<String, editorial_types::StaleCause> = {
-                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                    suggestion_apply::resolve_target(&store, &sel, kind)
-                        .map_err(editorial_types::StaleCause::from)
-                        .and_then(|target| {
-                            suggestion_apply::validate(&store, &target, &mutation)?;
-                            Ok(node_store_bridge::content_bridge::find_attr_text(
-                                &store,
-                                target.document(),
-                                "file",
-                            )
-                            .unwrap_or_default())
-                        })
-                };
-                match checked {
-                    Err(cause) => return Self::creation_error(&cause, kind),
-                    Ok(doc_file) if Path::new(&doc_file) != file.as_path() => {
-                        return CommandResult::error(format!(
-                            "selection resolves into {doc_file}, not {}",
-                            file.display()
-                        ));
-                    }
-                    Ok(_) => {}
-                }
-
-                let id = editorial_types::SuggestionId::new();
-                let workspace_hash = self.workspace_hash();
-                let created_at = Self::iso8601_now();
-                let file_path = editorial_types::ContentPath::new(file.to_string_lossy());
-
-                let sug = editorial_types::NedSuggestion {
-                    id: id.clone(),
-                    author,
-                    file: file_path,
-                    selection,
-                    mutation,
-                    workspace_hash,
-                    reason,
-                    status: editorial_types::NedSuggestionStatus::Pending,
-                    created_at,
-                    preview: None,
-                };
-
-                if let Err(e) = self.persist_ned_suggestion(&sug) {
-                    return CommandResult::error(format!("persist error: {e}"));
-                }
-                self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner())
-                    .insert(id.clone(), sug.clone());
-
-                CommandResult {
-                    response: Response::SuggestionCreated(id),
-                    events: vec![ConductorEvent::NedSuggestionCreated { suggestion: sug }],
-                }
+                self.create_ned_suggestion(&file, selection, mutation, reason, author, None)
             }
 
             Command::AcceptNedSuggestion { id } => {
@@ -3474,31 +3665,18 @@ impl Conductor {
                     ])
                 };
 
-                // 2. Re-evaluate the selection (query-only root, no lock held)
-                let sel = match self.eval_selection(&sug.selection) {
-                    Ok(sel) => sel,
+                // 2-4. Evaluate, resolve, check drift, validate and apply under
+                // one store write lock (ADR-056), then mark the document dirty
+                // and re-render its page.
+                let (pages, failed) = match self.apply_ned_mutation(
+                    &sug.selection,
+                    &sug.mutation,
+                    Path::new(sug.file.as_str()),
+                    sug.preview.as_ref(),
+                ) {
+                    Ok(done) => done,
                     Err(cause) => return mark_stale(self, sug, cause),
                 };
-
-                // 3. Resolve, validate and apply under ONE store write lock (ADR-056).
-                let applied: Result<PathBuf, editorial_types::StaleCause> = {
-                    let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
-                    Self::resolve_validate_apply(
-                        &mut store,
-                        &sel,
-                        &sug.mutation,
-                        Path::new(sug.file.as_str()),
-                    )
-                };
-                let path = match applied {
-                    Ok(path) => path,
-                    Err(cause) => return mark_stale(self, sug, cause),
-                };
-
-                // 4. Mark the document dirty and re-render its page.
-                // `path` equals the suggestion's (non-empty) file, checked above.
-                let dirty: Vec<PathBuf> = vec![path];
-                let (pages, failed) = self.mark_dirty_and_rebuild(&dirty);
 
                 // 5. Success: mark Accepted
                 let mut updated = sug.clone();
@@ -6753,6 +6931,469 @@ mod suggestion_accept_tests {
                 cause: StaleCause::Unspecified,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod block_edit_tests {
+    use super::*;
+    use editorial_types::{
+        BlockEditCause, BlockEditIntent, BlockEditOutcome, BlockEditRequest, BlockEditResponse,
+        BlockText, NedMutation, NedSuggestionStatus, StaleCause, SuggestionId,
+    };
+    use node_store_bridge::block_edit::Lowering;
+
+    const FILE: &str = "content/post/first.md";
+    const SCHEMA: &str =
+        "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+    const TEMPLATE: &str =
+        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+    const CONTENT: &str =
+        "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```rust\nfn a() {}\n```\n";
+
+    const FIRST_PARAGRAPH: &str =
+        r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#;
+    const TITLE_HEADING: &str =
+        r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")) "heading" 0)"#;
+
+    fn build_site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("schemas/post")).unwrap();
+        std::fs::create_dir_all(root.join("templates/post")).unwrap();
+        std::fs::create_dir_all(root.join("content/post")).unwrap();
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
+        std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
+        std::fs::write(root.join(FILE), CONTENT).unwrap();
+        tmp
+    }
+
+    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    fn request(
+        file: &str,
+        selection: &str,
+        base: &str,
+        proposed: &str,
+        intent: BlockEditIntent,
+    ) -> BlockEditRequest {
+        BlockEditRequest {
+            file: editorial_types::ContentPath::new(file),
+            selection: selection.to_string(),
+            base: BlockText::Markdown(base.to_string()),
+            proposed: BlockText::Markdown(proposed.to_string()),
+            intent,
+            reason: Some("because".to_string()),
+        }
+    }
+
+    fn edit(
+        conductor: &Conductor,
+        selection: &str,
+        base: &str,
+        proposed: &str,
+        intent: BlockEditIntent,
+    ) -> CommandResult {
+        conductor.handle_command(Command::BlockEdit(request(
+            FILE, selection, base, proposed, intent,
+        )))
+    }
+
+    fn response(result: &CommandResult) -> BlockEditResponse {
+        match &result.response {
+            Response::BlockEdited(r) => r.clone(),
+            other => panic!("expected BlockEdited, got {other:?}"),
+        }
+    }
+
+    fn refused_cause(result: &CommandResult) -> BlockEditCause {
+        match response(result) {
+            BlockEditResponse::Refused(e) => e.cause,
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    fn created_id(result: &CommandResult) -> SuggestionId {
+        match response(result) {
+            BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated { id }) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        }
+    }
+
+    fn suggestion(conductor: &Conductor, id: &SuggestionId) -> editorial_types::NedSuggestion {
+        conductor.ned_suggestions.read().unwrap().get(id).expect("suggestion").clone()
+    }
+
+    fn live_root(conductor: &Conductor) -> node_store::NodeId {
+        conductor.doc_root_for_path(Path::new(FILE)).expect("live root")
+    }
+
+    fn block_text(store: &node_store::NodeStore, block: node_store::NodeId) -> String {
+        match store.children(block).first().and_then(|t| store.get(*t)) {
+            Some(node_store::Node::Text(s)) => s.clone(),
+            other => panic!("expected a text child, got {other:?}"),
+        }
+    }
+
+    fn body_blocks(conductor: &Conductor) -> Vec<node_store::NodeId> {
+        let root = live_root(conductor);
+        let store = conductor.node_store.read().unwrap();
+        let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body")
+            .expect("body");
+        store.children(body)
+    }
+
+    fn body_texts(conductor: &Conductor) -> Vec<String> {
+        let blocks = body_blocks(conductor);
+        let store = conductor.node_store.read().unwrap();
+        blocks.into_iter().map(|b| block_text(&store, b)).collect()
+    }
+
+    fn title(conductor: &Conductor) -> String {
+        let root = live_root(conductor);
+        let store = conductor.node_store.read().unwrap();
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                .expect("preamble");
+        let slot = store.children(preamble)[0];
+        block_text(&store, store.children(slot)[0])
+    }
+
+    /// Change the text of the first body block behind the conductor's back.
+    fn manual_edit_first_paragraph(conductor: &Conductor, text: &str) {
+        let block = body_blocks(conductor)[0];
+        let mut store = conductor.node_store.write().unwrap();
+        let text_node = store.children(block)[0];
+        store.replace_node(text_node, node_store::Node::Text(text.to_string()));
+    }
+
+    fn pending_count(conductor: &Conductor) -> usize {
+        conductor.ned_suggestions.read().unwrap().len()
+    }
+
+    // ── 11 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_and_suggest_share_one_lowering() {
+        let cases = [
+            (FIRST_PARAGRAPH, "Alpha para.", "Alpha paragraph."),
+            (FIRST_PARAGRAPH, "Alpha para.", "Alpha one.\n\nAlpha two."),
+            (TITLE_HEADING, "First Post", "Second Post"),
+        ];
+        for (selection, base, proposed) in cases {
+            // The one lowering both intents use.
+            let tmp = build_site();
+            let lowering_conductor = make_conductor(&tmp);
+            let lowered = match lowering_conductor
+                .lower_block_edit(&request(FILE, selection, base, proposed, BlockEditIntent::Apply))
+                .expect("lowers")
+            {
+                Lowering::Lowered(l) => l,
+                Lowering::NoChange => panic!("{proposed:?} should change {base:?}"),
+            };
+
+            // Suggest stores exactly that mutation.
+            let tmp_s = build_site();
+            let suggester = make_conductor(&tmp_s);
+            let id = created_id(&edit(&suggester, selection, base, proposed, BlockEditIntent::Suggest));
+            let stored = suggestion(&suggester, &id);
+            assert_eq!(stored.selection, lowered.selection, "{proposed:?}");
+            assert_eq!(stored.mutation, lowered.mutation, "{proposed:?}");
+            assert_eq!(stored.preview, Some(lowered.preview.clone()), "{proposed:?}");
+
+            // Apply has the same effect as accepting that suggestion.
+            let tmp_a = build_site();
+            let applier = make_conductor(&tmp_a);
+            let applied = edit(&applier, selection, base, proposed, BlockEditIntent::Apply);
+            assert!(
+                matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+                "{:?}",
+                response(&applied)
+            );
+            let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
+            assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+            assert_eq!(title(&applier), title(&suggester), "{proposed:?}");
+            assert_eq!(body_texts(&applier), body_texts(&suggester), "{proposed:?}");
+        }
+    }
+
+    // ── 12 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_edit_apply_text_change_rebuilds_page() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let result = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha paragraph.",
+            BlockEditIntent::Apply,
+        );
+        let pages = match response(&result) {
+            BlockEditResponse::Done(BlockEditOutcome::Applied { pages }) => pages,
+            other => panic!("expected Applied, got {other:?}"),
+        };
+        assert!(pages.contains(&"/post/first".to_string()), "pages: {pages:?}");
+        assert_eq!(body_texts(&conductor)[0], "Alpha paragraph.");
+        assert!(conductor.dirty_docs().read().unwrap().contains(Path::new(FILE)));
+        assert!(
+            result.events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
+            "events: {:?}",
+            result.events
+        );
+        assert_eq!(pending_count(&conductor), 0, "apply creates no suggestion");
+    }
+
+    // ── 13 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_edit_apply_structural_change_replaces_block() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let result = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha one.\n\nAlpha two.",
+            BlockEditIntent::Apply,
+        );
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+        assert_eq!(
+            body_texts(&conductor),
+            vec!["Alpha one.", "Alpha two.", "Beta para.", "fn a() {}"]
+        );
+    }
+
+    // ── 14 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_edit_suggest_structural_change_creates_replace_suggestion() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let result = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha one.\n\nAlpha two.",
+            BlockEditIntent::Suggest,
+        );
+        let id = created_id(&result);
+        assert!(
+            result.events.iter().any(|e| matches!(e, ConductorEvent::NedSuggestionCreated { .. })),
+            "events: {:?}",
+            result.events
+        );
+        let sug = suggestion(&conductor, &id);
+        assert!(matches!(&sug.mutation, NedMutation::Replace(trees) if trees.len() == 2));
+        assert_eq!(sug.selection, FIRST_PARAGRAPH);
+        assert_eq!(sug.status, NedSuggestionStatus::Pending);
+        assert_eq!(sug.reason, "because");
+        assert_eq!(sug.author, editorial_types::Author::Human("browser".to_string()));
+        assert_eq!(
+            sug.preview,
+            Some(editorial_types::SuggestionPreview {
+                base: BlockText::Markdown("Alpha para.".to_string()),
+                proposed: BlockText::Markdown("Alpha one.\n\nAlpha two.".to_string()),
+            })
+        );
+        assert_eq!(body_texts(&conductor)[0], "Alpha para.", "suggest must not change the block");
+    }
+
+    // ── 15 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_edit_selection_must_resolve_to_one_block_in_file() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let doc = r#"(ned/doc-by-path "content/post/first.md")"#;
+        let bad_selections = [
+            // A text node, not a block.
+            format!("(ned/text-in {FIRST_PARAGRAPH})"),
+            // A container.
+            format!("(ned/body {doc})"),
+            // Nothing.
+            format!(r#"(ned/nth-of-kind (ned/children (ned/body {doc})) "paragraph" 9)"#),
+            // Not evaluable.
+            "(ned/no-such-thing)".to_string(),
+        ];
+        for sel in &bad_selections {
+            for intent in [BlockEditIntent::Apply, BlockEditIntent::Suggest] {
+                let result = edit(&conductor, sel, "Alpha para.", "Changed.", intent);
+                assert_eq!(refused_cause(&result), BlockEditCause::Unaddressable, "{sel}");
+            }
+        }
+        // A block in another file than the request names.
+        let result = conductor.handle_command(Command::BlockEdit(request(
+            "content/post/other.md",
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Changed.",
+            BlockEditIntent::Apply,
+        )));
+        assert_eq!(refused_cause(&result), BlockEditCause::Unaddressable);
+        assert_eq!(body_texts(&conductor)[0], "Alpha para.");
+        assert_eq!(pending_count(&conductor), 0);
+    }
+
+    #[test]
+    fn block_edit_refusals_drift_no_change_and_not_editable() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let drifted = edit(&conductor, FIRST_PARAGRAPH, "Old text.", "New.", BlockEditIntent::Apply);
+        assert_eq!(refused_cause(&drifted), BlockEditCause::Drifted);
+        let same = edit(&conductor, FIRST_PARAGRAPH, "Alpha para.", "Alpha para.", BlockEditIntent::Apply);
+        assert_eq!(response(&same), BlockEditResponse::Done(BlockEditOutcome::NoChange));
+        let empty = edit(&conductor, FIRST_PARAGRAPH, "Alpha para.", "  ", BlockEditIntent::Suggest);
+        assert_eq!(refused_cause(&empty), BlockEditCause::Invalid);
+    }
+
+    // ── 16 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn structural_suggestion_accept_after_manual_edit_is_drifted() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = created_id(&edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha one.\n\nAlpha two.",
+            BlockEditIntent::Suggest,
+        ));
+        manual_edit_first_paragraph(&conductor, "Alpha rewritten.");
+
+        let result = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
+        assert!(
+            result.events.iter().any(|e| matches!(e, ConductorEvent::NedSuggestionStaled { .. })),
+            "events: {:?}",
+            result.events
+        );
+        assert!(
+            matches!(
+                suggestion(&conductor, &id).status,
+                NedSuggestionStatus::Stale { cause: StaleCause::Drifted, .. }
+            ),
+            "{:?}",
+            suggestion(&conductor, &id).status
+        );
+        assert_eq!(body_texts(&conductor)[0], "Alpha rewritten.", "stale accept changes nothing");
+    }
+
+    // ── 17 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn search_replace_suggestion_survives_unrelated_edit() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        manual_edit_first_paragraph(&conductor, "Alpha beta gamma");
+        let id = created_id(&edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha beta gamma",
+            "Alpha BETA gamma",
+            BlockEditIntent::Suggest,
+        ));
+        let sug = suggestion(&conductor, &id);
+        assert!(matches!(sug.mutation, NedMutation::SearchReplace { .. }), "{:?}", sug.mutation);
+        assert!(sug.preview.is_some());
+
+        // The block changes elsewhere: the base has drifted, but the search
+        // text is still unique, so SearchReplace has no base check.
+        manual_edit_first_paragraph(&conductor, "Alpha beta delta");
+        let result = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert_eq!(suggestion(&conductor, &id).status, NedSuggestionStatus::Accepted);
+        assert_eq!(body_texts(&conductor)[0], "Alpha BETA delta");
+    }
+
+    // ── 18 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn forbidden_payload_kind_is_refused_for_both_intents() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        for proposed in [
+            "<div class=\"note\">\nAlpha para.\n</div>",
+            "Alpha para.\n\n---",
+        ] {
+            for intent in [BlockEditIntent::Apply, BlockEditIntent::Suggest] {
+                let result = edit(&conductor, FIRST_PARAGRAPH, "Alpha para.", proposed, intent);
+                assert_eq!(refused_cause(&result), BlockEditCause::Invalid, "{proposed:?}");
+            }
+        }
+        assert_eq!(body_texts(&conductor), vec!["Alpha para.", "Beta para.", "fn a() {}"]);
+        assert_eq!(pending_count(&conductor), 0);
+    }
+
+    // ── F1: the base is rechecked under the write lock ──────────────────────
+
+    #[test]
+    fn apply_rechecks_base_under_the_write_lock() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        for proposed in ["Alpha paragraph.", "Alpha one.\n\nAlpha two."] {
+            let req = request(FILE, FIRST_PARAGRAPH, "Alpha para.", proposed, BlockEditIntent::Apply);
+            let lowered = match conductor.lower_block_edit(&req).expect("lowers") {
+                Lowering::Lowered(l) => l,
+                Lowering::NoChange => panic!("should change"),
+            };
+            // The block changes between the lowering and the apply.
+            // (A Replace is caught by the base check; a SearchReplace by its
+            // search no longer matching, which also means drift.)
+            manual_edit_first_paragraph(&conductor, "Totally different");
+            let result = conductor.run_lowered(
+                BlockEditIntent::Apply,
+                Path::new(FILE),
+                lowered,
+                None,
+            );
+            assert_eq!(refused_cause(&result), BlockEditCause::Drifted, "{proposed:?}");
+            assert_eq!(body_texts(&conductor)[0], "Totally different");
+            manual_edit_first_paragraph(&conductor, "Alpha para.");
+        }
+    }
+
+    // ── F3: search failures on Apply mean drift ─────────────────────────────
+
+    #[test]
+    fn apply_refusal_causes() {
+        use editorial_types::StaleCause as S;
+        let cause = Conductor::apply_refusal_cause;
+        assert_eq!(cause(&S::Drifted), BlockEditCause::Drifted);
+        assert_eq!(cause(&S::SearchNotFound), BlockEditCause::Drifted);
+        assert_eq!(cause(&S::SearchNotUnique { occurrences: 2 }), BlockEditCause::Drifted);
+        assert_eq!(cause(&S::Unresolved), BlockEditCause::Unaddressable);
+        assert_eq!(cause(&S::Ambiguous { matches: 2 }), BlockEditCause::Unaddressable);
+        assert_eq!(
+            cause(&S::EvalError { detail: "x".into() }),
+            BlockEditCause::Unaddressable
+        );
+        assert_eq!(cause(&S::InvalidValue { detail: "x".into() }), BlockEditCause::Invalid);
+        assert_eq!(cause(&S::NoChange), BlockEditCause::Invalid);
+    }
+
+    // ── slot heading under both intents (Content projection) ────────────────
+
+    #[test]
+    fn block_edit_on_slot_heading_uses_content_projection() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        // The base is the heading's source, with no `#` markers.
+        let result = edit(&conductor, TITLE_HEADING, "First Post", "Second Post", BlockEditIntent::Apply);
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+        assert_eq!(title(&conductor), "Second Post");
     }
 }
 

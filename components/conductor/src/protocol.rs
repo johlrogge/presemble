@@ -130,6 +130,10 @@ pub enum Command {
         reason: String,
         author: editorial_types::Author,
     },
+    /// Edit one block through its markdown projection (ADR-059 §10). The
+    /// intent chooses between applying now and storing a suggestion; the
+    /// lowering is the same. Responds with [`Response::BlockEdited`].
+    BlockEdit(editorial_types::BlockEditRequest),
     /// Accept a NED-based suggestion: apply the mutation and mark as accepted.
     AcceptNedSuggestion {
         id: editorial_types::SuggestionId,
@@ -192,6 +196,8 @@ pub enum Response {
     SchemaUrl(Option<String>),
     /// Best-effort representative content page URL for a schema (response to `Command::PageUrlForSchema`).
     PageUrl(Option<String>),
+    /// Result of a [`Command::BlockEdit`]: done, or refused with a cause.
+    BlockEdited(editorial_types::BlockEditResponse),
     /// Result of applying a NED program: counts of dirty paths and rebuilt/failed pages.
     Applied {
         rebuilt_pages: Vec<String>,

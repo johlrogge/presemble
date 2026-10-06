@@ -16,7 +16,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 
 use content::ContentElement;
-use editorial_types::{NedMutation, StaleCause, TargetKind};
+use editorial_types::{BlockEditCause, NedMutation, StaleCause, SuggestionPreview, TargetKind};
 use ned::{NodeTree, Selection};
 use node_store::{Node, NodeId, NodeStore};
 use node_store_bridge::{
@@ -265,6 +265,36 @@ pub(crate) fn resolve_target(
             let document = container_document(store, id, kind)?;
             Ok(ResolvedTarget::Container { container: id, document })
         }
+    }
+}
+
+// ── Drift ───────────────────────────────────────────────────────────────────
+
+/// Whether the block a block-edit suggestion was made against still reads as
+/// its `preview.base` (ADR-059 §10).
+///
+/// Only `Replace` and `SetText` are checked: they overwrite the whole block
+/// or its whole text. `SearchReplace` keeps its own local drift detection (the
+/// search text must still occur exactly once) and gets no base check, as do
+/// the other mutations. The comparison is `block_edit::check_base`, the one
+/// definition of drift, shared with the lowering.
+pub(crate) fn check_drift(
+    store: &NodeStore,
+    target: &ResolvedTarget,
+    mutation: &NedMutation,
+    preview: &SuggestionPreview,
+) -> Result<(), StaleCause> {
+    if !matches!(mutation, NedMutation::Replace(_) | NedMutation::SetText(_)) {
+        return Ok(());
+    }
+    let block = match target {
+        ResolvedTarget::Text { block, .. } | ResolvedTarget::Block { block, .. } => *block,
+        ResolvedTarget::Container { .. } => return Ok(()),
+    };
+    match node_store_bridge::block_edit::check_base(store, block, &preview.base) {
+        Ok(_) => Ok(()),
+        Err(e) if e.cause == BlockEditCause::Drifted => Err(StaleCause::Drifted),
+        Err(e) => Err(StaleCause::InvalidValue { detail: e.message }),
     }
 }
 

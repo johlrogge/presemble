@@ -6,7 +6,7 @@
 //! lowering is the same for both intents.
 
 use content::{
-    Projection, check_block_round_trip, parse_markdown_projection, project_markdown,
+    ContentElement, Projection, check_block_round_trip, parse_markdown_projection, project_markdown,
 };
 use editorial_types::{
     BlockEditCause, BlockEditError, BlockText, NedMutation, SuggestionPreview,
@@ -128,6 +128,65 @@ fn projection_for(store: &NodeStore, block: NodeId) -> Option<Projection> {
     })
 }
 
+/// A block as it is edited now: its projection, its decoded element and its
+/// projected markdown.
+struct Current {
+    projection: Projection,
+    el: ContentElement,
+    text: String,
+}
+
+impl Current {
+    fn load(store: &NodeStore, block: NodeId) -> Result<Current, BlockEditError> {
+        let projection = projection_for(store, block).ok_or_else(|| {
+            refuse(
+                BlockEditCause::Unaddressable,
+                "the block is not directly under a slot or the body",
+            )
+        })?;
+        let el = block_from_node(store, block)
+            .map_err(|e| refuse(BlockEditCause::NotEditable, e.to_string()))?;
+        let text = project_markdown(&el, projection).ok_or_else(|| {
+            refuse(BlockEditCause::NotEditable, "this kind of block cannot be edited")
+        })?;
+        Ok(Current { projection, el, text })
+    }
+
+    /// Whether `md` reads as this block. Node equality is the primary check;
+    /// text equality covers markdown that is not a fixed point of parse and
+    /// serialize (known limits such as L11 and L19).
+    fn reads_as(&self, md: &str) -> bool {
+        let same_node = match parse_markdown_projection(md, self.projection, &self.el) {
+            Ok(els) => els.as_slice() == std::slice::from_ref(&self.el),
+            Err(_) => false,
+        };
+        same_node || normalize_newlines(md) == self.text
+    }
+}
+
+/// The one definition of drift: does `block` still read as `base`?
+///
+/// Picks the block's projection, decodes it, and compares `base` with it by
+/// node equality, falling back to text equality. Refuses with `Drifted` when
+/// it no longer does, and with `Unaddressable` or `NotEditable` when the
+/// block cannot be edited at all. Used by [`lower`] and by the conductor when
+/// it accepts a suggestion or applies a lowered edit.
+pub fn check_base(
+    store: &NodeStore,
+    block: NodeId,
+    base: &BlockText,
+) -> Result<(), BlockEditError> {
+    let BlockText::Markdown(base_md) = base;
+    if Current::load(store, block)?.reads_as(base_md) {
+        Ok(())
+    } else {
+        Err(refuse(
+            BlockEditCause::Drifted,
+            "the block has changed since it was loaded",
+        ))
+    }
+}
+
 /// Lower a block edit to one mutation, for both intents.
 ///
 /// `block` is the single resolved target block and `block_selection` the
@@ -146,48 +205,24 @@ pub fn lower(
     base: &BlockText,
     proposed: &BlockText,
 ) -> Result<Lowering, BlockEditError> {
-    let BlockText::Markdown(base_md) = base;
     let BlockText::Markdown(proposed_md) = proposed;
 
-    let projection = projection_for(store, block).ok_or_else(|| {
-        refuse(
-            BlockEditCause::Unaddressable,
-            "the block is not directly under a slot or the body",
-        )
-    })?;
-    let current_el = block_from_node(store, block)
-        .map_err(|e| refuse(BlockEditCause::NotEditable, e.to_string()))?;
-    let current = project_markdown(&current_el, projection).ok_or_else(|| {
-        refuse(BlockEditCause::NotEditable, "this kind of block cannot be edited")
-    })?;
+    check_base(store, block, base)?;
+    let now = Current::load(store, block)?;
+    let (projection, current_el) = (now.projection, &now.el);
 
-    // Drift: the base must still read as the block. Node equality is the
-    // primary check; text equality covers markdown that is not a fixed point
-    // of parse and serialize.
-    let same_block =
-        |md: &str| match parse_markdown_projection(md, projection, &current_el) {
-            Ok(els) => els.as_slice() == std::slice::from_ref(&current_el),
-            Err(_) => false,
-        };
-    if !same_block(base_md) && normalize_newlines(base_md) != current {
-        return Err(refuse(
-            BlockEditCause::Drifted,
-            "the block has changed since it was loaded",
-        ));
-    }
-
-    if same_block(proposed_md) || normalize_newlines(proposed_md) == current {
+    if now.reads_as(proposed_md) {
         return Ok(Lowering::NoChange);
     }
     if proposed_md.trim().is_empty() {
         return Err(refuse(BlockEditCause::Invalid, "use delete"));
     }
 
-    let elements = parse_markdown_projection(proposed_md, projection, &current_el)
+    let elements = parse_markdown_projection(proposed_md, projection, current_el)
         .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?;
 
     let preview = SuggestionPreview {
-        base: BlockText::Markdown(current),
+        base: BlockText::Markdown(now.text.clone()),
         proposed: proposed.clone(),
     };
 
@@ -240,7 +275,6 @@ fn normalize_newlines(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::content_bridge::{PAYLOAD_BLOCK_KINDS, block_to_store, block_to_tree, tree_to_block};
-    use content::ContentElement;
     use schema::HeadingLevel;
     use node_store::Edge;
 
@@ -564,6 +598,47 @@ mod tests {
         // The block projection (with markers) is not the base of a slot heading.
         let err = lowered("slot", &h, "# Hello *World*", "# Hello *Presemble*").unwrap_err();
         assert_eq!(err.cause, BlockEditCause::Drifted);
+    }
+
+    #[test]
+    fn check_base_agrees_with_lower() {
+        let h = ContentElement::Heading {
+            level: HeadingLevel::new(1).unwrap(),
+            source: "Hello *World*".into(),
+        };
+        let img = ContentElement::Image { alt: None, path: "p.jpg".to_string() };
+        let cases: Vec<(&str, ContentElement, &str)> = vec![
+            ("body", paragraph("Alpha beta."), "Alpha beta."),
+            ("body", paragraph("Alpha beta."), "Alpha gamma."),
+            ("body", paragraph("one\ntwo"), "one\r\ntwo"),
+            ("body", paragraph(""), ""),
+            ("slot", h.clone(), "Hello *World*"),
+            ("slot", h.clone(), "# Hello *World*"),
+            ("body", h, "# Hello *World*"),
+            ("body", img, "![](p.jpg)"),
+            ("section", paragraph("x"), "x"),
+        ];
+        for (parent, el, base) in cases {
+            let (store, block) = store_with(parent, &el);
+            let checked = check_base(&store, block, &md(base));
+            // `lower` with a proposal that differs from every base used here.
+            let lowered = lower(&store, block, SEL, &md(base), &md("Something else entirely."));
+            match (&checked, &lowered) {
+                (Ok(()), Ok(_)) => {}
+                (Err(a), Err(b)) if b.cause == a.cause => {}
+                // `lower` can refuse for its own reasons (the proposal) only
+                // after the base was accepted.
+                (Ok(()), Err(b)) => assert_ne!(b.cause, BlockEditCause::Drifted, "{parent} {base:?}"),
+                other => panic!("{parent} {base:?}: {other:?}"),
+            }
+        }
+        // And the cases are what they say.
+        let (store, block) = store_with("body", &paragraph("Alpha beta."));
+        assert!(check_base(&store, block, &md("Alpha beta.")).is_ok());
+        assert_eq!(
+            check_base(&store, block, &md("Alpha gamma.")).unwrap_err().cause,
+            BlockEditCause::Drifted
+        );
     }
 
     #[test]

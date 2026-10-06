@@ -518,6 +518,7 @@ fn app_router(state: AppState) -> Router {
         .route("/_presemble/schemas", get(schemas_handler))
         .route("/_presemble/create-content", post(create_content_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
+        .route("/_presemble/block-edit", post(block_edit_handler))
         .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
         .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
         .route("/_presemble/ned-suggestions/accept", post(ned_suggestions_accept_handler))
@@ -778,6 +779,33 @@ async fn save_all_handler(
     State(state): State<AppState>,
 ) -> axum::Json<EditResponse> {
     conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers))
+}
+
+/// `POST /_presemble/block-edit`: edit one block through its markdown
+/// projection (ADR-059 §10), applying now or storing a suggestion.
+///
+/// A refusal (drifted, unaddressable, invalid ...) is a 200 carrying the typed
+/// `refused` response. A conductor or transport failure is a JSON
+/// `{"error": ...}` with a non-2xx status.
+async fn block_edit_handler(
+    _session: Session,
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<editorial_types::BlockEditRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let failure = |status: StatusCode, message: String| {
+        (status, axum::Json(serde_json::json!({ "error": message }))).into_response()
+    };
+    match state.conductor.send(&conductor::Command::BlockEdit(req)) {
+        Ok(conductor::Response::BlockEdited(response)) => axum::Json(response).into_response(),
+        Ok(conductor::Response::Error(e)) => failure(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Ok(_) => failure(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unexpected conductor response".to_string(),
+        ),
+        Err(e) => failure(StatusCode::BAD_GATEWAY, e),
+    }
 }
 
 // ── NED suggestion HTTP endpoints ────────────────────────────────────────────
@@ -3415,12 +3443,98 @@ mod tests {
             session_store,
         };
         Router::new()
+            .route("/_presemble/block-edit", post(block_edit_handler))
             .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
             .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
             .route("/_presemble/ned-suggestions/accept", post(ned_suggestions_accept_handler))
             .route("/_presemble/ned-suggestions/reject", post(ned_suggestions_reject_handler))
             .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
             .with_state(state)
+    }
+
+    const TITLE_HEADING: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")) "heading" 0)"#;
+
+    async fn post_block_edit(
+        app: &axum::Router,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/block-edit")
+            .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let val = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, val)
+    }
+
+    #[tokio::test]
+    async fn block_edit_route_round_trip() {
+        let (client, _tmp) = start_test_conductor();
+        let app = test_app(client);
+        let request = |base: &str, proposed: &str, intent: &str| {
+            serde_json::json!({
+                "file": "content/test/doc.md",
+                "selection": TITLE_HEADING,
+                "base": {"markdown": base},
+                "proposed": {"markdown": proposed},
+                "intent": intent,
+            })
+        };
+
+        // Suggest: a typed `done` / `suggestion-created` response.
+        let (status, val) =
+            post_block_edit(&app, request("Test Title", "Better Title", "suggest")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        let id = val["done"]["suggestion-created"]["id"].as_str().expect("id");
+        assert!(id.starts_with("sug-"), "{val}");
+
+        // The suggestion is stored with its preview.
+        let list = {
+            use tower::ServiceExt;
+            let req = axum::http::Request::builder()
+                .method("GET")
+                .uri("/_presemble/ned-suggestions?file=content/test/doc.md")
+                .header("cookie", test_session_cookie())
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            let bytes =
+                http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+        assert_eq!(list.as_array().map(Vec::len), Some(1), "{list}");
+
+        // Apply: `done` / `applied`.
+        let (status, val) =
+            post_block_edit(&app, request("Test Title", "Applied Title", "apply")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert!(val["done"]["applied"]["pages"].is_array(), "{val}");
+
+        // A stale base is refused with a 200 and a typed cause.
+        let (status, val) =
+            post_block_edit(&app, request("Test Title", "Again", "apply")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert_eq!(val["refused"]["cause"], "drifted", "{val}");
+
+        // Nothing to change.
+        let (status, val) =
+            post_block_edit(&app, request("Applied Title", "Applied Title", "apply")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert_eq!(val, serde_json::json!({"done": "no-change"}));
+    }
+
+    #[tokio::test]
+    async fn block_edit_route_rejects_a_malformed_request() {
+        let (client, _tmp) = start_test_conductor();
+        let app = test_app(client);
+        let (status, _) = post_block_edit(&app, serde_json::json!({"file": 1})).await;
+        assert!(status.is_client_error(), "{status}");
     }
 
     #[tokio::test]
