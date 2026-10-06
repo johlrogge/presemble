@@ -799,6 +799,7 @@ fn stale_hint(cause: &editorial_types::StaleCause) -> Option<&'static str> {
         StaleCause::SearchNotFound | StaleCause::NoChange => {
             Some("text changed; likely already handled")
         }
+        StaleCause::Drifted => Some("the block changed; review and re-suggest"),
         StaleCause::SearchNotUnique { .. } => {
             Some("text now occurs more than once; review manually")
         }
@@ -1325,6 +1326,7 @@ mod tests {
             reason: "Test reason".to_string(),
             status,
             created_at: "2026-04-26T00:00:00Z".to_string(),
+            preview: None,
         }
     }
 

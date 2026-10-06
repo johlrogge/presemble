@@ -1,0 +1,15 @@
+{
+  "request": {
+    "file": "content/post/hello.md",
+    "selection": "(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path \"content/post/hello.md\") \"body\")) \"paragraph\" 0)",
+    "base": { "markdown": "A plain paragraph." },
+    "proposed": { "markdown": "<div class=\"note\">\nA plain paragraph.\n</div>" },
+    "intent": "apply"
+  },
+  "response": {
+    "refused": {
+      "cause": "invalid",
+      "message": "an html-block cannot be written through a block edit"
+    }
+  }
+}

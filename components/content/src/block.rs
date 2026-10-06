@@ -4,6 +4,7 @@
 use std::fmt;
 
 use crate::document::ContentElement;
+use crate::error::ContentError;
 use crate::parser::parse_document;
 use crate::serializer::serialize_element;
 
@@ -60,6 +61,56 @@ impl ContentElement {
             | ContentElement::LinkExpression { .. } => None,
         }
     }
+}
+
+/// Which markdown form of a block an editor works on (ADR-059 §10).
+///
+/// The server picks the projection from where the block lives; clients never
+/// send it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Projection {
+    /// The whole block as canonical block markdown (a block directly under
+    /// `body`).
+    Block,
+    /// The block's content: for a heading its source without the `#` markers
+    /// (a block under a preamble slot); every other kind is as `Block`.
+    Content,
+}
+
+/// The markdown `el` is edited as under projection `p`, or `None` for kinds
+/// that cannot be edited (Image, Table, Separator, HtmlBlock, LinkExpression).
+pub fn project_markdown(el: &ContentElement, p: Projection) -> Option<String> {
+    el.text()?;
+    let md = serialize_element(el);
+    match (p, el) {
+        (Projection::Content, ContentElement::Heading { level, .. }) => {
+            // `# ` × level + space precede the canonical source.
+            Some(md[usize::from(level.value()) + 1..].to_string())
+        }
+        _ => Some(md),
+    }
+}
+
+/// Parse edited markdown back into blocks under projection `p`. `like` is the
+/// block being edited; it supplies the heading level for a Content-projected
+/// heading. Line endings are normalised first.
+pub fn parse_markdown_projection(
+    md: &str,
+    p: Projection,
+    like: &ContentElement,
+) -> Result<Vec<ContentElement>, ContentError> {
+    let md = md.replace("\r\n", "\n");
+    let source = match (p, like) {
+        (Projection::Content, ContentElement::Heading { level, .. }) => {
+            crate::inline::heading_markdown(*level, &md.as_str().into())
+        }
+        _ => md,
+    };
+    Ok(parse_document(&source)?
+        .elements
+        .iter()
+        .map(|s| s.node.clone())
+        .collect())
 }
 
 /// Why a block failed the markdown round-trip check.
@@ -135,6 +186,108 @@ mod tests {
         ContentElement::Paragraph {
             text: text.to_string(),
         }
+    }
+
+    // ── projections ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_projection_is_canonical_block_markdown() {
+        let cases = [
+            "## Hello World",
+            "Hello, **world**.",
+            "[Visit Rust](https://rust-lang.org)",
+            "> A quote.",
+            "- one\n- two",
+            "```rust\nfn main() {}\n```",
+        ];
+        for md in cases {
+            let el = parse_one(md);
+            assert_eq!(
+                project_markdown(&el, Projection::Block),
+                Some(serialize_element(&el)),
+                "{md}"
+            );
+        }
+        assert_eq!(
+            project_markdown(&parse_one("## Hello World"), Projection::Block).as_deref(),
+            Some("## Hello World")
+        );
+    }
+
+    #[test]
+    fn content_projection_of_heading_is_its_source_without_markers() {
+        let h = parse_one("### Hello *there*");
+        assert_eq!(
+            project_markdown(&h, Projection::Content).as_deref(),
+            Some("Hello *there*")
+        );
+        let escaped = parse_one("# Title \\#");
+        assert_eq!(
+            project_markdown(&escaped, Projection::Content).as_deref(),
+            Some("Title \\#")
+        );
+        // Non-headings: same as Block.
+        let p = paragraph("Plain *text*");
+        assert_eq!(
+            project_markdown(&p, Projection::Content),
+            project_markdown(&p, Projection::Block)
+        );
+    }
+
+    #[test]
+    fn projection_is_none_for_non_editable_kinds() {
+        let cases = [
+            ContentElement::Image {
+                alt: None,
+                path: "p.jpg".to_string(),
+            },
+            ContentElement::Table {
+                headers: vec!["h".to_string()],
+                rows: vec![],
+            },
+            ContentElement::Separator,
+            ContentElement::HtmlBlock {
+                source: "<b>x</b>".to_string(),
+            },
+            ContentElement::LinkExpression {
+                text: LinkText::Empty,
+                target: LinkTarget::PathRef("x".to_string()),
+                slot: None,
+            },
+        ];
+        for el in cases {
+            for p in [Projection::Block, Projection::Content] {
+                assert_eq!(project_markdown(&el, p), None, "{el:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_projection_round_trips_each_editable_kind() {
+        let cases = [
+            "## Hello World",
+            "Hello, **world**.",
+            "[Visit Rust](https://rust-lang.org)",
+            "> A quote.",
+            "- one\n- two",
+            "```rust\nfn main() {}\n```",
+        ];
+        for md in cases {
+            let el = parse_one(md);
+            for p in [Projection::Block, Projection::Content] {
+                let text = project_markdown(&el, p).unwrap();
+                let parsed = parse_markdown_projection(&text, p, &el).unwrap();
+                assert_eq!(parsed, vec![el.clone()], "{md} under {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_projection_normalises_line_endings_and_splits_blocks() {
+        let el = paragraph("x");
+        let parsed =
+            parse_markdown_projection("one\r\n\r\ntwo", Projection::Block, &el).unwrap();
+        assert_eq!(parsed, vec![paragraph("one"), paragraph("two")]);
     }
 
     // ── text / with_text ────────────────────────────────────────────────────

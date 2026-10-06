@@ -2664,6 +2664,7 @@ mod tests {
             reason: "test".to_string(),
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            preview: None,
         };
         let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionCreated { suggestion });
         match msg {
@@ -3254,6 +3255,7 @@ mod tests {
             reason: "Clearer title".to_string(),
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
         let json_val = serde_json::to_value(NedSuggestionJson::from(&sug)).unwrap();
         assert_eq!(json_val["id"], "sug-00000000roundtrip");
@@ -3286,6 +3288,7 @@ mod tests {
                 cause: editorial_types::StaleCause::SearchNotFound,
             },
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
         let stale_json = serde_json::to_value(NedSuggestionJson::from(&stale_sug)).unwrap();
         assert_eq!(

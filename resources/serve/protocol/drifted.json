@@ -1,0 +1,15 @@
+{
+  "request": {
+    "file": "content/post/hello.md",
+    "selection": "(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path \"content/post/hello.md\") \"body\")) \"paragraph\" 0)",
+    "base": { "markdown": "The quick brown fox." },
+    "proposed": { "markdown": "The quick red fox." },
+    "intent": "apply"
+  },
+  "response": {
+    "refused": {
+      "cause": "drifted",
+      "message": "the block has changed since it was loaded"
+    }
+  }
+}

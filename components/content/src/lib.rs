@@ -17,7 +17,7 @@ pub use adapters::{
     diff_to_dom_patches, diff_to_source_edits, DomPatch, FileWriter, FullDocumentWriter,
     SourceEdit,
 };
-pub use block::{check_block_round_trip, RoundTripError};
+pub use block::{check_block_round_trip, parse_markdown_projection, project_markdown, Projection, RoundTripError};
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{
     AnchoredComment, Comment, CommentAnchor, Container, ContentElement, Document, DocumentSlot,

@@ -3435,6 +3435,7 @@ impl Conductor {
                     reason,
                     status: editorial_types::NedSuggestionStatus::Pending,
                     created_at,
+                    preview: None,
                 };
 
                 if let Err(e) = self.persist_ned_suggestion(&sug) {
@@ -6081,6 +6082,7 @@ mod ned_suggestion_handler_tests {
             reason: "file b".to_string(),
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-04-26T00:00:00Z".to_string(),
+            preview: None,
         };
         conductor.ned_suggestions.write().unwrap().insert(id_b, sug_b);
 
@@ -6126,6 +6128,7 @@ mod ned_suggestion_handler_tests {
             reason: "file alpha".to_string(),
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
 
         let id_b = editorial_types::SuggestionId::new();
@@ -6139,6 +6142,7 @@ mod ned_suggestion_handler_tests {
             reason: "file beta".to_string(),
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
 
         // Insert a Rejected suggestion for a third file -- must NOT appear in results.
@@ -6153,6 +6157,7 @@ mod ned_suggestion_handler_tests {
             reason: "file gamma rejected".to_string(),
             status: editorial_types::NedSuggestionStatus::Rejected,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
 
         {
@@ -6189,6 +6194,7 @@ mod ned_suggestion_handler_tests {
             reason: "rejected".to_string(),
             status: editorial_types::NedSuggestionStatus::Rejected,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
 
         let id_accepted = editorial_types::SuggestionId::new();
@@ -6202,6 +6208,7 @@ mod ned_suggestion_handler_tests {
             reason: "accepted".to_string(),
             status: editorial_types::NedSuggestionStatus::Accepted,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
 
         {
@@ -6239,6 +6246,7 @@ mod ned_suggestion_handler_tests {
                 cause: editorial_types::StaleCause::Unresolved,
             },
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
         conductor.ned_suggestions.write().unwrap().insert(id_stale, sug_stale);
 
@@ -6268,6 +6276,7 @@ mod ned_suggestion_handler_tests {
             reason: "first".to_string(),
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
         let id_2 = editorial_types::SuggestionId::new();
         let sug_2 = editorial_types::NedSuggestion {
@@ -6280,6 +6289,7 @@ mod ned_suggestion_handler_tests {
             reason: "second".to_string(),
             status: editorial_types::NedSuggestionStatus::Pending,
             created_at: "2026-04-28T00:00:00Z".to_string(),
+            preview: None,
         };
         {
             let mut map = conductor.ned_suggestions.write().unwrap();

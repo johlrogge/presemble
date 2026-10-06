@@ -1,0 +1,10 @@
+{
+  "request": {
+    "file": "content/post/hello.md",
+    "selection": "(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path \"content/post/hello.md\") \"body\")) \"Intro\") \"paragraph\" 0)",
+    "base": { "markdown": "The quick brown fox." },
+    "proposed": { "markdown": "The quick red fox." },
+    "intent": "apply"
+  },
+  "response": { "done": { "applied": { "pages": ["/post/hello"] } } }
+}

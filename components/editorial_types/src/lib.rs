@@ -187,6 +187,9 @@ pub enum StaleCause {
     NoChange,
     /// The selection could not be evaluated.
     EvalError { detail: String },
+    /// The addressed block no longer reads as it did when the suggestion was
+    /// made (its projection differs from the suggestion's preview base).
+    Drifted,
 }
 
 impl fmt::Display for StaleCause {
@@ -215,6 +218,9 @@ impl fmt::Display for StaleCause {
             StaleCause::NoChange => f.write_str("applying the change would change nothing"),
             StaleCause::EvalError { detail } => {
                 write!(f, "the address could not be evaluated: {detail}")
+            }
+            StaleCause::Drifted => {
+                f.write_str("the block has changed since the suggestion was made")
             }
         }
     }
@@ -261,6 +267,100 @@ pub struct NedSuggestion {
     pub status: NedSuggestionStatus,
     /// ISO 8601 timestamp of creation.
     pub created_at: String,
+    /// Display and drift-check data for suggestions made through a block edit
+    /// (ADR-059 §10). Never used to apply the mutation. Absent in suggestions
+    /// persisted before block edits existed.
+    #[serde(default)]
+    pub preview: Option<SuggestionPreview>,
+}
+
+/// A representation of a block's editable content. The block (N) is the core;
+/// this is one surface of it. No EDN variant exists until its codec does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockText {
+    Markdown(String),
+}
+
+/// What a suggestion was made against and proposes, for display and drift
+/// checks only.
+///
+/// `base` is the block's projection when the suggestion was created;
+/// `proposed` is the proposed projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestionPreview {
+    pub base: BlockText,
+    pub proposed: BlockText,
+}
+
+// ── Block edit protocol (ADR-059 §10) ────────────────────────────────────────
+
+/// Whether a block edit is applied now or stored as a suggestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockEditIntent {
+    Apply,
+    Suggest,
+}
+
+/// A browser edit of one block's markdown projection. The server chooses the
+/// projection; the client never sends it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct BlockEditRequest {
+    pub file: ContentPath,
+    /// Addresses a block (never wrapped in `ned/text-in`).
+    pub selection: String,
+    /// The projection the client started from.
+    pub base: BlockText,
+    /// The edited projection.
+    pub proposed: BlockText,
+    pub intent: BlockEditIntent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// What a successful block edit did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockEditOutcome {
+    /// The edit was applied; `pages` were rebuilt.
+    Applied { pages: Vec<String> },
+    /// The edit was stored as a pending suggestion.
+    SuggestionCreated { id: SuggestionId },
+    /// The edit changes nothing.
+    NoChange,
+}
+
+/// Why a block edit was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockEditCause {
+    /// The block no longer reads as the request's `base`.
+    Drifted,
+    /// The selection does not resolve to exactly one block in the file.
+    Unaddressable,
+    /// The block kind cannot be edited.
+    NotEditable,
+    /// The proposed text is invalid, including a payload kind that may not be
+    /// written through a block edit (html-block, separator, link-expression);
+    /// the error message says which.
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct BlockEditError {
+    pub cause: BlockEditCause,
+    pub message: String,
+}
+
+/// The result of a block edit: it was done, or it was refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockEditResponse {
+    Done(BlockEditOutcome),
+    Refused(BlockEditError),
 }
 
 /// Validate that a [`NedMutation`] contains no [`NodeTree::Existing`] nodes.
@@ -466,6 +566,7 @@ mod tests {
             reason: String::from("Test reason"),
             status: NedSuggestionStatus::Pending,
             created_at: String::from("2026-04-21T00:00:00Z"),
+            preview: None,
         }
     }
 
@@ -593,6 +694,7 @@ mod tests {
             StaleCause::EvalError {
                 detail: "boom".to_string(),
             },
+            StaleCause::Drifted,
         ];
         for cause in causes {
             let json = serde_json::to_string(&cause).expect("serialize");
@@ -627,6 +729,75 @@ mod tests {
         assert_eq!(NedMutation::InsertBefore(tree()).target_kind(), TargetKind::Block);
         assert_eq!(NedMutation::InsertAfter(tree()).target_kind(), TargetKind::Block);
         assert_eq!(NedMutation::InsertChild(tree()).target_kind(), TargetKind::Container);
+    }
+
+    // ── block-edit protocol (ADR-059 §10) ─────────────────────────────────────
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct Fixture {
+        request: BlockEditRequest,
+        response: BlockEditResponse,
+    }
+
+    #[test]
+    fn protocol_fixtures_round_trip() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/serve/protocol");
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("fixture dir exists") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path).expect("read fixture");
+            let original: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+            let typed: Fixture = serde_json::from_value(original.clone())
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let again = serde_json::to_value(&typed).expect("serialize");
+            assert_eq!(again, original, "{}", path.display());
+            names.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "apply-body-paragraph.json",
+                "apply-slot-heading.json",
+                "drifted.json",
+                "forbidden-kind.json",
+                "no-change.json",
+                "structural-apply.json",
+                "structural-suggest.json",
+                "suggest-body-paragraph.json",
+                "suggest-slot-heading.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn old_suggestions_without_preview_still_load() {
+        let sug = base_ned_suggestion(NedMutation::Delete);
+        let mut json = serde_json::to_value(&sug).expect("serialize");
+        json.as_object_mut().unwrap().remove("preview");
+        let back: NedSuggestion = serde_json::from_value(json).expect("old json loads");
+        assert_eq!(back.preview, None);
+    }
+
+    #[test]
+    fn suggestion_preview_round_trips() {
+        let mut sug = base_ned_suggestion(NedMutation::Delete);
+        sug.preview = Some(SuggestionPreview {
+            base: BlockText::Markdown("old".to_string()),
+            proposed: BlockText::Markdown("new".to_string()),
+        });
+        let value = serde_json::to_value(&sug).expect("serialize");
+        assert_eq!(
+            value["preview"],
+            serde_json::json!({"base": {"markdown": "old"}, "proposed": {"markdown": "new"}})
+        );
+        let json = serde_json::to_string(&sug).expect("serialize");
+        let back: NedSuggestion = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.preview, sug.preview);
     }
 
     #[test]
