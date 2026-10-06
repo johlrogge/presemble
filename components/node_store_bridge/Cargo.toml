@@ -21,3 +21,4 @@ im = { workspace = true }
 node_store = { workspace = true }
 schema = { workspace = true }
 content = { workspace = true }
+serde_json = { workspace = true }

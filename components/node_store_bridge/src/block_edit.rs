@@ -9,11 +9,11 @@ use content::{
     ContentElement, Projection, check_block_round_trip, parse_markdown_projection, project_markdown,
 };
 use editorial_types::{
-    BlockEditCause, BlockEditError, BlockText, NedMutation, SuggestionPreview,
+    BlockEditCause, BlockEditError, BlockText, NedMutation, PreviewText, SuggestionPreview,
 };
 use node_store::{Node, NodeId, NodeStore};
 
-use crate::content_bridge::{BlockDecodeError, block_from_node, block_to_tree};
+use crate::content_bridge::{BlockDecodeError, block_from_node, block_to_tree, tree_to_block};
 
 /// A minimal text edit of one block's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +164,27 @@ impl Current {
     }
 }
 
+/// The blocks an EDN text holds: hiccup read as trees, each decoded as a block.
+/// The projection does not apply: the tree is always the whole block.
+fn decode_edn(edn: &str) -> Result<Vec<ContentElement>, BlockEditError> {
+    template::hiccup_to_trees(edn)
+        .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?
+        .iter()
+        .map(|tree| tree_to_block(tree).map_err(payload_refusal))
+        .collect()
+}
+
+/// How a payload that cannot be a block is refused, for both representations.
+fn payload_refusal(e: BlockDecodeError) -> BlockEditError {
+    match e {
+        BlockDecodeError::NotPayloadKind(name) => refuse(
+            BlockEditCause::Invalid,
+            format!("a {name} cannot be written through a block edit"),
+        ),
+        other => refuse(BlockEditCause::Invalid, other.to_string()),
+    }
+}
+
 /// The one definition of drift: does `block` still read as `base`?
 ///
 /// Picks the block's projection, decodes it, and compares `base` with it by
@@ -176,8 +197,12 @@ pub fn check_base(
     block: NodeId,
     base: &BlockText,
 ) -> Result<(), BlockEditError> {
-    let BlockText::Markdown(base_md) = base;
-    if Current::load(store, block)?.reads_as(base_md) {
+    let now = Current::load(store, block)?;
+    let reads_as = match base {
+        BlockText::Markdown(md) => now.reads_as(md),
+        BlockText::Edn(edn) => decode_edn(edn)?.as_slice() == std::slice::from_ref(&now.el),
+    };
+    if reads_as {
         Ok(())
     } else {
         Err(refuse(
@@ -191,7 +216,10 @@ pub fn check_base(
 ///
 /// `block` is the single resolved target block and `block_selection` the
 /// selection that addresses it. `base` is what the client started from;
-/// `proposed` is what it wants.
+/// `proposed` is what it wants. Each may be markdown or EDN, independently:
+/// EDN is decoded by `hiccup_to_trees` and `tree_to_block`, with no
+/// projection (the tree is always the whole block). The preview is markdown
+/// either way.
 ///
 /// - Only the text of the block changes: a minimal unique text edit,
 ///   addressed with `(ned/text-in <block_selection>)`.
@@ -205,25 +233,53 @@ pub fn lower(
     base: &BlockText,
     proposed: &BlockText,
 ) -> Result<Lowering, BlockEditError> {
-    let BlockText::Markdown(proposed_md) = proposed;
-
     check_base(store, block, base)?;
     let now = Current::load(store, block)?;
     let (projection, current_el) = (now.projection, &now.el);
 
-    if now.reads_as(proposed_md) {
-        return Ok(Lowering::NoChange);
-    }
-    if proposed_md.trim().is_empty() {
-        return Err(refuse(BlockEditCause::Invalid, "use delete"));
-    }
+    let elements = match proposed {
+        BlockText::Markdown(md) => {
+            if now.reads_as(md) {
+                return Ok(Lowering::NoChange);
+            }
+            if md.trim().is_empty() {
+                return Err(refuse(BlockEditCause::Invalid, "use delete"));
+            }
+            parse_markdown_projection(md, projection, current_el)
+                .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?
+        }
+        BlockText::Edn(edn) => {
+            let elements = decode_edn(edn)?;
+            if elements.as_slice() == std::slice::from_ref(current_el) {
+                return Ok(Lowering::NoChange);
+            }
+            if elements.is_empty() {
+                return Err(refuse(BlockEditCause::Invalid, "use delete"));
+            }
+            elements
+        }
+    };
 
-    let elements = parse_markdown_projection(proposed_md, projection, current_el)
-        .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?;
+    // Refuse a kind that may not be written through a block edit before
+    // anything is shown or stored.
+    let trees = elements
+        .iter()
+        .map(|el| block_to_tree(el).map_err(payload_refusal))
+        .collect::<Result<Vec<_>, _>>()?;
 
+    // The preview is markdown, whatever the request used: it is for display,
+    // and shows what the blocks will read as, never what was typed.
+    let projected = elements
+        .iter()
+        .map(|el| {
+            project_markdown(el, projection).ok_or_else(|| {
+                refuse(BlockEditCause::Invalid, "this kind of block has no markdown")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let preview = SuggestionPreview {
-        base: BlockText::Markdown(now.text.clone()),
-        proposed: proposed.clone(),
+        base: PreviewText::new(now.text.clone()),
+        proposed: PreviewText::new(projected.join("\n\n")),
     };
 
     // Text-only change: one block that differs from the current one in its
@@ -249,17 +305,6 @@ pub fn lower(
     }
 
     // Anything else replaces the block.
-    let mut trees = Vec::with_capacity(elements.len());
-    for el in &elements {
-        let tree = block_to_tree(el).map_err(|e| match e {
-            BlockDecodeError::NotPayloadKind(name) => refuse(
-                BlockEditCause::Invalid,
-                format!("a {name} cannot be written through a block edit"),
-            ),
-            other => refuse(BlockEditCause::Invalid, other.to_string()),
-        })?;
-        trees.push(tree);
-    }
     Ok(Lowering::Lowered(Lowered {
         selection: block_selection.to_string(),
         mutation: NedMutation::Replace(trees),
@@ -490,8 +535,8 @@ mod tests {
         assert_eq!(
             l.preview,
             SuggestionPreview {
-                base: md("The quick brown fox."),
-                proposed: md("The quick red fox."),
+                base: pv("The quick brown fox."),
+                proposed: pv("The quick red fox."),
             }
         );
     }
@@ -558,6 +603,196 @@ mod tests {
         assert!(err.message.contains("separator"), "{}", err.message);
     }
 
+    fn pv(s: &str) -> PreviewText {
+        PreviewText::new(s)
+    }
+
+    fn edn(s: &str) -> BlockText {
+        BlockText::Edn(s.to_string())
+    }
+
+    #[test]
+    fn lower_accepts_edn_proposed() {
+        let el = paragraph("The quick brown fox.");
+        let (store, block) = store_with("body", &el);
+
+        // The same text edit as in markdown: one SearchReplace on the text.
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &md("The quick brown fox."),
+            &edn("[:paragraph \"The quick red fox.\"]"),
+        ));
+        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace {
+                search: "brown".to_string(),
+                replace: "red".to_string()
+            }
+        );
+
+        // Two blocks replace the one; the projection plays no part.
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &md("The quick brown fox."),
+            &edn("[:paragraph \"First.\"]\n\n[:paragraph \"Second.\"]"),
+        ));
+        assert_eq!(l.selection, SEL);
+        assert_eq!(
+            l.mutation,
+            NedMutation::Replace(vec![
+                block_to_tree(&paragraph("First.")).unwrap(),
+                block_to_tree(&paragraph("Second.")).unwrap(),
+            ])
+        );
+
+        // The unchanged block, an empty text, a non-block and a bad payload.
+        assert_eq!(
+            lower(&store, block, SEL, &md("The quick brown fox."), &edn("[:paragraph \"The quick brown fox.\"]")),
+            Ok(Lowering::NoChange)
+        );
+        let invalid = |proposed: &str| {
+            lower(&store, block, SEL, &md("The quick brown fox."), &edn(proposed))
+                .unwrap_err()
+        };
+        let err = invalid("");
+        assert_eq!((err.cause, err.message.as_str()), (BlockEditCause::Invalid, "use delete"));
+        assert_eq!(invalid("[:wibble \"x\"]").cause, BlockEditCause::Invalid);
+        assert_eq!(invalid("[:separator]").cause, BlockEditCause::Invalid);
+        assert_eq!(invalid("[:paragraph").cause, BlockEditCause::Invalid);
+        assert_eq!(invalid("[:heading {:level 2} \"T\"]").cause, BlockEditCause::Invalid);
+    }
+
+    #[test]
+    fn lower_accepts_edn_base() {
+        let el = paragraph("The quick brown fox.");
+        let (store, block) = store_with("body", &el);
+        let base = edn("[:paragraph \"The quick brown fox.\"]");
+
+        let l = expect_lowered(lower(&store, block, SEL, &base, &md("The quick red fox.")));
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace {
+                search: "brown".to_string(),
+                replace: "red".to_string()
+            }
+        );
+        // Both sides EDN.
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &base,
+            &edn("[:paragraph \"The quick red fox.\"]"),
+        ));
+        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+
+        // The base is checked against the block: drift is drift in any
+        // representation.
+        let drifted = edn("[:paragraph \"Something else.\"]");
+        assert_eq!(
+            lower(&store, block, SEL, &drifted, &md("New.")).unwrap_err().cause,
+            BlockEditCause::Drifted
+        );
+        assert_eq!(check_base(&store, block, &base), Ok(()));
+        assert_eq!(
+            check_base(&store, block, &drifted).unwrap_err().cause,
+            BlockEditCause::Drifted
+        );
+        // A base that is not a block at all cannot be read.
+        assert_eq!(
+            check_base(&store, block, &edn("[:wibble]")).unwrap_err().cause,
+            BlockEditCause::Invalid
+        );
+    }
+
+    #[test]
+    fn edn_preview_is_markdown() {
+        // A slot heading is edited as content: the preview shows its content
+        // projection, not EDN and not the block projection.
+        let h = ContentElement::Heading {
+            level: HeadingLevel::new(1).unwrap(),
+            source: "Hello *World*".into(),
+        };
+        let (store, block) = store_with("slot", &h);
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &edn("[:heading {:level \"1\"} \"Hello *World*\"]"),
+            &edn("[:heading {:level \"1\"} \"Hello *Presemble*\"]"),
+        ));
+        assert_eq!(
+            l.preview,
+            SuggestionPreview {
+                base: pv("Hello *World*"),
+                proposed: pv("Hello *Presemble*"),
+            }
+        );
+
+        // Several blocks are joined by a blank line, in the body projection.
+        let (store, block) = store_with("body", &paragraph("Alpha."));
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &md("Alpha."),
+            &edn("[:heading {:level \"2\"} \"Title\"]\n\n[:paragraph \"Beta.\"]"),
+        ));
+        assert_eq!(l.preview.base, pv("Alpha."));
+        assert_eq!(l.preview.proposed, pv("## Title\n\nBeta."));
+    }
+
+    #[test]
+    fn markdown_preview_is_canonical_projection() {
+        // The preview shows what the blocks will read as, not what was typed:
+        // a setext heading previews in ATX form (ADR-059 C9).
+        let (store, block) = store_with("body", &paragraph("Alpha."));
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &md("Alpha."),
+            &md("Title\n=====\n\nBeta."),
+        ));
+        assert_eq!(l.preview.base, pv("Alpha."));
+        assert_eq!(l.preview.proposed, pv("# Title\n\nBeta."));
+    }
+
+    #[test]
+    fn edn_fixtures_lower() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/serve/protocol");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("fixture dir") {
+            let path = entry.expect("entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with("-edn.json") {
+                continue;
+            }
+            let raw: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let request: editorial_types::BlockEditRequest =
+                serde_json::from_value(raw["request"].clone()).unwrap();
+            let BlockText::Edn(base) = &request.base else { panic!("{name}: base is not EDN") };
+            // The block the fixture starts from, in the parent its selection
+            // addresses: a slot when the selection names a slot other than body.
+            let parent = if request.selection.contains("\"body\"") { "body" } else { "slot" };
+            let trees = template::hiccup_to_trees(base).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let el = crate::content_bridge::tree_to_block(&trees[0])
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (store, block) = store_with(parent, &el);
+            let l = lower(&store, block, &request.selection, &request.base, &request.proposed);
+            assert!(matches!(l, Ok(Lowering::Lowered(_))), "{name}: {l:?}");
+            seen += 1;
+        }
+        assert_eq!(seen, 2, "expected the two EDN fixtures");
+    }
+
     #[test]
     fn lower_drifted_base_is_refused() {
         let err = lowered("body", &paragraph("Current text."), "Old text.", "New text.")
@@ -593,7 +828,7 @@ mod tests {
                 replace: "Presemble".to_string()
             }
         );
-        assert_eq!(l.preview.base, md("Hello *World*"));
+        assert_eq!(l.preview.base, pv("Hello *World*"));
 
         // The block projection (with markers) is not the base of a slot heading.
         let err = lowered("slot", &h, "# Hello *World*", "# Hello *Presemble*").unwrap_err();
@@ -663,7 +898,7 @@ mod tests {
             NedMutation::Replace(trees) => assert_eq!(trees.len(), 1),
             other => panic!("a table change replaces the block, got {other:?}"),
         }
-        assert_eq!(l.preview.base, md(&base));
+        assert_eq!(l.preview.base, pv(&base));
     }
 
     #[test]

@@ -1655,6 +1655,7 @@ dependencies = [
  "ned",
  "node_store",
  "schema",
+ "serde_json",
  "template",
 ]
 
@@ -2580,6 +2581,7 @@ dependencies = [
  "content",
  "content_store",
  "im",
+ "ned",
  "node_store",
  "pulldown-cmark",
  "quick-xml",

@@ -17,7 +17,11 @@
 //
 //   deno run --no-prompt --allow-read=. tools/protocol-fixtures.ts
 //
-// Output: `PASS <fixture>` per fixture, `FAIL <fixture> <what>` per mismatch.
+// Fixtures marked `"browser": false` (EDN requests, which only the Rust side
+// speaks) are skipped, not checked.
+//
+// Output: `PASS <fixture>` per fixture, `FAIL <fixture> <what>` per mismatch,
+// `SKIP <fixture>` per skipped fixture.
 // Exit 0 if everything matches, 1 otherwise.
 //
 // Deliberately import-free, like tools/text-vectors.ts.
@@ -25,9 +29,8 @@
 const BEGIN = "// BEGIN protocol-builders";
 const END = "// END protocol-builders";
 
-interface BlockText {
-  readonly markdown: string;
-}
+/** The browser only speaks markdown; a fixture in another representation says `"browser": false`. */
+type BlockText = { readonly markdown: string } | { readonly edn: string };
 
 interface BlockEditRequest {
   readonly file: string;
@@ -59,6 +62,16 @@ interface Builders {
 interface Fixture {
   readonly request: BlockEditRequest;
   readonly response: unknown;
+  /** `false` when the browser cannot build this request (for example EDN text). */
+  readonly browser?: boolean;
+}
+
+/** The markdown of a block text the browser can build; the fixture says so with `browser` unset. */
+function markdownOf(text: BlockText): string {
+  if (!("markdown" in text)) {
+    throw new Error(`a browser fixture must use markdown, got ${JSON.stringify(text)}`);
+  }
+  return text.markdown;
 }
 
 function read(relative: string): string {
@@ -116,12 +129,16 @@ function main(): number {
   let failures = 0;
   for (const name of fixtureNames()) {
     const fixture = JSON.parse(read(`../resources/serve/protocol/${name}.json`)) as Fixture;
+    if (fixture.browser === false) {
+      console.log(`SKIP ${name} (not a browser request)`);
+      continue;
+    }
     const req = fixture.request;
     const built = builders.buildBlockEditRequest(
       req.file,
       req.selection,
-      req.base.markdown,
-      req.proposed.markdown,
+      markdownOf(req.base),
+      markdownOf(req.proposed),
       req.intent,
       req.reason,
     );

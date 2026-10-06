@@ -291,7 +291,8 @@ pub(crate) fn check_drift(
         ResolvedTarget::Text { block, .. } | ResolvedTarget::Block { block, .. } => *block,
         ResolvedTarget::Container { .. } => return Ok(()),
     };
-    match node_store_bridge::block_edit::check_base(store, block, &preview.base) {
+    let base = editorial_types::BlockText::Markdown(preview.base.markdown.clone());
+    match node_store_bridge::block_edit::check_base(store, block, &base) {
         Ok(_) => Ok(()),
         Err(e) if e.cause == BlockEditCause::Drifted => Err(StaleCause::Drifted),
         Err(e) => Err(StaleCause::InvalidValue { detail: e.message }),

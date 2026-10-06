@@ -230,7 +230,8 @@ pub enum ConductorEvent {
     CursorScrollTo { anchor: editorial_types::StructuralAnchor },
     /// A NED-based editorial suggestion was created.
     NedSuggestionCreated {
-        suggestion: editorial_types::NedSuggestion,
+        // Boxed: `NedSuggestion` is much larger than the other events.
+        suggestion: Box<editorial_types::NedSuggestion>,
     },
     /// A NED-based suggestion went stale (accept-time re-evaluation failed).
     NedSuggestionStaled {

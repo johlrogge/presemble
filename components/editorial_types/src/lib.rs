@@ -275,22 +275,39 @@ pub struct NedSuggestion {
 }
 
 /// A representation of a block's editable content. The block (N) is the core;
-/// this is one surface of it. No EDN variant exists until its codec does.
+/// each variant is one surface of it, a codec in and out of N.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BlockText {
+    /// The block's markdown projection.
     Markdown(String),
+    /// The block's store tree as hiccup (ADR-059 §6): one `[:kind ...]` form
+    /// per block, using store names, for example `[:paragraph "source *md*"]`.
+    Edn(String),
+}
+
+/// Markdown for display. A preview is markdown by type, so the review UI never
+/// reads EDN.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewText {
+    pub markdown: String,
+}
+
+impl PreviewText {
+    pub fn new(markdown: impl Into<String>) -> Self {
+        PreviewText { markdown: markdown.into() }
+    }
 }
 
 /// What a suggestion was made against and proposes, for display and drift
 /// checks only.
 ///
 /// `base` is the block's projection when the suggestion was created;
-/// `proposed` is the proposed projection.
+/// `proposed` is the canonical projection of the proposed blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuggestionPreview {
-    pub base: BlockText,
-    pub proposed: BlockText,
+    pub base: PreviewText,
+    pub proposed: PreviewText,
 }
 
 // ── Block edit protocol (ADR-059 §10) ────────────────────────────────────────
@@ -737,6 +754,10 @@ mod tests {
     struct Fixture {
         request: BlockEditRequest,
         response: BlockEditResponse,
+        /// `false` for a fixture the browser's builders cannot build (the
+        /// browser only speaks markdown); absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        browser: Option<bool>,
     }
 
     #[test]
@@ -761,6 +782,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "apply-body-paragraph-edn.json",
                 "apply-body-paragraph.json",
                 "apply-slot-heading.json",
                 "drifted.json",
@@ -769,8 +791,45 @@ mod tests {
                 "structural-apply.json",
                 "structural-suggest.json",
                 "suggest-body-paragraph.json",
+                "suggest-heading-edn.json",
                 "suggest-slot-heading.json",
             ]
+        );
+    }
+
+    #[test]
+    fn edn_fixtures_round_trip() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/serve/protocol");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("fixture dir exists") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with("-edn.json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path).expect("read fixture");
+            let original: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+            // On the wire the representation is a tag: {"edn": "..."}.
+            assert!(original["request"]["base"]["edn"].is_string(), "{name}");
+            assert!(original["request"]["proposed"]["edn"].is_string(), "{name}");
+            let typed: Fixture = serde_json::from_value(original.clone()).expect("typed");
+            assert!(matches!(typed.request.base, BlockText::Edn(_)), "{name}");
+            assert!(matches!(typed.request.proposed, BlockText::Edn(_)), "{name}");
+            // The browser speaks markdown only: its runner must skip these.
+            assert_eq!(typed.browser, Some(false), "{name}");
+            assert_eq!(serde_json::to_value(&typed).expect("serialize"), original, "{name}");
+            seen += 1;
+        }
+        assert_eq!(seen, 2, "expected the two EDN fixtures");
+    }
+
+    #[test]
+    fn edn_block_text_is_tagged_edn() {
+        let text = BlockText::Edn("[:paragraph \"x\"]".to_string());
+        assert_eq!(
+            serde_json::to_value(&text).unwrap(),
+            serde_json::json!({"edn": "[:paragraph \"x\"]"})
         );
     }
 
@@ -787,8 +846,8 @@ mod tests {
     fn suggestion_preview_round_trips() {
         let mut sug = base_ned_suggestion(NedMutation::Delete);
         sug.preview = Some(SuggestionPreview {
-            base: BlockText::Markdown("old".to_string()),
-            proposed: BlockText::Markdown("new".to_string()),
+            base: PreviewText::new("old"),
+            proposed: PreviewText::new("new"),
         });
         let value = serde_json::to_value(&sug).expect("serialize");
         assert_eq!(

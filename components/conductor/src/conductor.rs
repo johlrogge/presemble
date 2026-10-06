@@ -2640,7 +2640,7 @@ impl Conductor {
 
         CommandResult {
             response: Response::SuggestionCreated(id),
-            events: vec![ConductorEvent::NedSuggestionCreated { suggestion: sug }],
+            events: vec![ConductorEvent::NedSuggestionCreated { suggestion: Box::new(sug) }],
         }
     }
 
@@ -7104,6 +7104,54 @@ mod block_edit_tests {
         }
     }
 
+    /// A guard, green on arrival: it pins that an EDN edit and an EDN
+    /// suggestion differ only by approval, and that a stored preview is
+    /// markdown.
+    #[test]
+    fn edn_block_edit_suggest_then_accept_equals_apply() {
+        let edn_request = |intent| {
+            let mut req = request(FILE, FIRST_PARAGRAPH, "", "", intent);
+            req.base = BlockText::Edn("[:paragraph \"Alpha para.\"]".to_string());
+            req.proposed = BlockText::Edn("[:paragraph \"Alpha paragraph.\"]".to_string());
+            req
+        };
+        let saved = |tmp: &tempfile::TempDir, conductor: &Conductor| {
+            let result = conductor
+                .handle_command(Command::SaveBuffer { path: FILE.to_string() });
+            assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+            std::fs::read_to_string(tmp.path().join(FILE)).expect("content file")
+        };
+
+        let tmp_a = build_site();
+        let applier = make_conductor(&tmp_a);
+        let applied = applier.handle_command(Command::BlockEdit(edn_request(BlockEditIntent::Apply)));
+        assert!(
+            matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&applied)
+        );
+
+        let tmp_s = build_site();
+        let suggester = make_conductor(&tmp_s);
+        let id = created_id(
+            &suggester.handle_command(Command::BlockEdit(edn_request(BlockEditIntent::Suggest))),
+        );
+        assert_eq!(
+            suggestion(&suggester, &id).preview,
+            Some(editorial_types::SuggestionPreview {
+                base: editorial_types::PreviewText::new("Alpha para."),
+                proposed: editorial_types::PreviewText::new("Alpha paragraph."),
+            })
+        );
+        let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
+        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+
+        let on_disk_applied = saved(&tmp_a, &applier);
+        let on_disk_accepted = saved(&tmp_s, &suggester);
+        assert!(on_disk_applied.contains("Alpha paragraph."), "{on_disk_applied}");
+        assert_eq!(on_disk_applied, on_disk_accepted);
+    }
+
     // ── 12 ──────────────────────────────────────────────────────────────────
 
     #[test]
@@ -7184,8 +7232,8 @@ mod block_edit_tests {
         assert_eq!(
             sug.preview,
             Some(editorial_types::SuggestionPreview {
-                base: BlockText::Markdown("Alpha para.".to_string()),
-                proposed: BlockText::Markdown("Alpha one.\n\nAlpha two.".to_string()),
+                base: editorial_types::PreviewText::new("Alpha para."),
+                proposed: editorial_types::PreviewText::new("Alpha one.\n\nAlpha two."),
             })
         );
         assert_eq!(body_texts(&conductor)[0], "Alpha para.", "suggest must not change the block");

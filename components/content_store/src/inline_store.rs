@@ -19,11 +19,11 @@
 //! must be impossible to create, so it is refused, never fixed afterwards.
 
 use crate::access::{add_child_element, add_child_text, add_text_attr, find_attr_text, make_element};
-use crate::block::{BlockDecodeError, node_to_tree};
+use crate::block::{BlockDecodeError, node_to_tree, tree_contains_existing};
 use content::Comment;
 use content::inline::{AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination};
 use ned::NodeTree;
-use node_store::{Node, NodeId, NodeStore};
+use node_store::{Edge, Node, NodeId, NodeStore};
 
 const EMPH: &str = "emph";
 const STRONG: &str = "strong";
@@ -245,12 +245,32 @@ fn child_trees(store: &NodeStore, node: NodeId) -> Vec<NodeTree> {
     store.children(node).into_iter().map(|c| node_to_tree(store, c)).collect()
 }
 
-/// What [`inlines_to_store`] writes for `inlines`, as trees.
-fn encoded_trees(inlines: &Inlines) -> Vec<NodeTree> {
+/// What [`inlines_to_store`] writes for `inlines`, as trees. This is also the
+/// canonical EDN of inline content (ADR-059 §6), once written as hiccup.
+pub fn inlines_to_tree(inlines: &Inlines) -> Vec<NodeTree> {
     let mut scratch = NodeStore::new();
     let root = make_element(&mut scratch, "scratch");
     inlines_to_store(&mut scratch, root, inlines);
     child_trees(&scratch, root)
+}
+
+/// Read `trees` as inlines of `ctx`, as strictly as [`inlines_from_store`]:
+/// the trees must be exactly what [`inlines_to_tree`] writes. A tree holding
+/// `NodeTree::Existing` is [`BlockDecodeError::ExistingNode`].
+pub fn inlines_from_tree(
+    trees: &[NodeTree],
+    ctx: InlineContext,
+) -> Result<Inlines, BlockDecodeError> {
+    if trees.iter().any(tree_contains_existing) {
+        return Err(BlockDecodeError::ExistingNode);
+    }
+    let mut scratch = NodeStore::new();
+    let root = make_element(&mut scratch, "scratch");
+    for tree in trees {
+        let child = tree.clone().materialize(&mut scratch);
+        scratch.add_edge(root, Edge::Child(child));
+    }
+    inlines_from_store(&scratch, root, ctx)
 }
 
 /// Read the children of `container` as inlines of `ctx`.
@@ -273,7 +293,7 @@ pub fn inlines_from_store(
 ) -> Result<Inlines, BlockDecodeError> {
     let items = decode_children(store, container, Place::of(ctx))?;
     let inlines = Inlines::new(items, ctx);
-    if encoded_trees(&inlines) != child_trees(store, container) {
+    if inlines_to_tree(&inlines) != child_trees(store, container) {
         return Err(BlockDecodeError::NotNormalForm { node: container });
     }
     inlines

@@ -556,7 +556,7 @@ pub(crate) fn node_to_tree(store: &NodeStore, id: NodeId) -> ned::NodeTree {
     }
 }
 
-fn tree_contains_existing(tree: &ned::NodeTree) -> bool {
+pub(crate) fn tree_contains_existing(tree: &ned::NodeTree) -> bool {
     match tree {
         ned::NodeTree::Existing(_) => true,
         ned::NodeTree::Text(_) => false,

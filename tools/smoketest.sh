@@ -141,6 +141,17 @@ else
     pass "protocol fixtures: inject.js builds the fixture requests ($(grep -c '^PASS' <<< "$PF_OUT") fixtures)"
 fi
 
+# Fixtures that are not browser requests (EDN text) are skipped, never checked.
+for pf in resources/serve/protocol/*-edn.json; do
+    pf_name=$(basename "$pf" .json)
+    if grep -q "^SKIP $pf_name " <<< "$PF_OUT" && ! grep -q "^PASS $pf_name\$" <<< "$PF_OUT"; then
+        pass "protocol fixtures: $pf_name is skipped (not a browser request)"
+    else
+        fail "protocol fixtures: $pf_name must be skipped, not checked"
+        JS_CHECK_FAILED=1
+    fi
+done
+
 if [ $JS_CHECK_FAILED -eq 1 ]; then
     echo -e "══════════════════════════════════════"
     echo -e "  ${GREEN}$PASS passed${NC}, ${RED}$FAIL failed${NC}"

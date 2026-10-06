@@ -2699,7 +2699,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             preview: None,
         };
-        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionCreated { suggestion });
+        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionCreated { suggestion: Box::new(suggestion) });
         match msg {
             EditorialMessage::SuggestionListChanged { file } => {
                 assert_eq!(file.as_deref(), Some("content/post/a.md"));
