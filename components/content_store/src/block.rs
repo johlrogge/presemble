@@ -6,6 +6,7 @@ use crate::access::{
     children_by_name, element_name_of, find_attr_int, find_attr_node, find_attr_text,
     find_child_by_name, make_element,
 };
+use content::inline::InlineContext;
 use content::{
     Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection,
 };
@@ -279,6 +280,17 @@ pub enum BlockDecodeError {
     TextChildCount { kind: String, found: usize },
     /// Comment trivia (ADR-062) holding something that is not a comment.
     InvalidComment(String),
+    /// An inline container holds an element that is not an inline kind.
+    UnknownInline { kind: String },
+    /// An inline kind that `ctx` does not allow (a link inside link text, a
+    /// hard break in a heading, ...).
+    InlineNotAllowed { kind: String, ctx: InlineContext },
+    /// The inline container is not in normal form (ADR-059 §4): decoding and
+    /// writing it again gives something else.
+    NotNormalForm { node: NodeId },
+    /// The inline container's tree does not read back as itself when written
+    /// as markdown (ADR-059 §7).
+    NotWritable { node: NodeId },
 }
 
 impl std::fmt::Display for BlockDecodeError {
@@ -320,6 +332,18 @@ impl std::fmt::Display for BlockDecodeError {
             ),
             BlockDecodeError::InvalidComment(text) => {
                 write!(f, "comment trivia holds something that is not an HTML comment: {text}")
+            }
+            BlockDecodeError::UnknownInline { kind } => {
+                write!(f, "'{kind}' is not an inline element")
+            }
+            BlockDecodeError::InlineNotAllowed { kind, ctx } => {
+                write!(f, "'{kind}' is not allowed in {ctx:?} content")
+            }
+            BlockDecodeError::NotNormalForm { node } => {
+                write!(f, "inline content of node {} is not in normal form", node.0)
+            }
+            BlockDecodeError::NotWritable { node } => {
+                write!(f, "inline content of node {} cannot be written as markdown", node.0)
             }
         }
     }
@@ -499,7 +523,7 @@ pub fn block_to_tree(el: &ContentElement) -> Result<ned::NodeTree, BlockDecodeEr
     Ok(node_to_tree(&scratch, root))
 }
 
-fn node_to_tree(store: &NodeStore, id: NodeId) -> ned::NodeTree {
+pub(crate) fn node_to_tree(store: &NodeStore, id: NodeId) -> ned::NodeTree {
     match store.get(id) {
         Some(Node::Text(s)) => ned::NodeTree::Text(s.clone()),
         Some(Node::Element(name)) => {

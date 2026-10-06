@@ -34,7 +34,7 @@ pub(crate) fn events_to_nodes<'a>(events: impl IntoIterator<Item = Event<'a>>) -
 /// Mirrors the `HREF_SAFE` table of pulldown-cmark-escape 0.11.0 (used by
 /// pulldown-cmark 0.12.2): every byte ≥ 0x80 and every ASCII byte not marked
 /// safe becomes `%XX` (upper-case hex).
-fn percent_encode_url(url: &str) -> String {
+pub(crate) fn percent_encode_url(url: &str) -> String {
     fn is_safe(b: u8) -> bool {
         b.is_ascii_alphanumeric()
             || matches!(

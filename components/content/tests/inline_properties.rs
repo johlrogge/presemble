@@ -12,6 +12,9 @@
 //! - P1, `inline_round_trip_on_generated_writable_trees`: for trees from the
 //!   writable generator, `parse(serialize(t)) == t` and `check_writable` says
 //!   so;
+//! The source corpus for P2 and P4 is `resources/test/inline-corpus.json`,
+//! shared with `content_store`.
+//!
 //! - P2, `inline_source_is_fixed_point_after_one_save`: for markdown read from
 //!   disk, `serialize(parse(serialize(parse(s)))) == serialize(parse(s))`.
 //!
@@ -482,51 +485,18 @@ fn inline_round_trip_on_generated_writable_trees() {
 
 // ── Fixed point (P2) ────────────────────────────────────────────────────────
 
-const CORPUS: &[&str] = &[
-    "",
-    "plain text",
-    "*a* _b_ **c** __d__ ***e*** ___f___",
-    "a *b **c** d* e",
-    "`code` and ``a`b`` and `` `x` ``",
-    "[a](/x) [b](/y \"t\") [c](<d e>) [f][g]\n\n[g]: /g 'T'",
-    "![a](i.png) ![b *c*](j.png \"t\")",
-    "<https://x.y> <me@example.com> [https://x.y](https://x.y)",
-    "a  \nb\\\nc\nd",
-    "&amp; &lt; &copy; &#35; &nbsp; &#x200B; &#8195; a\u{a0}b",
-    "\\* \\_ \\` \\[ \\< \\& \\\\ \\# \\- \\> \\{#x}",
-    "a <b>x</b> <!-- c --> d",
-    "x <span class=\"y\">z</span>",
-    "see {#x}",
-    "\\# not a heading",
-    "1\\. not a list",
-    "a\n\\- not a list",
-    "[x](->> :post)",
-    "\\[x](->> :post)",
-    "a * b _ c",
-    "snake_case and 2*3*4",
-    "a\\\n\\\nb",
-    "tab\tinside",
-    "  leading spaces",
-    "trailing spaces  ",
-    "*a*\n*b*",
-    "**a**\n**b**",
-    "a\n\nb",
-    "- list",
-    "# heading",
-    "> quote",
-    "<div>block</div>",
-    "<!-- only a comment -->",
-    "| a | b |\n| - | - |",
-    "line one\nline two\nline three",
-    "[link with *emph* and `code`](/u)",
-    "[![img](i.png)](/u)",
-    "a [b] c [d]",
-    "a [b](c) [d](e)f",
-    "!!!bang [x](/y)",
-    "*[a](/b)*",
-    "**`code`**",
-    "_a_b_ and *a*b*",
-];
+/// The shared source corpus (also read by `content_store`).
+const CORPUS_JSON: &str = include_str!("../../../resources/test/inline-corpus.json");
+
+fn corpus_group(group: &str) -> Vec<String> {
+    let all: serde_json::Value = serde_json::from_str(CORPUS_JSON).expect("inline-corpus.json parses");
+    all[group]
+        .as_array()
+        .unwrap_or_else(|| panic!("a `{group}` group"))
+        .iter()
+        .map(|s| s.as_str().expect("a string").to_string())
+        .collect()
+}
 
 const FRAGMENTS: &[&str] = &[
     "word", "two words", "*em*", "**strong**", "_em_", "__strong__", "***both***", "`code`",
@@ -570,8 +540,9 @@ fn check_fixed_point(source: &str) -> bool {
 #[test]
 fn inline_source_is_fixed_point_after_one_save() {
     let started = std::time::Instant::now();
-    let corpus_ok = CORPUS.iter().filter(|source| check_fixed_point(source)).count();
-    assert!(corpus_ok >= CORPUS.len() - 10, "only {corpus_ok} corpus entries are inline content");
+    let corpus = corpus_group("corpus");
+    let corpus_ok = corpus.iter().filter(|source| check_fixed_point(source)).count();
+    assert!(corpus_ok >= corpus.len() - 10, "only {corpus_ok} corpus entries are inline content");
 
     let generated_ok =
         generated_sources().iter().filter(|source| check_fixed_point(source)).count();
@@ -741,11 +712,8 @@ fn search_replace_result_is_normalised_and_writable() {
 #[test]
 fn parsed_trees_are_writable() {
     let started = std::time::Instant::now();
-    let mut sources: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
-    sources.extend(
-        ["**_x_**", "_**x**_", "*_x_*", "__*x*__", "_a_*b*", "**a**__b__", "*a**b*_c_"]
-            .map(String::from),
-    );
+    let mut sources = corpus_group("corpus");
+    sources.extend(corpus_group("nested_emphasis"));
     let corpus_len = sources.len();
     sources.extend(generated_sources());
 

@@ -11,3 +11,6 @@ content = { workspace = true }
 node_store = { workspace = true }
 ned = { workspace = true }
 schema = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

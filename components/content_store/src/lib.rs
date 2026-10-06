@@ -8,6 +8,9 @@ mod access;
 mod block;
 #[cfg(test)]
 mod block_tests;
+mod inline_store;
+#[cfg(test)]
+mod inline_store_tests;
 
 pub use access::{
     add_bool_attr, add_child_element, add_text_attr, children_by_name, element_name_of,
@@ -18,6 +21,7 @@ pub use block::{
     block_from_node, block_to_store, block_to_tree, content_element_to_store, decode_trivia,
     link_target_from_node, tree_to_block,
 };
+pub use inline_store::{inlines_from_store, inlines_to_store};
 
 #[cfg(test)]
 mod tests {

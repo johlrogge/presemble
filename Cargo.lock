@@ -439,6 +439,7 @@ dependencies = [
  "ned",
  "node_store",
  "schema",
+ "serde_json",
 ]
 
 [[package]]
@@ -2583,6 +2584,7 @@ dependencies = [
  "pulldown-cmark",
  "quick-xml",
  "schema",
+ "serde_json",
 ]
 
 [[package]]

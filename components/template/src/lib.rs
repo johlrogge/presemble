@@ -9,6 +9,7 @@ pub mod graph_view;
 pub mod hiccup;
 mod hiccup_serializer;
 mod body_nodes;
+mod inline_nodes;
 mod markdown_nodes;
 pub mod registry;
 pub mod transformer;
@@ -18,6 +19,7 @@ pub use constraints::{constraint_attr_name, extract_slot_constraint_attrs, CONST
 pub use data::{build_article_graph,build_schema_included_by_json, inject_schema_included_by, stored_text, synthesize_link, Callable, DataGraph, OutputMode, SuggestionKind, Value};
 pub use graph_view::{DataRef, GraphView, ResolvedNode};
 pub use error::TemplateError;
+pub use inline_nodes::inline_nodes;
 pub use expr::parse_expr;
 pub use transformer::{attach_schema_included_by_attr, attach_schema_instance_attrs, transform, RenderError};
 pub use constants::{ATTR_SCHEMA_INCLUDED_BY, ATTR_SCHEMA_INSTANCE_COUNT, ATTR_SCHEMA_INSTANCE_SAMPLE_URL, KEY_SCHEMA_INCLUDED_BY};
