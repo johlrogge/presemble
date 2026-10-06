@@ -7,6 +7,7 @@
 /// Escape a Rust string for use as a Clojure string literal body.
 /// Handles `\\` and `\"`. Strips `\r` (CR) and null bytes rather than panicking.
 /// Returns the escaped content without surrounding quotes.
+/// Keep in sync with `content::clj_str` (components/content/src/address.rs), the shared copy.
 fn clj_str_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for ch in s.chars() {

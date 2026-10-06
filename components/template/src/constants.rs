@@ -48,6 +48,10 @@ pub const KEY_STORED_TEXT_PREFIX: &str = "_presemble_text_";
 /// Present in editorial graphs only. The address is built without a file (the
 /// graph does not know it yet) and filled in at render time.
 pub const KEY_EDITOR_PREFIX: &str = "_presemble_editor_";
+/// Name of the `Derived` edge from a page's semantic content node to its
+/// document root. The underscore keeps it out of slot names, and graph views
+/// never read `Derived` edges, so it is not a template path.
+pub const KEY_DOCUMENT_EDGE: &str = "_document";
 /// Key of the address inside an editor record.
 pub const KEY_EDITOR_ADDRESS: &str = "address";
 /// Key of the canonical markdown inside an editor record.

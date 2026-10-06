@@ -475,17 +475,19 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
 
     // :apply needs Value — go to legacy path immediately
     if apply_form.is_none() {
-        // The page link the store pipeline adds stands for its page's title
-        // heading, which sits beside it.
-        let title = (editorial && path_segments.last() == Some(&"link"))
-            .then(|| {
-                let mut sibling = path_segments[..path_segments.len() - 1].to_vec();
-                sibling.push("title");
-                graph.resolve_node(&sibling).map(|r| r.id)
+        // The node of the page being rendered, from which the page's own
+        // document is reached when a slot stands for a block in it.
+        // That is the path's prefix when it has one (`input` of `input.author`,
+        // `item` of `item.link` inside a data-each), else the view's root.
+        let page = editorial
+            .then(|| match path_segments.split_last() {
+                Some((_, prefix)) if !prefix.is_empty() => graph.resolve_node(prefix),
+                _ => graph.root_node(),
             })
-            .flatten();
+            .flatten()
+            .map(|r| r.id);
         let editor_mode = if editorial {
-            EditorAttrs::Computed { title }
+            EditorAttrs::Computed { page }
         } else {
             EditorAttrs::Published
         };
@@ -713,10 +715,11 @@ enum EditorAttrs {
     /// Published output: none.
     Published,
     /// Editorial output: computed from the block node itself
-    /// (`native_block_bundle`). `title` is the title heading of the page the
-    /// rendered node belongs to, for the page link the store pipeline adds,
-    /// which stands for it.
-    Computed { title: Option<node_store::NodeId>, },
+    /// (`native_block_bundle`). `page` is the node of the page being rendered:
+    /// the document or its semantic content node, for the elements that stand
+    /// for a block of the page's own document (a link slot that resolves to
+    /// another page; the page link, which stands for the title).
+    Computed { page: Option<node_store::NodeId> },
 }
 
 /// Render a presemble:insert element using direct NodeStore access (no Value materialization).
@@ -816,7 +819,7 @@ fn render_insert_native(
                 let tag = as_tag.unwrap_or("span");
                 let mut result = Vec::new();
                 let child_editor_mode = if editorial {
-                    EditorAttrs::Computed { title: None }
+                    EditorAttrs::Computed { page: None }
                 } else {
                     EditorAttrs::Published
                 };
@@ -997,13 +1000,20 @@ fn render_insert_native(
                         );
                     } else if parent_slot(store, id).is_some() {
                         link_editor.extend(editor_here());
-                    } else if let EditorAttrs::Computed { title: Some(title_id) } = editor {
-                        // The page link the store pipeline adds to every page.
+                    } else if let EditorAttrs::Computed { page: Some(page) } = editor
+                        && slot == "link"
+                    {
+                        // The page link the store pipeline adds to every page:
+                        // it stands for the page's title heading.
                         source_attrs.push((
                             crate::constants::ATTR_SOURCE_SLOT.to_string(),
                             Form::Str("title".to_string()),
                         ));
-                        link_editor.extend(title_text_attrs(first_child_text(store, title_id), presemble_file));
+                        let heading = page_document(store, page)
+                            .and_then(|document| document_slot_blocks(store, document, "title").into_iter().next());
+                        if let Some(heading) = heading {
+                            link_editor.extend(title_text_attrs(first_child_text(store, heading), presemble_file));
+                        }
                     }
 
                     return match effective_tag {
@@ -1104,6 +1114,15 @@ fn render_insert_native(
                             (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
                             (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                         ];
+                        // A link slot of this page that resolves to another page.
+                        if let EditorAttrs::Computed { page: Some(page) } = editor
+                            && let Some(document) = page_document(store, page)
+                        {
+                            link_elem_attrs.extend(
+                                page_slot_block_bundle(store, document, &slot_name_from_path(data_path))
+                                    .unwrap_or_default(),
+                            );
+                        }
                         link_elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
                             name: effective_tag.to_string(),
@@ -1215,18 +1234,74 @@ fn parent_slot(store: &node_store::NodeStore, block: node_store::NodeId) -> Opti
     })
 }
 
-/// The `file` of the document that owns `node`: the nearest ancestor that
-/// names one.
-fn owning_file(store: &node_store::NodeStore, node: node_store::NodeId) -> Option<String> {
+/// The document that owns `node`: the nearest ancestor (or `node` itself)
+/// that names a `file`.
+fn owning_document(store: &node_store::NodeStore, node: node_store::NodeId) -> Option<node_store::NodeId> {
     let mut current = node;
     // Documents are shallow; the bound only guards against a cycle.
     for _ in 0..16 {
-        if let Some(file) = node_attr_str(store, current, "file").filter(|f| !f.is_empty()) {
-            return Some(file);
+        if node_attr_str(store, current, "file").is_some_and(|f| !f.is_empty()) {
+            return Some(current);
         }
         current = store.parents(current).into_iter().next()?;
     }
     None
+}
+
+/// The `file` of the document that owns `node`.
+fn owning_file(store: &node_store::NodeStore, node: node_store::NodeId) -> Option<String> {
+    node_attr_str(store, owning_document(store, node)?, "file")
+}
+
+/// The bundle of the one block of link slot `slot` in the document that owns
+/// `sibling`, a node of the same page.
+///
+/// A link slot that resolves to another page renders that page's link, but
+/// the element is the page's own slot: it takes the bundle of the slot's block
+/// in the page's document. A slot of several blocks has no bundle: it cannot
+/// be addressed exactly.
+fn page_slot_block_bundle(
+    store: &node_store::NodeStore,
+    document: node_store::NodeId,
+    slot: &str,
+) -> Option<Vec<(String, Form)>> {
+    match document_slot_blocks(store, document, slot)[..] {
+        [block] => native_block_bundle(store, block),
+        _ => None,
+    }
+}
+
+/// The document of the page whose node is `page`: what a semantic content
+/// node points at by its `_document` edge, or `page` itself when it is the
+/// document (it has a preamble). `None` for any other node.
+fn page_document(store: &node_store::NodeStore, page: node_store::NodeId) -> Option<node_store::NodeId> {
+    let named = |id: node_store::NodeId, wanted: &str| {
+        matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == wanted)
+    };
+    if let Some((_, document)) = store
+        .derived(page)
+        .into_iter()
+        .find(|(name, _)| store.resolve_name(*name) == crate::constants::KEY_DOCUMENT_EDGE)
+    {
+        return Some(document);
+    }
+    store.children(page).into_iter().any(|c| named(c, "preamble")).then_some(page)
+}
+
+/// The blocks of preamble slot `slot` in `document`, in order.
+fn document_slot_blocks(
+    store: &node_store::NodeStore,
+    document: node_store::NodeId,
+    slot: &str,
+) -> Vec<node_store::NodeId> {
+    store
+        .children(document)
+        .into_iter()
+        .filter(|c| matches!(store.get(*c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "preamble"))
+        .flat_map(|preamble| store.children(preamble))
+        .find(|s| node_attr_str(store, *s, "name").as_deref() == Some(slot))
+        .map(|slot_node| store.children(slot_node))
+        .unwrap_or_default()
 }
 
 /// The editor attributes of the content block `block`, whichever document it
@@ -3313,6 +3388,9 @@ mod tests {
                 bound_root: id,
             }))
         }
+        fn root_node(&self) -> Option<crate::graph_view::ResolvedNode<'_>> {
+            Some(crate::graph_view::ResolvedNode { id: self.root, store: &self.store })
+        }
         fn resolve_node(&self, path: &[&str]) -> Option<crate::graph_view::ResolvedNode<'_>> {
             // Walk ConsistsOf, Reference, and Attribute edges for each segment
             let mut current = self.root;
@@ -3379,6 +3457,10 @@ mod tests {
                 bound_key: key,
                 bound_root: id,
             }))
+        }
+        fn root_node(&self) -> Option<crate::graph_view::ResolvedNode<'_>> {
+            // Inside data-each the page is the item.
+            Some(crate::graph_view::ResolvedNode { id: self.bound_root, store: self.store })
         }
         fn resolve_node(&self, path: &[&str]) -> Option<crate::graph_view::ResolvedNode<'_>> {
             match path {
@@ -4426,6 +4508,157 @@ mod tests {
         );
     }
 
+    /// A page whose `author` slot holds `links` (text, href) as link blocks,
+    /// shaped as the store pipeline leaves it: the document is
+    /// `page > preamble > slot(name) > block`, and the page's semantic parts
+    /// are those blocks, except that a link slot is a `Reference` to the
+    /// target page (a `Collection` of them for several links). Each target
+    /// has the page link the pipeline synthesizes.
+    ///
+    /// The page's node is its semantic content, which points at the document
+    /// by a `_document` edge. `with_title` adds a `title` slot to the page.
+    fn page_with_link_slot(links: &[(&str, &str)], with_title: bool) -> NodeStoreGraphView {
+        let mut store = node_store::NodeStore::new();
+        let element = |store: &mut node_store::NodeStore, name: &str| {
+            let n = store.intern(name);
+            store.add_node(node_store::Node::Element(n))
+        };
+        let text_attr = |store: &mut node_store::NodeStore, host, key: &str, value: &str| {
+            let name = store.intern(key);
+            let val = store.add_node(node_store::Node::Text(value.into()));
+            store.add_edge(host, node_store::Edge::Attribute { name, value: val });
+        };
+        let document = element(&mut store, "page");
+        text_attr(&mut store, document, "file", ADDRESS_FILE);
+        let preamble = element(&mut store, "preamble");
+        store.add_edge(document, node_store::Edge::Child(preamble));
+        let slot = |store: &mut node_store::NodeStore, name: &str| {
+            let slot = element(store, "slot");
+            text_attr(store, slot, "name", name);
+            store.add_edge(preamble, node_store::Edge::Child(slot));
+            slot
+        };
+        let root = element(&mut store, "semantic-content");
+        text_attr(&mut store, root, "file", ADDRESS_FILE);
+        let document_edge = store.intern("_document");
+        store.add_edge(root, node_store::Edge::Derived { name: document_edge, target: document });
+
+        if with_title {
+            let title_slot = slot(&mut store, "title");
+            let heading = element(&mut store, "heading");
+            let source = store.add_node(node_store::Node::Text("A title".into()));
+            store.add_edge(heading, node_store::Edge::Child(source));
+            store.add_edge(title_slot, node_store::Edge::Child(heading));
+            let title_name = store.intern("title");
+            store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+        }
+
+        let author_slot = slot(&mut store, "author");
+        let mut targets = Vec::new();
+        for (text, href) in links {
+            let block = element(&mut store, "link");
+            text_attr(&mut store, block, "href", href);
+            text_attr(&mut store, block, "text", text);
+            store.add_edge(author_slot, node_store::Edge::Child(block));
+            // The target page: the semantic content with its synthesized link.
+            let target = element(&mut store, "semantic-content");
+            let page_link = element(&mut store, "link");
+            text_attr(&mut store, page_link, "href", href);
+            text_attr(&mut store, page_link, "text", &format!("Page of {text}"));
+            let link_name = store.intern("link");
+            store.add_edge(target, node_store::Edge::ConsistsOf { name: link_name, part: page_link });
+            targets.push(target);
+        }
+        let author_name = store.intern("author");
+        if let [target] = targets[..] {
+            store.add_edge(root, node_store::Edge::Reference { name: author_name, target });
+        } else {
+            let collection = store.add_node(node_store::Node::Collection);
+            for target in targets {
+                store.add_edge(collection, node_store::Edge::Child(target));
+            }
+            store.add_edge(root, node_store::Edge::ConsistsOf { name: author_name, part: collection });
+        }
+        NodeStoreGraphView { store, root }
+    }
+
+    #[test]
+    fn single_link_slot_resolving_to_a_page_carries_its_link_block_address() {
+        use crate::data::OutputMode::Editorial;
+        let address = format!(
+            r#"(ned/nth-of-kind {} "link" 0)"#,
+            doc_slot("author")
+        );
+        let md = "[Joakim](/author/joakim)";
+
+        // Native: the page's own link block, reached from the page.
+        let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
+        let native = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        assert!(native.contains("Page of Joakim"), "renders the target's link: {native}");
+        assert_eq!(attr_values(&native, "data-presemble-address"), vec![address.clone()], "{native}");
+        assert_eq!(attr_values(&native, "data-presemble-md"), vec![md.to_string()], "{native}");
+
+        // Legacy: the link slot of the document.
+        let schema = "# Title {#title}\noccurs\n: exactly once\n\n\
+            [<name>](/author/<name>) {#author}\noccurs\n: exactly once\n\n----\n\nBody.\n";
+        let grammar = schema::parse_schema(schema).expect("schema parses");
+        let doc = content::parse_and_assign(
+            "# T\n\n[Joakim](/author/joakim)\n\n----\n\nBody.\n",
+            &grammar,
+        )
+        .expect("content parses");
+        let mut data = crate::data::build_article_graph(&doc, &grammar, Editorial);
+        data.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        let legacy = render_for(&data, r#"<presemble:insert data="author" />"#, Editorial);
+        assert_eq!(attr_values(&legacy, "data-presemble-address"), vec![address], "{legacy}");
+        assert_eq!(attr_values(&legacy, "data-presemble-md"), vec![md.to_string()], "{legacy}");
+    }
+
+    #[test]
+    fn multi_value_link_slot_gets_no_bundle() {
+        use crate::data::OutputMode::Editorial;
+        let graph = page_with_link_slot(&[("A", "/author/a"), ("B", "/author/b")], true);
+        let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        assert!(html.contains("Page of A") && html.contains("Page of B"), "{html}");
+        assert!(!html.contains("data-presemble-address"), "{html}");
+        assert!(!html.contains("data-presemble-md"), "{html}");
+    }
+
+    #[test]
+    fn link_slot_bundle_without_a_title_slot() {
+        use crate::data::OutputMode::Editorial;
+        let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], false);
+        let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        assert_eq!(
+            attr_values(&html, "data-presemble-address"),
+            vec![format!(r#"(ned/nth-of-kind {} "link" 0)"#, doc_slot("author"))],
+            "{html}"
+        );
+        assert_eq!(attr_values(&html, "data-presemble-md"), vec!["[Joakim](/author/joakim)".to_string()]);
+    }
+
+    /// A template that names the slot without a prefix (`data="author"`): the
+    /// page is the view's root.
+    #[test]
+    fn unprefixed_link_slot_carries_bundle() {
+        use crate::data::OutputMode::Editorial;
+        let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
+        let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        assert_eq!(
+            attr_values(&html, "data-presemble-address"),
+            vec![format!(r#"(ned/nth-of-kind {} "link" 0)"#, doc_slot("author"))],
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn semantic_document_edge_is_not_a_template_path() {
+        use crate::data::OutputMode::Editorial;
+        let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
+        let html = render_for(&graph, r#"<presemble:insert data="_document" />"#, Editorial);
+        assert_eq!(html, "", "{html}");
+    }
+
     #[test]
     fn synthesized_page_link_carries_title_address() {
         use crate::data::OutputMode::Editorial;
@@ -4442,17 +4675,28 @@ mod tests {
         assert!(legacy.contains(&want_md), "{legacy}");
 
         // Native: the link the store pipeline adds has href and text only; it
-        // sits beside the title heading of its own page.
+        // stands for the title heading of its page's document, which the page
+        // here is (it has a preamble).
         let mut store = node_store::NodeStore::new();
         let root_name = store.intern("page");
         let root = store.add_node(node_store::Node::Element(root_name));
         let file_name = store.intern("file");
         let file_val = store.add_node(node_store::Node::Text(ADDRESS_FILE.into()));
         store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        let preamble_name = store.intern("preamble");
+        let preamble = store.add_node(node_store::Node::Element(preamble_name));
+        store.add_edge(root, node_store::Edge::Child(preamble));
+        let slot_name = store.intern("slot");
+        let slot = store.add_node(node_store::Node::Element(slot_name));
+        let name_key = store.intern("name");
+        let name_val = store.add_node(node_store::Node::Text("title".into()));
+        store.add_edge(slot, node_store::Edge::Attribute { name: name_key, value: name_val });
+        store.add_edge(preamble, node_store::Edge::Child(slot));
         let heading_name = store.intern("heading");
         let heading = store.add_node(node_store::Node::Element(heading_name));
         let text = store.add_node(node_store::Node::Text("Plain *em* title".into()));
         store.add_edge(heading, node_store::Edge::Child(text));
+        store.add_edge(slot, node_store::Edge::Child(heading));
         let title_name = store.intern("title");
         store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
         let link_name = store.intern("link");

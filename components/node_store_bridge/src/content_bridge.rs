@@ -1069,6 +1069,13 @@ pub fn create_semantic_content(
     add_text_attr(store, sem, "file", &meta.file);
     add_text_attr(store, sem, "page-kind", &meta.page_kind);
 
+    // The document this node is a view of. Derived: the semantic node is
+    // computed, rebuilt with the store and never serialized. The leading
+    // underscore keeps the name out of slot names, and graph views read only
+    // ConsistsOf, Reference and Attribute edges, so no template path reaches it.
+    let document_edge = store.intern(template::constants::KEY_DOCUMENT_EDGE);
+    store.add_edge(sem, Edge::Derived { name: document_edge, target: doc_root });
+
     // Find preamble node
     let preamble = find_child_by_name(store, doc_root, "preamble");
 
@@ -1752,6 +1759,45 @@ mod tests {
         assert!(!names.iter().any(|n| n == "unassigned"), "{names:?}");
         // The unassigned paragraph does not fill the (empty) `summary` slot.
         assert!(!names.iter().any(|n| n == "summary"), "{names:?}");
+    }
+
+    /// The semantic node points at its document, by a name no slot can have,
+    /// and that name is not a template path.
+    #[test]
+    fn semantic_content_points_at_its_document() {
+        use template::graph_view::GraphView;
+        let grammar = schema::parse_schema("# Title {#title}\n\n----\n\nBody.\n").unwrap();
+        let doc = content::parse_and_assign("# T\n\n----\n\nB.\n", &grammar).unwrap();
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/p".to_string(),
+            stem: "p".to_string(),
+            file: "content/p.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(
+            &mut store,
+            root,
+            &grammar,
+            &meta,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            None,
+        );
+        let documents: Vec<NodeId> = store
+            .derived(sem)
+            .into_iter()
+            .filter(|(n, _)| store.resolve_name(*n) == "_document")
+            .map(|(_, target)| target)
+            .collect();
+        assert_eq!(documents, vec![root]);
+
+        // It is not data: no template path reaches it.
+        let view = crate::graph_view_impl::NodeStoreView::new(&store, sem);
+        assert!(view.resolve(&["_document"]).is_none());
+        assert!(view.resolve_node(&["_document"]).is_none());
+        assert!(!view.iter_keys().iter().any(|k| k == "_document"));
     }
 
     // ── test 3: LinkExpression variants ─────────────────────────────────────

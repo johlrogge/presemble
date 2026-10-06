@@ -8950,10 +8950,8 @@ mod emitted_address_tests {
                 if editable {
                     editable_count += 1;
                     if attr(tag, "data-presemble-address").is_none() {
-                        // Accepted exclusion: a reference link slot renders the
-                        // *target* page's link, and the slot's own block is a
-                        // link expression in the referencing document, which
-                        // is not a block edit's to write (ADR-062 D4).
+                        // Accepted exclusion: a link slot of several blocks that
+                        // resolve to other pages cannot be addressed exactly.
                         let file = attr(tag, "data-presemble-file").unwrap_or_default();
                         let slot = attr(tag, "data-presemble-slot").unwrap_or_default();
                         let slot_blocks = conductor.eval_selection(&format!(
@@ -8963,7 +8961,7 @@ mod emitted_address_tests {
                         ));
                         let store = conductor.node_store.read().unwrap();
                         let is_link_slot = slot_blocks.is_ok_and(|s| {
-                            !s.is_empty()
+                            s.len() > 1
                                 && s.iter().all(|n| {
                                     matches!(
                                         node_store_bridge::content_bridge::block_from_node(&store, n),
@@ -9041,7 +9039,8 @@ mod emitted_address_tests {
             missing.len(),
             missing.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
         );
-        // Every editable element is covered, but the reference-link slots.
-        assert_eq!(checked + reference_links, editable_count);
+        // Every editable element is covered, but the multi-value link slots.
+        assert_eq!(checked, editable_count - reference_links);
+        assert_eq!(reference_links, 0, "site/ has no multi-value reference link slot rendered");
     }
 }

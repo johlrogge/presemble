@@ -156,6 +156,10 @@ impl<'a> GraphView for NodeStoreView<'a> {
         Some(Box::new(NodeStoreView::new(self.store, current)))
     }
 
+    fn root_node(&self) -> Option<ResolvedNode<'_>> {
+        Some(ResolvedNode { id: self.root, store: self.store })
+    }
+
     fn resolve_node(&self, path: &[&str]) -> Option<ResolvedNode<'_>> {
         let mut current = self.root;
         for (i, segment) in path.iter().enumerate() {
@@ -253,6 +257,10 @@ impl GraphView for LayeredGraphView {
                 }
             }
         }
+    }
+
+    fn root_node(&self) -> Option<ResolvedNode<'_>> {
+        self.parent.root_node()
     }
 
     fn iter_keys(&self) -> Vec<String> {

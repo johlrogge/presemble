@@ -53,6 +53,12 @@ pub trait GraphView {
         None
     }
 
+    /// The node this view is rooted at: the page, or the item a `data-each`
+    /// binds. Returns None by default — only NodeStore-backed views have one.
+    fn root_node(&self) -> Option<ResolvedNode<'_>> {
+        None
+    }
+
     /// Bind a key to a NodeId without materializing to Value.
     /// Returns None by default — only NodeStore-backed implementations support this.
     fn with_node_binding(
