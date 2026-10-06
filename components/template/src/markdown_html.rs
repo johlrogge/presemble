@@ -4,10 +4,13 @@
 //! Content may never inject HTML into a page. Every HTML event pulldown-cmark
 //! produces is either dropped (comments) or turned into text, so
 //! `push_html` escapes it.
+//!
+//! Superseded by [`crate::markdown_nodes`] (ADR-064); removed once every
+//! reader builds nodes directly. HTML neutralisation lives there.
 
-use content::html::is_comment_only;
+use crate::markdown_nodes::neutralise_html;
 use content::MARKDOWN_OPTIONS;
-use pulldown_cmark::{CowStr, Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 /// Render content markdown to HTML without passing any HTML from the content
 /// through, stripping the outer `<p>` wrapper.
@@ -54,7 +57,7 @@ pub(crate) fn safe_table_cell_html(src: &str) -> String {
 /// GFM silently drops cells beyond the header's column count, so a source
 /// with an unescaped `|` would still read as one cell. The cell's range must
 /// therefore end right before the wrapper's final `|`.
-fn single_body_cell(wrapper: &str) -> Option<Vec<Event<'_>>> {
+pub(crate) fn single_body_cell(wrapper: &str) -> Option<Vec<Event<'_>>> {
     if wrapper.matches(['\n', '\r']).count() != 3 {
         return None;
     }
@@ -94,165 +97,9 @@ fn single_body_cell(wrapper: &str) -> Option<Vec<Event<'_>>> {
     (closes_row && runs_to_last_pipe).then_some(cell)
 }
 
-/// Map an event stream so no HTML from the content survives.
-///
-/// - pulldown-cmark emits an HTML block as `Start(HtmlBlock)`, one `Html`
-///   event per source line, then `End(HtmlBlock)`. The lines are joined before
-///   the comment check so a comment spanning several lines is recognised.
-/// - An inline comment split over several `InlineHtml` pieces (an opening
-///   piece with no `-->`, then `InlineHtml`, `SoftBreak` and `HardBreak`
-///   events up to the piece holding `-->`) is joined the same way. 0.12.2
-///   emits a closed multi-line inline comment as one event; this guards
-///   against versions that split it. A comment still open when any other
-///   event arrives is emitted as text.
-fn neutralise_html<'a>(input: impl IntoIterator<Item = Event<'a>>) -> Vec<Event<'a>> {
-    let mut events: Vec<Event<'a>> = Vec::new();
-    let mut html_block: Option<String> = None;
-    let mut open_comment: Option<String> = None;
-    for event in input {
-        if let Some(buffer) = open_comment.as_mut() {
-            match &event {
-                Event::InlineHtml(s) => {
-                    buffer.push_str(s);
-                    if s.contains("-->")
-                        && let Some(source) = open_comment.take()
-                    {
-                        push_neutralised(&mut events, CowStr::from(source));
-                    }
-                    continue;
-                }
-                Event::SoftBreak | Event::HardBreak => {
-                    buffer.push('\n');
-                    continue;
-                }
-                _ => {
-                    if let Some(source) = open_comment.take() {
-                        events.push(Event::Text(CowStr::from(source)));
-                    }
-                }
-            }
-        }
-        match event {
-            Event::Start(Tag::HtmlBlock) => html_block = Some(String::new()),
-            Event::End(TagEnd::HtmlBlock) => {
-                if let Some(source) = html_block.take() {
-                    push_neutralised(&mut events, CowStr::from(source));
-                }
-            }
-            Event::Html(s) => match html_block.as_mut() {
-                Some(buffer) => buffer.push_str(&s),
-                None => push_neutralised(&mut events, s),
-            },
-            Event::InlineHtml(s) if opens_unclosed_comment(&s) => open_comment = Some(s.to_string()),
-            Event::InlineHtml(s) => push_neutralised(&mut events, s),
-            other => events.push(other),
-        }
-    }
-    if let Some(source) = open_comment.take() {
-        events.push(Event::Text(CowStr::from(source)));
-    }
-    events
-}
-
-/// True for an inline HTML piece that opens a comment and does not close it.
-/// `-->` is searched from offset 2, as in `content::html::is_comment_only`.
-fn opens_unclosed_comment(piece: &str) -> bool {
-    piece.starts_with("<!--") && !piece[2..].contains("-->")
-}
-
-/// Drop comment-only HTML; turn any other HTML into text so it is escaped.
-fn push_neutralised<'a>(events: &mut Vec<Event<'a>>, source: CowStr<'a>) {
-    if !is_comment_only(&source) {
-        events.push(Event::Text(source));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn events(md: &str) -> Vec<Event<'_>> {
-        Parser::new(md).collect()
-    }
-
-    // ── pulldown-cmark behaviour this module depends on ──────────────────────
-
-    #[test]
-    fn pulldown_inline_html_is_one_inline_html_event_per_tag() {
-        let got = events("a <script>x</script> b");
-        assert_eq!(
-            got,
-            vec![
-                Event::Start(Tag::Paragraph),
-                Event::Text("a ".into()),
-                Event::InlineHtml("<script>".into()),
-                Event::Text("x".into()),
-                Event::InlineHtml("</script>".into()),
-                Event::Text(" b".into()),
-                Event::End(TagEnd::Paragraph),
-            ]
-        );
-    }
-
-    #[test]
-    fn pulldown_inline_comment_is_one_inline_html_event() {
-        let got = events("a <!-- secret --> b");
-        assert!(
-            got.contains(&Event::InlineHtml("<!-- secret -->".into())),
-            "expected the whole comment as one InlineHtml event: {got:?}"
-        );
-    }
-
-    #[test]
-    fn pulldown_multi_line_inline_comment_is_one_inline_html_event() {
-        // 0.12.2 does not split a closed multi-line inline comment, whether
-        // the line ends softly or with a hard break. `safe_inline_html` still
-        // buffers split pieces in case a later version splits them.
-        for (md, comment) in [
-            ("a <!-- one\ntwo --> b", "<!-- one\ntwo -->"),
-            ("a <!-- one\ntwo\nthree --> b", "<!-- one\ntwo\nthree -->"),
-            ("a <!-- one  \ntwo --> b", "<!-- one  \ntwo -->"),
-        ] {
-            assert_eq!(
-                events(md),
-                vec![
-                    Event::Start(Tag::Paragraph),
-                    Event::Text("a ".into()),
-                    Event::InlineHtml(comment.into()),
-                    Event::Text(" b".into()),
-                    Event::End(TagEnd::Paragraph),
-                ],
-                "{md:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn pulldown_unclosed_inline_comment_is_plain_text() {
-        let got = events("a <!-- one\ntwo b");
-        assert!(!got.iter().any(|e| matches!(e, Event::InlineHtml(_))), "{got:?}");
-    }
-
-    #[test]
-    fn pulldown_html_block_is_one_html_event_per_line_inside_html_block_tags() {
-        let got = events("<div>\nsecret\n</div>\n");
-        assert_eq!(
-            got,
-            vec![
-                Event::Start(Tag::HtmlBlock),
-                Event::Html("<div>\n".into()),
-                Event::Html("secret\n".into()),
-                Event::Html("</div>\n".into()),
-                Event::End(TagEnd::HtmlBlock),
-            ]
-        );
-    }
-
-    #[test]
-    fn pulldown_line_starting_with_script_tag_is_an_html_block() {
-        let got = events("<script>x</script>");
-        assert_eq!(got.first(), Some(&Event::Start(Tag::HtmlBlock)), "{got:?}");
-    }
 
     #[test]
     fn pulldown_push_html_escapes_text_events() {
@@ -298,59 +145,6 @@ mod tests {
     fn inline_comment_with_hard_break_does_not_leak() {
         let html = safe_inline_html("a <!-- one  \ntwo --> b");
         assert!(!html.contains("one") && !html.contains("two"), "{html}");
-    }
-
-    // ── neutralise_html with split inline comments (synthetic events) ────────
-
-    fn para(inner: Vec<Event<'static>>) -> Vec<Event<'static>> {
-        let mut v = vec![Event::Start(Tag::Paragraph)];
-        v.extend(inner);
-        v.push(Event::End(TagEnd::Paragraph));
-        v
-    }
-
-    #[test]
-    fn split_inline_comment_over_two_pieces_is_dropped() {
-        let got = neutralise_html(para(vec![
-            Event::Text("a ".into()),
-            Event::InlineHtml("<!-- one".into()),
-            Event::SoftBreak,
-            Event::InlineHtml("two -->".into()),
-            Event::Text(" b".into()),
-        ]));
-        assert_eq!(got, para(vec![Event::Text("a ".into()), Event::Text(" b".into())]));
-    }
-
-    #[test]
-    fn split_inline_comment_over_three_pieces_with_hard_break_is_dropped() {
-        let got = neutralise_html(para(vec![
-            Event::InlineHtml("<!-- one".into()),
-            Event::HardBreak,
-            Event::InlineHtml("two".into()),
-            Event::SoftBreak,
-            Event::InlineHtml("three -->".into()),
-        ]));
-        assert_eq!(got, para(vec![]));
-    }
-
-    #[test]
-    fn split_pieces_that_are_not_only_a_comment_become_one_text() {
-        let got = neutralise_html(para(vec![
-            Event::InlineHtml("<!-- one".into()),
-            Event::SoftBreak,
-            Event::InlineHtml("two --><b>".into()),
-        ]));
-        assert_eq!(got, para(vec![Event::Text("<!-- one\ntwo --><b>".into())]));
-    }
-
-    #[test]
-    fn comment_still_open_at_paragraph_end_becomes_text() {
-        let got = neutralise_html(para(vec![
-            Event::InlineHtml("<!-- one".into()),
-            Event::SoftBreak,
-            Event::InlineHtml("two".into()),
-        ]));
-        assert_eq!(got, para(vec![Event::Text("<!-- one\ntwo".into())]));
     }
 
     #[test]
