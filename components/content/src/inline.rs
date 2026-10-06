@@ -10,6 +10,15 @@ use schema::HeadingLevel;
 
 use crate::parser::MARKDOWN_OPTIONS;
 
+mod model;
+mod normal;
+mod parse;
+mod text;
+
+pub use model::{AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination};
+pub use parse::{inlines_from_events, parse_inlines, NotInlineContent};
+pub use text::{EditKind, EditSegment, EditText, InlinePath};
+
 /// Inline markdown source, e.g. the content of a heading line without its
 /// `#` markers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -102,15 +111,22 @@ fn h1_line(source: &MarkdownText) -> String {
 /// strictly between the heading's start and end. If the written line does not
 /// read as exactly one heading, the whole source is one `Text` event.
 pub fn heading_inline_events(source: &MarkdownText) -> Vec<Event<'static>> {
+    exact_heading_inline_events(source)
+        .unwrap_or_else(|| vec![Event::Text(source.as_str().to_string().into())])
+}
+
+/// Like [`heading_inline_events`], but `None` when the written line does not
+/// read as exactly one heading (no literal fallback).
+pub(crate) fn exact_heading_inline_events(source: &MarkdownText) -> Option<Vec<Event<'static>>> {
     let line = h1_line(source);
     let events: Vec<Event<'_>> = Parser::new_ext(&line, MARKDOWN_OPTIONS).collect();
     match events.as_slice() {
         [Event::Start(Tag::Heading { .. }), inner @ .., Event::End(TagEnd::Heading(_))]
             if !inner.iter().any(is_heading_boundary) =>
         {
-            inner.iter().cloned().map(Event::into_static).collect()
+            Some(inner.iter().cloned().map(Event::into_static).collect())
         }
-        _ => vec![Event::Text(source.as_str().to_string().into())],
+        _ => None,
     }
 }
 

@@ -111,11 +111,15 @@ Content domain (`content::inline`):
   - N2: no adjacent Text siblings.
   - N3: `emph` and `strong` are non-empty.
   - N4: the content of `emph` and `strong` neither starts nor ends with
-    whitespace (normalisation moves it outside).
+    whitespace (normalisation moves it outside). Whitespace is Unicode
+    White_Space (CommonMark flanking treats U+00A0 as whitespace).
   - N5: no space or tab next to a `\n` in Text. Paragraph Text never holds
     `\n\n`. Heading and cell Text never hold `\n` (normalisation turns it into
     a space).
   - N6: `code` Text is non-empty and holds no `\n`.
+  - N7: in the Heading, Paragraph and Cell contexts, the top-level run has no
+    leading or trailing space, tab, `\n` or `line-break`. U+00A0 is kept,
+    because CommonMark strips only spaces and tabs at block edges.
 - A soft break is a `\n` in Text. A hard break is `line-break`.
 
 ### 5. Markers and link expressions are structure, not text
@@ -161,7 +165,9 @@ Content domain (`content::inline`):
 ### 7. Canonical markdown
 
 **Parsing.** Inlines are built from the same pulldown pass that finds blocks.
-Reference-style links are resolved at parse time.
+Reference-style links are resolved at parse time. `parse_inlines` fails on
+input that is not inline content of its context; it never reinterprets block
+syntax.
 
 **Canonical forms.** The serializer always writes:
 
