@@ -78,9 +78,13 @@ pub enum Projection {
 }
 
 /// The markdown `el` is edited as under projection `p`, or `None` for kinds
-/// that cannot be edited (Image, Table, Separator, HtmlBlock, LinkExpression).
+/// that cannot be edited as markdown (Separator, HtmlBlock, LinkExpression).
+/// Images and tables have no single text value but do have markdown, so the
+/// editor can round-trip them; both projections give their canonical form.
 pub fn project_markdown(el: &ContentElement, p: Projection) -> Option<String> {
-    el.text()?;
+    if !matches!(el, ContentElement::Image { .. } | ContentElement::Table { .. }) {
+        el.text()?;
+    }
     let md = serialize_element(el);
     match (p, el) {
         (Projection::Content, ContentElement::Heading { level, .. }) => {
@@ -235,16 +239,25 @@ mod tests {
     }
 
     #[test]
+    fn project_markdown_covers_tables_and_images() {
+        let cases = [
+            ContentElement::Image { alt: None, path: "p.jpg".to_string() },
+            ContentElement::Image { alt: Some("a".to_string()), path: "p.jpg".to_string() },
+            ContentElement::Table {
+                headers: vec!["h1".to_string(), "h2".to_string()],
+                rows: vec![vec!["a".to_string(), "b".to_string()]],
+            },
+        ];
+        for el in cases {
+            for p in [Projection::Block, Projection::Content] {
+                assert_eq!(project_markdown(&el, p), Some(serialize_element(&el)), "{el:?}");
+            }
+        }
+    }
+
+    #[test]
     fn projection_is_none_for_non_editable_kinds() {
         let cases = [
-            ContentElement::Image {
-                alt: None,
-                path: "p.jpg".to_string(),
-            },
-            ContentElement::Table {
-                headers: vec!["h".to_string()],
-                rows: vec![],
-            },
             ContentElement::Separator,
             ContentElement::HtmlBlock {
                 source: "<b>x</b>".to_string(),

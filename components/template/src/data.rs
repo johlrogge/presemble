@@ -233,24 +233,22 @@ pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
 /// Slot names become top-level keys. Body content is rendered as HTML.
 /// Editorial output also carries each heading slot's stored text (ADR-063);
 /// published output carries no editor-only data.
+/// Editorial output also carries each body block's and slot's canonical
+/// markdown for the browser editor (ADR-059 section 10).
 pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode) -> DataGraph {
-    build_article_graph_inner(doc, grammar, None, output)
-}
-
-/// Like `build_article_graph` but attaches a `data-presemble-md` attribute to
-/// every body element containing the original markdown source slice. This is
-/// editorial output, so heading slots also carry their stored text.
-pub fn build_article_graph_with_source(doc: &Document, grammar: &Grammar, source: &str) -> DataGraph {
-    build_article_graph_inner(doc, grammar, Some(source), OutputMode::Editorial)
-}
-
-fn build_article_graph_inner(
-    doc: &Document,
-    grammar: &Grammar,
-    source: Option<&str>,
-    output: OutputMode,
-) -> DataGraph {
     let mut graph = DataGraph::new();
+    let editorial = output == OutputMode::Editorial;
+    // The canonical markdown of a slot element, under the `Content` projection.
+    let insert_md = |graph: &mut DataGraph, slot_key: &str, el: &ContentElement| {
+        if editorial
+            && let Some(md) = content::project_markdown(el, content::Projection::Content)
+        {
+            graph.insert(
+                format!("{}{slot_key}", crate::constants::KEY_MD_PREFIX),
+                Value::Text(md),
+            );
+        }
+    };
 
     // Iterate grammar preamble slots and map each to its DocumentSlot.
     for slot in &grammar.preamble {
@@ -268,8 +266,9 @@ fn build_article_graph_inner(
                 if let Some(spanned) = elements.front()
                     && let ContentElement::Heading { source, .. } = &spanned.node
                 {
+                    insert_md(&mut graph, &slot_key, &spanned.node);
                     // The stored source, which the browser editor edits (ADR-063).
-                    if output == OutputMode::Editorial {
+                    if editorial {
                         let stored_key =
                             format!("{}{slot_key}", crate::constants::KEY_STORED_TEXT_PREFIX);
                         graph.insert(stored_key, Value::Text(source.to_string()));
@@ -297,6 +296,12 @@ fn build_article_graph_inner(
                 // For single-value slots (exactly once), store as Text not List
                 // so templates don't need `as` to avoid span concatenation.
                 let value = if max == 1 {
+                    if let Some(first) = elements
+                        .iter()
+                        .find(|s| matches!(s.node, ContentElement::Paragraph { .. }))
+                    {
+                        insert_md(&mut graph, &slot_key, &first.node);
+                    }
                     paragraphs.into_iter().next().unwrap_or(Value::Absent)
                 } else {
                     Value::List(paragraphs)
@@ -370,11 +375,11 @@ fn build_article_graph_inner(
         }
     }
 
-    // Render body elements as HTML. A schema with only a preamble has no
+    // Render body elements as nodes. A schema with only a preamble has no
     // body: content below `----` is invalid and never rendered (ADR-060 P1).
     // `doc.unassigned` never reaches the data graph.
     if grammar.body.is_some() {
-        let body = crate::body_nodes::render_body_nodes(&doc.body, source);
+        let body = crate::body_nodes::render_body_nodes(&doc.body, editorial);
         if !body.is_empty() {
             graph.insert("body", Value::Nodes(body.into()));
         }
@@ -542,11 +547,11 @@ mod tests {
     }
 
     /// The body as serialized HTML, for asserting on rendered output.
-    fn render_body_html(
+    fn body_html(
         elements: &im::Vector<Spanned<ContentElement>>,
-        source: Option<&str>,
+        editorial: bool,
     ) -> String {
-        crate::dom::serialize_nodes(&crate::body_nodes::render_body_nodes(elements, source))
+        crate::dom::serialize_nodes(&crate::body_nodes::render_body_nodes(elements, editorial))
     }
 
     /// The body of a graph as serialized HTML.
@@ -817,7 +822,7 @@ mod tests {
             language: Some("rust".to_string()),
             code: "fn main() {}\n".to_string(),
         });
-        let html = render_body_html(&im::vector![code_block], None);
+        let html = body_html(&im::vector![code_block], false);
         assert!(
             html.contains("<pre data-presemble-slot=\"body\"><code class=\"language-rust\">"),
             "expected language class in output; got: {html}"
@@ -834,7 +839,7 @@ mod tests {
             language: None,
             code: "some code\n".to_string(),
         });
-        let html = render_body_html(&im::vector![code_block], None);
+        let html = body_html(&im::vector![code_block], false);
         assert!(
             html.contains("<pre data-presemble-slot=\"body\"><code>"),
             "expected plain pre/code in output; got: {html}"
@@ -846,12 +851,12 @@ mod tests {
     }
 
     #[test]
-    fn render_body_html_elements_have_data_presemble_slot_body() {
+    fn body_nodes_elements_have_data_presemble_slot_body() {
         let elements: im::Vector<_> = vec![
             spanned(ContentElement::Paragraph { text: "para".to_string() }),
             spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), source: "head".into() }),
         ].into_iter().collect();
-        let html = render_body_html(&elements, None);
+        let html = body_html(&elements, false);
         assert!(
             html.contains("data-presemble-slot=\"body\""),
             "expected data-presemble-slot=\"body\" attribute on body elements; got: {html}"
@@ -862,15 +867,15 @@ mod tests {
     }
 
     #[test]
-    fn render_body_html_does_not_emit_legacy_ids() {
+    fn body_nodes_do_not_emit_legacy_ids() {
         let elements: im::Vector<_> = vec![
             spanned(ContentElement::Paragraph { text: "first".to_string() }),
             spanned(ContentElement::Separator),
             spanned(ContentElement::Paragraph { text: "second".to_string() }),
         ].into_iter().collect();
-        let html = render_body_html(&elements, None);
+        let html = body_html(&elements, false);
         assert!(!html.contains("presemble-body-"),
-            "render_body_html must not emit legacy presemble-body-N ids; got: {html}");
+            "body nodes must not emit legacy presemble-body-N ids; got: {html}");
         let count = html.matches("data-presemble-slot=\"body\"").count();
         assert_eq!(count, 3, "expected 3 body-slot markers (P, Sep-marker, P); got {count} in: {html}");
         assert!(html.contains("hidden=\"\"></span>"), "separator should emit hidden marker; got: {html}");
@@ -1262,7 +1267,7 @@ mod tests {
     fn body_paragraph_with_bold_renders_as_strong() {
         // **bold** in a paragraph stored with markdown syntax should render as <strong>
         let para = spanned(ContentElement::Paragraph { text: "This has **bold** text.".to_string() });
-        let html = render_body_html(&im::vector![para], None);
+        let html = body_html(&im::vector![para], false);
         assert!(
             html.contains("<strong>bold</strong>"),
             "expected <strong>bold</strong> in body HTML; got: {html}"
@@ -1277,7 +1282,7 @@ mod tests {
     #[test]
     fn body_paragraph_with_italic_renders_as_em() {
         let para = spanned(ContentElement::Paragraph { text: "This has _italic_ text.".to_string() });
-        let html = render_body_html(&im::vector![para], None);
+        let html = body_html(&im::vector![para], false);
         assert!(
             html.contains("<em>italic</em>"),
             "expected <em>italic</em> in body HTML; got: {html}"
@@ -1287,7 +1292,7 @@ mod tests {
     #[test]
     fn body_blockquote_renders_as_blockquote_tag() {
         let bq = spanned(ContentElement::Blockquote { text: "A wise quote.".to_string() });
-        let html = render_body_html(&im::vector![bq], None);
+        let html = body_html(&im::vector![bq], false);
         assert!(
             html.contains("<blockquote"),
             "expected <blockquote tag in body HTML; got: {html}"
@@ -1308,7 +1313,7 @@ mod tests {
             level: schema::HeadingLevel::new(3).unwrap(),
             source: "Section with *emphasis*".into(),
         });
-        let html = render_body_html(&im::vector![heading], None);
+        let html = body_html(&im::vector![heading], false);
         assert!(
             html.contains("<h3"),
             "expected h3 tag; got: {html}"
@@ -1326,7 +1331,7 @@ mod tests {
     #[test]
     fn body_paragraph_inline_html_renders_escaped() {
         let para = spanned(ContentElement::Paragraph { text: "a <script>x</script> b".to_string() });
-        let html = render_body_html(&im::vector![para], None);
+        let html = body_html(&im::vector![para], false);
         assert!(!html.contains("<script"), "inline HTML must not be rendered; got: {html}");
         assert!(html.contains("&lt;script&gt;"), "inline HTML must render escaped; got: {html}");
     }
@@ -1337,7 +1342,7 @@ mod tests {
             level: schema::HeadingLevel::new(2).unwrap(),
             source: "<script>x</script>".into(),
         });
-        let html = render_body_html(&im::vector![heading], None);
+        let html = body_html(&im::vector![heading], false);
         assert!(!html.contains("<script"), "heading HTML must not be rendered; got: {html}");
         assert!(html.contains("&lt;script&gt;"), "heading HTML must render escaped; got: {html}");
     }
@@ -1347,7 +1352,7 @@ mod tests {
         let list = spanned(ContentElement::List {
             source: "- item\n\n  <div>inner</div>\n".to_string(),
         });
-        let html = render_body_html(&im::vector![list], None);
+        let html = body_html(&im::vector![list], false);
         assert!(!html.contains("<div>inner"), "nested HTML block must not be rendered; got: {html}");
         assert!(html.contains("&lt;div&gt;inner"), "nested HTML block must render escaped; got: {html}");
     }
@@ -1355,14 +1360,14 @@ mod tests {
     #[test]
     fn body_paragraph_inline_comment_is_stripped() {
         let para = spanned(ContentElement::Paragraph { text: "a <!-- secret --> b".to_string() });
-        let html = render_body_html(&im::vector![para], None);
+        let html = body_html(&im::vector![para], false);
         assert!(!html.contains("secret"), "inline comment must be stripped; got: {html}");
     }
 
     #[test]
     fn body_html_block_renders_only_the_placeholder() {
         let block = spanned(ContentElement::HtmlBlock { source: "<div>secret</div>".to_string() });
-        let html = render_body_html(&im::vector![block], None);
+        let html = body_html(&im::vector![block], false);
         assert!(!html.contains("secret"), "HTML block source must not be rendered; got: {html}");
         assert!(html.contains("presemble-html-removed"), "expected the placeholder class; got: {html}");
         assert!(
@@ -1377,7 +1382,7 @@ mod tests {
             headers: headers.iter().map(|s| s.to_string()).collect(),
             rows: rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect(),
         });
-        render_body_html(&im::vector![table], None)
+        body_html(&im::vector![table], false)
     }
 
     #[test]
@@ -1419,7 +1424,7 @@ mod tests {
             ("# a <b>x</b>", "&lt;b&gt;x&lt;/b&gt;"),
         ] {
             let elements = content::parse_document(md).expect("parses").elements;
-            let html = render_body_html(&elements, None);
+            let html = body_html(&elements, false);
             assert!(html.contains(escaped), "{md:?}: {html}");
             assert!(!html.contains("<div") && !html.contains("<b>"), "{md:?}: {html}");
         }
@@ -1432,7 +1437,7 @@ mod tests {
         let src = "# Title\n\n----\n\n<!-- secret one -->\n\nVisible.\n\n<!-- secret two -->\n";
         let doc = parse_and_assign(src, &grammar).expect("parses");
         assert_eq!(doc.comments.len(), 2);
-        let html = render_body_html(&doc.body, Some(src));
+        let html = body_html(&doc.body, true);
         assert!(html.contains("Visible."), "got: {html}");
         assert!(!html.contains("secret") && !html.contains("<!--"), "got: {html}");
     }
@@ -1440,52 +1445,43 @@ mod tests {
     #[test]
     fn body_paragraph_code_and_link_still_render() {
         let para = spanned(ContentElement::Paragraph { text: "Use `x<y` and [here](/a)".to_string() });
-        let html = render_body_html(&im::vector![para], None);
+        let html = body_html(&im::vector![para], false);
         assert!(html.contains("<code>x&lt;y</code>"), "expected code span; got: {html}");
         assert!(html.contains(r#"<a href="/a">here</a>"#), "expected link; got: {html}");
     }
 
     #[test]
-    fn render_body_html_with_source_adds_data_presemble_md_attr() {
-        // Source where the paragraph text spans bytes 0..5.
-        let source = "Hello world text here";
-        let para = Spanned {
-            node: ContentElement::Paragraph { text: "Hello".to_string() },
-            span: SchemaSpan { start: 0, end: 5 },
-        };
-        let html = render_body_html(&im::vector![para], Some(source));
+    fn body_nodes_editorial_adds_canonical_data_presemble_md_attr() {
+        let para = spanned(ContentElement::Paragraph { text: "Hello".to_string() });
+        let html = body_html(&im::vector![para], true);
         assert!(
             html.contains("data-presemble-md=\"Hello\""),
-            "expected data-presemble-md attribute with source slice; got: {html}"
+            "expected the canonical markdown as data-presemble-md; got: {html}"
         );
     }
 
     #[test]
-    fn render_body_html_with_source_escapes_html_in_md_attr() {
-        let source = "<b>bold</b> text";
-        let para = Spanned {
-            node: ContentElement::Paragraph { text: "bold text".to_string() },
-            span: SchemaSpan { start: 0, end: 16 },
-        };
-        let html = render_body_html(&im::vector![para], Some(source));
+    fn body_nodes_editorial_escapes_html_in_md_attr() {
+        let para = spanned(ContentElement::Paragraph { text: "a \\<b> text".to_string() });
+        let html = body_html(&im::vector![para], true);
         assert!(
-            html.contains("data-presemble-md=\"&lt;b&gt;bold&lt;/b&gt; text\""),
+            html.contains("data-presemble-md=\"a \\&lt;b&gt; text\""),
             "expected HTML-escaped data-presemble-md attribute; got: {html}"
         );
     }
 
     #[test]
-    fn render_body_html_without_source_has_no_data_presemble_md_attr() {
+    fn body_nodes_published_has_no_data_presemble_md_attr() {
         let para = spanned(ContentElement::Paragraph { text: "hello".to_string() });
-        let html = render_body_html(&im::vector![para], None);
+        let html = body_html(&im::vector![para], false);
         assert!(
             !html.contains("data-presemble-md"),
-            "expected no data-presemble-md attribute when source is None; got: {html}"
+            "expected no data-presemble-md attribute in published output; got: {html}"
         );
     }
 
     #[test]
-    fn build_article_graph_with_source_attaches_md_attr() {
+    fn editorial_graph_attaches_md_attr_without_source() {
         use content::parse_and_assign;
         use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
 
@@ -1507,12 +1503,19 @@ mod tests {
         };
 
         let doc = parse_and_assign(source, &grammar).expect("document should parse");
-        let graph = super::build_article_graph_with_source(&doc, &grammar, source);
+        let graph = build_article_graph(&doc, &grammar, OutputMode::Editorial);
         let html = body_html_of(&graph);
         assert!(
-            html.contains("data-presemble-md="),
-            "expected data-presemble-md attribute in body HTML from build_article_graph_with_source; got: {html}"
+            html.contains("data-presemble-md=\"A body paragraph.\""),
+            "expected data-presemble-md attribute in editorial body HTML; got: {html}"
         );
+        assert!(
+            graph.resolve(&["_presemble_md_title"]).is_some(),
+            "editorial graph carries the title slot's md"
+        );
+        let published = build_article_graph(&doc, &grammar, OutputMode::Published);
+        assert!(!body_html_of(&published).contains("data-presemble-md"));
+        assert!(published.resolve(&["_presemble_md_title"]).is_none());
     }
 
     // -------------------------------------------------------------------------

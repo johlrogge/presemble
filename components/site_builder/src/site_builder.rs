@@ -7,7 +7,8 @@ use site_index::{
 };
 use template::constants::KEY_PRESEMBLE_FILE;
 
-/// Controls whether markdown source is attached to data graph nodes.
+/// Selects the output mode: `Attach` is editorial output, which carries the
+/// editor's data (canonical markdown, stored text); `Omit` is published output.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum SourceAttachment {
     #[default]
@@ -159,16 +160,8 @@ pub fn build_graph(
             }
 
             // Build data graph
-            let mut data = match source_attachment {
-                SourceAttachment::Attach => {
-                    template::build_article_graph_with_source(&doc, &grammar, &content_src)
-                }
-                SourceAttachment::Omit => template::build_article_graph(
-                    &doc,
-                    &grammar,
-                    template::OutputMode::Published,
-                ),
-            };
+            let mut data =
+                template::build_article_graph(&doc, &grammar, source_attachment.output_mode());
 
             // Inject metadata
             data.insert(
@@ -509,6 +502,18 @@ mod tests {
             !html.contains(template::constants::ATTR_TEXT),
             "published output must not carry stored text: {html}"
         );
+    }
+
+    #[test]
+    fn editorial_build_carries_canonical_md_and_published_does_not() {
+        let editorial = render_item(SourceAttachment::Attach);
+        assert_eq!(
+            editorial.matches(r#"data-presemble-md="Hello World""#).count(),
+            2,
+            "the title slot and the synthesized title link carry md: {editorial}"
+        );
+        let published = render_item(SourceAttachment::Omit);
+        assert!(!published.contains(template::constants::ATTR_MD), "{published}");
     }
 
     #[test]

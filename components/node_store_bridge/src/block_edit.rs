@@ -643,12 +643,27 @@ mod tests {
 
     #[test]
     fn lower_not_editable_kind() {
-        let img = ContentElement::Image {
-            alt: Some("a".to_string()),
-            path: "p.jpg".to_string(),
-        };
-        let err = lowered("body", &img, "![a](p.jpg)", "![b](p.jpg)").unwrap_err();
+        let html = ContentElement::HtmlBlock { source: "<b>x</b>".to_string() };
+        let err = lowered("body", &html, "<b>x</b>", "<b>y</b>").unwrap_err();
         assert_eq!(err.cause, BlockEditCause::NotEditable);
+    }
+
+    #[test]
+    fn lower_table_change_is_replace() {
+        let table = ContentElement::Table {
+            headers: vec!["h1".to_string(), "h2".to_string()],
+            rows: vec![vec!["a".to_string(), "b".to_string()]],
+        };
+        let base = content::project_markdown(&table, Projection::Block).unwrap();
+        let proposed = base.replace("| a ", "| z ");
+        assert_ne!(base, proposed, "{base}");
+        let l = expect_lowered(lowered("body", &table, &base, &proposed));
+        assert_eq!(l.selection, SEL);
+        match l.mutation {
+            NedMutation::Replace(trees) => assert_eq!(trees.len(), 1),
+            other => panic!("a table change replaces the block, got {other:?}"),
+        }
+        assert_eq!(l.preview.base, md(&base));
     }
 
     #[test]

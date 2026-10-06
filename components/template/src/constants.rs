@@ -38,6 +38,12 @@ pub const KEY_SCHEMA_CONSTRAINTS_PREFIX: &str = "_presemble_schema_constraints_"
 /// The value is a `Value::Text` holding the text as stored in the document.
 pub const KEY_STORED_TEXT_PREFIX: &str = "_presemble_text_";
 
+/// DataGraph key prefix for a slot's canonical markdown (ADR-059 section 10),
+/// the `Content` projection of its element. The full key for slot "title" is
+/// `"_presemble_md_title"`. Present in editorial graphs only, for heading and
+/// single-value paragraph slots.
+pub const KEY_MD_PREFIX: &str = "_presemble_md_";
+
 /// DataGraph key on a synthesized link record holding the stored text of the
 /// slot named by `_source_slot`.
 pub const KEY_SOURCE_TEXT: &str = "_source_text";

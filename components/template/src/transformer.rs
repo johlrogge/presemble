@@ -503,7 +503,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
                 {
                     attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
                     if editorial {
-                        attrs.extend(source_text_attr(source, sub_graph));
+                        attrs.extend(source_text_attrs(source, sub_graph));
                     }
                 }
                 attrs.extend(constraint_attrs);
@@ -530,6 +530,7 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
             ];
             if editorial {
                 attrs.extend(resolve_stored_text_attr(data_path, graph));
+                attrs.extend(resolve_md_attr(data_path, graph));
             }
             attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
@@ -788,9 +789,9 @@ fn render_insert_native(
                         match store.get(child_id) {
                             Some(node_store::Node::Element(_)) => {
                                 if let Some(block) = native_block(store, child_id) {
-                                    body_nodes.extend(crate::body_nodes::block_nodes(
+                                    body_nodes.extend(crate::body_nodes::body_block_nodes(
                                         &block,
-                                        &crate::body_nodes::BlockCtx { md: None },
+                                        editorial,
                                     ));
                                 }
                             }
@@ -851,6 +852,14 @@ fn render_insert_native(
                         } else {
                             text
                         };
+                        // The slot element's canonical markdown: the `Content`
+                        // projection of the element itself.
+                        if editorial
+                            && let Some(md) = native_block(store, id)
+                                .and_then(|el| content::project_markdown(&el, content::Projection::Content))
+                        {
+                            elem_attrs.push(md_attr(md));
+                        }
                         elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
                             name: tag,
@@ -929,7 +938,7 @@ fn render_insert_native(
                                     .then(|| node_attr_str(store, id, crate::constants::KEY_SOURCE_TEXT))
                                     .flatten();
                                 elem_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
-                                elem_attrs.extend(source_text.map(stored_text_attr));
+                                elem_attrs.extend(source_text.into_iter().flat_map(title_text_attrs));
                             }
                             elem_attrs.extend(constraint_attrs.iter().cloned());
                             Ok(Some(vec![Node::Element(Element {
@@ -1052,6 +1061,10 @@ fn first_child_text(store: &node_store::NodeStore, id: node_store::NodeId) -> St
 ///
 /// `None` for what renders nothing: unknown kinds, a link without `href`, and
 /// link expressions (ADR-058 section 4: ignored in the body).
+///
+/// A heading level outside 1..=6 renders nothing. This cannot happen for a live
+/// document: the parser builds a typed `HeadingLevel`, and every editorial
+/// transaction passes the ADR-057 §4 gate (`InvalidHeadingLevel`).
 fn native_block(store: &node_store::NodeStore, id: node_store::NodeId) -> Option<content::ContentElement> {
     use content::ContentElement;
     let Some(node_store::Node::Element(name)) = store.get(id) else {
@@ -1315,7 +1328,7 @@ fn record_attrs(
     if let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT]) {
         attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
         if editorial {
-            attrs.extend(source_text_attr(source, sub_graph));
+            attrs.extend(source_text_attrs(source, sub_graph));
         }
     }
     attrs
@@ -1324,12 +1337,47 @@ fn record_attrs(
 /// A synthesized title link carries the title's stored text (ADR-063).
 /// Callers emit it only in editorial output: the render mode alone decides,
 /// whatever the record was built for.
-fn source_text_attr(source_slot: &str, sub_graph: &DataGraph) -> Option<(String, Form)> {
+fn source_text_attrs(source_slot: &str, sub_graph: &DataGraph) -> Vec<(String, Form)> {
     if source_slot != "title" {
-        return None;
+        return Vec::new();
     }
     match sub_graph.resolve(&[crate::constants::KEY_SOURCE_TEXT]) {
-        Some(Value::Text(text)) => Some(stored_text_attr(text.clone())),
+        Some(Value::Text(text)) => title_text_attrs(text.clone()),
+        _ => Vec::new(),
+    }
+}
+
+/// The editor attributes of a synthesized title link: the title's stored text
+/// and its canonical markdown, the `Content` projection of the title heading.
+fn title_text_attrs(stored: String) -> Vec<(String, Form)> {
+    let md = heading_content_md(&stored).map(md_attr);
+    std::iter::once(stored_text_attr(stored)).chain(md).collect()
+}
+
+/// The `Content` projection of a heading whose markdown source is `source`.
+/// The level is irrelevant: the projection drops the markers.
+fn heading_content_md(source: &str) -> Option<String> {
+    let level = schema::HeadingLevel::new(1)?;
+    let heading = content::ContentElement::Heading { level, source: source.into() };
+    content::project_markdown(&heading, content::Projection::Content)
+}
+
+/// The `data-presemble-md` attribute holding `md`.
+fn md_attr(md: String) -> (String, Form) {
+    (crate::constants::ATTR_MD.to_string(), Form::Str(md))
+}
+
+/// Look up the canonical markdown of slot `data_path` in its parent record,
+/// as a `data-presemble-md` attribute. Like the stored text there is no
+/// top-level fallback.
+fn resolve_md_attr(data_path: &str, graph: &dyn GraphView) -> Option<(String, Form)> {
+    let key = format!("{}{}", crate::constants::KEY_MD_PREFIX, slot_name_from_path(data_path));
+    let mut scoped: Vec<&str> = data_path.split('.').collect();
+    if let Some(last) = scoped.last_mut() {
+        *last = key.as_str();
+    }
+    match graph.resolve(&scoped)?.into_owned() {
+        Value::Text(t) => Some(md_attr(t)),
         _ => None,
     }
 }
@@ -3620,7 +3668,7 @@ mod tests {
         graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(BODY_FILE.to_string()));
         graph.insert(
             "body",
-            Value::Nodes(crate::body_nodes::render_body_nodes(elements, None).into()),
+            Value::Nodes(crate::body_nodes::render_body_nodes(elements, true).into()),
         );
         let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
         let reg = NullRegistry;
@@ -3793,7 +3841,7 @@ mod tests {
     }
 
     #[test]
-    fn render_body_html_and_transformer_body_render_agree_on_id_omission_and_slot_marker() {
+    fn legacy_and_native_body_agree_on_id_omission_and_slot_marker() {
         use schema::{Span as SchemaSpan, Spanned};
 
         // --- data.rs path ---
@@ -3910,6 +3958,159 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Canonical data-presemble-md (ADR-059 section 10)
+    // ---------------------------------------------------------------------------
+
+    fn md_attr(md: &str) -> String {
+        format!(r#"data-presemble-md="{md}""#)
+    }
+
+    fn heading_el(level: u8, source: &str) -> content::ContentElement {
+        content::ContentElement::Heading {
+            level: schema::HeadingLevel::new(level).unwrap(),
+            source: source.into(),
+        }
+    }
+
+    #[test]
+    fn body_md_attr_is_canonical_block_markdown_for_store_built_document() {
+        let elements = vec![
+            heading_el(2, "Section *em*"),
+            content::ContentElement::Paragraph { text: "A *para*".to_string() },
+        ];
+        let html = native_body_html(&elements);
+        for el in &elements {
+            let md = content::project_markdown(el, content::Projection::Block).unwrap();
+            assert!(html.contains(&md_attr(&md)), "expected {md:?} in: {html}");
+        }
+        assert!(
+            html.contains("data-presemble-md=\"## Section"),
+            "block heading keeps its markers: {html}"
+        );
+        assert!(!html.contains(r#"data-presemble-md="""#), "no empty md attr: {html}");
+    }
+
+    #[test]
+    fn table_and_image_body_blocks_carry_md() {
+        let elements = vec![
+            content::ContentElement::Image { path: "/i.png".to_string(), alt: Some("a".to_string()) },
+            content::ContentElement::Table {
+                headers: vec!["h1".to_string(), "h2".to_string()],
+                rows: vec![vec!["a".to_string(), "b".to_string()]],
+            },
+        ];
+        let spanned: im::Vector<_> = elements
+            .iter()
+            .cloned()
+            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .collect();
+        for html in [native_body_html(&elements), legacy_body_html(&spanned)] {
+            assert_eq!(html.matches("data-presemble-md=").count(), 2, "{html}");
+            assert!(html.contains("data-presemble-md=\"![a](/i.png)\""), "{html}");
+        }
+    }
+
+    #[test]
+    fn legacy_body_md_attr_equals_native_body_md_attr() {
+        let elements = vec![
+            heading_el(2, "Section"),
+            content::ContentElement::Paragraph { text: "A *para*".to_string() },
+            content::ContentElement::Image { path: "/i.png".to_string(), alt: None },
+        ];
+        let spanned: im::Vector<_> = elements
+            .iter()
+            .cloned()
+            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .collect();
+        let count = |html: &str| html.matches("data-presemble-md=").count();
+        let (legacy, native) = (legacy_body_html(&spanned), native_body_html(&elements));
+        assert_eq!(count(&legacy), 3, "{legacy}");
+        assert_eq!(count(&native), 3, "{native}");
+    }
+
+    #[test]
+    fn paragraph_slot_carries_content_projection_md() {
+        let want = md_attr("A summary.");
+        // Legacy: a paragraph slot from build_article_graph.
+        let html = render_with(
+            &stored_text_graph("# Title\n\nA summary.\n"),
+            r#"<presemble:insert data="summary" as="p" />"#,
+        );
+        assert!(html.contains(&want), "legacy: {html}");
+
+        // Native: a paragraph element in the store.
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let para_name = store.intern("paragraph");
+        let para = store.add_node(node_store::Node::Element(para_name));
+        let para_text = store.add_node(node_store::Node::Text("A summary.".into()));
+        store.add_edge(para, node_store::Edge::Child(para_text));
+        let summary_name = store.intern("summary");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: para });
+        let graph = NodeStoreGraphView { store, root };
+        let html = render_with(&graph, r#"<presemble:insert data="summary" as="p" />"#);
+        assert!(html.contains(&want), "native: {html}");
+    }
+
+    #[test]
+    fn heading_slot_md_is_source_without_markers() {
+        use crate::data::OutputMode::Editorial;
+        let source = "Plain *em* title";
+        let want = content::project_markdown(&heading_el(1, source), content::Projection::Content)
+            .unwrap();
+        assert!(!want.starts_with('#'), "{want}");
+        let want = md_attr(&want);
+        let legacy = render_for(
+            &heading_graph(&format!("# {source}\n\nA summary.\n"), Editorial),
+            r#"<presemble:insert data="input.title" as="h1" />"#,
+            Editorial,
+        );
+        let native = render_for(
+            &heading_store(source),
+            r#"<presemble:insert data="title" as="h1" />"#,
+            Editorial,
+        );
+        for html in [legacy, native] {
+            assert!(html.contains(&want), "{html}");
+        }
+        // The synthesized title link projects as Content too.
+        let link = render_for(
+            &heading_graph(&format!("# {source}\n\nA summary.\n"), Editorial),
+            r#"<presemble:insert data="input.link" />"#,
+            Editorial,
+        );
+        assert!(link.contains(&want), "{link}");
+    }
+
+    #[test]
+    fn published_output_has_no_md_attrs() {
+        use crate::data::OutputMode::Published;
+        let published = |elements: &[content::ContentElement]| {
+            let spanned: im::Vector<_> = elements
+                .iter()
+                .cloned()
+                .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+                .collect();
+            crate::dom::serialize_nodes(&crate::body_nodes::render_body_nodes(&spanned, false))
+        };
+        let body = published(&[heading_el(2, "S"), content::ContentElement::Paragraph { text: "p".into() }]);
+        assert!(!body.contains("data-presemble-md"), "{body}");
+        let slot = render_for(
+            &heading_store("Plain *em* title"),
+            r#"<presemble:insert data="title" as="h1" />"#,
+            Published,
+        );
+        assert!(!slot.contains("data-presemble-md"), "{slot}");
+        let legacy = render_for(
+            &heading_graph("# T\n\nA summary.\n", Published),
+            r#"<presemble:insert data="input.title" as="h1" /><presemble:insert data="input.link" />"#,
+            Published,
+        );
+        assert!(!legacy.contains("data-presemble-md"), "{legacy}");
+    }
+
+    // ---------------------------------------------------------------------------
     // HTML from content is never rendered (ADR-062)
     // ---------------------------------------------------------------------------
 
@@ -3937,7 +4138,8 @@ mod tests {
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
+        // Published: these tests are about how a block renders, not the editor's md.
+        let ctx = RenderContext::published(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
     }
 
@@ -4027,7 +4229,7 @@ mod tests {
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
         let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
+        let ctx = RenderContext::published(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
     }
 

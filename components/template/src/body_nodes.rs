@@ -14,8 +14,8 @@ use schema::Spanned;
 
 /// Per-block rendering context.
 pub(crate) struct BlockCtx<'a> {
-    /// The raw source slice of the block, emitted as `data-presemble-md`.
-    /// Legacy (editorial) output only; the native path passes `None`.
+    /// The canonical markdown of the block, emitted as `data-presemble-md`.
+    /// Editorial output only.
     pub md: Option<&'a str>,
 }
 
@@ -106,18 +106,26 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
     }
 }
 
-/// The nodes for a whole body. With `source`, every block carries its source
-/// slice as `data-presemble-md` (editorial legacy output).
+/// The nodes for one body block. In editorial output the block carries its
+/// canonical block markdown as `data-presemble-md` (ADR-059 section 10); a
+/// block that cannot be edited as markdown carries none. Published output
+/// carries no editor-only data.
+pub(crate) fn body_block_nodes(element: &ContentElement, editorial: bool) -> Vec<Node> {
+    let md = editorial
+        .then(|| content::project_markdown(element, content::Projection::Block))
+        .flatten();
+    block_nodes(element, &BlockCtx { md: md.as_deref() })
+}
+
+/// The nodes for a whole body, each block through [`body_block_nodes`].
 pub(crate) fn render_body_nodes(
     elements: &im::Vector<Spanned<ContentElement>>,
-    source: Option<&str>,
+    editorial: bool,
 ) -> Vec<Node> {
-    let mut nodes = Vec::new();
-    for spanned in elements.iter() {
-        let md = source.map(|s| &s[spanned.span.start..spanned.span.end]);
-        nodes.extend(block_nodes(&spanned.node, &BlockCtx { md }));
-    }
-    nodes
+    elements
+        .iter()
+        .flat_map(|spanned| body_block_nodes(&spanned.node, editorial))
+        .collect()
 }
 
 /// Add `data-presemble-file` to every top-level element that carries
@@ -195,7 +203,7 @@ mod tests {
                 spanned(ContentElement::Paragraph { text: "a *b*".to_string() }),
                 spanned(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() }),
             ],
-            None,
+            false,
         );
         stamp_file(&mut nodes, "content/p.md");
         let html = serialize_nodes(&nodes);
@@ -209,23 +217,20 @@ mod tests {
     }
 
     #[test]
-    fn with_source_blocks_carry_their_md_slice() {
+    fn editorial_blocks_carry_canonical_md_escaped() {
         let nodes = render_body_nodes(
-            &im::vector![Spanned {
-                node: ContentElement::Paragraph { text: "bold".to_string() },
-                span: Span { start: 0, end: 6 },
-            }],
-            Some("<b>bold</b>"),
+            &im::vector![spanned(ContentElement::Paragraph { text: "a \"b\" & c".to_string() })],
+            true,
         );
         let html = serialize_nodes(&nodes);
-        assert!(html.contains(r#"data-presemble-md="&lt;b&gt;bol""#), "{html}");
+        assert!(html.contains(r#"data-presemble-md="a &quot;b&quot; &amp; c""#), "{html}");
     }
 
     #[test]
     fn body_nodes_round_trip_through_hiccup() {
         for src in BLOCK_CORPUS {
             let doc = content::parse_document(src).expect("parses");
-            let nodes = render_body_nodes(&doc.elements, Some(src));
+            let nodes = render_body_nodes(&doc.elements, true);
             let hiccup = crate::serialize_to_hiccup(&nodes);
             let parsed = crate::parse_template_hiccup(&hiccup)
                 .unwrap_or_else(|e| panic!("hiccup must parse: {e}\n{hiccup}"));
