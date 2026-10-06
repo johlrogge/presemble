@@ -1,0 +1,650 @@
+//! Pure lowering of a block edit (ADR-059 §10) to one NED mutation.
+//!
+//! The browser, the REPL and MCP all use this module. It takes no locks and
+//! does no I/O: the caller resolves the target block, calls [`lower`], and
+//! then either applies the mutation now or stores it as a suggestion. The
+//! lowering is the same for both intents.
+
+use content::{
+    Projection, check_block_round_trip, parse_markdown_projection, project_markdown,
+};
+use editorial_types::{
+    BlockEditCause, BlockEditError, BlockText, NedMutation, SuggestionPreview,
+};
+use node_store::{Node, NodeId, NodeStore};
+
+use crate::content_bridge::{BlockDecodeError, block_from_node, block_to_tree};
+
+/// A minimal text edit of one block's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextDiff {
+    SetText(String),
+    SearchReplace { search: String, replace: String },
+}
+
+/// The smallest edit that turns `base` into `edited`, as a SearchReplace whose
+/// search text occurs exactly once in `base`; `SetText` when `base` is empty
+/// (nothing can be searched for); `None` when the texts are equal.
+///
+/// A port of the browser's `minimalDiff` and `expandToUnique`
+/// (`resources/serve/inject.js`, lines 1146-1218), working on characters
+/// rather than UTF-16 units: the common prefix and suffix are removed, then
+/// the changed span grows outward in steps of ten characters, each step
+/// snapping to the next space or newline, until the search text is unique.
+pub fn minimal_unique_diff(base: &str, edited: &str) -> Option<TextDiff> {
+    if base == edited {
+        return None;
+    }
+    if base.is_empty() {
+        return Some(TextDiff::SetText(edited.to_string()));
+    }
+    let o: Vec<char> = base.chars().collect();
+    let e: Vec<char> = edited.chars().collect();
+
+    let min_len = o.len().min(e.len());
+    let prefix = (0..min_len).take_while(|&i| o[i] == e[i]).count();
+    let suffix = (0..min_len - prefix)
+        .take_while(|&i| o[o.len() - 1 - i] == e[e.len() - 1 - i])
+        .count();
+
+    let is_boundary = |c: char| c == ' ' || c == '\n';
+    let (mut ctx_left, mut ctx_right) = (0usize, 0usize);
+    loop {
+        let candidate = &o[prefix - ctx_left..o.len() - suffix + ctx_right];
+        if !candidate.is_empty() && count_occurrences(&o, candidate, 1) == 1 {
+            break;
+        }
+        // Fully expanded: the candidate is the whole (non-empty) base.
+        if ctx_left >= prefix && ctx_right >= suffix {
+            break;
+        }
+        if ctx_left < prefix {
+            ctx_left = (ctx_left + 10).min(prefix);
+            while ctx_left < prefix && !is_boundary(o[prefix - ctx_left]) {
+                ctx_left += 1;
+            }
+        }
+        if ctx_right < suffix {
+            ctx_right = (ctx_right + 10).min(suffix);
+            while ctx_right < suffix && !is_boundary(o[o.len() - suffix + ctx_right - 1]) {
+                ctx_right += 1;
+            }
+        }
+    }
+    let start = prefix - ctx_left;
+    Some(TextDiff::SearchReplace {
+        search: o[start..o.len() - suffix + ctx_right].iter().collect(),
+        replace: e[start..e.len() - suffix + ctx_right].iter().collect(),
+    })
+}
+
+/// Occurrences of `needle` in `hay`, overlapping ones included, stopping once
+/// `limit` is exceeded.
+fn count_occurrences(hay: &[char], needle: &[char], limit: usize) -> usize {
+    let mut count = 0;
+    for window in hay.windows(needle.len()) {
+        if window == needle {
+            count += 1;
+            if count > limit {
+                break;
+            }
+        }
+    }
+    count
+}
+
+/// The result of lowering a block edit: what to run and what to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lowered {
+    pub selection: String,
+    pub mutation: NedMutation,
+    pub preview: SuggestionPreview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lowering {
+    NoChange,
+    Lowered(Lowered),
+}
+
+fn refuse(cause: BlockEditCause, message: impl Into<String>) -> BlockEditError {
+    BlockEditError {
+        cause,
+        message: message.into(),
+    }
+}
+
+/// The projection a block is edited under, from its parent: a block in a
+/// preamble `slot` is edited as content; a block in `body` or `unassigned`
+/// as block markdown.
+fn projection_for(store: &NodeStore, block: NodeId) -> Option<Projection> {
+    store.parents(block).into_iter().find_map(|p| match store.get(p)? {
+        Node::Element(name) => match store.resolve_name(*name) {
+            "slot" => Some(Projection::Content),
+            "body" | "unassigned" => Some(Projection::Block),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// Lower a block edit to one mutation, for both intents.
+///
+/// `block` is the single resolved target block and `block_selection` the
+/// selection that addresses it. `base` is what the client started from;
+/// `proposed` is what it wants.
+///
+/// - Only the text of the block changes: a minimal unique text edit,
+///   addressed with `(ned/text-in <block_selection>)`.
+/// - Anything else (another kind or heading level, several blocks): a
+///   `Replace` of the block with the proposed blocks. html-block, separator
+///   and link-expression may not be written this way (ADR-062 D4).
+pub fn lower(
+    store: &NodeStore,
+    block: NodeId,
+    block_selection: &str,
+    base: &BlockText,
+    proposed: &BlockText,
+) -> Result<Lowering, BlockEditError> {
+    let BlockText::Markdown(base_md) = base;
+    let BlockText::Markdown(proposed_md) = proposed;
+
+    let projection = projection_for(store, block).ok_or_else(|| {
+        refuse(
+            BlockEditCause::Unaddressable,
+            "the block is not directly under a slot or the body",
+        )
+    })?;
+    let current_el = block_from_node(store, block)
+        .map_err(|e| refuse(BlockEditCause::NotEditable, e.to_string()))?;
+    let current = project_markdown(&current_el, projection).ok_or_else(|| {
+        refuse(BlockEditCause::NotEditable, "this kind of block cannot be edited")
+    })?;
+
+    // Drift: the base must still read as the block. Node equality is the
+    // primary check; text equality covers markdown that is not a fixed point
+    // of parse and serialize.
+    let same_block =
+        |md: &str| match parse_markdown_projection(md, projection, &current_el) {
+            Ok(els) => els.as_slice() == std::slice::from_ref(&current_el),
+            Err(_) => false,
+        };
+    if !same_block(base_md) && normalize_newlines(base_md) != current {
+        return Err(refuse(
+            BlockEditCause::Drifted,
+            "the block has changed since it was loaded",
+        ));
+    }
+
+    if same_block(proposed_md) || normalize_newlines(proposed_md) == current {
+        return Ok(Lowering::NoChange);
+    }
+    if proposed_md.trim().is_empty() {
+        return Err(refuse(BlockEditCause::Invalid, "use delete"));
+    }
+
+    let elements = parse_markdown_projection(proposed_md, projection, &current_el)
+        .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?;
+
+    let preview = SuggestionPreview {
+        base: BlockText::Markdown(current),
+        proposed: proposed.clone(),
+    };
+
+    // Text-only change: one block that differs from the current one in its
+    // text alone.
+    if let [new] = elements.as_slice()
+        && let (Some(old_text), Some(new_text)) = (current_el.text(), new.text())
+        && current_el.with_text(new_text).as_ref() == Some(new)
+    {
+        check_block_round_trip(new)
+            .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?;
+        let mutation = match minimal_unique_diff(old_text, new_text) {
+            Some(TextDiff::SetText(text)) => NedMutation::SetText(text),
+            Some(TextDiff::SearchReplace { search, replace }) => {
+                NedMutation::SearchReplace { search, replace }
+            }
+            None => return Ok(Lowering::NoChange),
+        };
+        return Ok(Lowering::Lowered(Lowered {
+            selection: format!("(ned/text-in {block_selection})"),
+            mutation,
+            preview,
+        }));
+    }
+
+    // Anything else replaces the block.
+    let mut trees = Vec::with_capacity(elements.len());
+    for el in &elements {
+        let tree = block_to_tree(el).map_err(|e| match e {
+            BlockDecodeError::NotPayloadKind(name) => refuse(
+                BlockEditCause::Invalid,
+                format!("a {name} cannot be written through a block edit"),
+            ),
+            other => refuse(BlockEditCause::Invalid, other.to_string()),
+        })?;
+        trees.push(tree);
+    }
+    Ok(Lowering::Lowered(Lowered {
+        selection: block_selection.to_string(),
+        mutation: NedMutation::Replace(trees),
+        preview,
+    }))
+}
+
+fn normalize_newlines(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content_bridge::{PAYLOAD_BLOCK_KINDS, block_to_store, block_to_tree, tree_to_block};
+    use content::ContentElement;
+    use schema::HeadingLevel;
+    use node_store::Edge;
+
+    fn md(s: &str) -> BlockText {
+        BlockText::Markdown(s.to_string())
+    }
+
+    fn paragraph(text: &str) -> ContentElement {
+        ContentElement::Paragraph { text: text.to_string() }
+    }
+
+    /// A store with one `parent_kind` element holding `el` as its only child.
+    fn store_with(parent_kind: &str, el: &ContentElement) -> (NodeStore, NodeId) {
+        let mut store = NodeStore::new();
+        let name = store.intern(parent_kind);
+        let parent = store.add_node(node_store::Node::Element(name));
+        let block = block_to_store(el, &mut store);
+        store.add_edge(parent, Edge::Child(block));
+        (store, block)
+    }
+
+    const SEL: &str = "(block-selection)";
+
+    fn lowered(
+        parent: &str,
+        el: &ContentElement,
+        base: &str,
+        proposed: &str,
+    ) -> Result<Lowering, BlockEditError> {
+        let (store, block) = store_with(parent, el);
+        lower(&store, block, SEL, &md(base), &md(proposed))
+    }
+
+    fn expect_lowered(l: Result<Lowering, BlockEditError>) -> Lowered {
+        match l {
+            Ok(Lowering::Lowered(l)) => l,
+            other => panic!("expected Lowered, got {other:?}"),
+        }
+    }
+
+    fn sr(search: &str, replace: &str) -> Option<TextDiff> {
+        Some(TextDiff::SearchReplace {
+            search: search.to_string(),
+            replace: replace.to_string(),
+        })
+    }
+
+    #[test]
+    fn minimal_unique_diff_cases() {
+        // A word change: the differing word is unique.
+        assert_eq!(
+            minimal_unique_diff("The quick brown fox.", "The quick red fox."),
+            sr("brown", "red")
+        );
+        // A repeated word needs context: "on" occurs twice, so the span grows
+        // (here, to the whole text).
+        assert_eq!(
+            minimal_unique_diff("one two one", "one two three"),
+            sr("one two one", "one two three")
+        );
+        // An empty base cannot be searched: SetText.
+        assert_eq!(
+            minimal_unique_diff("", "hello"),
+            Some(TextDiff::SetText("hello".to_string()))
+        );
+        // Identical input: nothing to do.
+        assert_eq!(minimal_unique_diff("same", "same"), None);
+        // Snapping to word boundaries: the changed "r" is not unique, so the
+        // span grows left in steps of ten and then to the next space, giving
+        // a span that starts at a word boundary.
+        let base = "The first sentence has a cat in it. The second sentence has a car in it.";
+        let edited = "The first sentence has a cat in it. The second sentence has a cap in it.";
+        assert_eq!(
+            minimal_unique_diff(base, edited),
+            sr(" sentence has a car in it.", " sentence has a cap in it.")
+        );
+        // Multi-byte text is handled by character, not byte.
+        assert_eq!(
+            minimal_unique_diff("blåbär och jordgubbar", "blåbär och hallon"),
+            sr("jordgubbar", "hallon")
+        );
+    }
+
+    const SEEDS: std::ops::Range<u64> = 0..2000;
+
+    /// splitmix64, as in `content/tests/serializer_round_trip.rs`.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+
+    /// A small vocabulary so that words repeat; includes multi-byte words.
+    const VOCAB: &[&str] = &["the", "cat", "sat", "on", "mat", "a", "blå", "bär", "日本", "ö"];
+
+    fn gen_pair(seed: u64) -> (String, String) {
+        let mut rng = Rng::new(seed);
+        let word = |rng: &mut Rng| VOCAB[rng.below(VOCAB.len())].to_string();
+        let n = if seed % 25 == 0 { 0 } else { 1 + rng.below(12) };
+        let mut words: Vec<String> = (0..n).map(|_| word(&mut rng)).collect();
+        let sep = |rng: &mut Rng| if rng.below(8) == 0 { "\n" } else { " " };
+        let join = |words: &[String], rng: &mut Rng| {
+            let mut out = String::new();
+            for (i, w) in words.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(sep(rng));
+                }
+                out.push_str(w);
+            }
+            out
+        };
+        // Fix the separators once so base and edited share them where they
+        // can: join the base, then edit the word list and join again with
+        // the same generator state.
+        let mut sep_rng = Rng::new(seed ^ 0xABCD);
+        let base = join(&words, &mut sep_rng);
+        let mut sep_rng = Rng::new(seed ^ 0xABCD);
+        if words.is_empty() {
+            words.push(word(&mut rng));
+        } else {
+            let i = rng.below(words.len());
+            match rng.below(4) {
+                0 => words.insert(i, word(&mut rng)),
+                1 => {
+                    words.remove(i);
+                }
+                2 => words[i] = word(&mut rng),
+                _ => {
+                    // Change one character inside a word.
+                    let mut chars: Vec<char> = words[i].chars().collect();
+                    let j = rng.below(chars.len());
+                    chars[j] = ['x', 'é', '日'][rng.below(3)];
+                    words[i] = chars.into_iter().collect();
+                }
+            }
+        }
+        let edited = join(&words, &mut sep_rng);
+        (base, edited)
+    }
+
+    #[test]
+    fn minimal_unique_diff_reconstructs_edited() {
+        let started = std::time::Instant::now();
+        let (mut search_replace, mut set_text, mut none) = (0usize, 0usize, 0usize);
+        for seed in SEEDS {
+            let (base, edited) = gen_pair(seed);
+            match minimal_unique_diff(&base, &edited) {
+                Some(TextDiff::SearchReplace { search, replace }) => {
+                    search_replace += 1;
+                    assert!(!search.is_empty(), "seed {seed}: {base:?} -> {edited:?}");
+                    let overlapping = (0..base.len())
+                        .filter(|&i| base.is_char_boundary(i) && base[i..].starts_with(&search))
+                        .count();
+                    assert_eq!(overlapping, 1, "seed {seed}: {search:?} in {base:?}");
+                    assert_eq!(
+                        base.replacen(&search, &replace, 1),
+                        edited,
+                        "seed {seed}: {base:?} -> {edited:?}"
+                    );
+                }
+                Some(TextDiff::SetText(t)) => {
+                    set_text += 1;
+                    assert!(base.is_empty(), "seed {seed}: {base:?}");
+                    assert_eq!(t, edited, "seed {seed}");
+                }
+                None => {
+                    none += 1;
+                    assert_eq!(base, edited, "seed {seed}");
+                }
+            }
+        }
+        // The generator must exercise every outcome.
+        assert!(search_replace > 1000, "search_replace {search_replace}");
+        assert!(set_text > 0, "set_text {set_text}");
+        assert!(none > 0, "none {none}");
+        eprintln!(
+            "{} seeds in {:?}: {search_replace} search-replace, {set_text} set-text, {none} none",
+            SEEDS.end - SEEDS.start,
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn lower_text_change_is_search_replace_on_text_in() {
+        let l = expect_lowered(lowered(
+            "body",
+            &paragraph("The quick brown fox."),
+            "The quick brown fox.",
+            "The quick red fox.",
+        ));
+        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace {
+                search: "brown".to_string(),
+                replace: "red".to_string()
+            }
+        );
+        assert_eq!(
+            l.preview,
+            SuggestionPreview {
+                base: md("The quick brown fox."),
+                proposed: md("The quick red fox."),
+            }
+        );
+    }
+
+    #[test]
+    fn lower_empty_base_text_is_set_text() {
+        let l = expect_lowered(lowered("body", &paragraph(""), "", "hello"));
+        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+        assert_eq!(l.mutation, NedMutation::SetText("hello".to_string()));
+    }
+
+    #[test]
+    fn lower_structural_change_is_replace() {
+        // One paragraph becomes two.
+        let l = expect_lowered(lowered(
+            "body",
+            &paragraph("First thought. Second thought."),
+            "First thought. Second thought.",
+            "First thought.\n\nSecond thought.",
+        ));
+        assert_eq!(l.selection, SEL);
+        assert_eq!(
+            l.mutation,
+            NedMutation::Replace(vec![
+                block_to_tree(&paragraph("First thought.")).unwrap(),
+                block_to_tree(&paragraph("Second thought.")).unwrap(),
+            ])
+        );
+
+        // A heading level change.
+        let h2 = ContentElement::Heading {
+            level: HeadingLevel::new(2).unwrap(),
+            source: "Title".into(),
+        };
+        let h3 = ContentElement::Heading {
+            level: HeadingLevel::new(3).unwrap(),
+            source: "Title".into(),
+        };
+        let l = expect_lowered(lowered("body", &h2, "## Title", "### Title"));
+        assert_eq!(l.selection, SEL);
+        assert_eq!(l.mutation, NedMutation::Replace(vec![block_to_tree(&h3).unwrap()]));
+    }
+
+    #[test]
+    fn lower_forbidden_kind_is_invalid() {
+        let err = lowered(
+            "body",
+            &paragraph("A plain paragraph."),
+            "A plain paragraph.",
+            "<div class=\"note\">\nA plain paragraph.\n</div>",
+        )
+        .unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::Invalid);
+        assert!(err.message.contains("html-block"), "{}", err.message);
+
+        let err = lowered(
+            "body",
+            &paragraph("A plain paragraph."),
+            "A plain paragraph.",
+            "A plain paragraph.\n\n---",
+        )
+        .unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::Invalid);
+        assert!(err.message.contains("separator"), "{}", err.message);
+    }
+
+    #[test]
+    fn lower_drifted_base_is_refused() {
+        let err = lowered("body", &paragraph("Current text."), "Old text.", "New text.")
+            .unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::Drifted);
+    }
+
+    #[test]
+    fn lower_unchanged_is_no_change() {
+        let l = lowered("body", &paragraph("Same."), "Same.", "Same.");
+        assert_eq!(l, Ok(Lowering::NoChange));
+    }
+
+    #[test]
+    fn lower_empty_proposed_is_invalid_use_delete() {
+        let err = lowered("body", &paragraph("Same."), "Same.", "  \n ").unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::Invalid);
+        assert!(err.message.contains("use delete"), "{}", err.message);
+    }
+
+    #[test]
+    fn lower_slot_heading_uses_content_projection() {
+        let h = ContentElement::Heading {
+            level: HeadingLevel::new(1).unwrap(),
+            source: "Hello *World*".into(),
+        };
+        let l = expect_lowered(lowered("slot", &h, "Hello *World*", "Hello *Presemble*"));
+        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace {
+                search: "World".to_string(),
+                replace: "Presemble".to_string()
+            }
+        );
+        assert_eq!(l.preview.base, md("Hello *World*"));
+
+        // The block projection (with markers) is not the base of a slot heading.
+        let err = lowered("slot", &h, "# Hello *World*", "# Hello *Presemble*").unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::Drifted);
+    }
+
+    #[test]
+    fn lower_not_editable_kind() {
+        let img = ContentElement::Image {
+            alt: Some("a".to_string()),
+            path: "p.jpg".to_string(),
+        };
+        let err = lowered("body", &img, "![a](p.jpg)", "![b](p.jpg)").unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::NotEditable);
+    }
+
+    #[test]
+    fn lower_refuses_a_block_outside_body_and_slot() {
+        let err = lowered("section", &paragraph("x"), "x", "y").unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::Unaddressable);
+    }
+
+    #[test]
+    fn block_to_tree_refuses_non_payload_kinds() {
+        use content::{LinkTarget, LinkText};
+        let cases = [
+            (ContentElement::HtmlBlock { source: "<b>x</b>".to_string() }, "html-block"),
+            (ContentElement::Separator, "separator"),
+            (
+                ContentElement::LinkExpression {
+                    text: LinkText::Empty,
+                    target: LinkTarget::PathRef("x".to_string()),
+                    slot: None,
+                },
+                "link-expression",
+            ),
+        ];
+        for (el, kind) in cases {
+            assert_eq!(
+                block_to_tree(&el),
+                Err(BlockDecodeError::NotPayloadKind(kind.to_string())),
+                "{el:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_to_tree_round_trips_every_payload_kind() {
+        let samples = vec![
+            ContentElement::Heading {
+                level: HeadingLevel::new(3).unwrap(),
+                source: "A *title*".into(),
+            },
+            paragraph("Some **text**."),
+            ContentElement::Link {
+                text: "t".to_string(),
+                href: "/x".to_string(),
+            },
+            ContentElement::Blockquote { text: "q".to_string() },
+            ContentElement::List { source: "- a\n- b".to_string() },
+            ContentElement::CodeBlock {
+                language: Some("rust".to_string()),
+                code: "fn main() {}".to_string(),
+            },
+            ContentElement::CodeBlock { language: None, code: "x".to_string() },
+            ContentElement::Image { alt: Some("a".to_string()), path: "p.jpg".to_string() },
+            ContentElement::Image { alt: None, path: "p.jpg".to_string() },
+            ContentElement::Table {
+                headers: vec!["h1".to_string(), "h2".to_string()],
+                rows: vec![
+                    vec!["a".to_string(), "b".to_string()],
+                    vec!["c".to_string(), "d".to_string()],
+                ],
+            },
+        ];
+        let mut kinds = std::collections::BTreeSet::new();
+        for el in &samples {
+            let tree = block_to_tree(el).expect("payload kind");
+            if let ned::NodeTree::Element { name, .. } = &tree {
+                kinds.insert(name.clone());
+            }
+            assert_eq!(tree_to_block(&tree).as_ref(), Ok(el), "{el:?}");
+        }
+        for kind in PAYLOAD_BLOCK_KINDS {
+            assert!(kinds.contains(*kind), "no sample for payload kind {kind}");
+        }
+    }
+}

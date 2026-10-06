@@ -13,6 +13,7 @@ content = { workspace = true }
 template = { workspace = true }
 expressions = { workspace = true }
 ned = { workspace = true }
+editorial_types = { workspace = true }
 im = { workspace = true }
 
 [dev-dependencies]

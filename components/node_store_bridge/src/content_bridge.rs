@@ -484,8 +484,9 @@ pub const BLOCK_KINDS: &[&str] = &[
 ];
 
 /// Block kinds accepted as a suggestion tree payload root:
-/// [`TEXT_BLOCK_KINDS`] plus `"image"`. An HTML block can never be inserted
-/// through a payload (ADR-062 D4).
+/// [`TEXT_BLOCK_KINDS`] plus `"image"` and `"table"`. An HTML block can never
+/// be inserted through a payload (ADR-062 D4); nor can a separator or a link
+/// expression.
 pub const PAYLOAD_BLOCK_KINDS: &[&str] = &[
     "heading",
     "paragraph",
@@ -494,6 +495,7 @@ pub const PAYLOAD_BLOCK_KINDS: &[&str] = &[
     "list",
     "code-block",
     "image",
+    "table",
 ];
 
 /// Why a node (or tree) could not be decoded into a [`ContentElement`].
@@ -732,6 +734,56 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
 /// The returned node is not linked to any parent.
 pub fn block_to_store(el: &ContentElement, store: &mut NodeStore) -> NodeId {
     content_element_to_store(el, store)
+}
+
+/// Describe `el` as a [`ned::NodeTree`]: the inverse of [`tree_to_block`].
+///
+/// Exact for every kind in [`PAYLOAD_BLOCK_KINDS`]. Attribute values become
+/// text (an integer or boolean value is written as its text, which the block
+/// decoder reads back). The tree has no `Existing` nodes. A block of any other
+/// kind (separator, html-block, link-expression) is refused with
+/// [`BlockDecodeError::NotPayloadKind`].
+pub fn block_to_tree(el: &ContentElement) -> Result<ned::NodeTree, BlockDecodeError> {
+    let mut scratch = NodeStore::new();
+    let root = block_to_store(el, &mut scratch);
+    let kind = element_name_of(&scratch, root).ok_or(BlockDecodeError::NotAnElement)?;
+    if !PAYLOAD_BLOCK_KINDS.contains(&kind.as_str()) {
+        return Err(BlockDecodeError::NotPayloadKind(kind));
+    }
+    Ok(node_to_tree(&scratch, root))
+}
+
+fn node_to_tree(store: &NodeStore, id: NodeId) -> ned::NodeTree {
+    match store.get(id) {
+        Some(Node::Text(s)) => ned::NodeTree::Text(s.clone()),
+        Some(Node::Element(name)) => {
+            let attrs = store
+                .attributes(id)
+                .into_iter()
+                .filter_map(|(attr, value)| {
+                    let text = match store.get(value)? {
+                        Node::Text(s) => s.clone(),
+                        Node::Integer(i) => i.to_string(),
+                        Node::Boolean(b) => b.to_string(),
+                        _ => return None,
+                    };
+                    Some((store.resolve_name(attr).to_string(), text))
+                })
+                .collect();
+            let children = store
+                .children(id)
+                .into_iter()
+                .filter(|c| matches!(store.get(*c), Some(Node::Text(_) | Node::Element(_))))
+                .map(|c| node_to_tree(store, c))
+                .collect();
+            ned::NodeTree::Element {
+                name: store.resolve_name(*name).to_string(),
+                attrs,
+                children,
+            }
+        }
+        _ => ned::NodeTree::Text(String::new()),
+    }
 }
 
 fn tree_contains_existing(tree: &ned::NodeTree) -> bool {
@@ -2560,13 +2612,14 @@ mod tests {
     }
 
     #[test]
-    fn tree_to_block_rejects_table() {
+    fn tree_to_block_accepts_table() {
+        // Tables are a payload kind (ADR-059 §10): a block edit may write one.
         let tree = ned::NodeTree::element("table")
             .with_child(ned::NodeTree::element("headers"))
             .with_child(ned::NodeTree::element("rows"));
         assert_eq!(
             tree_to_block(&tree),
-            Err(BlockDecodeError::NotPayloadKind("table".to_string()))
+            Ok(ContentElement::Table { headers: vec![], rows: vec![] })
         );
     }
 
@@ -2797,6 +2850,7 @@ mod tests {
 
         let mut payload = TEXT_BLOCK_KINDS.to_vec();
         payload.push("image");
+        payload.push("table");
         assert_eq!(payload, PAYLOAD_BLOCK_KINDS);
     }
 

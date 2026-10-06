@@ -8,12 +8,13 @@ pub mod value_bridge;
 pub mod store_pipeline;
 pub mod graph_view_impl;
 pub mod slot_edit;
+pub mod block_edit;
 
 pub use body_fragment::ingest_body_fragment;
 pub use schema_document::synthesize_schema_document;
 pub use content_bridge::{
     BLOCK_KINDS, BlockDecodeError, DocumentDecodeError, DocumentMeta, PAYLOAD_BLOCK_KINDS,
-    TEXT_BLOCK_KINDS, block_from_node, block_to_store, owning_block, owning_document,
+    TEXT_BLOCK_KINDS, block_from_node, block_to_store, block_to_tree, owning_block, owning_document,
     presemble_file_for_root, serialize_from_store, store_to_document, tree_to_block,
 };
 pub use value_bridge::{node_to_value, value_to_node};
