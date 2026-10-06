@@ -1,6 +1,7 @@
 //! The inline vocabulary (ADR-059 §2–§4).
 
 use super::normal;
+use super::search_replace::{self, SearchReplaceError};
 use super::serialize::{self, NotWritable};
 use super::text::{edit_text, EditText};
 use crate::Comment;
@@ -86,6 +87,20 @@ impl Inlines {
     /// `c`), because raw HTML would open an HTML block, and so on.
     pub fn check_writable(&self, ctx: InlineContext) -> Result<(), NotWritable> {
         serialize::check_writable(self, ctx)
+    }
+
+    /// Replace the one occurrence of `search` in the edit text by `replace`
+    /// (ADR-059 §9). The replacement is literal text and takes the formatting
+    /// of the first matched character; nodes the match covers are removed or
+    /// trimmed, atoms and comments are kept. The result is normalised for
+    /// `ctx` and must be writable there.
+    pub fn search_replace(
+        &self,
+        search: &str,
+        replace: &str,
+        ctx: InlineContext,
+    ) -> Result<Inlines, SearchReplaceError> {
+        search_replace::search_replace(self, search, replace, ctx)
     }
 
     /// The text for SearchReplace and edit lowering, with an offset map back

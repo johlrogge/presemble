@@ -13,11 +13,13 @@ use crate::parser::MARKDOWN_OPTIONS;
 mod model;
 mod normal;
 mod parse;
+mod search_replace;
 mod serialize;
 mod text;
 
 pub use model::{AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination};
 pub use parse::{inlines_from_events, parse_inlines, NotInlineContent};
+pub use search_replace::SearchReplaceError;
 pub use serialize::{serialize_inlines, NotWritable};
 pub use text::{EditKind, EditSegment, EditText, InlinePath};
 

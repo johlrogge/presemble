@@ -50,7 +50,7 @@
 
 use content::inline::{
     parse_inlines, serialize_inlines, AssetRef, Inline, InlineContext, InlineHtml, Inlines,
-    LinkDestination,
+    LinkDestination, SearchReplaceError,
 };
 use content::{AsPlainText, Comment};
 
@@ -580,6 +580,158 @@ fn inline_source_is_fixed_point_after_one_save() {
         "inline_source_is_fixed_point_after_one_save: {corpus_ok} corpus, {generated_ok} generated, {:?}",
         started.elapsed()
     );
+}
+
+// ── SearchReplace ───────────────────────────────────────────────────────────
+
+const REPLACEMENTS: &[&str] = &["", "x", "new words", "*", "a\nb", " ", "`", "[l](u)", "\u{a0}", "_"];
+
+/// Links, images, raw HTML and comments, at any depth outside alt text:
+/// SearchReplace never removes them.
+fn count_kept_nodes(items: &[Inline]) -> usize {
+    items
+        .iter()
+        .map(|item| match item {
+            Inline::Image { .. } | Inline::Html(_) | Inline::Comment(_) => 1,
+            Inline::Emph(c) | Inline::Strong(c) => count_kept_nodes(c.as_slice()),
+            Inline::Link { text, .. } => 1 + count_kept_nodes(text.as_slice()),
+            Inline::Text(_) | Inline::Code(_) | Inline::LineBreak => 0,
+        })
+        .sum()
+}
+
+/// Hard breaks, at any depth outside alt text.
+fn count_breaks(items: &[Inline]) -> usize {
+    items
+        .iter()
+        .map(|item| match item {
+            Inline::LineBreak => 1,
+            Inline::Emph(c) | Inline::Strong(c) => count_breaks(c.as_slice()),
+            Inline::Link { text, .. } => count_breaks(text.as_slice()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// `items` without the `§` that `with_sentinels` put around them.
+fn strip_sentinels(mut items: Vec<Inline>) -> Option<Vec<Inline>> {
+    let Some(Inline::Text(first)) = items.first_mut() else { return None };
+    *first = first.strip_prefix('§')?.to_string();
+    let Some(Inline::Text(last)) = items.last_mut() else { return None };
+    *last = last.strip_suffix('§')?.to_string();
+    Some(items)
+}
+
+fn text_node(s: &str) -> Inline {
+    Inline::Text(s.to_string())
+}
+
+fn count_overlapping(text: &str, search: &str) -> usize {
+    text.char_indices().filter(|(i, _)| text[*i..].starts_with(search)).count()
+}
+
+#[test]
+fn search_replace_result_is_normalised_and_writable() {
+    let started = std::time::Instant::now();
+    let (mut ok, mut spans_atom, mut not_unique, mut not_writable) = (0usize, 0usize, 0usize, 0usize);
+    for seed in WRITABLE_SEEDS {
+        for (i, ctx) in CONTEXTS.into_iter().enumerate() {
+            let mut rng = Rng::new(1_000_000 + seed * CONTEXTS.len() as u64 + i as u64);
+            let tree = Inlines::new(gen_writable_run(&mut rng, 0, shape_of(ctx)), ctx);
+            let edit = tree.edit_text();
+            let text = edit.as_str();
+            let chars: Vec<(usize, char)> = text.char_indices().collect();
+            if chars.is_empty() {
+                continue;
+            }
+            // A random stretch of the edit text, one to six characters.
+            let start = rng.below(chars.len());
+            let len = 1 + rng.below(6.min(chars.len() - start));
+            let from = chars[start].0;
+            let to = chars.get(start + len).map_or(text.len(), |c| c.0);
+            let search = &text[from..to];
+            let replace = rng.pick(REPLACEMENTS);
+            let count = count_overlapping(text, search);
+            let what = format!("seed {seed} in {ctx:?}: {search:?} -> {replace:?} in {tree:?}");
+
+            match tree.search_replace(search, replace, ctx) {
+                Ok(result) => {
+                    ok += 1;
+                    assert_eq!(count, 1, "{what}");
+                    assert!(!search.contains('\u{fffc}'), "{what}");
+                    let single_line = matches!(ctx, InlineContext::Heading | InlineContext::Cell);
+                    assert_normal(result.as_slice(), ctx, single_line, seed);
+                    assert_edges(result.as_slice(), ctx, seed);
+                    assert_eq!(
+                        Inlines::new(result.as_slice().to_vec(), ctx),
+                        result,
+                        "not normalised: {what}"
+                    );
+                    assert_eq!(result.check_writable(ctx), Ok(()), "not writable: {what}");
+                    assert_eq!(
+                        count_kept_nodes(result.as_slice()),
+                        count_kept_nodes(tree.as_slice()),
+                        "a link, image, HTML or comment was lost: {what}"
+                    );
+                    // Every hard break is kept, except one that ends up at an
+                    // edge of the top-level run (N7). Padding the tree with a
+                    // text at both ends puts no break at an edge: that edit
+                    // loses no break, and normalising its result without the
+                    // padding gives the result (so N7 is the only difference).
+                    if matches!(
+                        ctx,
+                        InlineContext::Heading | InlineContext::Paragraph | InlineContext::Cell
+                    ) {
+                        let mut padded = vec![text_node("§")];
+                        padded.extend(tree.as_slice().iter().cloned());
+                        padded.push(text_node("§"));
+                        let padded = Inlines::new(padded, ctx);
+                        if let Ok(edited) = padded.search_replace(search, replace, ctx) {
+                            let stripped = strip_sentinels(edited.as_slice().to_vec())
+                                .unwrap_or_else(|| panic!("sentinels lost: {what}"));
+                            assert_eq!(
+                                count_breaks(&stripped),
+                                count_breaks(tree.as_slice()),
+                                "a hard break was lost away from the edge: {what}"
+                            );
+                            assert_eq!(
+                                Inlines::new(stripped, ctx),
+                                result,
+                                "more than N7 differs: {what}"
+                            );
+                        }
+                    } else {
+                        assert_eq!(
+                            count_breaks(result.as_slice()),
+                            count_breaks(tree.as_slice()),
+                            "a hard break was lost: {what}"
+                        );
+                    }
+                }
+                Err(SearchReplaceError::NotUnique(n)) => {
+                    not_unique += 1;
+                    assert!(n > 1 && n == count, "{what}: counted {count}, said {n}");
+                }
+                Err(SearchReplaceError::SpansAtom) => {
+                    spans_atom += 1;
+                    assert_eq!(count, 1, "{what}");
+                    assert!(search.contains('\u{fffc}'), "{what}");
+                }
+                Err(SearchReplaceError::NotWritable) => {
+                    not_writable += 1;
+                    assert_eq!(count, 1, "{what}");
+                    assert!(!search.contains('\u{fffc}'), "{what}");
+                }
+                Err(SearchReplaceError::NotFound) => panic!("{what}: a stretch of the text is not found"),
+            }
+        }
+    }
+    eprintln!(
+        "search_replace_result_is_normalised_and_writable: {ok} ok, {not_unique} not unique, {spans_atom} spans an atom, {not_writable} not writable, {:?}",
+        started.elapsed()
+    );
+    assert!(ok >= 500, "only {ok} replacements went through");
+    assert!(spans_atom > 0 && not_unique > 0, "the generator never hit an atom or a repeat");
 }
 
 // ── Parsed trees are writable (P4) ──────────────────────────────────────────
