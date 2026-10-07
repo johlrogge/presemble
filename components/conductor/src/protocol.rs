@@ -91,10 +91,24 @@ pub enum Command {
     GetDirtyBuffers,
     /// List distinct file paths that have at least one pending NED suggestion.
     GetNedSuggestionFiles,
-    /// Write a dirty buffer to disk.
-    SaveBuffer { path: String },
-    /// Write all dirty buffers to disk.
-    SaveAllBuffers,
+    /// List the documents whose file changed on disk while they have unsaved
+    /// edits (answered with `Response::Conflicts`).
+    GetConflicts,
+    /// Write a dirty buffer to disk. A buffer in conflict with the file on
+    /// disk is only written if `consent` names it; otherwise nothing is
+    /// written and the answer is `ConflictsNeedConfirmation`.
+    SaveBuffer {
+        path: String,
+        #[serde(default)]
+        consent: editorial_types::ConflictConsent,
+    },
+    /// Write all dirty buffers to disk. If any of them is in conflict and is
+    /// not named in `consent`, nothing at all is written and the answer is
+    /// `ConflictsNeedConfirmation` listing every such conflict.
+    SaveAllBuffers {
+        #[serde(default)]
+        consent: editorial_types::ConflictConsent,
+    },
     /// Scaffold a new site from a template.
     ScaffoldSite {
         template_name: String,
@@ -178,6 +192,12 @@ pub enum Response {
     /// the conductor, now gone. `editor_buffer`: an editor also holds unsaved
     /// text for it; that is the editor's, and stays there.
     Reloaded { discarded: bool, editor_buffer: bool },
+    /// A save would overwrite files that changed on disk while they have
+    /// unsaved edits, and the consent does not name them. Nothing was written.
+    /// Sorted site-relative paths.
+    ConflictsNeedConfirmation(Vec<String>),
+    /// The documents in conflict with the file on disk (sorted, site-relative).
+    Conflicts(Vec<String>),
     /// A NED program was refused: which step, which builtin, and why.
     PlanRefused(editorial_types::PlanFailure),
     /// Content file created successfully. Returns the URL path.
@@ -262,6 +282,10 @@ pub enum ConductorEvent {
         file: editorial_types::ContentPath,
         pages: Vec<String>,
     },
+    /// A document with unsaved edits changed on disk: the edits are kept and
+    /// the document is in conflict (reported once, when first recorded).
+    /// `file` is site-relative.
+    DiskConflict { file: String },
     /// A NED-based suggestion was rejected (dismissed without applying).
     NedSuggestionRejected {
         id: editorial_types::SuggestionId,

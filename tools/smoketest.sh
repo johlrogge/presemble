@@ -541,6 +541,66 @@ assert_curl "reload shows the disk text" "/post/hello-world" GET "" "Presemble k
 assert_curl_not_contains "reload dropped the edit" "/post/hello-world" "NTHCHILD ONLY SECOND"
 assert_curl_not_contains "reload clears the dirty buffer" "/_presemble/dirty-buffers" "content/post/hello-world.md"
 
+# ── Test: a disk change to a dirty document is a conflict (ADR-065) ───────
+# Unsaved edits are never discarded automatically. Saving over a conflict needs
+# consent that names the file; `presemble reload` takes the disk version.
+
+log "Testing disk conflicts..."
+HW_FILE="content/post/hello-world.md"
+HW_PATH="$SITE_DIR/$HW_FILE"
+HW_ORIG=$(cat "$HW_PATH")
+# Poll until a GET of $1 contains $2 (up to ~10 s): the watcher is asynchronous.
+wait_for_page_text() {
+    local url="$1" text="$2" i
+    for i in $(seq 1 50); do
+        if acurl "http://127.0.0.1:$PORT$url" 2>/dev/null | grep -qF -- "$text"; then return 0; fi
+        sleep 0.2
+    done
+    return 1
+}
+conflict_edit() {   # set the title through /apply; $1 is the new title
+    local program body
+    program='(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "'"$HW_FILE"'") "title"))) "'"$1"'")'
+    body='{"program":"'"$(echo "$program" | sed 's/"/\\"/g')"'"}'
+    post_json "/_presemble/apply" "$body"
+}
+
+# 1-2. Edit in the browser, then overwrite the file from the shell.
+assert_contains "conflict scenario: edit applied" "$(conflict_edit 'Edited In The Browser')" '"dirtyPaths":1'
+sed 's/Hello, World: Your First Post/Shell Wrote This Title/' "$HW_PATH" > "$HW_PATH.tmp" && mv "$HW_PATH.tmp" "$HW_PATH"
+wait_for_page_text "/_presemble/conflicts" "$HW_FILE" || true
+
+# 3. The edit is kept and the conflict is listed.
+assert_curl "disk change to a dirty file is listed as a conflict" "/_presemble/conflicts" GET "" "$HW_FILE"
+assert_curl "conflict keeps the unsaved edit on the page" "/post/hello-world" GET "" "Edited In The Browser"
+
+# 4. Save-all with no consent warns and writes nothing.
+REFUSED=$(post_json "/_presemble/save-all" "")
+assert_contains "save-all needs confirmation for the conflict" "$REFUSED" '"needsConfirmation":true'
+assert_contains "save-all names the conflicted file" "$REFUSED" "$HW_FILE"
+if grep -qF "Shell Wrote This Title" "$HW_PATH"; then pass "save-all with a conflict wrote nothing"; else fail "save-all with a conflict wrote nothing (disk: $(head -c 200 "$HW_PATH"))"; fi
+
+# 5. Consent that names the file overwrites it.
+SAVED=$(post_json "/_presemble/save-all" '{"overwriteConflicts":["'"$HW_FILE"'"]}')
+assert_contains "save-all with consent is ok" "$SAVED" '"ok":true'
+if grep -qF "Edited In The Browser" "$HW_PATH"; then pass "save-all with consent wrote the edit"; else fail "save-all with consent wrote the edit (disk: $(head -c 200 "$HW_PATH"))"; fi
+assert_curl "the conflict is cleared after saving" "/_presemble/conflicts" GET "" "[]"
+
+# 6. Edit again, change the file from outside again, then take the disk version.
+conflict_edit 'Edited Again' > /dev/null
+sed 's/Edited In The Browser/Shell Again Title/' "$HW_PATH" > "$HW_PATH.tmp" && mv "$HW_PATH.tmp" "$HW_PATH"
+wait_for_page_text "/_presemble/conflicts" "$HW_FILE" || true
+assert_curl "a second disk change is a conflict again" "/_presemble/conflicts" GET "" "$HW_FILE"
+CONFLICT_RELOAD=$(cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- reload "$SITE_DIR/" "$HW_FILE" 2>&1)
+assert_contains "reload discards the conflicted edits" "$CONFLICT_RELOAD" "discarded unsaved edits"
+assert_curl "reload shows the disk text of the conflicted file" "/post/hello-world" GET "" "Shell Again Title"
+assert_curl "reload resolves the conflict" "/_presemble/conflicts" GET "" "[]"
+
+# Restore the scaffolded file for the sections below.
+printf '%s\n' "$HW_ORIG" > "$HW_PATH"
+wait_for_page_text "/post/hello-world" "Hello, World: Your First Post" || true
+assert_curl "hello-world is back to its scaffolded text" "/post/hello-world" GET "" "Hello, World: Your First Post"
+
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
 log "Testing suggestions..."
@@ -733,7 +793,8 @@ log "Testing WebSocket broadcasts..."
 C=$(awk '$6=="presemble_session"{print $7}' "$COOKIE_JAR")
 WS_ERR=$(mktemp /tmp/presemble-smoke-wserr-XXXXXX)
 WS_RC=0
-WS_OUT=$(PRESEMBLE_SMOKE_BASE="http://127.0.0.1:$PORT" PRESEMBLE_SMOKE_COOKIE="$C" deno run --no-prompt --allow-net=127.0.0.1:$PORT --allow-env=PRESEMBLE_SMOKE_BASE,PRESEMBLE_SMOKE_COOKIE tools/ws-smoke.ts 2>"$WS_ERR") || WS_RC=$?
+# The conflict step rewrites hello-world.md from outside, like an editor would.
+WS_OUT=$(PRESEMBLE_SMOKE_BASE="http://127.0.0.1:$PORT" PRESEMBLE_SMOKE_COOKIE="$C" PRESEMBLE_SMOKE_SITE="$SITE_DIR" deno run --no-prompt --allow-net=127.0.0.1:$PORT --allow-env=PRESEMBLE_SMOKE_BASE,PRESEMBLE_SMOKE_COOKIE,PRESEMBLE_SMOKE_SITE --allow-read="$SITE_DIR/content/post" --allow-write="$SITE_DIR/content/post" tools/ws-smoke.ts 2>"$WS_ERR") || WS_RC=$?
 WS_DONE=0
 WS_FAILS=0
 while IFS= read -r line; do

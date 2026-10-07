@@ -196,6 +196,28 @@ pub enum StaleCause {
     Overlap { with_step: usize },
 }
 
+/// Consent to overwrite files that changed on disk while they have unsaved
+/// edits (ADR-065). It names the files (site-relative paths), so a conflict
+/// that appears after the user was warned is not covered by it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictConsent {
+    /// No consent: a save that would overwrite a conflict is refused.
+    #[default]
+    None,
+    /// The user agreed to overwrite exactly these files.
+    Overwrite(std::collections::BTreeSet<String>),
+}
+
+impl ConflictConsent {
+    /// Whether the user agreed to overwrite `file`.
+    pub fn covers(&self, file: &str) -> bool {
+        match self {
+            ConflictConsent::None => false,
+            ConflictConsent::Overwrite(files) => files.contains(file),
+        }
+    }
+}
+
 /// Why one step of a plan (a NED program) was refused: the one structured
 /// answer every surface renders its own way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

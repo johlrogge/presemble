@@ -44,6 +44,8 @@ fn ranges_overlap(a: &Range, b: &Range) -> bool {
         || (b.end.line == a.start.line && b.end.character < a.start.character))
 }
 
+const DISK_CONFLICT_MESSAGE: &str = "Unsaved edits from the browser or REPL conflict with this file on disk. Save them from the browser (you will be asked to confirm), or run `presemble reload <site-dir> <file>` to keep the file.";
+
 struct StoredDiagnostic {
     lsp_diag: Diagnostic,
     action: Option<SlotAction>,
@@ -176,6 +178,24 @@ impl PresembleLsp {
         std::fs::read_to_string(&path).ok()
     }
 
+    /// Whether the conductor holds unsaved edits for this file that conflict
+    /// with a change on disk. Asked synchronously: the conductor is the source
+    /// of truth and the LSP has no channel for it to push (channel gap 8).
+    async fn has_disk_conflict(&self, uri: &Url) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        let Ok(rel) = path.strip_prefix(&self.site_dir) else {
+            return false;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let cond = self.conductor.lock().await;
+        match cond.send(&conductor::Command::GetConflicts) {
+            Ok(conductor::Response::Conflicts(files)) => files.contains(&rel),
+            _ => false,
+        }
+    }
+
     async fn validate_and_publish(&self, uri: Url, src: String) {
         self.doc_sources.lock().await.insert(uri.to_string(), src.clone());
         let Some((grammar, _)) = self.grammar_for_uri(&uri).await else {
@@ -206,7 +226,20 @@ impl PresembleLsp {
             })
             .collect();
 
-        let diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
+        let mut diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
+        // ADR-065: unsaved edits that conflict with this file on disk are never
+        // discarded automatically; tell the author where they stand.
+        if self.has_disk_conflict(&uri).await {
+            diags.push(Diagnostic {
+                range: Range {
+                    start: Position { line: 0, character: 0 },
+                    end: Position { line: 0, character: 0 },
+                },
+                severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING),
+                message: DISK_CONFLICT_MESSAGE.to_string(),
+                ..Default::default()
+            });
+        }
         *self.doc_diagnostics.lock().await.entry(uri.to_string()).or_default() = stored;
         self.client.publish_diagnostics(uri, diags, None).await;
     }

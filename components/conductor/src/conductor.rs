@@ -413,6 +413,29 @@ impl Conductor {
         &self.dirty_docs
     }
 
+    /// `path` (absolute, or already site-relative) as a site-relative path.
+    fn site_relative(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.site_dir).map(Path::to_path_buf).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// If the document at site-relative `rel` has unsaved edits, record that
+    /// the file on disk changed under them (ADR-065). Returns the event to
+    /// announce when the conflict is new; `None` when the document is not
+    /// dirty or the conflict was already recorded.
+    fn record_disk_conflict(&self, rel: &Path) -> Option<ConductorEvent> {
+        let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
+        if !dirty.contains(rel) {
+            return None;
+        }
+        // A file that is gone still conflicts; its mtime is simply now.
+        let disk_mtime = std::fs::metadata(self.site_dir.join(rel))
+            .and_then(|m| m.modified())
+            .unwrap_or_else(|_| std::time::SystemTime::now());
+        dirty
+            .mark_conflict(rel.to_path_buf(), disk_mtime)
+            .then(|| ConductorEvent::DiskConflict { file: rel.to_string_lossy().to_string() })
+    }
+
     /// The text of every dirty document (by site-relative path) except those in
     /// `disk_wins`, serialized from the store as it is now.
     ///
@@ -3217,7 +3240,13 @@ impl Conductor {
                 let path = PathBuf::from(&path);
                 // Clear in-memory version — disk is now authoritative
                 self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
-                CommandResult::ok()
+                // The editor wrote the file itself. If the store holds unsaved
+                // edits for it, they now conflict with what was written.
+                let rel = self.site_relative(&path);
+                match self.record_disk_conflict(&rel) {
+                    Some(event) => CommandResult::ok_with_events(vec![event]),
+                    None => CommandResult::ok(),
+                }
             }
             Command::FileChanged { paths } => {
                 // 0. Filter out paths that the conductor wrote itself.
@@ -3265,15 +3294,19 @@ impl Conductor {
                 // A full re-render (D9). The snapshot comparison CreateContent
                 // uses (`snapshot_query_results` before and after the
                 // repopulate) is the basis for a minimal FileChanged later.
-                // Unsaved edits are carried over, except in the documents
-                // whose own file changed: those take the disk version.
-                let disk_wins: Vec<PathBuf> = paths
-                    .iter()
-                    .map(|p| {
-                        let path = PathBuf::from(p);
-                        path.strip_prefix(&self.site_dir).map(Path::to_path_buf).unwrap_or(path)
-                    })
-                    .collect();
+                // A changed file with unsaved edits is a conflict (ADR-065):
+                // its edits are kept and the disk version does not win. Every
+                // other changed file takes the disk version.
+                let mut disk_wins: Vec<PathBuf> = Vec::new();
+                let mut conflict_events: Vec<ConductorEvent> = Vec::new();
+                for p in &paths {
+                    let rel = self.site_relative(Path::new(p));
+                    if let Some(event) = self.record_disk_conflict(&rel) {
+                        conflict_events.push(event);
+                    } else if !self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel) {
+                        disk_wins.push(rel);
+                    }
+                }
                 self.populate_node_store(&disk_wins);
 
                 // 5. Detect stylesheet changes (for reload signalling)
@@ -3294,7 +3327,8 @@ impl Conductor {
                 let (rebuilt_pages, failed_pages, new_errors) = self.build_all_pages(template::OutputMode::Editorial);
 
                 // 7-8. Update build errors and build events
-                let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, has_stylesheet_change);
+                let mut events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, has_stylesheet_change);
+                events.extend(conflict_events);
 
                 if events.is_empty() {
                     CommandResult::ok()
@@ -3495,9 +3529,28 @@ impl Conductor {
 
                 CommandResult::with_response(Response::DirtyBuffers(paths.into_iter().collect()))
             }
-            Command::SaveBuffer { path } => {
+            Command::GetConflicts => {
+                let mut files: Vec<String> = self
+                    .dirty_docs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .conflicts()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                files.sort();
+                CommandResult::with_response(Response::Conflicts(files))
+            }
+            Command::SaveBuffer { path, consent } => {
                 let rel_path = PathBuf::from(&path);
                 let abs_path = self.site_dir.join(&rel_path);
+
+                // A save never overwrites a conflict without consent that
+                // names the file (ADR-065). Nothing is written.
+                if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).is_conflicted(&rel_path)
+                    && !consent.covers(&path)
+                {
+                    return CommandResult::with_response(Response::ConflictsNeedConfirmation(vec![path]));
+                }
 
                 // Try NED path first: serialize from NodeStore and write.
                 if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel_path) {
@@ -3544,13 +3597,37 @@ impl Conductor {
                     CommandResult::error(format!("buffer not dirty: {path}"))
                 }
             }
-            Command::SaveAllBuffers => {
+            Command::SaveAllBuffers { consent } => {
+                // The check comes first (ADR-065): if any document we would
+                // write is in conflict with the file on disk and the consent
+                // does not name it, write nothing and say which.
+                let uncovered: Vec<String> = {
+                    let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
+                    let mut files: Vec<String> = dirty
+                        .conflicts()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .filter(|file| !consent.covers(file))
+                        .collect();
+                    files.sort();
+                    files
+                };
+                if !uncovered.is_empty() {
+                    return CommandResult::with_response(Response::ConflictsNeedConfirmation(uncovered));
+                }
+
                 // Save NED-dirty documents (NodeStore → disk)
-                let ned_paths = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).take();
-                // Documents that fail to decode or write stay dirty and are
-                // reported after the remaining buffers have been saved.
+                let ned_docs = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).take();
+                // Documents that fail to decode or write stay dirty (and keep
+                // their conflict) and are reported after the remaining
+                // buffers have been saved.
                 let mut failures: Vec<String> = Vec::new();
-                for rel_path in &ned_paths {
+                for (rel_path, state) in &ned_docs {
+                    let keep_dirty = |dirty: &RwLock<crate::dirty::DirtyDocs>| {
+                        dirty
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .restore(rel_path.clone(), *state);
+                    };
                     let abs_path = self.site_dir.join(rel_path);
                     let text = match self.doc_root_for_path(rel_path) {
                         Some(root) => {
@@ -3559,10 +3636,7 @@ impl Conductor {
                                 Ok(text) => text,
                                 Err(e) => {
                                     drop(store);
-                                    self.dirty_docs
-                                        .write()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .mark(rel_path.clone());
+                                    keep_dirty(&self.dirty_docs);
                                     failures
                                         .push(format!("cannot save {}: {e}", rel_path.display()));
                                     continue;
@@ -3571,10 +3645,7 @@ impl Conductor {
                         }
                         None => {
                             eprintln!("conductor: SaveAllBuffers: no store root for {}", rel_path.display());
-                            self.dirty_docs
-                                .write()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .mark(rel_path.clone());
+                            keep_dirty(&self.dirty_docs);
                             failures.push(format!(
                                 "cannot save {}: document not in store",
                                 rel_path.display()
@@ -3587,10 +3658,7 @@ impl Conductor {
                         text.as_bytes(),
                         &self.self_write_tracker,
                     ) {
-                        self.dirty_docs
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .mark(rel_path.clone());
+                        keep_dirty(&self.dirty_docs);
                         failures.push(format!("write error for {}: {e}", abs_path.display()));
                         continue;
                     }
@@ -7069,6 +7137,186 @@ mod suggestion_accept_tests {
         assert_eq!(dirty, vec![OTHER.to_string()]);
     }
 
+    // ── Disk conflicts (ADR-065) ────────────────────────────────────────────
+
+    const OTHER_FILE: &str = "content/post/second.md";
+    const SHELL_A: &str = "# Shell Title\n\n----\n\nShell.\n";
+    const SHELL_B: &str = "# Shell B\n\n----\n\nShell B.\n";
+
+    /// A and B on disk; unsaved edits in both ("Edited A", "Edited B"); then
+    /// both files are overwritten from outside and the watcher reports it.
+    /// With `both == false` only A is edited and overwritten.
+    fn conflicted(both: bool) -> (Conductor, tempfile::TempDir) {
+        let tmp = build_site();
+        std::fs::write(tmp.path().join(OTHER_FILE), "# Second Post\n\n----\n\nGamma.\n").unwrap();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
+        let mut changed = vec![FILE.to_string()];
+        if both {
+            edit_title(&conductor, OTHER_FILE, "Edited B");
+            std::fs::write(tmp.path().join(OTHER_FILE), SHELL_B).unwrap();
+            changed.push(OTHER_FILE.to_string());
+        }
+        conductor.handle_command(Command::FileChanged { paths: changed });
+        (conductor, tmp)
+    }
+
+    fn conflicts(conductor: &Conductor) -> Vec<String> {
+        match conductor.handle_command(Command::GetConflicts).response {
+            Response::Conflicts(files) => files,
+            other => panic!("expected Conflicts, got {other:?}"),
+        }
+    }
+
+    fn consent(files: &[&str]) -> editorial_types::ConflictConsent {
+        editorial_types::ConflictConsent::Overwrite(files.iter().map(|f| f.to_string()).collect())
+    }
+
+    fn disk(tmp: &tempfile::TempDir, file: &str) -> String {
+        std::fs::read_to_string(tmp.path().join(file)).unwrap()
+    }
+
+    #[test]
+    fn external_change_to_a_dirty_file_keeps_its_edits_and_reports_a_conflict() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
+
+        let result =
+            conductor.handle_command(Command::FileChanged { paths: vec![FILE.to_string()] });
+
+        assert_eq!(title(&conductor), "Edited A", "the disk version does not win");
+        assert!(is_dirty(&conductor));
+        assert_eq!(conflicts(&conductor), vec![FILE.to_string()]);
+        let announced = result
+            .events
+            .iter()
+            .filter(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE))
+            .count();
+        assert_eq!(announced, 1, "{:?}", result.events);
+
+        // A second event for the same conflict is not announced again.
+        std::fs::write(tmp.path().join(FILE), "# Shell Again\n\n----\n\nAgain.\n").unwrap();
+        let again =
+            conductor.handle_command(Command::FileChanged { paths: vec![FILE.to_string()] });
+        assert!(
+            !again.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { .. })),
+            "{:?}",
+            again.events
+        );
+    }
+
+    #[test]
+    fn editor_save_over_a_dirty_document_is_a_conflict() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+
+        // The editor wrote the file itself, then says so.
+        std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
+        let result = conductor.handle_command(Command::DocumentSaved {
+            path: tmp.path().join(FILE).to_string_lossy().to_string(),
+        });
+
+        assert!(
+            result.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
+            "{:?}",
+            result.events
+        );
+        assert_eq!(conflicts(&conductor), vec![FILE.to_string()]);
+        assert_eq!(title(&conductor), "Edited A");
+    }
+
+    #[test]
+    fn save_all_with_a_conflict_asks_for_confirmation_and_writes_nothing() {
+        let (conductor, tmp) = conflicted(true);
+
+        let response = conductor
+            .handle_command(Command::SaveAllBuffers { consent: Default::default() })
+            .response;
+
+        match response {
+            Response::ConflictsNeedConfirmation(files) => {
+                assert_eq!(files, vec![FILE.to_string(), OTHER_FILE.to_string()]);
+            }
+            other => panic!("expected ConflictsNeedConfirmation, got {other:?}"),
+        }
+        assert_eq!(disk(&tmp, FILE), SHELL_A, "nothing was written");
+        assert_eq!(disk(&tmp, OTHER_FILE), SHELL_B, "nothing was written");
+        assert_eq!(conflicts(&conductor), vec![FILE.to_string(), OTHER_FILE.to_string()]);
+    }
+
+    #[test]
+    fn save_all_with_consent_overwrites_the_listed_conflicts_and_clears_them() {
+        let (conductor, tmp) = conflicted(true);
+
+        let response = conductor
+            .handle_command(Command::SaveAllBuffers { consent: consent(&[FILE, OTHER_FILE]) })
+            .response;
+
+        assert!(matches!(response, Response::Ok), "{response:?}");
+        assert!(disk(&tmp, FILE).contains("Edited A"), "{}", disk(&tmp, FILE));
+        assert!(disk(&tmp, OTHER_FILE).contains("Edited B"));
+        assert!(conflicts(&conductor).is_empty());
+        assert!(!is_dirty(&conductor));
+    }
+
+    #[test]
+    fn consent_does_not_cover_a_conflict_that_appeared_later() {
+        // The user was warned about A only; B conflicted afterwards.
+        let (conductor, tmp) = conflicted(true);
+
+        let response = conductor
+            .handle_command(Command::SaveAllBuffers { consent: consent(&[FILE]) })
+            .response;
+
+        match response {
+            Response::ConflictsNeedConfirmation(files) => {
+                assert_eq!(files, vec![OTHER_FILE.to_string()], "only the uncovered conflict");
+            }
+            other => panic!("expected ConflictsNeedConfirmation, got {other:?}"),
+        }
+        assert_eq!(disk(&tmp, FILE), SHELL_A, "nothing is written, not even the covered file");
+        assert_eq!(disk(&tmp, OTHER_FILE), SHELL_B);
+    }
+
+    #[test]
+    fn save_buffer_on_a_conflict_needs_consent() {
+        let (conductor, tmp) = conflicted(false);
+
+        let refused = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .response;
+        assert!(
+            matches!(&refused, Response::ConflictsNeedConfirmation(files) if files == &vec![FILE.to_string()]),
+            "{refused:?}"
+        );
+        assert_eq!(disk(&tmp, FILE), SHELL_A);
+
+        let saved = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: consent(&[FILE]) })
+            .response;
+        assert!(matches!(saved, Response::Ok), "{saved:?}");
+        assert!(disk(&tmp, FILE).contains("Edited A"));
+        assert!(conflicts(&conductor).is_empty());
+    }
+
+    #[test]
+    fn reload_resolves_a_conflict() {
+        let (conductor, tmp) = conflicted(false);
+        assert_eq!(conflicts(&conductor), vec![FILE.to_string()]);
+
+        let result = reload(&conductor, FILE);
+
+        assert!(matches!(result.response, Response::Reloaded { discarded: true, .. }), "{:?}", result.response);
+        assert!(conflicts(&conductor).is_empty());
+        assert!(!is_dirty(&conductor));
+        assert_eq!(title(&conductor), "Shell Title", "the disk version is loaded");
+        assert_eq!(disk(&tmp, FILE), SHELL_A, "reload writes nothing");
+    }
+
     /// ADR-043: every conductor write to a source file is recorded as a
     /// self-write, so the watcher's event for it is not an external change.
     #[test]
@@ -7421,7 +7669,7 @@ mod suggestion_accept_tests {
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert!(is_dirty(&conductor));
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string() })
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
             .response;
         assert!(!matches!(saved, Response::Error(_)), "save: {saved:?}");
         std::fs::read_to_string(tmp.path().join(FILE)).expect("file written")
@@ -7694,7 +7942,7 @@ mod block_edit_tests {
         };
         let saved = |tmp: &tempfile::TempDir, conductor: &Conductor| {
             let result = conductor
-                .handle_command(Command::SaveBuffer { path: FILE.to_string() });
+                .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
             assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
             std::fs::read_to_string(tmp.path().join(FILE)).expect("content file")
         };
@@ -7897,7 +8145,7 @@ mod block_edit_tests {
             "{:?}",
             response(&applied)
         );
-        let saved = conductor.handle_command(Command::SaveBuffer { path: FILE.to_string() });
+        let saved = conductor.handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
         assert!(matches!(saved.response, Response::Ok), "{:?}", saved.response);
         assert!(dirty_buffers(&conductor).is_empty());
 
@@ -8731,7 +8979,7 @@ mod body_structural_bsave_tests {
         dirty_doc_without_body(&conductor, doc_root);
 
         let response = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string() })
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
             .response;
         assert!(
             !matches!(response, Response::Error(_)),
@@ -8748,7 +8996,7 @@ mod body_structural_bsave_tests {
         let (conductor, tmp, doc_root) = make_conductor_with_doc();
         dirty_doc_without_body(&conductor, doc_root);
 
-        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
         assert!(
             !matches!(response, Response::Error(_)),
             "schema-invalid doc must save: {response:?}"
@@ -8768,7 +9016,7 @@ mod body_structural_bsave_tests {
         dirty_doc_with_malformed_block(&conductor, broken_root);
         add_good_dirty_doc(&conductor, GOOD, "/test/other");
 
-        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
         match response {
             Response::Error(e) => {
                 assert!(e.contains(FILE), "error must name the broken doc: {e}");
@@ -8799,7 +9047,7 @@ mod body_structural_bsave_tests {
         // A directory at the target path makes the write fail.
         std::fs::create_dir_all(tmp.path().join(FILE)).expect("blocking dir");
 
-        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
         match response {
             Response::Error(e) => {
                 assert!(e.contains(FILE), "error must name the failed doc: {e}");
@@ -8824,7 +9072,7 @@ mod body_structural_bsave_tests {
         // Dirty, but never registered in path_to_doc_root.
         conductor.dirty_docs.write().unwrap().mark(PathBuf::from(FILE));
 
-        let response = conductor.handle_command(Command::SaveAllBuffers).response;
+        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
         match response {
             Response::Error(e) => assert!(e.contains(FILE), "error must name the doc: {e}"),
             other => panic!("expected Response::Error, got: {other:?}"),

@@ -57,7 +57,13 @@ interface Scroll {
   readonly anchor: Anchor;
 }
 
-type WsMessage = Reload | SuggestionListChanged | Resync | Scroll;
+/** A file changed on disk while it has unsaved edits (ADR-065). Editorial only. */
+interface Conflict {
+  readonly type: "conflict";
+  readonly file: string;
+}
+
+type WsMessage = Reload | SuggestionListChanged | Resync | Scroll | Conflict;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -92,6 +98,11 @@ function parseWsMessage(raw: string): WsMessage | null {
     }
     case "resync":
       return { type: "resync" };
+    case "conflict": {
+      const { file } = parsed;
+      if (typeof file !== "string") return null;
+      return { type: "conflict", file };
+    }
     case "scroll": {
       const { anchor } = parsed;
       if (!isRecord(anchor)) return null;
@@ -269,12 +280,17 @@ function isEditorialOnly(m: WsMessage): boolean {
   switch (m.type) {
     case "scroll":
     case "suggestion-list-changed":
+    case "conflict":
       return true;
     case "reload":
       return m.anchor !== null || m.primary !== null;
     case "resync":
       return false;
   }
+}
+
+function conflictFor(file: string): (m: WsMessage) => m is Conflict {
+  return (m: WsMessage): m is Conflict => m.type === "conflict" && m.file === file;
 }
 
 function suggestionListChangedFor(file: string): (m: WsMessage) => m is SuggestionListChanged {
@@ -429,7 +445,7 @@ const BODY_PARA_SELECTION =
 /** Zero-based body index of a paragraph in FILE; see step 7 in `run`. */
 const EDIT_BODY_IDX = 3;
 
-async function run(baseUrl: string, cookie: string): Promise<void> {
+async function run(baseUrl: string, cookie: string, siteDir: string | null): Promise<void> {
   const http = new Http(baseUrl, cookie);
   const wsBase = baseUrl.replace(/^http/, "ws");
   const publicInbox = new Inbox("public");
@@ -503,6 +519,40 @@ async function run(baseUrl: string, cookie: string): Promise<void> {
       await publicInbox.expect(
         `ws: /apply broadcasts public reload including ${PAGE}`,
         reloadIncluding(PAGE),
+      );
+    }
+
+    // 3b. A file that changes on disk while it has unsaved edits (step 2 and 3
+    //     left FILE dirty) is a conflict: `conflict` on the editorial socket
+    //     only (the leak check at the end covers the public one). Saving needs
+    //     consent that names the file; with it the edits are written.
+    if (siteDir !== null) {
+      const path = `${siteDir}/${FILE}`;
+      const onDisk = await Deno.readTextFile(path);
+      await Deno.writeTextFile(path, onDisk + "\nChanged from outside.\n");
+      await editorialInbox.expect(
+        `ws: an external change to a dirty file broadcasts conflict for ${FILE}`,
+        conflictFor(FILE),
+      );
+      const refused = await http.post("/_presemble/save-all", {});
+      check(
+        "ws: save-all with a conflict needs confirmation",
+        isRecord(refused.json) && refused.json.needsConfirmation === true,
+        refused.text,
+      );
+      const listed = await http.get("/_presemble/conflicts");
+      check(
+        "ws: the conflict is listed",
+        Array.isArray(listed.json) && listed.json.includes(FILE),
+        listed.text,
+      );
+      const saved = await http.post("/_presemble/save-all", { overwriteConflicts: [FILE] });
+      expectOk("ws: save-all with consent returns ok", saved);
+      const after = await http.get("/_presemble/conflicts");
+      check(
+        "ws: saving with consent clears the conflict",
+        Array.isArray(after.json) && after.json.length === 0,
+        after.text,
       );
     }
 
@@ -682,7 +732,12 @@ async function main(): Promise<void> {
 
   let code = 0;
   try {
-    await run(base.replace(/\/+$/, ""), cookie);
+    const site = Deno.env.get("PRESEMBLE_SMOKE_SITE");
+    await run(
+      base.replace(/\/+$/, ""),
+      cookie,
+      site === undefined || site === "" ? null : site.replace(/\/+$/, ""),
+    );
   } catch (e) {
     code = 1;
     if (e instanceof StepFailure) {

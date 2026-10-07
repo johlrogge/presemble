@@ -1,15 +1,30 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-/// Set of content file paths (relative to site root, e.g. `"content/post/hello.md"`)
-/// whose NodeStore subtree has been mutated since the last save.
+/// Why a document has unsaved edits in the conductor's store.
+///
+/// A conflicted document is dirty by construction: it is the same unsaved
+/// edits, plus the fact that the file on disk changed under them (ADR-065).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsaved {
+    /// Edited here; the file on disk is as we last saw it.
+    Edited,
+    /// Edited here, and the file on disk changed since. `disk_mtime` is the
+    /// modification time of the disk version that conflicts.
+    ConflictsWithDisk { disk_mtime: SystemTime },
+}
+
+/// Content file paths (relative to site root, e.g. `"content/post/hello.md"`)
+/// whose NodeStore subtree has been mutated since the last save, each with its
+/// [`Unsaved`] state.
 ///
 /// Separate from `doc_sources`, which is an LSP working-copy buffer keyed on
 /// absolute paths. `DirtyDocs` uses the same content-relative path convention
 /// as the NodeStore's `:file` attribute.
 #[derive(Debug, Default)]
 pub struct DirtyDocs {
-    paths: HashSet<PathBuf>,
+    docs: HashMap<PathBuf, Unsaved>,
 }
 
 impl DirtyDocs {
@@ -17,35 +32,65 @@ impl DirtyDocs {
         Self::default()
     }
 
-    /// Mark a document as dirty.
+    /// Mark a document as dirty. A document already in conflict stays in
+    /// conflict: more edits do not resolve it.
     pub fn mark(&mut self, path: impl Into<PathBuf>) {
-        self.paths.insert(path.into());
+        self.docs.entry(path.into()).or_insert(Unsaved::Edited);
     }
 
-    /// Remove a document from the dirty set (after successful save).
+    /// Mark a document as in conflict with the file on disk (it is dirty by
+    /// construction). Returns whether the conflict is new: it was not already
+    /// recorded, so the caller should report it once.
+    pub fn mark_conflict(&mut self, path: impl Into<PathBuf>, disk_mtime: SystemTime) -> bool {
+        let previous = self
+            .docs
+            .insert(path.into(), Unsaved::ConflictsWithDisk { disk_mtime });
+        !matches!(previous, Some(Unsaved::ConflictsWithDisk { .. }))
+    }
+
+    /// Remove a document from the dirty set (after save or reload), clearing
+    /// any conflict with it.
     pub fn clear(&mut self, path: &Path) {
-        self.paths.remove(path);
+        self.docs.remove(path);
     }
 
-    /// Check whether a document is dirty.
+    /// Check whether a document is dirty (edited or in conflict).
     pub fn contains(&self, path: &Path) -> bool {
-        self.paths.contains(path)
+        self.docs.contains_key(path)
+    }
+
+    /// Check whether a document is in conflict with the file on disk.
+    pub fn is_conflicted(&self, path: &Path) -> bool {
+        matches!(self.docs.get(path), Some(Unsaved::ConflictsWithDisk { .. }))
+    }
+
+    /// The documents in conflict with the file on disk.
+    pub fn conflicts(&self) -> impl Iterator<Item = &Path> {
+        self.docs
+            .iter()
+            .filter(|(_, state)| matches!(state, Unsaved::ConflictsWithDisk { .. }))
+            .map(|(path, _)| path.as_path())
     }
 
     /// True if no documents are dirty.
     pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
+        self.docs.is_empty()
     }
 
     /// Iterate over dirty paths (borrowing — doesn't modify the set).
     pub fn iter(&self) -> impl Iterator<Item = &Path> {
-        self.paths.iter().map(|p| p.as_path())
+        self.docs.keys().map(|p| p.as_path())
     }
 
-    /// Take (drain) all dirty paths, leaving the set empty.
-    /// Used for SaveAllBuffers.
-    pub fn take(&mut self) -> HashSet<PathBuf> {
-        std::mem::take(&mut self.paths)
+    /// Take (drain) all dirty documents with their state, leaving the set
+    /// empty. Used for SaveAllBuffers.
+    pub fn take(&mut self) -> HashMap<PathBuf, Unsaved> {
+        std::mem::take(&mut self.docs)
+    }
+
+    /// Put a document back with the state it had (a save of it failed).
+    pub fn restore(&mut self, path: PathBuf, state: Unsaved) {
+        self.docs.insert(path, state);
     }
 }
 
@@ -101,5 +146,42 @@ mod tests {
         let second_count = dirty.iter().count();
         assert_eq!(first_count, 2);
         assert_eq!(second_count, 2, "second iteration should still yield both paths");
+    }
+
+    #[test]
+    fn a_conflicted_document_is_dirty() {
+        let mut dirty = DirtyDocs::new();
+        assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH));
+        assert!(dirty.contains(Path::new("content/a.md")));
+        assert!(dirty.is_conflicted(Path::new("content/a.md")));
+        assert_eq!(dirty.conflicts().collect::<Vec<_>>(), vec![Path::new("content/a.md")]);
+        assert_eq!(dirty.iter().count(), 1);
+    }
+
+    #[test]
+    fn a_conflict_is_reported_once() {
+        let mut dirty = DirtyDocs::new();
+        assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH));
+        assert!(!dirty.mark_conflict("content/a.md", SystemTime::now()), "already recorded");
+    }
+
+    #[test]
+    fn more_edits_do_not_resolve_a_conflict() {
+        let mut dirty = DirtyDocs::new();
+        dirty.mark("content/a.md");
+        assert!(!dirty.is_conflicted(Path::new("content/a.md")));
+        dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH);
+        dirty.mark("content/a.md");
+        assert!(dirty.is_conflicted(Path::new("content/a.md")));
+    }
+
+    #[test]
+    fn clear_clears_a_conflict() {
+        let mut dirty = DirtyDocs::new();
+        dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH);
+        dirty.clear(Path::new("content/a.md"));
+        assert!(!dirty.contains(Path::new("content/a.md")));
+        assert!(!dirty.is_conflicted(Path::new("content/a.md")));
+        assert_eq!(dirty.conflicts().count(), 0);
     }
 }

@@ -120,6 +120,18 @@ the conductor's domain logic.
   conductor write. Linux ext4 provides nanosecond resolution and is the primary
   target. The limitation should be noted in code comments.
 
+## Amendment (ADR-065)
+
+`Command::FileChanged` no longer clears in-memory edits for a document that is
+dirty: the edits are kept and the document is marked as conflicting with the
+file on disk ([ADR-065](065-unsaved-edits-are-never-discarded-automatically.md)).
+Since the repopulate fix, rebuilding the store from disk keeps every dirty
+document except those whose own file changed, and those are now conflicts.
+Manual recovery is `presemble reload`; ADR-057's recovery section is being
+rewritten in stage 2e-2. Only changed paths that are not dirty are reloaded
+from disk. The description above of `FileChanged` as clearing NED state
+applies to clean documents only.
+
 ## Related
 
 - [ADR-006](006-serve-architecture.md) — serve architecture, defines the watcher

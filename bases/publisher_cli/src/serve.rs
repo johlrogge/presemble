@@ -43,6 +43,11 @@ enum EditorialMessage {
     /// The browser may have missed messages (lagged receiver); it should
     /// reload in place to pick up whatever it missed.
     Resync,
+    /// A document with unsaved edits changed on disk (ADR-065). Editorial
+    /// only: a draft file name never goes on the public socket.
+    Conflict {
+        file: String,
+    },
 }
 
 /// Serialisable projection of a [`editorial_types::StructuralAnchor`] for the
@@ -150,6 +155,7 @@ impl EditorialMessage {
             EditorialMessage::Resync => Some(PublicMessage::Resync),
             EditorialMessage::ScrollTo { .. } => None,
             EditorialMessage::SuggestionListChanged { .. } => None,
+            EditorialMessage::Conflict { .. } => None,
         }
     }
 
@@ -197,6 +203,12 @@ impl EditorialMessage {
                 format!(r#"{{"type":"suggestion-list-changed"{}}}"#, file_json)
             }
             EditorialMessage::Resync => r#"{"type":"resync"}"#.to_string(),
+            EditorialMessage::Conflict { file } => {
+                format!(
+                    r#"{{"type":"conflict","file":"{}"}}"#,
+                    file.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            }
         }
     }
 }
@@ -227,6 +239,7 @@ fn editorial_message_for(ev: conductor::ConductorEvent) -> EditorialMessage {
         ConductorEvent::NedSuggestionRejected { file, .. } => {
             EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
         }
+        ConductorEvent::DiskConflict { file } => EditorialMessage::Conflict { file },
     }
 }
 
@@ -518,6 +531,7 @@ fn app_router(state: AppState) -> Router {
         .route("/_presemble/schemas", get(schemas_handler))
         .route("/_presemble/create-content", post(create_content_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
+        .route("/_presemble/conflicts", get(conflicts_handler))
         .route("/_presemble/block-edit", post(block_edit_handler))
         .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
         .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
@@ -570,6 +584,12 @@ struct EditResponse {
     origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<editorial_types::StaleCause>,
+    /// A save would overwrite files that changed on disk while they have
+    /// unsaved edits: nothing was written; `conflicts` lists them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    needs_confirmation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflicts: Option<Vec<String>>,
 }
 
 impl EditResponse {
@@ -587,6 +607,21 @@ impl EditResponse {
             step: None,
             origin: None,
             cause: None,
+            needs_confirmation: None,
+            conflicts: None,
+        }
+    }
+
+    /// Saving needs the user's consent to overwrite `conflicts`.
+    fn needs_confirmation(conflicts: Vec<String>) -> Self {
+        Self {
+            error: Some(format!(
+                "These files changed on disk while they have unsaved edits here: {}. Nothing was saved.",
+                conflicts.join(", ")
+            )),
+            needs_confirmation: Some(true),
+            conflicts: Some(conflicts),
+            ..Self::base(false)
         }
     }
 
@@ -627,6 +662,9 @@ fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum:
         }
         Ok(conductor::Response::PlanRefused(failure)) => {
             axum::Json(EditResponse::plan_refused(failure))
+        }
+        Ok(conductor::Response::ConflictsNeedConfirmation(conflicts)) => {
+            axum::Json(EditResponse::needs_confirmation(conflicts))
         }
         Ok(conductor::Response::Error(e)) => {
             axum::Json(EditResponse::err(e))
@@ -809,11 +847,61 @@ async fn dirty_buffers_handler(
     }
 }
 
+/// Optional body of `POST /_presemble/save-all`: the files the user agreed to
+/// overwrite (ADR-065). Empty or missing means no consent.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SaveAllRequest {
+    #[serde(default)]
+    overwrite_conflicts: Vec<String>,
+}
+
+/// `POST /_presemble/save-all`. A conflict that the consent does not name
+/// answers `{"ok":false,"needsConfirmation":true,"conflicts":[...],...}` and
+/// writes nothing.
 async fn save_all_handler(
     _session: Session,
     State(state): State<AppState>,
+    body: axum::body::Bytes,
 ) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers))
+    let request: SaveAllRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        SaveAllRequest::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(e) => return axum::Json(EditResponse::err(format!("invalid save-all body: {e}"))),
+        }
+    };
+    let consent = if request.overwrite_conflicts.is_empty() {
+        editorial_types::ConflictConsent::None
+    } else {
+        editorial_types::ConflictConsent::Overwrite(request.overwrite_conflicts.into_iter().collect())
+    };
+    conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers { consent }))
+}
+
+/// `GET /_presemble/conflicts`: the documents whose file changed on disk while
+/// they have unsaved edits (site-relative paths, sorted).
+async fn conflicts_handler(
+    _session: Session,
+    State(state): State<AppState>,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+
+    let (status, body) = match state.conductor.send(&conductor::Command::GetConflicts) {
+        Ok(conductor::Response::Conflicts(files)) => {
+            (StatusCode::OK, serde_json::to_vec(&files).unwrap_or_else(|_| b"[]".to_vec()))
+        }
+        Ok(conductor::Response::Error(e)) | Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::to_vec(&serde_json::json!({ "error": e })).unwrap_or_default(),
+        ),
+        Ok(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"error":"unexpected conductor response"}"#.to_vec(),
+        ),
+    };
+    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 /// `POST /_presemble/block-edit`: edit one block through its markdown
@@ -3490,6 +3578,8 @@ mod tests {
             session_store,
         };
         Router::new()
+            .route("/_presemble/save-all", post(save_all_handler))
+            .route("/_presemble/conflicts", get(conflicts_handler))
             .route("/_presemble/apply", post(apply_handler))
             .route("/_presemble/block-edit", post(block_edit_handler))
             .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
@@ -3698,6 +3788,93 @@ mod tests {
         let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val, serde_json::json!({"ok": true, "alreadyInPlace": true}), "{val}");
+    }
+
+    #[test]
+    fn editorial_message_for_disk_conflict() {
+        let msg = editorial_message_for(conductor::ConductorEvent::DiskConflict {
+            file: "content/post/a.md".to_string(),
+        });
+        match &msg {
+            EditorialMessage::Conflict { file } => assert_eq!(file, "content/post/a.md"),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(msg.to_json(), r#"{"type":"conflict","file":"content/post/a.md"}"#);
+        // A draft file name never goes on the public socket.
+        assert!(msg.to_public().is_none());
+    }
+
+    /// POST (optionally with a JSON body) and parse the JSON answer.
+    async fn post_json_body(
+        app: &axum::Router,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("cookie", test_session_cookie());
+        let body = match body {
+            Some(value) => {
+                req = req.header("content-type", "application/json");
+                axum::body::Body::from(serde_json::to_vec(&value).unwrap())
+            }
+            None => axum::body::Body::empty(),
+        };
+        let resp = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn save_all_answers_needs_confirmation_with_the_conflicts() {
+        use tower::ServiceExt;
+
+        let (client, tmp) = start_test_conductor();
+        // An unsaved edit, then the editor writes the file: a conflict.
+        let program = r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))) "Edited")"#;
+        client
+            .send(&conductor::Command::ApplyNedProgram { program: program.to_string() })
+            .unwrap();
+        client
+            .send(&conductor::Command::DocumentSaved {
+                path: tmp.path().join("content/test/doc.md").to_string_lossy().to_string(),
+            })
+            .unwrap();
+        let app = test_app(client);
+
+        // The conflict is listed.
+        let req = axum::http::Request::builder()
+            .uri("/_presemble/conflicts")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let listed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(listed, serde_json::json!(["content/test/doc.md"]));
+
+        // No body: no consent. Nothing is written.
+        let refused = post_json_body(&app, "/_presemble/save-all", None).await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(refused["needsConfirmation"], true, "{refused}");
+        assert_eq!(refused["conflicts"], serde_json::json!(["content/test/doc.md"]), "{refused}");
+        assert!(refused["error"].as_str().is_some_and(|e| e.contains("content/test/doc.md")), "{refused}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("content/test/doc.md")).unwrap(),
+            "# Test Title\n"
+        );
+
+        // Consent that names the file: written.
+        let saved = post_json_body(
+            &app,
+            "/_presemble/save-all",
+            Some(serde_json::json!({ "overwriteConflicts": ["content/test/doc.md"] })),
+        )
+        .await;
+        assert_eq!(saved["ok"], true, "{saved}");
+        assert!(std::fs::read_to_string(tmp.path().join("content/test/doc.md")).unwrap().contains("Edited"));
     }
 
     #[tokio::test]

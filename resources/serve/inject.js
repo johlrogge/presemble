@@ -232,6 +232,10 @@ if(m.type==='resync'){
 _requestReload({resync:true});
 return;
 }
+if(m.type==='conflict'){
+_noteConflict(m.file);
+return;
+}
 if(m.type==='suggestion-list-changed'){
 if(window._fetchSuggestionFiles){window._fetchSuggestionFiles();}
 if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
@@ -240,6 +244,41 @@ return;
 if(m.anchor){sessionStorage.setItem('presemble-anchor',JSON.stringify(m.anchor));}
 _requestReload(m);
 }
+// ── Disk conflicts (ADR-065) ──────────────────────────────────────────────
+// A file that changed on disk while it has unsaved edits here. The notice is
+// persistent and has no buttons: the toolbar Save (with its confirmation) is
+// the one way to keep the edits; `presemble reload` keeps the file.
+var _conflictFiles=[];
+function _showConflictNotice(){
+document.querySelectorAll('.presemble-conflict-notice').forEach(function(n){n.remove();});
+var onPage={};
+document.querySelectorAll('[data-presemble-file]').forEach(function(el){onPage[el.getAttribute('data-presemble-file')]=true;});
+var here=_conflictFiles.filter(function(f){return onPage[f];});
+if(!here.length){return;}
+var box=document.createElement('div');
+box.className='presemble-conflict-notice';
+box.setAttribute('role','alert');
+here.forEach(function(file){
+var p=document.createElement('p');
+p.textContent=file+' changed on disk while it has unsaved edits here. To keep your edits, use Save: you will be asked to confirm overwriting the file. To keep the file on disk, run `presemble reload <site-dir> '+file+'`.';
+box.appendChild(p);
+});
+document.body.appendChild(box);
+}
+function _fetchConflicts(){
+fetchJson('/_presemble/conflicts')
+.then(function(list){
+if(!Array.isArray(list)){return;}
+_conflictFiles=list;
+_showConflictNotice();
+})
+.catch(function(err){console.warn('presemble: conflicts poll failed',err);});
+}
+function _noteConflict(file){
+if(_conflictFiles.indexOf(file)<0){_conflictFiles.push(file);}
+_showConflictNotice();
+}
+_fetchConflicts();
 _wsConnect();
 (function(){
 var anchorRaw=sessionStorage.getItem('presemble-anchor');
@@ -365,6 +404,27 @@ document.addEventListener('click',function(){menu.classList.remove('open');});
 menu.onclick=function(e){e.stopPropagation();};
 function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});_onEditorClosed();}
 var _editToolbar=null;
+// Save every unsaved document. If some changed on disk while they have unsaved
+// edits here, the server writes nothing and lists them: warn first, then
+// Overwrite (post again with exactly the files shown) or Cancel (do nothing).
+function _saveAll(overwrite){
+var opts={method:'POST'};
+if(overwrite){
+opts.headers={'Content-Type':'application/json'};
+opts.body=JSON.stringify({overwriteConflicts:overwrite});
+}
+return fetchJson('/_presemble/save-all',opts).then(function(data){
+if(data.ok){_fetchDirtyCount();_fetchConflicts();return;}
+if(data.needsConfirmation){
+var files=data.conflicts||[];
+if(confirm('These files changed on disk while they have unsaved edits here: '+files.join(', ')+'. Overwrite them with your edits? (Cancel saves nothing.)')){
+return _saveAll(files);
+}
+return;
+}
+alert(data.error||'Save failed');
+});
+}
 function _editEnter(){
 if(_editToolbar){return;}
 _editToolbar=document.createElement('div');
@@ -374,12 +434,7 @@ _editToolbar.innerHTML='<button class="presemble-edit-save" style="display:none"
 document.body.appendChild(_editToolbar);
 _editToolbar.querySelector('.presemble-edit-new').onclick=function(){_openCreateDialog();};
 _editToolbar.querySelector('.presemble-edit-save').onclick=function(){
-fetchJson('/_presemble/save-all',{method:'POST'})
-.then(function(data){
-if(data.ok){_fetchDirtyCount();}
-else{alert(data.error||'Save failed');}
-})
-.catch(function(err){_toast('Save failed: '+err.message);});
+_saveAll(null).catch(function(err){_toast('Save failed: '+err.message);});
 };
 _foldSetup();
 _fetchSuggestionCount();

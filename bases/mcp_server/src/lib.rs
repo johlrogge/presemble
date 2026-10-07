@@ -2115,7 +2115,10 @@ mod tests {
         );
 
         let saved = client
-            .send(&conductor::Command::SaveBuffer { path: E2E_FILE.to_string() })
+            .send(&conductor::Command::SaveBuffer {
+                path: E2E_FILE.to_string(),
+                consent: editorial_types::ConflictConsent::None,
+            })
             .expect("save");
         assert!(matches!(saved, conductor::Response::Ok), "save: {saved:?}");
         std::fs::read_to_string(site_dir.join(E2E_FILE)).expect("read saved file")
