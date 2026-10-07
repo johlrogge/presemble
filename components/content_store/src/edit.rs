@@ -469,7 +469,19 @@ fn write(store: &mut NodeStore, change: Change) {
         }
         Change::Replace { block, container, blocks } => {
             let at = anchor_index(store, container, block);
-            insert_blocks(store, container, at, &blocks);
+            let created = insert_blocks(store, container, at, &blocks);
+            // ADR-062 D5: the replaced block's leading comments move to the
+            // first new root, before the edge goes (delete relocates through
+            // the parent).
+            let first = *created.first().expect("a prepared replace has at least one block");
+            ned::trivia::move_trivia(
+                store,
+                block,
+                ned::trivia::ATTR_TRIVIA_BEFORE,
+                first,
+                ned::trivia::ATTR_TRIVIA_BEFORE,
+                ned::trivia::Placement::At(0),
+            );
             store.remove_child_edge(container, block);
             ned::mutation::delete(store, &Selection::single(block));
         }
@@ -477,17 +489,22 @@ fn write(store: &mut NodeStore, change: Change) {
 }
 
 /// Encode `blocks` and insert them, in order, as children of `container`
-/// starting at child index `base`.
+/// starting at child index `base`. Returns the new nodes, in order.
 fn insert_blocks(
     store: &mut NodeStore,
     container: NodeId,
     base: usize,
     blocks: &[ContentElement],
-) {
-    for (i, block) in blocks.iter().enumerate() {
-        let id = block_to_store(block, store);
-        store.insert_child_at(container, base + i, id);
-    }
+) -> Vec<NodeId> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(i, block)| {
+            let id = block_to_store(block, store);
+            store.insert_child_at(container, base + i, id);
+            id
+        })
+        .collect()
 }
 
 fn anchor_index(store: &NodeStore, container: NodeId, anchor: NodeId) -> usize {

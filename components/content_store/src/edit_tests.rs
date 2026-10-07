@@ -10,7 +10,7 @@ use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::HeadingLevel;
 
 use crate::access::{add_child_element, add_text_attr, find_child_by_name, make_element};
-use crate::block::{BlockDecodeError, block_from_node, block_to_store};
+use crate::block::{BlockDecodeError, add_trivia, block_from_node, block_to_store};
 use crate::edit::{
     AddressError, Committed, EditError, NedMutation, PreparedEdit, Target, TargetKind, commit,
     prepare, resolve,
@@ -547,6 +547,41 @@ fn delete_removes_subtree() {
     assert_eq!(f.body_texts(), vec!["b"]);
     assert!(f.store.get(a).is_none());
     assert!(f.store.get(a_text).is_none());
+}
+
+fn leading_comments(store: &NodeStore, block: NodeId) -> Vec<String> {
+    ned::trivia::trivia_texts(store, block, ned::trivia::ATTR_TRIVIA_BEFORE)
+        .into_iter()
+        .map(|t| match store.get(t) {
+            Some(Node::Text(s)) => s.clone(),
+            other => panic!("expected a comment text, got {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn replace_keeps_leading_comments_on_the_first_new_root() {
+    // ADR-062 D5: the comments of a replaced block move to the first new block.
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    add_trivia(&mut f.store, a, ned::trivia::ATTR_TRIVIA_BEFORE, &["<!-- note -->"]);
+    f.run(a, &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]));
+    let blocks = f.body_blocks();
+    assert_eq!(f.body_texts(), vec!["X", "Y", "b"]);
+    assert_eq!(leading_comments(&f.store, blocks[0]), vec!["<!-- note -->"]);
+    assert!(leading_comments(&f.store, blocks[1]).is_empty());
+    assert!(leading_comments(&f.store, blocks[2]).is_empty());
+}
+
+/// Guard: delete keeps the edge while it relocates, so the comments survive.
+#[test]
+fn delete_moves_leading_comments_to_the_next_sibling() {
+    let mut f = fixture();
+    let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
+    add_trivia(&mut f.store, a, ned::trivia::ATTR_TRIVIA_BEFORE, &["<!-- note -->"]);
+    f.run(a, &NedMutation::Delete);
+    assert_eq!(f.body_blocks(), vec![b]);
+    assert_eq!(leading_comments(&f.store, b), vec!["<!-- note -->"]);
 }
 
 #[test]
