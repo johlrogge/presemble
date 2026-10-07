@@ -2977,6 +2977,40 @@ mod tests {
         assert!(html.contains("images/cat.jpg"), "{html}");
     }
 
+    /// The two lines of the user guide's "Link and image records" section,
+    /// rendered as it says.
+    #[test]
+    fn guide_link_and_image_records_example_renders_as_documented() {
+        use crate::data::OutputMode::Published;
+        const LINES: [&str; 2] = [
+            r#"<presemble:insert data="input.cover" />"#,
+            r#"<presemble:insert data="input.cover.alt" as="figcaption" />"#,
+        ];
+        let page = |image: &str| {
+            let grammar = schema::parse_schema(COVER_SCHEMA).expect("schema parses");
+            let doc = content::parse_and_assign(&format!("# Title\n\n{image}\n"), &grammar)
+                .expect("content parses");
+            let mut graph = DataGraph::new();
+            graph.insert(
+                "input",
+                Value::Record(crate::data::build_article_graph(&doc, &grammar, Published)),
+            );
+            graph
+        };
+
+        let with_alt = page("![A cat](c.png)");
+        let img = render_for(&with_alt, LINES[0], Published);
+        assert!(img.starts_with(r#"<img src="c.png" alt="A cat""#), "{img}");
+        let caption = render_for(&with_alt, LINES[1], Published);
+        assert!(caption.contains("<figcaption") && caption.contains(">A cat</figcaption>"), "{caption}");
+
+        let without_alt = page("![](c.png)");
+        let img = render_for(&without_alt, LINES[0], Published);
+        assert!(img.starts_with(r#"<img src="c.png""#), "{img}");
+        let caption = render_for(&without_alt, LINES[1], Published);
+        assert!(!caption.contains("figcaption"), "no figcaption element: {caption}");
+    }
+
     /// Guard: inserting the whole image record renders the `<img>` it always did.
     #[test]
     fn whole_image_record_insert_renders_unchanged() {

@@ -333,6 +333,24 @@ In Hiccup:
 [:presemble/insert {:data "input.author" :as "h3"}]
 ```
 
+#### Link and image records
+
+A link slot or an image slot gives the template a record:
+
+| Slot | Fields |
+|---|---|
+| Link | `href`: where the link points; `text`: the link text |
+| Image | `src`: the image source; `alt`: the alt text (absent when the image has none) |
+
+Insert the whole record to render the link or image, or a single field to insert its text on its own:
+
+```html
+<presemble:insert data="input.cover" />
+<presemble:insert data="input.cover.alt" as="figcaption" />
+```
+
+The first line renders `<img src="…" alt="…">`. The second inserts only the alt text, wrapped in a `<figcaption>`; like any absent value, it is removed when the image has no alt text.
+
 ### `data-each`
 
 Iterate over a collection on a `<template>` element. The value passed to `data-each` is the singular schema stem — the publisher automatically finds all items of that type:
