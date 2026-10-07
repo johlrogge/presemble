@@ -1112,10 +1112,10 @@ mod tests {
                 DocumentSlot {
                     name: SlotName::new("title"),
                     elements: im::vector![Spanned {
-                        node: ContentElement::Heading {
-                            level: HeadingLevel::new(1).unwrap(),
-                            source: "My Title".into(),
-                        },
+                        node: ContentElement::heading_from_markdown(
+                            HeadingLevel::new(1).unwrap(),
+                            "My Title",
+                        ),
                         span: Span { start: 0, end: 0 },
                     }],
                 }
@@ -1448,10 +1448,10 @@ mod tests {
                 DocumentSlot {
                     name: SlotName::new("title"),
                     elements: im::vector![Spanned {
-                        node: ContentElement::Heading {
-                            level: HeadingLevel::new(1).unwrap(),
-                            source: "Title".into(),
-                        },
+                        node: ContentElement::heading_from_markdown(
+                            HeadingLevel::new(1).unwrap(),
+                            "Title",
+                        ),
                         span: Span { start: 0, end: 0 },
                     }],
                 }
@@ -2136,10 +2136,7 @@ mod tests {
             Spanned { node, span: Span { start: 0, end: 0 } }
         }
         fn h2(text: &str) -> Spanned<ContentElement> {
-            spanned(ContentElement::Heading {
-                level: HeadingLevel::new(2).unwrap(),
-                source: text.into(),
-            })
+            spanned(ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), text))
         }
         fn p(text: &str) -> Spanned<ContentElement> {
             spanned(ContentElement::Paragraph { text: text.to_string() })
@@ -2148,10 +2145,10 @@ mod tests {
         let doc = Document {
             preamble: im::vector![DocumentSlot {
                 name: SlotName::new("title"),
-                elements: im::vector![spanned(ContentElement::Heading {
-                    level: HeadingLevel::new(1).unwrap(),
-                    source: "Home".into(),
-                })],
+                elements: im::vector![spanned(ContentElement::heading_from_markdown(
+                    HeadingLevel::new(1).unwrap(),
+                    "Home",
+                ))],
             }],
             body: im::vector![
                 h2("Intro"),
@@ -2356,7 +2353,7 @@ mod tests {
         fn spanned(node: ContentElement) -> Spanned<ContentElement> {
             Spanned { node, span: Span { start: 0, end: 0 } }
         }
-        let h2 = |t: &str| spanned(ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), source: t.into() });
+        let h2 = |t: &str| spanned(ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), t));
         let p = |t: &str| spanned(ContentElement::Paragraph { text: t.to_string() });
 
         let doc = Document {

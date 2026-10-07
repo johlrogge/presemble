@@ -362,10 +362,10 @@ headings
         let title_slot = DocumentSlot {
             name: grammar.preamble.iter().find(|s| s.name.as_str() == "title").unwrap().name.clone(),
             elements: im::vector![schema::Spanned {
-                node: crate::document::ContentElement::Heading {
-                    level: schema::HeadingLevel::new(1).unwrap(),
-                    source: "New Title".into(),
-                },
+                node: crate::document::ContentElement::heading_from_markdown(
+                    schema::HeadingLevel::new(1).unwrap(),
+                    "New Title",
+                ),
                 span: Span { start: 0, end: 0 },
             }],
         };

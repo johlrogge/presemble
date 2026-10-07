@@ -51,10 +51,7 @@ fn heading_node(store: &mut NodeStore, level: Option<Node>, text: Option<&str>) 
 }
 
 fn h(level: u8, text: &str) -> ContentElement {
-    ContentElement::Heading {
-        level: HeadingLevel::new(level).unwrap(),
-        source: text.into(),
-    }
+    ContentElement::heading_from_markdown(HeadingLevel::new(level).unwrap(), text)
 }
 
 #[test]

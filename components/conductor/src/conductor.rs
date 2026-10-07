@@ -136,12 +136,12 @@ fn body_idx_to_structural(
     let mut heading_idx: Option<usize> = None;
     let mut heading_text: Option<String> = None;
     for i in (0..body_idx).rev() {
-        if let content::ContentElement::Heading { source, .. } = &doc.body[i].node {
+        if let content::ContentElement::Heading { content, .. } = &doc.body[i].node {
             heading_idx = Some(i);
             // The heading's plain text, as rendered and as
             // `ned/heading-with-text` matches it (ADR-063); already
             // whitespace-normalised.
-            heading_text = Some(content::AsPlainText::plain_text(source));
+            heading_text = Some(content::AsPlainText::plain_text(content));
             break;
         }
     }
@@ -5755,10 +5755,10 @@ mod creation_check_tests {
                 DocumentSlot {
                     name: SlotName::new("title"),
                     elements: im::vector![Spanned {
-                        node: ContentElement::Heading {
-                            level: HeadingLevel::new(1).unwrap(),
-                            source: "Test Title".into(),
-                        },
+                        node: ContentElement::heading_from_markdown(
+                            HeadingLevel::new(1).unwrap(),
+                            "Test Title",
+                        ),
                         span: Span { start: 0, end: 0 },
                     }],
                 },
@@ -6006,10 +6006,10 @@ mod ned_suggestion_handler_tests {
                 DocumentSlot {
                     name: SlotName::new("title"),
                     elements: im::vector![Spanned {
-                        node: ContentElement::Heading {
-                            level: HeadingLevel::new(1).unwrap(),
-                            source: "Test Title".into(),
-                        },
+                        node: ContentElement::heading_from_markdown(
+                            HeadingLevel::new(1).unwrap(),
+                            "Test Title",
+                        ),
                         span: Span { start: 0, end: 0 },
                     }],
                 },
@@ -6927,10 +6927,10 @@ mod suggestion_accept_tests {
                 preamble: im::vector![DocumentSlot {
                     name: SlotName::new("title"),
                     elements: im::vector![Spanned {
-                        node: ContentElement::Heading {
-                            level: HeadingLevel::new(1).unwrap(),
-                            source: "Same".into(),
-                        },
+                        node: ContentElement::heading_from_markdown(
+                            HeadingLevel::new(1).unwrap(),
+                            "Same",
+                        ),
                         span: Span { start: 0, end: 0 },
                     }],
                 }],
@@ -8580,10 +8580,10 @@ mod apply_ned_program_diagnostic_tests {
             preamble: im::vector![DocumentSlot {
                 name: SlotName::new("title"),
                 elements: im::vector![Spanned {
-                    node: ContentElement::Heading {
-                        level: HeadingLevel::new(1).unwrap(),
-                        source: "Test Title".into(),
-                    },
+                    node: ContentElement::heading_from_markdown(
+                        HeadingLevel::new(1).unwrap(),
+                        "Test Title",
+                    ),
                     span: Span { start: 0, end: 0 },
                 }],
             }],
@@ -8685,10 +8685,10 @@ mod ned_program_plan_tests {
     fn title(text: &str) -> DocumentSlot {
         DocumentSlot {
             name: SlotName::new("title"),
-            elements: im::vector![spanned(ContentElement::Heading {
-                level: HeadingLevel::new(1).unwrap(),
-                source: text.into(),
-            })],
+            elements: im::vector![spanned(ContentElement::heading_from_markdown(
+                HeadingLevel::new(1).unwrap(),
+                text,
+            ))],
         }
     }
 
@@ -8970,10 +8970,7 @@ mod body_structural_bsave_tests {
     }
 
     fn h2(text: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::Heading {
-            level: HeadingLevel::new(2).unwrap(),
-            source: text.into(),
-        })
+        spanned(ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), text))
     }
 
     fn p(text: &str) -> Spanned<ContentElement> {
@@ -9006,10 +9003,10 @@ mod body_structural_bsave_tests {
         let doc = Document {
             preamble: im::vector![DocumentSlot {
                 name: SlotName::new("title"),
-                elements: im::vector![spanned(ContentElement::Heading {
-                    level: HeadingLevel::new(1).unwrap(),
-                    source: "Test Title".into(),
-                })],
+                elements: im::vector![spanned(ContentElement::heading_from_markdown(
+                    HeadingLevel::new(1).unwrap(),
+                    "Test Title",
+                ))],
             }],
             body: im::vector![
                 h2("Intro"),
@@ -9053,7 +9050,9 @@ mod body_structural_bsave_tests {
         doc.body
             .iter()
             .map(|el| match &el.node {
-                ContentElement::Heading { source, .. } => ("heading".to_string(), source.to_string()),
+                ContentElement::Heading { content, .. } => {
+                    ("heading".to_string(), content::AsPlainText::plain_text(content))
+                }
                 ContentElement::Paragraph { text } => ("paragraph".to_string(), text.clone()),
                 other => ("other".to_string(), format!("{other:?}")),
             })
@@ -9164,10 +9163,10 @@ mod body_structural_bsave_tests {
         let good_doc = Document {
             preamble: im::vector![DocumentSlot {
                 name: SlotName::new("title"),
-                elements: im::vector![spanned(ContentElement::Heading {
-                    level: HeadingLevel::new(1).unwrap(),
-                    source: "Other Title".into(),
-                })],
+                elements: im::vector![spanned(ContentElement::heading_from_markdown(
+                    HeadingLevel::new(1).unwrap(),
+                    "Other Title",
+                ))],
             }],
             body: im::vector![p("Other para")],
             has_separator: true,

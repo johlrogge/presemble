@@ -102,9 +102,11 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
     // and table cells are not canonicalised yet. Only lossless block-level
     // escaping is applied below.
     match element {
-        // A heading stores its source (ADR-063): written as one canonical ATX
-        // line, with no escaping beyond a closing `#` run.
-        ContentElement::Heading { level, source } => crate::inline::heading_markdown(*level, source),
+        // A heading holds inline nodes (ADR-059 stage 4): written as one
+        // canonical ATX line.
+        ContentElement::Heading { level, content, marker } => {
+            crate::inline::heading_markdown(*level, content, marker.as_ref())
+        }
         ContentElement::Paragraph { text } => escape_block_lines(text).join("\n"),
         ContentElement::Link { text, href } => format!("[{text}]({})", destination(href)),
         ContentElement::Image { alt, path } => {
@@ -842,10 +844,10 @@ headings
 
     #[test]
     fn serialize_heading() {
-        let d = doc_with_slot("title", vec![ContentElement::Heading {
-            level: HeadingLevel::new(1).unwrap(),
-            source: "Hello".into(),
-        }]);
+        let d = doc_with_slot(
+            "title",
+            vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello")],
+        );
         assert_eq!(serialize_document(&d), "# Hello\n");
     }
 
@@ -1057,23 +1059,12 @@ headings
             (1, "a # b", "# a # b"),
         ];
         for (level, text, expected) in cases {
-            let el = ContentElement::Heading {
-                level: HeadingLevel::new(level).unwrap(),
-                source: text.into(),
-            };
+            let el = ContentElement::heading_from_markdown(HeadingLevel::new(level).unwrap(), text);
             assert_eq!(serialize_element(&el), expected, "heading {text:?}");
-            // Headings store their source (ADR-063): the escape is part of
-            // the source read back, which is then a fixed point.
+            // The escaped run reads back as the same literal text, which is
+            // then a fixed point.
             let back = reparse_one(expected);
-            let written_source = expected.split_once(' ').unwrap().1;
-            assert_eq!(
-                back,
-                ContentElement::Heading {
-                    level: HeadingLevel::new(level).unwrap(),
-                    source: written_source.into(),
-                },
-                "heading {text:?}"
-            );
+            assert_eq!(back, el, "heading {text:?}");
             assert_eq!(serialize_element(&back), expected, "heading {text:?}");
         }
     }
@@ -1893,10 +1884,10 @@ headings
     #[test]
     fn comment_anchors_past_the_end_are_written_at_the_end() {
         use CommentAnchor::{Before, End};
-        let mut doc = doc_with_slot("title", vec![ContentElement::Heading {
-            level: HeadingLevel::new(1).unwrap(),
-            source: "T".into(),
-        }]);
+        let mut doc = doc_with_slot(
+            "title",
+            vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "T")],
+        );
         let comment = |anchor: CommentAnchor, text: &str| crate::document::AnchoredComment {
             anchor,
             comment: Spanned { node: crate::document::Comment::new(text).unwrap(), span: Span { start: 0, end: 0 } },

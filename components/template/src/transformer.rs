@@ -1457,10 +1457,8 @@ fn source_text_attrs(source_slot: &str, sub_graph: &DataGraph, file: &str) -> Ve
 /// `Content` projection of the heading and its address that of the first
 /// heading of the `title` slot of `file`.
 fn title_text_attrs(stored: String, file: &str) -> Vec<(String, Form)> {
-    let heading = schema::HeadingLevel::new(1).map(|level| content::ContentElement::Heading {
-        level,
-        source: stored.as_str().into(),
-    });
+    let heading = schema::HeadingLevel::new(1)
+        .map(|level| content::ContentElement::heading_from_markdown(level, &stored));
     let md = heading
         .as_ref()
         .and_then(|h| content::project_markdown(h, content::Projection::Content));
@@ -3854,12 +3852,15 @@ mod tests {
             store.add_edge(host, node_store::Edge::Attribute { name, value });
         }
         let block = match el {
-            ContentElement::Heading { level, source } => {
+            ContentElement::Heading { level, .. } => {
                 let b = element(store, "heading");
                 let name = store.intern("level");
                 let value = store.add_node(node_store::Node::Integer(i64::from(level.value())));
                 store.add_edge(b, node_store::Edge::Attribute { name, value });
-                text_child(store, b, source.as_str());
+                // stage 4b: inline-node children
+                #[allow(deprecated)]
+                let source = el.heading_source().unwrap_or_default();
+                text_child(store, b, &source);
                 b
             }
             ContentElement::Paragraph { text } => {
@@ -3956,7 +3957,7 @@ mod tests {
     fn every_block_kind() -> Vec<content::ContentElement> {
         use content::{ContentElement as C, LinkTarget, LinkText};
         vec![
-            C::Heading { level: schema::HeadingLevel::new(3).unwrap(), source: "Head *em* <b>x</b>".into() },
+            C::heading_from_markdown(schema::HeadingLevel::new(3).unwrap(), "Head *em* <b>x</b>"),
             C::Paragraph { text: "a <script>x</script> **b** `c<d` [l](/a \"t\")".to_string() },
             C::Separator,
             C::HtmlBlock { source: "<div>secret</div>".to_string() },
@@ -4007,10 +4008,10 @@ mod tests {
             span: SchemaSpan { start: 0, end: 0 },
         };
         let elements: im::Vector<_> = vec![
-            mk_spanned(content::ContentElement::Heading {
-                level: schema::HeadingLevel::new(2).unwrap(),
-                source: "Section".into(),
-            }),
+            mk_spanned(content::ContentElement::heading_from_markdown(
+                schema::HeadingLevel::new(2).unwrap(),
+                "Section",
+            )),
             mk_spanned(content::ContentElement::Paragraph {
                 text: "A paragraph.".to_string(),
             }),
@@ -4123,10 +4124,10 @@ mod tests {
     }
 
     fn heading_el(level: u8, source: &str) -> content::ContentElement {
-        content::ContentElement::Heading {
-            level: schema::HeadingLevel::new(level).unwrap(),
-            source: source.into(),
-        }
+        content::ContentElement::heading_from_markdown(
+            schema::HeadingLevel::new(level).unwrap(),
+            source,
+        )
     }
 
     #[test]

@@ -385,6 +385,31 @@ fn conservation() {
     });
 }
 
+/// Every line of every generated document, and every pair of consecutive
+/// lines, wrapped as an ATX and as a setext heading, reads back as heading
+/// content. A heading that did not would hit the parser's `debug_assert` (and
+/// fall back to literal text in release), so the parse itself is the check.
+#[test]
+fn headings_wrapped_around_generated_lines_always_read_back() {
+    check_all("heading read-back", |src, _grammar| {
+        let lines: Vec<&str> = src.lines().filter(|l| !l.trim().is_empty()).collect();
+        let mut wrapped: Vec<String> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            wrapped.push(format!("# {line}\n"));
+            wrapped.push(format!("{line}\n===\n"));
+            wrapped.push(format!("{line}\n---\n"));
+            if let Some(next) = lines.get(i + 1) {
+                wrapped.push(format!("{line}\n{next}\n===\n"));
+                wrapped.push(format!("{line}\\\n{next}\n---\n"));
+            }
+        }
+        for doc in wrapped {
+            parse_document(&doc).map_err(|e| format!("{doc:?}: {e}"))?;
+        }
+        Ok(())
+    });
+}
+
 #[test]
 fn byte_coverage() {
     check_all("byte coverage", |src, grammar| {

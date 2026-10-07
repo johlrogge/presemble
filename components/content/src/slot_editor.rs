@@ -95,14 +95,18 @@ pub(crate) fn capitalize_slot(
         None => return Ok(false),
     };
 
-    // A heading stores its source (ADR-063): capitalize the first letter of
-    // its plain text in place, or leave it when that cannot be done in source.
+    // A heading: capitalize the first letter of its plain text in place, or
+    // leave it when that cannot be done in its markdown (stage 4e moves this
+    // onto the first Text node).
     if let Some(first) = doc_slot.elements.front_mut()
-        && let ContentElement::Heading { source, .. } = &mut first.node
+        && let ContentElement::Heading { level, content, marker } = &first.node
     {
-        return Ok(match crate::inline::capitalize_first(source) {
+        let source = crate::inline::MarkdownText::from(
+            crate::inline::heading_source_text(content, marker.as_ref()),
+        );
+        return Ok(match crate::inline::capitalize_first(&source) {
             Some(capitalized) => {
-                *source = capitalized;
+                first.node = ContentElement::heading_from_markdown(*level, capitalized.as_str());
                 true
             }
             None => false,
@@ -137,10 +141,7 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
         Element::Heading { level } => {
             let heading_level = HeadingLevel::new(level.min.value())
                 .ok_or_else(|| format!("invalid heading level: {}", level.min.value()))?;
-            Ok(ContentElement::Heading {
-                level: heading_level,
-                source: new_value.into(),
-            })
+            Ok(ContentElement::heading_from_markdown(heading_level, new_value))
         }
         Element::Paragraph => Ok(ContentElement::Paragraph {
             text: new_value.to_string(),

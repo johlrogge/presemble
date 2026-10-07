@@ -132,10 +132,15 @@ impl Document {
 /// A structural element within a content document.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentElement {
-    /// `source` is the inline markdown of the heading line, without the `#`
-    /// markers or a closing `#` run (ADR-063). Readers that need text use
-    /// [`crate::inline::AsPlainText`].
-    Heading { level: HeadingLevel, source: crate::inline::MarkdownText },
+    /// A heading holds inline nodes (ADR-059 stage 4): `content` is the text
+    /// of the heading line with its formatting, and `marker` the structural
+    /// `{#name}` that ends it, if any. Readers that need text use
+    /// [`crate::inline::AsPlainText`] on `content`.
+    Heading {
+        level: HeadingLevel,
+        content: crate::inline::Inlines,
+        marker: Option<SlotMarker>,
+    },
     Paragraph { text: String },
     Image { alt: Option<String>, path: String },
     Link { text: String, href: String },
@@ -160,6 +165,28 @@ pub enum ContentElement {
         /// The preamble link slot this expression is marked for, if any.
         slot: Option<Keyword>,
     },
+}
+
+/// The name in a `{#name}` that ends a heading: structure, not text (ADR-059
+/// §5). A name holds no `{`, `}`, backtick or newline.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SlotMarker(String);
+
+impl SlotMarker {
+    /// `None` when `name` could not have been written between `{#` and `}`.
+    pub fn new(name: &str) -> Option<SlotMarker> {
+        (!name.contains(['{', '}', '`', '\n'])).then(|| SlotMarker(name.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SlotMarker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// A link-expression keyword: a source schema stem or a field name, written

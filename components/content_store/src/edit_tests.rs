@@ -17,7 +17,7 @@ use crate::edit::{
 };
 
 fn heading(level: u8, text: &str) -> ContentElement {
-    ContentElement::Heading { level: HeadingLevel::new(level).unwrap(), source: text.into() }
+    ContentElement::heading_from_markdown(HeadingLevel::new(level).unwrap(), text)
 }
 
 fn para(text: &str) -> ContentElement {

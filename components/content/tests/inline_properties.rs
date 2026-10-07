@@ -498,6 +498,38 @@ fn corpus_group(group: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every corpus and generated source, wrapped as an ATX heading (when it is
+/// one line) and as a setext heading (lines joined with a space, hard breaks
+/// stripped), reads back as heading content: the parser never has to fall back
+/// to literal text (its `debug_assert` would fire here).
+#[test]
+fn every_source_wrapped_as_a_heading_reads_back_without_fallback() {
+    let mut sources = corpus_group("corpus");
+    sources.extend(corpus_group("nested_emphasis"));
+    sources.extend(generated_sources());
+    let heading_count = |doc: &str| {
+        content::parse_document(doc)
+            .expect("parses")
+            .elements
+            .iter()
+            .filter(|e| matches!(e.node, content::ContentElement::Heading { .. }))
+            .count()
+    };
+    for source in &sources {
+        if !source.contains(['\n', '\r']) {
+            let atx = format!("# {source}\n");
+            assert!(heading_count(&atx) <= 1, "ATX {atx:?}");
+        }
+        for underline in ["===", "---"] {
+            // A multi-line source may hold more than one block (a later line
+            // can itself be an underline); only a failed read matters here,
+            // and that would panic in the parser.
+            let setext = format!("{source}\n{underline}\n");
+            heading_count(&setext);
+        }
+    }
+}
+
 const FRAGMENTS: &[&str] = &[
     "word", "two words", "*em*", "**strong**", "_em_", "__strong__", "***both***", "`code`",
     "``a`b``", "[l](/u)", "[l](/u \"t\")", "![alt](i.png)", "<me@e.com>", "<https://x.y>", "<b>",

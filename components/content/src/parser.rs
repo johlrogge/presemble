@@ -318,8 +318,24 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         if let State::Heading { level, byte_range } = &state {
             if matches!(event, Event::End(TagEnd::Heading(_))) {
                 let source = heading_source(input.get(byte_range.clone()).unwrap_or_default());
+                // The heading's own line read as one heading's content: a
+                // failure here is a bug in the reading, not a parse error.
+                // Disk input must never take the server down, so release
+                // builds keep the whole source as literal text; debug and
+                // test builds fail loudly.
+                let (content, marker) = crate::inline::read_heading_source(source.as_str())
+                    .unwrap_or_else(|| {
+                        let line = input[..byte_range.start].matches('\n').count() + 1;
+                        debug_assert!(
+                            false,
+                            "invariant: the source of a parsed heading reads back as one \
+                             heading's content, but {source:?} (line {line}) did not"
+                        );
+                        log_unreadable_heading(source.as_str(), line);
+                        crate::inline::literal_heading_content(source.as_str())
+                    });
                 elements.push_back(Spanned {
-                    node: ContentElement::Heading { level: *level, source },
+                    node: ContentElement::Heading { level: *level, content, marker },
                     span: Span::from(byte_range.clone()),
                 });
                 state = State::Idle;
@@ -800,6 +816,18 @@ pub fn parse_link_target(href: &str) -> Result<LinkTarget, ContentError> {
         .map_err(|e| ContentError::ParseError(format!("malformed link expression `{href}`: {e}")))
 }
 
+/// Say once that a heading was kept as literal text. The parser does not know
+/// the file, so the line in the parsed input is what can be named.
+fn log_unreadable_heading(source: &str, line: usize) {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        eprintln!(
+            "content: a heading at line {line} did not read back as heading content; \
+             kept as literal text: {source:?} (reported once; the file is not known here)"
+        );
+    });
+}
+
 /// The markdown source of a heading from its source range (ADR-063).
 ///
 /// - ATX: [`crate::inline::atx_heading_content`] of its line.
@@ -861,6 +889,7 @@ fn convert_heading_level(
 mod tests {
     use super::*;
     use crate::document::ContentElement;
+    use crate::inline::Inline;
 
     // Helper: assert document has exactly the given number of elements.
     fn assert_element_count(doc: &FlatDocument, n: usize) {
@@ -988,7 +1017,7 @@ mod tests {
     #[test]
     fn escaped_angle_in_heading_round_trips_as_source() {
         let doc = parse_document("# Use \\<div>\n").unwrap();
-        assert_eq!(doc.elements[0].node.text(), Some("Use \\<div>"));
+        assert_eq!(doc.elements[0].node.text().as_deref(), Some("Use \\<div>"));
         assert_eq!(written("# Use \\<div>\n"), "# Use \\<div>");
     }
 
@@ -1006,13 +1035,20 @@ mod tests {
             let line = pair[0].as_str().unwrap();
             let doc = parse_document(&format!("{line}\n")).unwrap();
             assert_eq!(doc.elements.len(), 1, "{line:?}: {:#?}", doc.elements);
-            assert_eq!(doc.elements[0].node.text(), pair[1].as_str(), "{line:?}");
+            assert_eq!(doc.elements[0].node.text().as_deref(), pair[1].as_str(), "{line:?}");
         }
     }
 
     #[test]
     fn heading_markup_round_trips() {
-        assert_eq!(written("# **B** _i_ [l](/a)\n"), "# **B** _i_ [l](/a)");
+        assert_eq!(written("# **B** *i* [l](/a)\n"), "# **B** *i* [l](/a)");
+    }
+
+    /// ADR-059 §0: a heading is written canonically, never in the author's
+    /// style: `_i_` is saved as `*i*`.
+    #[test]
+    fn heading_is_written_canonically_not_in_the_authors_style() {
+        assert_eq!(written("# **B** _i_ [l](/a)\n"), "# **B** *i* [l](/a)");
     }
 
     /// L19: a setext heading is written as ATX; its lines are joined with
@@ -1086,10 +1122,7 @@ mod tests {
         assert_eq!(
             doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
             vec![
-                ContentElement::Heading {
-                    level: HeadingLevel::new(2).unwrap(),
-                    source: "a <b>x</b>".into()
-                },
+                ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "a <b>x</b>"),
                 ContentElement::Blockquote { text: "q <i>y</i> z".to_string() },
             ]
         );
@@ -1138,12 +1171,39 @@ mod tests {
         let doc = parse_document("# My Title").unwrap();
         assert_element_count(&doc, 1);
         match &doc.elements[0].node {
-            ContentElement::Heading { level, source } => {
+            ContentElement::Heading { level, content, marker } => {
                 assert_eq!(level.value(), 1, "expected H1");
-                assert_eq!(source.as_str(), "My Title");
+                assert_eq!(content.as_slice(), &[Inline::Text("My Title".to_string())]);
+                assert_eq!(*marker, None);
             }
             other => panic!("expected Heading, got {other:?}"),
         }
+    }
+
+    /// ADR-059 §5: a trailing `{#name}` is structure (the marker), and an
+    /// escaped one is literal text.
+    #[test]
+    fn heading_marker_is_structural() {
+        let doc = parse_document("## Intro {#intro}\n\n## Intro \\{#x}\n").unwrap();
+        match &doc.elements[0].node {
+            ContentElement::Heading { content, marker, .. } => {
+                assert_eq!(content.as_slice(), &[Inline::Text("Intro".to_string())]);
+                assert_eq!(marker.as_ref().map(|m| m.as_str()), Some("intro"));
+            }
+            other => panic!("expected Heading, got {other:?}"),
+        }
+        match &doc.elements[1].node {
+            ContentElement::Heading { content, marker, .. } => {
+                assert_eq!(content.as_slice(), &[Inline::Text("Intro {#x}".to_string())]);
+                assert_eq!(*marker, None);
+            }
+            other => panic!("expected Heading, got {other:?}"),
+        }
+        // Both are written back as they were read.
+        assert_eq!(
+            crate::serializer::serialize_elements(&doc.elements),
+            "## Intro {#intro}\n\n## Intro \\{#x}"
+        );
     }
 
     #[test]
@@ -1331,9 +1391,9 @@ Body paragraph."#;
         // We expect at least: Heading(1), Paragraph, Link, Image, Separator, Heading(3), Paragraph.
         // Confirm the first element is an H1 heading.
         match &doc.elements[0].node {
-            ContentElement::Heading { level, source } => {
+            ContentElement::Heading { level, content, .. } => {
                 assert_eq!(level.value(), 1);
-                assert_eq!(source.as_str(), "Title");
+                assert_eq!(content.as_slice(), &[Inline::Text("Title".to_string())]);
             }
             other => panic!("first element should be Heading(H1), got {other:?}"),
         }

@@ -715,10 +715,10 @@ mod tests {
         let doc = Document {
             preamble: im::vector![slot(
                 "title",
-                vec![ContentElement::Heading {
-                    level: HeadingLevel::new(1).unwrap(),
-                    source: "Hello World".into(),
-                }]
+                vec![ContentElement::heading_from_markdown(
+                    HeadingLevel::new(1).unwrap(),
+                    "Hello World",
+                )]
             )],
             body: im::vector![zero_spanned(ContentElement::Paragraph {
                 text: "Some body text.".to_string(),
@@ -738,10 +738,7 @@ mod tests {
     #[test]
     fn round_trip_all_content_element_variants() {
         let elements = vec![
-            ContentElement::Heading {
-                level: HeadingLevel::new(2).unwrap(),
-                source: "Section".into(),
-            },
+            ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Section"),
             ContentElement::Paragraph { text: "Para text".to_string() },
             ContentElement::Image {
                 alt: Some("alt text".to_string()),
@@ -886,7 +883,7 @@ mod tests {
     #[test]
     fn round_trip_unassigned_elements_of_every_kind() {
         let unassigned = vec![
-            ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), source: "Aside".into() },
+            ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Aside"),
             ContentElement::Paragraph { text: "{#stray}".to_string() },
             ContentElement::Paragraph { text: "![c](i.jpg) {#cover}".to_string() },
             ContentElement::Image { alt: Some("alt".to_string()), path: "/i.jpg".to_string() },
@@ -913,10 +910,7 @@ mod tests {
         let doc = Document {
             preamble: im::vector![slot(
                 "title",
-                vec![ContentElement::Heading {
-                    level: HeadingLevel::new(1).unwrap(),
-                    source: "T".into(),
-                }]
+                vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "T")]
             )],
             unassigned: unassigned.into_iter().map(zero_spanned).collect(),
             body: im::vector![zero_spanned(ContentElement::Paragraph { text: "b".to_string() })],
@@ -1281,10 +1275,10 @@ mod tests {
             preamble: im::vector![
                 slot(
                     "title",
-                    vec![ContentElement::Heading {
-                        level: HeadingLevel::new(1).unwrap(),
-                        source: "My Article".into(),
-                    }]
+                    vec![ContentElement::heading_from_markdown(
+                        HeadingLevel::new(1).unwrap(),
+                        "My Article",
+                    )]
                 ),
                 slot(
                     "summary",
@@ -1457,10 +1451,10 @@ mod tests {
     #[test]
     fn semantic_link_text_is_plain_heading_text() {
         let mut doc = make_doc_with_title_and_summary();
-        doc.preamble[0].elements[0].node = ContentElement::Heading {
-            level: HeadingLevel::new(1).unwrap(),
-            source: "*My* \\<Article> <!-- c -->".into(),
-        };
+        doc.preamble[0].elements[0].node = ContentElement::heading_from_markdown(
+            HeadingLevel::new(1).unwrap(),
+            "*My* \\<Article> <!-- c -->",
+        );
         let grammar = make_grammar_with_title_summary();
         let mut store = NodeStore::new();
         let meta = DocumentMeta {
@@ -1714,10 +1708,7 @@ mod tests {
     // ── block_from_node / tree_to_block / block_to_store ─────────────────────
 
     fn h(level: u8, text: &str) -> ContentElement {
-        ContentElement::Heading {
-            level: HeadingLevel::new(level).unwrap(),
-            source: text.into(),
-        }
+        ContentElement::heading_from_markdown(HeadingLevel::new(level).unwrap(), text)
     }
 
     #[test]
@@ -1953,10 +1944,7 @@ mod tests {
     #[test]
     fn serialize_from_store_round_trip_covers_variants() {
         let elements = vec![
-            ContentElement::Heading {
-                level: HeadingLevel::new(2).unwrap(),
-                source: "Section".into(),
-            },
+            ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Section"),
             ContentElement::Paragraph { text: "Para text".to_string() },
             ContentElement::Image {
                 alt: Some("alt text".to_string()),
@@ -2053,10 +2041,10 @@ mod tests {
         let doc = Document {
             preamble: im::vector![slot(
                 "title",
-                vec![ContentElement::Heading {
-                    level: HeadingLevel::new(1).unwrap(),
-                    source: "Title Only".into(),
-                }]
+                vec![ContentElement::heading_from_markdown(
+                    HeadingLevel::new(1).unwrap(),
+                    "Title Only",
+                )]
             )],
             body: im::vector![],
             has_separator: false,

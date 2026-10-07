@@ -1745,7 +1745,11 @@ mod tests {
         );
         let doc = parsed.unwrap();
         let has_new_title = doc.elements.iter().any(|e| {
-            matches!(&e.node, content::ContentElement::Heading { source, .. } if source.as_str() == "New Title")
+            matches!(
+                &e.node,
+                content::ContentElement::Heading { content, .. }
+                    if content::AsPlainText::plain_text(content) == "New Title"
+            )
         });
         assert!(has_new_title, "parsed document should contain the new heading: {doc:#?}");
     }

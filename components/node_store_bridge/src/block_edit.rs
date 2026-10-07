@@ -294,11 +294,11 @@ pub fn lower(
     // text alone.
     if let [new] = elements.as_slice()
         && let (Some(old_text), Some(new_text)) = (current_el.text(), new.text())
-        && current_el.with_text(new_text).as_ref() == Some(new)
+        && current_el.with_text(&new_text).as_ref() == Some(new)
     {
         check_block_round_trip(new)
             .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?;
-        let mutation = match minimal_unique_diff(old_text, new_text) {
+        let mutation = match minimal_unique_diff(&old_text, &new_text) {
             Some(TextDiff::SetText(text)) => NedMutation::SetText(text),
             Some(TextDiff::SearchReplace { search, replace }) => {
                 NedMutation::SearchReplace { search, replace }
@@ -575,14 +575,8 @@ mod tests {
         );
 
         // A heading level change.
-        let h2 = ContentElement::Heading {
-            level: HeadingLevel::new(2).unwrap(),
-            source: "Title".into(),
-        };
-        let h3 = ContentElement::Heading {
-            level: HeadingLevel::new(3).unwrap(),
-            source: "Title".into(),
-        };
+        let h2 = ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Title");
+        let h3 = ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "Title");
         let l = expect_lowered(lowered("body", &h2, "## Title", "### Title"));
         assert_eq!(l.selection, SEL);
         assert_eq!(l.mutation, NedMutation::Replace(vec![block_to_tree(&h3).unwrap()]));
@@ -759,10 +753,7 @@ mod tests {
     fn edn_preview_is_markdown() {
         // A slot heading is edited as content: the preview shows its content
         // projection, not EDN and not the block projection.
-        let h = ContentElement::Heading {
-            level: HeadingLevel::new(1).unwrap(),
-            source: "Hello *World*".into(),
-        };
+        let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let (store, block) = store_with("slot", &h);
         let l = expect_lowered(lower(
             &store,
@@ -860,10 +851,7 @@ mod tests {
 
     #[test]
     fn lower_slot_heading_uses_content_projection() {
-        let h = ContentElement::Heading {
-            level: HeadingLevel::new(1).unwrap(),
-            source: "Hello *World*".into(),
-        };
+        let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let l = expect_lowered(lowered("slot", &h, "Hello *World*", "Hello *Presemble*"));
         assert_eq!(l.selection, "(ned/text-in (block-selection))");
         assert_eq!(
@@ -882,10 +870,7 @@ mod tests {
 
     #[test]
     fn check_base_agrees_with_lower() {
-        let h = ContentElement::Heading {
-            level: HeadingLevel::new(1).unwrap(),
-            source: "Hello *World*".into(),
-        };
+        let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let img = ContentElement::Image { alt: None, path: "p.jpg".to_string() };
         let cases: Vec<(&str, ContentElement, &str)> = vec![
             ("body", paragraph("Alpha beta."), "Alpha beta."),
@@ -979,10 +964,7 @@ mod tests {
     #[test]
     fn block_to_tree_round_trips_every_payload_kind() {
         let samples = vec![
-            ContentElement::Heading {
-                level: HeadingLevel::new(3).unwrap(),
-                source: "A *title*".into(),
-            },
+            ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "A *title*"),
             paragraph("Some **text**."),
             ContentElement::Link {
                 text: "t".to_string(),

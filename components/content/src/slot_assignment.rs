@@ -402,6 +402,7 @@ pub(crate) fn element_matches_slot(element: &ContentElement, slot_element: &Elem
 mod tests {
     use super::*;
     use crate::document::{ContentElement, LinkText};
+    use crate::inline::AsPlainText;
     use crate::parser::parse_document;
     use schema::{parse_schema, Span};
 
@@ -475,10 +476,10 @@ headings
     }
 
     fn heading(level: u8, text: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::Heading {
-            level: schema::HeadingLevel::new(level).unwrap(),
-            source: text.into(),
-        })
+        spanned(ContentElement::heading_from_markdown(
+            schema::HeadingLevel::new(level).unwrap(),
+            text,
+        ))
     }
 
     fn paragraph(text: &str) -> Spanned<ContentElement> {
@@ -983,10 +984,10 @@ headings
         assert_eq!(
             unassigned_nodes(&doc),
             vec![
-                ContentElement::Heading {
-                    level: schema::HeadingLevel::new(2).unwrap(),
-                    source: "Aside".into()
-                },
+                ContentElement::heading_from_markdown(
+                    schema::HeadingLevel::new(2).unwrap(),
+                    "Aside"
+                ),
                 ContentElement::Link { text: "a".to_string(), href: "/post/a".to_string() },
             ]
         );
@@ -1067,7 +1068,7 @@ headings
             .iter()
             .map(|e| match &e.node {
                 ContentElement::Paragraph { text } => text.clone(),
-                ContentElement::Heading { source, .. } => source.to_string(),
+                ContentElement::Heading { content, .. } => content.plain_text(),
                 ContentElement::LinkExpression { slot: Some(k), .. } => k.to_string(),
                 other => format!("{other:?}"),
             })
@@ -1102,7 +1103,9 @@ headings
         let doc = assign_page("# Home\n\n## H\n\n----\n\nBody.\n", "*");
         let flat: Vec<ContentElement> = doc.flat_elements().iter().map(|e| e.node.clone()).collect();
         assert!(matches!(flat[0], ContentElement::Heading { .. }));
-        assert!(matches!(&flat[1], ContentElement::Heading { source, .. } if source.as_str() == "H"));
+        assert!(
+            matches!(&flat[1], ContentElement::Heading { content, .. } if content.plain_text() == "H")
+        );
         assert_eq!(flat[2], ContentElement::Separator);
         assert!(matches!(flat[3], ContentElement::Paragraph { .. }));
     }

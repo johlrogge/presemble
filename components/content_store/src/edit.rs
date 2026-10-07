@@ -389,6 +389,13 @@ fn no_text(store: &NodeStore, block: NodeId) -> EditError {
 /// Check that `block` with its text replaced by `value` round-trips.
 fn check_text_value(store: &NodeStore, block: NodeId, value: &str) -> Result<(), EditError> {
     let el = block_from_node(store, block).map_err(EditError::OwningBlock)?;
+    // A heading is one line. Its nodes would read a line break as a space
+    // (ADR-059 N5); until stage 4b decides that for SetText, it is refused.
+    if matches!(el, ContentElement::Heading { .. }) && value.contains(['\n', '\r']) {
+        return Err(EditError::Postcondition(RoundTripError::Changed {
+            got: format!("a heading is one line: {value:?}"),
+        }));
+    }
     let edited = el.with_text(value).ok_or_else(|| no_text(store, block))?;
     check_block_round_trip(&edited).map_err(EditError::Postcondition)
 }

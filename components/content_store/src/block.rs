@@ -24,10 +24,14 @@ use schema::HeadingLevel;
 pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore) -> NodeId {
     match element {
         // One Text child holding the heading's markdown source (ADR-063).
-        ContentElement::Heading { level, source } => {
+        ContentElement::Heading { level, .. } => {
             let node = make_element(store, "heading");
             add_int_attr(store, node, "level", level.value() as i64);
-            add_child_text(store, node, source.as_str());
+            // stage 4b: the store holds the inline nodes; until then the
+            // markdown the model writes for them.
+            #[allow(deprecated)]
+            let source = element.heading_source().unwrap_or_default();
+            add_child_text(store, node, &source);
             node
         }
         ContentElement::Paragraph { text } => {
@@ -455,7 +459,7 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
         "heading" => {
             let level = heading_level(store, id)?;
             let source = try_child_text(store, id, kind)?;
-            Ok(ContentElement::Heading { level, source: source.into() })
+            Ok(ContentElement::heading_from_markdown(level, &source))
         }
         "paragraph" => Ok(ContentElement::Paragraph {
             text: try_child_text(store, id, kind)?,

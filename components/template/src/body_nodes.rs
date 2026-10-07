@@ -51,11 +51,12 @@ fn slot_attrs(ctx: &BlockCtx) -> Vec<(String, Form)> {
 ///   body, with a diagnostic).
 pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node> {
     match element {
-        ContentElement::Heading { level, source } => vec![el(
-            &format!("h{}", level.value()),
-            slot_attrs(ctx),
-            inline_children(source.as_str()),
-        )],
+        ContentElement::Heading { level, .. } => {
+            // stage 4d renders the heading's inline nodes instead.
+            #[allow(deprecated)]
+            let source = element.heading_source().unwrap_or_default();
+            vec![el(&format!("h{}", level.value()), slot_attrs(ctx), inline_children(&source))]
+        }
         ContentElement::Paragraph { text } => {
             vec![el("p", slot_attrs(ctx), inline_children(text))]
         }

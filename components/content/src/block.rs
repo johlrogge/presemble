@@ -1,7 +1,10 @@
 //! Single-block helpers: text access for single-text block kinds and a
 //! markdown round-trip check used to validate edited block text (ADR-056).
 
+use std::borrow::Cow;
 use std::fmt;
+
+use schema::HeadingLevel;
 
 use crate::document::ContentElement;
 use crate::error::ContentError;
@@ -9,22 +12,52 @@ use crate::parser::parse_document;
 use crate::serializer::serialize_element;
 
 impl ContentElement {
+    /// A heading from the markdown source of its line's content (no `#`
+    /// markers): the source is read as inlines, and a trailing `{#name}` is
+    /// the marker (ADR-059 §5). A source that does not read as exactly one
+    /// heading's content (a line break in it, say) is kept as literal text,
+    /// so a later write-back shows that it does not round-trip.
+    pub fn heading_from_markdown(level: HeadingLevel, source: &str) -> ContentElement {
+        let (content, marker) = crate::inline::read_heading_source(source)
+            .unwrap_or_else(|| crate::inline::literal_heading_content(source));
+        ContentElement::Heading { level, content, marker }
+    }
+
+    /// The markdown source of a heading's content: canonical inlines plus
+    /// ` {#marker}`, the string a heading used to store. `None` for other
+    /// kinds.
+    ///
+    /// Temporary adapter (ADR-059 stage 4): readers outside `content` use it
+    /// until stage 4e moves them onto the inline nodes.
+    #[deprecated(note = "stage 4e: read the heading's inline nodes instead")]
+    pub fn heading_source(&self) -> Option<String> {
+        match self {
+            ContentElement::Heading { content, marker, .. } => {
+                Some(crate::inline::heading_source_text(content, marker.as_ref()))
+            }
+            _ => None,
+        }
+    }
+
     /// The text of a single-text block, or `None` for kinds that do not carry
     /// exactly one editable text value (Image, Table, Separator,
     /// LinkExpression, and HtmlBlock, which cannot be text-edited: ADR-062 D4).
     ///
     /// - Paragraph, Link, Blockquote → `text`
-    /// - Heading → `source` (its markdown source, ADR-063)
+    /// - Heading → its markdown source (canonical inlines plus ` {#marker}`;
+    ///   stage 4e replaces this with node edits)
     /// - List → `source`
     /// - CodeBlock → `code`
-    pub fn text(&self) -> Option<&str> {
+    pub fn text(&self) -> Option<Cow<'_, str>> {
         match self {
-            ContentElement::Heading { source, .. } => Some(source.as_str()),
+            ContentElement::Heading { content, marker, .. } => {
+                Some(Cow::Owned(crate::inline::heading_source_text(content, marker.as_ref())))
+            }
             ContentElement::Paragraph { text }
             | ContentElement::Link { text, .. }
-            | ContentElement::Blockquote { text } => Some(text),
-            ContentElement::List { source } => Some(source),
-            ContentElement::CodeBlock { code, .. } => Some(code),
+            | ContentElement::Blockquote { text } => Some(Cow::Borrowed(text)),
+            ContentElement::List { source } => Some(Cow::Borrowed(source)),
+            ContentElement::CodeBlock { code, .. } => Some(Cow::Borrowed(code)),
             ContentElement::Image { .. }
             | ContentElement::Table { .. }
             | ContentElement::Separator
@@ -39,10 +72,9 @@ impl ContentElement {
     pub fn with_text(&self, text: &str) -> Option<ContentElement> {
         let text = text.to_string();
         match self {
-            ContentElement::Heading { level, .. } => Some(ContentElement::Heading {
-                level: *level,
-                source: text.into(),
-            }),
+            ContentElement::Heading { level, .. } => {
+                Some(ContentElement::heading_from_markdown(*level, &text))
+            }
             ContentElement::Paragraph { .. } => Some(ContentElement::Paragraph { text }),
             ContentElement::Link { href, .. } => Some(ContentElement::Link {
                 text,
@@ -106,7 +138,7 @@ pub fn parse_markdown_projection(
     let md = md.replace("\r\n", "\n");
     let source = match (p, like) {
         (Projection::Content, ContentElement::Heading { level, .. }) => {
-            crate::inline::heading_markdown(*level, &md.as_str().into())
+            crate::inline::heading_line_for_source(*level, &md.as_str().into())
         }
         _ => md,
     };
@@ -171,6 +203,7 @@ pub fn check_block_round_trip(el: &ContentElement) -> Result<(), RoundTripError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inline::AsPlainText;
     use crate::document::{LinkOp, LinkTarget, LinkText, RefsToTarget};
     use schema::HeadingLevel;
 
@@ -307,19 +340,13 @@ mod tests {
 
     #[test]
     fn with_text_keeps_heading_level() {
-        let h = ContentElement::Heading {
-            level: HeadingLevel::new(3).unwrap(),
-            source: "Old".into(),
-        };
+        let h = ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "Old");
         let new = h.with_text("New").expect("heading has text");
         assert_eq!(
             new,
-            ContentElement::Heading {
-                level: HeadingLevel::new(3).unwrap(),
-                source: "New".into(),
-            }
+            ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "New")
         );
-        assert_eq!(new.text(), Some("New"));
+        assert_eq!(new.text().as_deref(), Some("New"));
     }
 
     #[test]
@@ -352,7 +379,7 @@ mod tests {
                 code: "new()".to_string(),
             }
         );
-        assert_eq!(new.text(), Some("new()"));
+        assert_eq!(new.text().as_deref(), Some("new()"));
     }
 
     #[test]
@@ -369,7 +396,7 @@ mod tests {
         for el in cases {
             assert!(el.text().is_some(), "{el:?} should have text");
             let new = el.with_text("Z").expect("single-text kind");
-            assert_eq!(new.text(), Some("Z"));
+            assert_eq!(new.text().as_deref(), Some("Z"));
         }
     }
 
@@ -464,24 +491,26 @@ mod tests {
 
     // ── round trip: rejections ──────────────────────────────────────────────
 
-    /// Newlines in a heading's source are canonicalised to spaces when it is
-    /// written (ADR-063), so it reads back as a different heading.
+    /// A line break in a heading is a space in its nodes (ADR-059 N5), so the
+    /// heading reads back as itself. (`content_store::edit` still refuses a
+    /// newline in a SetText until stage 4b decides it.)
     #[test]
-    fn rejects_newline_in_heading() {
+    fn newline_in_heading_becomes_a_space_in_its_nodes() {
         let h = parse_one("# Title").with_text("Title\nmore").unwrap();
-        match check_block_round_trip(&h) {
-            Err(RoundTripError::Changed { got }) => assert!(got.contains("Title more"), "{got}"),
-            other => panic!("expected Changed, got {other:?}"),
-        }
+        assert_eq!(check_block_round_trip(&h), Ok(()));
+        let ContentElement::Heading { content, .. } = &h else { panic!("{h:?}") };
+        assert_eq!(content.plain_text(), "Title more");
     }
 
-    /// A heading source ending in what reads as a closing `#` run is written
-    /// with the run escaped, so it reads back as a different source.
+    /// A heading source ending in what reads as a closing `#` run is read as
+    /// literal text (the run is escaped), and is written escaped, so it
+    /// round-trips (ADR-059: heading text is nodes, not source).
     #[test]
-    fn heading_source_ending_in_closing_run_is_changed() {
+    fn heading_source_ending_in_closing_run_is_literal_text() {
         let h = parse_one("# Title").with_text("Title #").unwrap();
-        let err = check_block_round_trip(&h).unwrap_err();
-        assert!(matches!(err, RoundTripError::Changed { .. }), "{err:?}");
+        assert_eq!(check_block_round_trip(&h), Ok(()));
+        let ContentElement::Heading { content, .. } = &h else { panic!("{h:?}") };
+        assert_eq!(content.plain_text(), "Title #");
     }
 
     #[test]
@@ -526,10 +555,7 @@ mod tests {
     #[test]
     fn escaped_literal_text_blocks_round_trip() {
         let cases = [
-            ContentElement::Heading {
-                level: HeadingLevel::new(2).unwrap(),
-                source: "Sharp \\##".into(),
-            },
+            ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Sharp \\##"),
             ContentElement::Blockquote {
                 text: "# not a heading".to_string(),
             },

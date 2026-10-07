@@ -23,7 +23,7 @@ pub use block::{check_block_round_trip, parse_markdown_projection, project_markd
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{
     AnchoredComment, Comment, CommentAnchor, Container, ContentElement, Document, DocumentSlot,
-    FlatDocument, Keyword, KeywordError, LinkOp, LinkTarget, LinkText, RefsToTarget,
+    FlatDocument, Keyword, KeywordError, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
     SortDirection,
 };
 pub use error::ContentError;

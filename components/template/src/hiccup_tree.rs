@@ -83,10 +83,7 @@ mod tests {
     #[test]
     fn block_hiccup_round_trips_every_payload_kind() {
         let samples = vec![
-            ContentElement::Heading {
-                level: HeadingLevel::new(3).unwrap(),
-                source: "A *title*".into(),
-            },
+            ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "A *title*"),
             paragraph("Some **text** with \"quotes\", a \\ backslash,\nand a newline."),
             ContentElement::Link { text: "t".to_string(), href: "/x".to_string() },
             ContentElement::Blockquote { text: "q".to_string() },

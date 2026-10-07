@@ -1,8 +1,6 @@
 use crate::document::{ContentElement, Document, Keyword, LinkText};
 use crate::inline::AsPlainText;
-use crate::link_expression::{
-    bare_marker, diagnose_paragraph, parse_destination, split_marker, LinkExpressionDiagnostic,
-};
+use crate::link_expression::{diagnose_paragraph, parse_destination, LinkExpressionDiagnostic};
 use crate::parse_list_items;
 use crate::parser::{diagnose_marker_paragraph, is_link_expression, is_marker_paragraph};
 use crate::serializer::serialize_element;
@@ -159,17 +157,8 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 // Slot markers on headings
 // ---------------------------------------------------------------------------
 
-/// The name of a slot marker that ends a heading's source (`Title {#x}`, or a
-/// heading that is only `{#x}`), if any. Headings store their source
-/// (ADR-063), so an escaped `\{#x}` or a code span is literal.
-fn heading_marker(text: &str) -> Option<&str> {
-    split_marker(text)
-        .map(|(_, name)| name)
-        .or_else(|| bare_marker(text))
-        .filter(|name| !name.contains(['{', '}', '`']))
-}
-
-/// One error per heading that ends in a slot marker. The heading stays where
+/// One error per heading that ends in a slot marker (the heading's `marker`;
+/// an escaped `\{#x}` or a code span is literal text, not a marker). The heading stays where
 /// slot assignment put it; elements of a slot are reported against the slot.
 fn validate_heading_markers(
     elements: &im::Vector<Spanned<ContentElement>>,
@@ -177,10 +166,7 @@ fn validate_heading_markers(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     for spanned in elements {
-        let ContentElement::Heading { source, .. } = &spanned.node else {
-            continue;
-        };
-        let Some(name) = heading_marker(source.as_str()) else {
+        let ContentElement::Heading { marker: Some(name), .. } = &spanned.node else {
             continue;
         };
         let message = format!(
@@ -316,13 +302,14 @@ fn validate_inline_html(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     for spanned in elements {
-        let source = match &spanned.node {
-            ContentElement::Paragraph { text } => text.as_str(),
-            ContentElement::List { source } => source.as_str(),
-            ContentElement::Heading { source, .. } => source.as_str(),
+        let html = match &spanned.node {
+            ContentElement::Paragraph { text } => crate::html::first_inline_html(text),
+            ContentElement::List { source } => crate::html::first_inline_html(source),
+            // A heading's HTML is in its nodes.
+            ContentElement::Heading { content, .. } => first_html_node(content.as_slice()),
             _ => continue,
         };
-        let Some(html) = crate::html::first_inline_html(source) else {
+        let Some(html) = html else {
             continue;
         };
         let message = format!(
@@ -342,6 +329,18 @@ fn validate_inline_html(
             span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
         });
     }
+}
+
+/// The first inline HTML node (not a comment) in `items`, at any depth.
+fn first_html_node(items: &[crate::inline::Inline]) -> Option<String> {
+    use crate::inline::Inline;
+    items.iter().find_map(|item| match item {
+        Inline::Html(html) => Some(html.as_str().trim().to_string()),
+        Inline::Emph(children) | Inline::Strong(children) => first_html_node(children.as_slice()),
+        Inline::Link { text, .. } => first_html_node(text.as_slice()),
+        Inline::Image { alt, .. } => first_html_node(alt.as_slice()),
+        _ => None,
+    })
 }
 
 /// The error message for an HTML block.
@@ -593,14 +592,15 @@ fn validate_headings(
     let mut count = 0usize;
 
     for spanned in elements {
-        if let ContentElement::Heading { level, source } = &spanned.node {
+        if let ContentElement::Heading { level, content, marker } = &spanned.node {
             if level.value() >= level_range.min.value()
                 && level.value() <= level_range.max.value()
             {
                 count += 1;
-                // Constraints read the plain text; messages quote the source
-                // (ADR-063).
-                check_content_constraints(&source.plain_text(), source.as_str(), slot, diagnostics);
+                // Constraints read the plain text; messages quote the
+                // heading's markdown.
+                let quoted = crate::inline::heading_source_text(content, marker.as_ref());
+                check_content_constraints(&content.plain_text(), &quoted, slot, diagnostics);
             } else {
                 diagnostics.push(ValidationDiagnostic {
                     severity: Severity::Error,
@@ -848,8 +848,8 @@ fn validate_body(
 ) {
     if let Some(heading_range) = &body_rules.heading_range {
         for spanned in elements.iter() {
-            if let ContentElement::Heading { level, source } = &spanned.node {
-                let text = source.as_str();
+            if let ContentElement::Heading { level, content, marker } = &spanned.node {
+                let text = crate::inline::heading_source_text(content, marker.as_ref());
                 let in_range = level.value() >= heading_range.min.value()
                     && level.value() <= heading_range.max.value();
                 if !in_range {
@@ -860,7 +860,7 @@ fn validate_body(
                             level.value(),
                             heading_range.min.value(),
                             heading_range.max.value(),
-                            text
+                            text.as_str()
                         ),
                         slot: None,
                         span: None,

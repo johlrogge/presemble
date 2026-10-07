@@ -8,6 +8,7 @@
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use schema::HeadingLevel;
 
+use crate::document::SlotMarker;
 use crate::parser::MARKDOWN_OPTIONS;
 
 mod model;
@@ -85,9 +86,74 @@ impl AsPlainText for MarkdownText {
     }
 }
 
-/// The ATX heading line for `source` at `level`: `#`×level, a space, and the
-/// canonical source (one line, trimmed, closing `#` run escaped).
-pub fn heading_markdown(level: HeadingLevel, source: &MarkdownText) -> String {
+/// The ATX heading line for a heading: `#`×level, a space, the canonical
+/// inlines (ADR-059 C10 at line starts, a closing `#` run escaped), and
+/// ` {#marker}` when there is a marker.
+pub fn heading_markdown(
+    level: HeadingLevel,
+    content: &Inlines,
+    marker: Option<&SlotMarker>,
+) -> String {
+    format!(
+        "{} {}",
+        "#".repeat(usize::from(level.value())),
+        heading_source_text(content, marker)
+    )
+}
+
+/// What follows the `#` markers of a heading line: the canonical inlines and
+/// the marker. A heading that is only a marker is written `{#name}`.
+pub(crate) fn heading_source_text(content: &Inlines, marker: Option<&SlotMarker>) -> String {
+    let text = serialize_inlines(content, InlineContext::Heading);
+    match marker {
+        None => text,
+        Some(marker) if text.is_empty() => format!("{{#{marker}}}"),
+        Some(marker) => format!("{text} {{#{marker}}}"),
+    }
+}
+
+/// Read the markdown source of a heading line's content (no `#` markers) as
+/// inlines and a marker: a trailing `{#name}` that follows a space, or a
+/// source that is only `{#name}`, is the marker (a code span or an escaped
+/// `\{#name}` is literal). `None` when what remains does not read as exactly
+/// one heading's content.
+pub(crate) fn read_heading_source(source: &str) -> Option<(Inlines, Option<SlotMarker>)> {
+    let source = source.trim_matches([' ', '\t']);
+    // One line: a line break is not part of a heading's content here (the
+    // stage 4b edit operations decide what a newline in a heading means).
+    if source.contains(['\n', '\r']) {
+        return None;
+    }
+    let (rest, marker) = split_heading_marker(source);
+    let content = parse_inlines(rest, InlineContext::Heading).ok()?;
+    Some((content, marker))
+}
+
+/// The fallback for a source that does not read as one heading's content: the
+/// whole source as one text value, no marker. Nothing is lost, and a later
+/// write-back shows that it does not round-trip.
+pub(crate) fn literal_heading_content(source: &str) -> (Inlines, Option<SlotMarker>) {
+    (Inlines::new(vec![Inline::Text(source.to_string())], InlineContext::Heading), None)
+}
+
+fn split_heading_marker(source: &str) -> (&str, Option<SlotMarker>) {
+    if let Some((expression, name)) = crate::link_expression::split_marker(source)
+        && let Some(marker) = SlotMarker::new(name)
+    {
+        return (expression, Some(marker));
+    }
+    if let Some(name) = crate::link_expression::bare_marker(source)
+        && let Some(marker) = SlotMarker::new(name)
+    {
+        return ("", Some(marker));
+    }
+    (source, None)
+}
+
+/// The ATX heading line for the markdown `source` at `level`: `#`×level, a
+/// space, and the canonical source (one line, trimmed, closing `#` run
+/// escaped). Text to text; nothing is parsed into nodes.
+pub fn heading_line_for_source(level: HeadingLevel, source: &MarkdownText) -> String {
     format!(
         "{} {}",
         "#".repeat(usize::from(level.value())),
@@ -108,7 +174,7 @@ fn canonical_heading_source(source: &str) -> String {
 const H1_PREFIX_LEN: usize = 2;
 
 fn h1_line(source: &MarkdownText) -> String {
-    heading_markdown(HeadingLevel::new(1).expect("1 is a heading level"), source)
+    heading_line_for_source(HeadingLevel::new(1).expect("1 is a heading level"), source)
 }
 
 /// The inline events of `source` read as a heading's content: the events
@@ -293,11 +359,72 @@ mod tests {
     }
 
     #[test]
-    fn heading_markdown_writes_one_canonical_line() {
-        assert_eq!(heading_markdown(h(2), &"Title".into()), "## Title");
-        assert_eq!(heading_markdown(h(1), &" a\r\nb\rc\nd\t".into()), "# a b c d");
-        assert_eq!(heading_markdown(h(1), &"Title #".into()), "# Title \\#");
-        assert_eq!(heading_markdown(h(1), &"C#".into()), "# C#");
+    fn heading_line_for_source_writes_one_canonical_line() {
+        assert_eq!(heading_line_for_source(h(2), &"Title".into()), "## Title");
+        assert_eq!(heading_line_for_source(h(1), &" a\r\nb\rc\nd\t".into()), "# a b c d");
+        assert_eq!(heading_line_for_source(h(1), &"Title #".into()), "# Title \\#");
+        assert_eq!(heading_line_for_source(h(1), &"C#".into()), "# C#");
+    }
+
+    #[test]
+    fn heading_markdown_writes_content_and_marker() {
+        let content = |s: &str| parse_inlines(s, InlineContext::Heading).unwrap();
+        assert_eq!(heading_markdown(h(2), &content("Title *x*"), None), "## Title *x*");
+        assert_eq!(heading_markdown(h(1), &content("Title \\#"), None), "# Title \\#");
+        let marker = SlotMarker::new("intro").unwrap();
+        assert_eq!(heading_markdown(h(2), &content("Intro"), Some(&marker)), "## Intro {#intro}");
+        assert_eq!(heading_markdown(h(2), &content(""), Some(&marker)), "## {#intro}");
+        // A literal trailing marker is written escaped.
+        assert_eq!(heading_markdown(h(2), &content("Intro \\{#x}"), None), "## Intro \\{#x}");
+    }
+
+    #[test]
+    fn heading_marker_is_structural() {
+        let (content, marker) = read_heading_source("Intro {#intro}").unwrap();
+        assert_eq!(content.as_slice(), &[Inline::Text("Intro".to_string())]);
+        assert_eq!(marker.as_ref().map(SlotMarker::as_str), Some("intro"));
+        let (content, marker) = read_heading_source("Intro \\{#x}").unwrap();
+        assert_eq!(content.as_slice(), &[Inline::Text("Intro {#x}".to_string())]);
+        assert_eq!(marker, None);
+        let (content, marker) = read_heading_source("{#only}").unwrap();
+        assert!(content.is_empty());
+        assert_eq!(marker.as_ref().map(SlotMarker::as_str), Some("only"));
+    }
+
+    /// The release-build fallback, tested on the function itself: the parser's
+    /// `debug_assert` would fire in a debug build, so the failure is built
+    /// directly. A source with a line break is not one heading's content.
+    #[test]
+    fn unreadable_heading_source_falls_back_to_literal_text_in_release() {
+        let source = "x {#m}\ny";
+        assert!(read_heading_source(source).is_none(), "the source does not read");
+        let (content, marker) = literal_heading_content(source);
+        // Everything is kept as one text value, the marker text included; a
+        // line break is a space in a heading's nodes (ADR-059 N5).
+        assert_eq!(content.as_slice(), &[Inline::Text("x {#m} y".to_string())]);
+        assert_eq!(marker, None);
+        // `heading_from_markdown` takes the same fallback.
+        let el = crate::ContentElement::heading_from_markdown(h(2), source);
+        assert_eq!(
+            el,
+            crate::ContentElement::Heading { level: h(2), content, marker: None }
+        );
+    }
+
+    #[test]
+    fn heading_with_block_syntax_is_inline_text() {
+        let (content, marker) = read_heading_source("1. Intro").unwrap();
+        assert_eq!(content.as_slice(), &[Inline::Text("1. Intro".to_string())]);
+        assert_eq!(marker, None);
+    }
+
+    #[test]
+    fn heading_plain_text_vectors_unchanged() {
+        for (source, expected) in vectors("plain") {
+            let content = parse_inlines(&source, InlineContext::Heading)
+                .unwrap_or_else(|_| panic!("{source:?} reads as a heading"));
+            assert_eq!(content.plain_text(), expected.as_str().unwrap(), "plain text of {source:?}");
+        }
     }
 
     #[test]

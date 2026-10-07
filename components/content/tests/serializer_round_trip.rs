@@ -280,7 +280,7 @@ fn gen_heading(rng: &mut Rng) -> ContentElement {
         }
         _ => gen_opener_text(rng, false),
     };
-    ContentElement::Heading { level, source: canonical_heading_source(&text).into() }
+    ContentElement::heading_from_markdown(level, &canonical_heading_source(&text))
 }
 
 fn gen_code(rng: &mut Rng) -> ContentElement {

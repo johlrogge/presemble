@@ -117,7 +117,7 @@ pub fn block_addresses(
     };
 
     let heading_text = |el: &ContentElement| match el {
-        ContentElement::Heading { source, .. } => Some(source.plain_text()),
+        ContentElement::Heading { content, .. } => Some(content.plain_text()),
         _ => None,
     };
     let mut heading_counts: HashMap<String, usize> = HashMap::new();
@@ -162,7 +162,7 @@ mod tests {
     use schema::HeadingLevel;
 
     fn h(source: &str) -> ContentElement {
-        ContentElement::Heading { level: HeadingLevel::new(2).unwrap(), source: source.into() }
+        ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), source)
     }
 
     fn p(text: &str) -> ContentElement {

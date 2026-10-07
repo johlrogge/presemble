@@ -309,18 +309,21 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
         match &slot.element {
             Element::Heading { .. } => {
                 if let Some(spanned) = elements.front()
-                    && let ContentElement::Heading { source, .. } = &spanned.node
+                    && let ContentElement::Heading { content, .. } = &spanned.node
                 {
                     insert_editor(&mut graph, &slot_key, elements, vec![0], true);
                     // The stored source, which the browser editor edits (ADR-063).
                     if editorial {
                         let stored_key =
                             format!("{}{slot_key}", crate::constants::KEY_STORED_TEXT_PREFIX);
-                        graph.insert(stored_key, Value::Text(source.to_string()));
+                        // stage 4d removes the stored-text keys.
+                        #[allow(deprecated)]
+                        let source = spanned.node.heading_source().unwrap_or_default();
+                        graph.insert(stored_key, Value::Text(source));
                     }
                     // Templates get the plain text until heading slots render
                     // inline nodes (ADR-064).
-                    graph.insert(slot_key, Value::Text(source.plain_text()));
+                    graph.insert(slot_key, Value::Text(content.plain_text()));
                 }
             }
 
@@ -908,7 +911,7 @@ mod tests {
     fn body_nodes_elements_have_data_presemble_slot_body() {
         let elements: im::Vector<_> = vec![
             spanned(ContentElement::Paragraph { text: "para".to_string() }),
-            spanned(ContentElement::Heading { level: schema::HeadingLevel::new(3).unwrap(), source: "head".into() }),
+            spanned(ContentElement::heading_from_markdown(schema::HeadingLevel::new(3).unwrap(), "head")),
         ].into_iter().collect();
         let html = body_html(&elements, false);
         assert!(
@@ -1128,10 +1131,10 @@ mod tests {
             preamble: im::vector![
                 DocumentSlot {
                     name: SlotName::new("title"),
-                    elements: vector![spanned(ContentElement::Heading {
-                        level: schema::HeadingLevel::new(1).unwrap(),
-                        source: "My Page".into(),
-                    })],
+                    elements: vector![spanned(ContentElement::heading_from_markdown(
+                        schema::HeadingLevel::new(1).unwrap(),
+                        "My Page",
+                    ))],
                 },
                 DocumentSlot {
                     name: SlotName::new("related"),
@@ -1363,10 +1366,10 @@ mod tests {
 
     #[test]
     fn body_heading_with_inline_markdown_renders_correctly() {
-        let heading = spanned(ContentElement::Heading {
-            level: schema::HeadingLevel::new(3).unwrap(),
-            source: "Section with *emphasis*".into(),
-        });
+        let heading = spanned(ContentElement::heading_from_markdown(
+            schema::HeadingLevel::new(3).unwrap(),
+            "Section with *emphasis*",
+        ));
         let html = body_html(&im::vector![heading], false);
         assert!(
             html.contains("<h3"),
@@ -1392,10 +1395,10 @@ mod tests {
 
     #[test]
     fn body_heading_literal_html_renders_escaped() {
-        let heading = spanned(ContentElement::Heading {
-            level: schema::HeadingLevel::new(2).unwrap(),
-            source: "<script>x</script>".into(),
-        });
+        let heading = spanned(ContentElement::heading_from_markdown(
+            schema::HeadingLevel::new(2).unwrap(),
+            "<script>x</script>",
+        ));
         let html = body_html(&im::vector![heading], false);
         assert!(!html.contains("<script"), "heading HTML must not be rendered; got: {html}");
         assert!(html.contains("&lt;script&gt;"), "heading HTML must render escaped; got: {html}");
