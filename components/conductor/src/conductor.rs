@@ -41,6 +41,21 @@ fn stem_root_lists(stem_roots: &StemRoots) -> HashMap<String, Vec<node_store::No
 // the server emits.
 pub(crate) use content::clj_str;
 
+/// What running a NED program changed (see [`Conductor::run_ned_program`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgramOutcome {
+    /// Files of the documents the program changed, marked dirty.
+    pub dirty_paths: Vec<PathBuf>,
+    /// URLs of the pages re-rendered.
+    pub rebuilt_pages: Vec<String>,
+    /// URLs of the pages that failed to re-render.
+    pub failed_pages: Vec<String>,
+    /// How many steps changed something.
+    pub applied: usize,
+    /// How many steps were already in place and dropped from the plan.
+    pub skipped: usize,
+}
+
 /// The result of handling a command: a response to send back, plus
 /// zero or more events to broadcast to all subscribers.
 pub struct CommandResult {
@@ -2030,7 +2045,7 @@ impl Conductor {
     ///
     /// The superseded root drops out of every `:kind "document"` query
     /// (`doc-by-path`, `by-url`, `by-stem`, `posts`, `all-documents`,
-    /// `source-docs-of`, and the Rust `source_docs_of`). All attributes and
+    /// `source-docs-of`, and `content_store::edit::resolve`). All attributes and
     /// edges are kept, so stale references from other pages still read a
     /// correct `url` / `file`. Wave 1 reclaims the subtree.
     ///
@@ -2475,10 +2490,16 @@ impl Conductor {
     /// separately in `editor_server`, a base; components cannot depend on bases,
     /// so those are not available here. Phase C may lift them into a shared
     /// component (`evaluator_bridge`) if MCP needs them.
-    pub(crate) fn make_ned_root(&self) -> Result<evaluator::RootEnv, String> {
+    ///
+    /// The mutating builtins record into `recorder` and write nothing; run the
+    /// program with [`Conductor::run_ned_program`].
+    pub(crate) fn make_ned_root(
+        &self,
+        recorder: &evaluator::ned_primitives::PlanRecorder,
+    ) -> Result<evaluator::RootEnv, String> {
         let root = evaluator::RootEnv::new();
         evaluator::init_root(&root).map_err(|e| format!("evaluator init failed: {e}"))?;
-        evaluator::ned_primitives::register_ned_builtins(&root, self.node_store());
+        evaluator::ned_primitives::register_ned_builtins(&root, self.node_store(), recorder);
         evaluator::load_ned_prelude(&root).map_err(|e| format!("ned prelude failed: {e}"))?;
         Ok(root)
     }
@@ -2807,117 +2828,81 @@ impl Conductor {
         }
     }
 
-    /// Walk the NodeStore upward from each node in `sel`, collecting every
-    /// ancestor (and the nodes themselves) that is an `Element("document")`.
+    /// Run a NED program as a plan (select-then-apply, ADR-059 stage 2e).
     ///
-    /// This is the Rust mirror of the `ned/source-docs-of` prelude function.
-    /// We do it in Rust to avoid needing to pass the evaluation result back
-    /// through the evaluator.
-    pub(crate) fn source_docs_of(&self, sel: &ned::Selection) -> Vec<node_store::NodeId> {
-        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let mut doc_roots: Vec<node_store::NodeId> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+    /// `root` is a root built with [`Conductor::make_ned_root`] around
+    /// `recorder` (or one that registers the NED builtins with it). The
+    /// program is evaluated with no store lock held: its queries see the
+    /// store as it is now, and its mutating builtins only record. The
+    /// recorded plan then runs under one write lock with
+    /// `content_store::edit::execute`: all of it, or nothing. The changed
+    /// documents are marked dirty and their pages re-rendered.
+    ///
+    /// Returns the program's value and what changed. An evaluation error
+    /// (nothing is applied) is `eval error: ...`; a refused step is the
+    /// `PlanError` text, e.g. `step 2 (ned/set-text): ...`.
+    pub fn run_ned_program(
+        &self,
+        root: &evaluator::RootEnv,
+        recorder: &evaluator::ned_primitives::PlanRecorder,
+        code: &str,
+    ) -> Result<(template::Value, ProgramOutcome), String> {
+        // The primitives take their own read locks: hold none here.
+        let value = evaluator::eval_str_with_root(code, root)
+            .map_err(|e| format!("eval error: {e}"))?;
 
-        for start_id in sel.iter() {
-            // BFS upward: walk parent chain until we hit a document root.
-            let mut frontier = vec![start_id];
-            while let Some(id) = frontier.pop() {
-                if !seen.insert(id) {
-                    continue;
-                }
-                if let Some(node_store::Node::Element(name)) = store.get(id)
-                    && store.resolve_name(*name) == DOCUMENT_KIND
-                {
-                    doc_roots.push(id);
-                    // Don't walk further up from a document root.
-                    continue;
-                }
-                for parent in store.parents(id) {
-                    frontier.push(parent);
-                }
-            }
+        let plan = recorder.take();
+        if plan.is_empty() {
+            return Ok((value, ProgramOutcome::default()));
         }
+        let steps = plan.len();
 
-        doc_roots.sort();
-        doc_roots.dedup();
-        doc_roots
+        let (dirty_paths, skipped) = {
+            let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+            let executed = edit::execute(&mut store, plan).map_err(|e| e.to_string())?;
+            // Documents without a file (synthetic roots) have nothing to save.
+            let paths: Vec<PathBuf> = executed
+                .documents
+                .iter()
+                .filter_map(|doc| {
+                    node_store_bridge::content_bridge::find_attr_text(&store, *doc, "file")
+                })
+                .filter(|file| !file.is_empty())
+                .map(PathBuf::from)
+                .collect();
+            (paths, executed.skipped.len())
+        };
+
+        let (rebuilt_pages, failed_pages) = if dirty_paths.is_empty() {
+            (vec![], vec![])
+        } else {
+            self.mark_dirty_and_rebuild(&dirty_paths)
+        };
+        Ok((
+            value,
+            ProgramOutcome { dirty_paths, rebuilt_pages, failed_pages, applied: steps - skipped, skipped },
+        ))
     }
 
-    /// Evaluate a NED program string against the current NodeStore.
+    /// Run a NED program for `/apply` (see [`Conductor::run_ned_program`]).
     ///
-    /// # Locking invariant
-    /// The evaluator's NED primitives acquire their own read/write locks on the
-    /// shared `Arc<RwLock<NodeStore>>`.  This method MUST NOT hold any outer
-    /// lock on the store when calling `eval_str_with_root`; doing so would
-    /// deadlock. All store reads/writes here are performed before or after the
-    /// eval call, never while the eval is in progress.
-    ///
-    /// Returns `(response, events)`.
+    /// The response shape is unchanged: `Response::Applied` with the number of
+    /// dirty documents, or `Response::Error` with why the program was
+    /// refused.
     fn apply_ned_program(&self, program: &str) -> CommandResult {
         // Build the evaluator root — does not hold any store lock.
-        let root = match self.make_ned_root() {
+        let recorder = evaluator::ned_primitives::PlanRecorder::new();
+        let root = match self.make_ned_root(&recorder) {
             Ok(r) => r,
             Err(e) => return CommandResult::error(format!("evaluator init: {e}")),
         };
-
-        // Evaluate — the primitives acquire their own locks internally.
-        let value = match evaluator::eval_str_with_root(program, &root) {
-            Ok(v) => v,
-            Err(e) => return CommandResult::error(format!("eval error: {e}")),
+        let outcome = match self.run_ned_program(&root, &recorder, program) {
+            Ok((_value, outcome)) => outcome,
+            Err(e) => return CommandResult::error(e),
         };
 
-        // Extract a Selection from the result (if any).
-        // If the program returned something other than a Selection, treat as
-        // a successful query with no dirty docs (no mutation occurred).
-        let sel = match evaluator::ned_primitives::extract_selection(&value) {
-            Ok(s) => s,
-            Err(_) => {
-                // Non-Selection result: program ran successfully, nothing is dirty.
-                return CommandResult::with_response(Response::Applied {
-                    rebuilt_pages: vec![],
-                    failed_pages: vec![],
-                    dirty_paths: 0,
-                });
-            }
-        };
-
-        // Determine dirty document roots from the returned selection.
-        let dirty_roots = self.source_docs_of(&sel);
-
-        if dirty_roots.is_empty() {
-            // Selection exists but contains no document-rooted nodes — nothing dirty.
-            return CommandResult::with_response(Response::Applied {
-                rebuilt_pages: vec![],
-                failed_pages: vec![],
-                dirty_paths: 0,
-            });
-        }
-
-        // Collect file paths from document root attributes.
-        // Roots without a file attr (synthetic roots, e.g. root index) are skipped.
-        let dirty_paths: Vec<PathBuf> = {
-            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-            dirty_roots
-                .iter()
-                .filter_map(|root_id| {
-                    node_store_bridge::content_bridge::find_attr_text(&store, *root_id, "file")
-                })
-                .filter(|file_attr| !file_attr.is_empty())
-                .map(PathBuf::from)
-                .collect()
-        };
-
-        if dirty_paths.is_empty() {
-            return CommandResult::with_response(Response::Applied {
-                rebuilt_pages: vec![],
-                failed_pages: vec![],
-                dirty_paths: 0,
-            });
-        }
-
-        // Mark dirty and rebuild pages for modified nodes.
-        let (rebuilt_urls, failed_urls) = self.mark_dirty_and_rebuild(&dirty_paths);
-
+        let ProgramOutcome { dirty_paths, rebuilt_pages: rebuilt_urls, failed_pages: failed_urls, .. } =
+            outcome;
         let dirty_path_count = dirty_paths.len();
         let mut events = Vec::new();
         if !rebuilt_urls.is_empty() {
@@ -4857,7 +4842,9 @@ mod update_document_in_store_tests {
     }
 
     fn eval_count(conductor: &Conductor, program: &str) -> i64 {
-        let root = conductor.make_ned_root().expect("make_ned_root");
+        let root = conductor
+            .make_ned_root(&evaluator::ned_primitives::PlanRecorder::new())
+            .expect("make_ned_root");
         match evaluator::eval_str_with_root(program, &root) {
             Ok(template::Value::Integer(n)) => n,
             other => panic!("expected Integer from {program}, got {other:?}"),
@@ -5676,7 +5663,9 @@ mod creation_check_tests {
         assert!(err.contains("could not be evaluated"), "{err}");
         no_suggestions_persisted(&conductor, &tmp);
 
-        let root = conductor.make_ned_root().expect("root");
+        let root = conductor
+            .make_ned_root(&evaluator::ned_primitives::PlanRecorder::new())
+            .expect("root");
         let count = evaluator::eval_str_with_root(
             r#"(ned/count (ned/doc-by-path "content/test/doc.md"))"#,
             &root,
@@ -6610,6 +6599,27 @@ mod suggestion_accept_tests {
         let pages = accepted_pages(&result);
         assert!(!pages.is_empty(), "accepted event must list rebuilt pages");
         assert!(pages.contains(&"/post/first".to_string()), "pages: {pages:?}");
+    }
+
+    /// The entry the nREPL uses: a root of the caller's making and its own
+    /// recorder. Marks the changed document dirty and re-renders its page.
+    #[test]
+    fn run_ned_program_marks_dirty_and_rebuilds() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let recorder = evaluator::ned_primitives::PlanRecorder::new();
+        let root = conductor.make_ned_root(&recorder).expect("root");
+        let program = format!(r#"(ned/set-text {TITLE_TEXT} "Renamed Post")"#);
+
+        let (value, outcome) = conductor.run_ned_program(&root, &recorder, &program).expect("runs");
+
+        assert!(matches!(value, template::Value::Absent), "{value:?}");
+        assert_eq!(outcome.dirty_paths, vec![PathBuf::from(FILE)]);
+        assert_eq!((outcome.applied, outcome.skipped), (1, 0));
+        assert!(outcome.rebuilt_pages.contains(&"/post/first".to_string()), "{outcome:?}");
+        assert!(outcome.failed_pages.is_empty(), "{outcome:?}");
+        assert!(is_dirty(&conductor));
+        assert_eq!(title(&conductor), "Renamed Post");
     }
 
     #[test]
@@ -7580,6 +7590,254 @@ mod apply_ned_program_diagnostic_tests {
             Response::Error(e) => panic!("unexpected error from apply_ned_program: {e}"),
             other => panic!("expected Response::Applied, got: {other:?}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NED programs are plans (ADR-059 stage 2e): select against the store as it
+// was before the program, then apply all or nothing.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod ned_program_plan_tests {
+    use super::*;
+    use content::{ContentElement, Document, DocumentSlot};
+    use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+    use schema::{HeadingLevel, SlotName, Span, Spanned};
+
+    const FILE: &str = "content/test/doc.md";
+    const OTHER: &str = "content/test/other.md";
+    const TITLE_TEXT: &str =
+        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+    const OTHER_TITLE_TEXT: &str =
+        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/other.md") "title")))"#;
+    const BODY: &str = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "body")"#;
+    const SUMMARY: &str = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "summary")"#;
+
+    fn spanned(node: ContentElement) -> Spanned<ContentElement> {
+        Spanned { node, span: Span { start: 0, end: 0 } }
+    }
+
+    fn p(text: &str) -> Spanned<ContentElement> {
+        spanned(ContentElement::Paragraph { text: text.to_string() })
+    }
+
+    fn title(text: &str) -> DocumentSlot {
+        DocumentSlot {
+            name: SlotName::new("title"),
+            elements: im::vector![spanned(ContentElement::Heading {
+                level: HeadingLevel::new(1).unwrap(),
+                source: text.into(),
+            })],
+        }
+    }
+
+    fn add_doc(conductor: &Conductor, file: &str, url: &str, doc: Document) {
+        let meta = DocumentMeta {
+            url: url.to_string(),
+            stem: "test".to_string(),
+            file: file.to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut store = conductor.node_store.write().unwrap();
+        document_to_store(&doc, &mut store, Some(&meta));
+    }
+
+    /// `content/test/doc.md`: title "Test Title"; summary "One", "Two"; body
+    /// "Alpha and Alpha", "Beta". `content/test/other.md`: title "Other Title".
+    fn make_conductor() -> (Conductor, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
+        std::fs::create_dir_all(root.join("templates/test")).expect("templates");
+        std::fs::create_dir_all(root.join("content/test")).expect("content");
+        std::fs::write(
+            root.join("schemas/test/item.md"),
+            "# Title {#title}\noccurs\n: exactly once\n",
+        )
+        .expect("schema");
+        std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").expect("template");
+        let repo = site_repository::SiteRepository::builder().from_dir(root).build();
+        let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
+
+        add_doc(
+            &conductor,
+            FILE,
+            "/test/doc",
+            Document {
+                preamble: im::vector![
+                    title("Test Title"),
+                    DocumentSlot {
+                        name: SlotName::new("summary"),
+                        elements: im::vector![p("One"), p("Two")],
+                    },
+                ],
+                body: im::vector![p("Alpha and Alpha"), p("Beta")],
+                has_separator: true,
+                separator_span: None,
+                unassigned: Default::default(),
+                comments: Default::default(),
+            },
+        );
+        add_doc(
+            &conductor,
+            OTHER,
+            "/test/other",
+            Document {
+                preamble: im::vector![title("Other Title")],
+                body: im::vector![],
+                has_separator: false,
+                separator_span: None,
+                unassigned: Default::default(),
+                comments: Default::default(),
+            },
+        );
+        (conductor, tmp)
+    }
+
+    /// Texts of the blocks under the element selected by `sel`.
+    fn block_texts(conductor: &Conductor, sel: &str) -> Vec<String> {
+        let value = evaluator::eval_str_with_root(
+            sel,
+            &conductor.make_ned_query_root().expect("query root"),
+        )
+        .expect("selection evaluates");
+        let sel = evaluator::ned_primitives::extract_selection(&value).expect("a selection");
+        let store = conductor.node_store.read().unwrap();
+        sel.iter()
+            .flat_map(|container| store.children(container))
+            .map(|block| match store.children(block).first().and_then(|t| store.get(*t)) {
+                Some(node_store::Node::Text(s)) => s.clone(),
+                other => panic!("expected a text child, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn applied(result: CommandResult) -> usize {
+        match result.response {
+            Response::Applied { dirty_paths, .. } => dirty_paths,
+            other => panic!("expected Response::Applied, got: {other:?}"),
+        }
+    }
+
+    fn refused(result: CommandResult) -> String {
+        match result.response {
+            Response::Error(e) => e,
+            other => panic!("expected Response::Error, got: {other:?}"),
+        }
+    }
+
+    fn unchanged(conductor: &Conductor) {
+        assert_eq!(block_texts(conductor, BODY), vec!["Alpha and Alpha", "Beta"]);
+        assert_eq!(block_texts(conductor, SUMMARY), vec!["One", "Two"]);
+        let title = block_texts(conductor, r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#);
+        assert_eq!(title, vec!["Test Title"]);
+    }
+
+    #[test]
+    fn apply_program_with_ambiguous_selection_applies_nothing() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(
+            r#"(ned/set-text (-> {SUMMARY} ned/descendants ned/texts) "X")"#
+        );
+        let e = refused(conductor.apply_ned_program(&program));
+        assert!(e.starts_with("step 1 (ned/set-text):"), "{e}");
+        assert!(e.contains("2 nodes"), "{e}");
+        unchanged(&conductor);
+    }
+
+    #[test]
+    fn apply_invalid_second_entry_applies_nothing() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(
+            r#"(do (ned/set-text {TITLE_TEXT} "Changed") (ned/insert-child {BODY} (ned/mk-element "wibble")))"#
+        );
+        let e = refused(conductor.apply_ned_program(&program));
+        assert!(e.starts_with("step 2 (ned/insert-child):"), "{e}");
+        unchanged(&conductor);
+    }
+
+    #[test]
+    fn apply_program_inserting_non_payload_element_is_refused() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(r#"(ned/insert-child {BODY} (ned/mk-element "wibble"))"#);
+        let e = refused(conductor.apply_ned_program(&program));
+        assert!(e.starts_with("step 1 (ned/insert-child):"), "{e}");
+        unchanged(&conductor);
+    }
+
+    #[test]
+    fn apply_search_replace_with_two_occurrences_is_refused() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(
+            r#"(ned/search-replace (ned/text-containing {BODY} "Alpha") "Alpha" "Gamma")"#
+        );
+        let e = refused(conductor.apply_ned_program(&program));
+        assert!(e.starts_with("step 1 (ned/search-replace):"), "{e}");
+        assert!(e.contains("2 times"), "{e}");
+        unchanged(&conductor);
+    }
+
+    #[test]
+    fn apply_eval_error_after_a_mutation_applies_nothing() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(r#"(do (ned/set-text {TITLE_TEXT} "x") (undefined-fn))"#);
+        let e = refused(conductor.apply_ned_program(&program));
+        assert!(e.starts_with("eval error:"), "{e}");
+        unchanged(&conductor);
+    }
+
+    #[test]
+    fn apply_query_only_program_dirties_nothing() {
+        let (conductor, _tmp) = make_conductor();
+        assert_eq!(
+            applied(conductor.apply_ned_program(r#"(ned/doc-by-path "content/test/doc.md")"#)),
+            0
+        );
+    }
+
+    #[test]
+    fn apply_delete_marks_its_document_dirty() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(
+            r#"(ned/delete (ned/nth-of-kind (ned/children {BODY}) "paragraph" 1))"#
+        );
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+        assert_eq!(block_texts(&conductor, BODY), vec!["Alpha and Alpha"]);
+    }
+
+    #[test]
+    fn dirty_documents_come_from_the_plan() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(
+            r#"(do (ned/set-text {TITLE_TEXT} "Changed") (ned/set-text {OTHER_TITLE_TEXT} "Other changed"))"#
+        );
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 2);
+    }
+
+    #[test]
+    fn apply_no_op_program_succeeds_with_nothing_dirty() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(r#"(ned/set-text {TITLE_TEXT} "Test Title")"#);
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 0);
+        unchanged(&conductor);
+    }
+
+    #[test]
+    fn selection_cannot_see_nodes_inserted_earlier_in_the_program() {
+        let (conductor, _tmp) = make_conductor();
+        let new_paragraph =
+            r#"(ned/with-child (ned/mk-element "paragraph") (ned/mk-text "New"))"#;
+        // Step 2 addresses "the paragraph at index 1". Select-then-apply reads
+        // the store as it was before the program: that is "Beta", not the
+        // paragraph step 1 inserts.
+        let program = format!(
+            r#"(do
+                 (ned/insert-after (ned/nth-of-kind (ned/children {BODY}) "paragraph" 0) {new_paragraph})
+                 (ned/set-text (ned/text-in (ned/nth-of-kind (ned/children {BODY}) "paragraph" 1)) "Z"))"#
+        );
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+        assert_eq!(block_texts(&conductor, BODY), vec!["Alpha and Alpha", "New", "Z"]);
     }
 }
 

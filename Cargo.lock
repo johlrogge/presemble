@@ -779,6 +779,7 @@ version = "0.35.0"
 dependencies = [
  "conductor",
  "content",
+ "content_store",
  "editorial_types",
  "edn",
  "expressions",

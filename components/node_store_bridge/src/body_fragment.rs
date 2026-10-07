@@ -1,66 +1,47 @@
-use content::{CommentAnchor, Container, ContentError};
-use node_store::{Edge, Node, NodeId, NodeStore};
+use content::ContentError;
+use content_store::{BlockDecodeError, block_to_tree};
+use ned::NodeTree;
 use schema::Grammar;
 
-use crate::content_bridge::content_element_to_store;
-
-/// Parse a markdown body fragment and ingest it into the node store.
+/// Parse a markdown body fragment into payload trees.
 ///
 /// The fragment may contain one or more body elements (headings, paragraphs,
 /// images, etc.) expressed as plain markdown — no separator (`----`) is needed.
 ///
-/// Returns the ordered list of top-level NodeIds produced. The nodes exist in
-/// the store but are **not linked to any parent**; the caller (e.g. NED
-/// `replace`) is responsible for wiring them into the graph.
-pub fn ingest_body_fragment(
-    src: &str,
-    grammar: &Grammar,
-    store: &mut NodeStore,
-) -> Result<Vec<NodeId>, ContentError> {
+/// Pure: the result describes blocks in the canonical store encoding and
+/// touches no store. A program writes them with `ned/replace`, `ned/insert-*`,
+/// which go through `content_store::edit`.
+///
+/// Refused, because a payload cannot carry them (ADR-062 D4, D5):
+/// - html blocks, separators and link expressions ("a {kind} cannot be written
+///   through a program");
+/// - comments (`NodeTree` has no trivia yet).
+pub fn parse_body_fragment(src: &str, grammar: &Grammar) -> Result<Vec<NodeTree>, ContentError> {
     // parse_and_assign requires a separator to separate preamble from body.
     // For a pure body fragment we wrap with a separator so the parser treats
     // everything as body elements and ignores any preamble inference.
     let wrapped = format!("----\n{src}");
     let doc = content::parse_and_assign(&wrapped, grammar)?;
 
-    // Every comment is the leading trivia of the block after it (ADR-062).
-    // A fragment that ends with a comment has no block to carry it.
-    let mut before: Vec<Vec<&str>> = vec![Vec::new(); doc.body.len()];
-    for c in &doc.comments {
-        match &c.anchor {
-            CommentAnchor::Before(Container::Body, at) if *at < doc.body.len() => {
-                before[*at].push(c.comment.node.as_str());
-            }
-            _ => {
-                return Err(ContentError::ParseError(
-                    "a comment must be followed by a block".to_string(),
-                ));
-            }
-        }
+    if !doc.comments.is_empty() {
+        return Err(ContentError::ParseError(
+            "comments in a parse-body fragment are not supported yet".to_string(),
+        ));
     }
 
-    let ids: Vec<NodeId> = doc
-        .body
+    doc.body
         .iter()
-        .zip(&before)
-        .map(|(spanned, comments)| {
-            let id = content_element_to_store(&spanned.node, store);
-            if !comments.is_empty() {
-                let trivia = ned::trivia::ensure_trivia_element(
-                    store,
-                    id,
-                    ned::trivia::ATTR_TRIVIA_BEFORE,
-                );
-                for comment in comments {
-                    let text = store.add_node(Node::Text(comment.to_string()));
-                    store.add_edge(trivia, Edge::Child(text));
-                }
-            }
-            id
+        .map(|spanned| {
+            block_to_tree(&spanned.node).map_err(|e| {
+                ContentError::ParseError(match e {
+                    BlockDecodeError::NotPayloadKind(kind) => {
+                        format!("a {kind} cannot be written through a program")
+                    }
+                    other => other.to_string(),
+                })
+            })
         })
-        .collect();
-
-    Ok(ids)
+        .collect()
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -69,206 +50,88 @@ pub fn ingest_body_fragment(
 mod tests {
     use super::*;
     use content::parse_and_assign;
-    use node_store::{Node, NodeStore};
-    use schema::Grammar;
-
-    use crate::content_bridge::{document_to_store, find_child_by_name};
 
     fn empty_grammar() -> Grammar {
         Grammar { preamble: vec![], body: None }
     }
 
-    fn element_name(store: &NodeStore, id: NodeId) -> Option<String> {
-        if let Some(Node::Element(name)) = store.get(id) {
-            Some(store.resolve_name(*name).to_string())
-        } else {
-            None
-        }
+    fn parse(src: &str) -> Vec<NodeTree> {
+        parse_body_fragment(src, &empty_grammar()).expect("should parse")
     }
 
-    fn first_child_text(store: &NodeStore, id: NodeId) -> Option<String> {
-        store.children(id).iter().find_map(|&cid| {
-            if let Some(Node::Text(s)) = store.get(cid) {
-                Some(s.clone())
-            } else {
-                None
-            }
-        })
+    fn paragraph(text: &str) -> NodeTree {
+        NodeTree::element("paragraph").with_child(NodeTree::text(text))
+    }
+
+    fn refusal(src: &str) -> String {
+        parse_body_fragment(src, &empty_grammar()).expect_err("refused").to_string()
     }
 
     #[test]
-    fn fragment_comments_attach_to_the_following_block() {
-        let mut store = NodeStore::new();
-        let ids = ingest_body_fragment(
-            "<!-- a -->\n\nOne.\n\n<!-- b -->\n<!-- c -->\n\nTwo.\n",
-            &empty_grammar(),
-            &mut store,
-        )
-        .expect("should parse");
-        assert_eq!(ids.len(), 2, "comments are not blocks");
-        let comments = |id| -> Vec<String> {
-            ned::trivia::trivia_texts(&store, id, ned::trivia::ATTR_TRIVIA_BEFORE)
-                .into_iter()
-                .map(|t| match store.get(t) {
-                    Some(Node::Text(s)) => s.clone(),
-                    other => panic!("{other:?}"),
-                })
-                .collect()
-        };
-        assert_eq!(comments(ids[0]), vec!["<!-- a -->"]);
-        assert_eq!(comments(ids[1]), vec!["<!-- b -->", "<!-- c -->"]);
-    }
-
-    #[test]
-    fn fragment_ending_with_a_comment_is_an_error() {
-        let mut store = NodeStore::new();
-        let err = ingest_body_fragment("One.\n\n<!-- last -->\n", &empty_grammar(), &mut store)
-            .expect_err("a trailing comment has no block");
-        assert!(err.to_string().contains("a comment must be followed by a block"), "{err}");
-    }
-
-    #[test]
-    fn ingests_single_paragraph() {
-        let grammar = empty_grammar();
-        let mut store = NodeStore::new();
-        let ids = ingest_body_fragment("Hello world\n", &grammar, &mut store)
-            .expect("should parse");
-        assert_eq!(ids.len(), 1, "expected exactly one element");
-        let id = ids[0];
-        assert_eq!(
-            element_name(&store, id).as_deref(),
-            Some("paragraph"),
-            "top-level element should be paragraph"
-        );
-        let text = first_child_text(&store, id);
-        assert_eq!(text.as_deref(), Some("Hello world"), "text should match");
-    }
-
-    #[test]
-    fn ingests_heading_and_paragraph() {
-        let grammar = empty_grammar();
-        let mut store = NodeStore::new();
-        let ids = ingest_body_fragment("# Title\n\nBody text\n", &grammar, &mut store)
-            .expect("should parse");
-        assert_eq!(ids.len(), 2, "expected heading + paragraph");
-
-        // First: heading
-        let heading_id = ids[0];
-        assert_eq!(
-            element_name(&store, heading_id).as_deref(),
-            Some("heading"),
-            "first element should be heading"
-        );
-        // Check :level attribute
-        let level = crate::content_bridge::find_attr_int(&store, heading_id, "level");
-        assert_eq!(level, Some(1), "heading level should be 1");
-
-        // Second: paragraph
-        let para_id = ids[1];
-        assert_eq!(
-            element_name(&store, para_id).as_deref(),
-            Some("paragraph"),
-            "second element should be paragraph"
-        );
-    }
-
-    #[test]
-    fn ingested_nodes_are_unparented() {
-        let grammar = empty_grammar();
-        let mut store = NodeStore::new();
-        let ids = ingest_body_fragment("# Title\n\nSome text\n", &grammar, &mut store)
-            .expect("should parse");
-        for id in &ids {
-            let parents = store.parents(*id);
+    fn fragments_with_comments_are_refused() {
+        for src in ["<!-- a -->\n\nOne.\n", "One.\n\n<!-- last -->\n"] {
+            let err = refusal(src);
             assert!(
-                parents.is_empty(),
-                "node {id:?} should have no parents but has: {parents:?}"
+                err.contains("comments in a parse-body fragment are not supported yet"),
+                "{src:?}: {err}"
             );
         }
     }
 
     #[test]
-    fn ingests_multiple_paragraphs() {
-        let grammar = empty_grammar();
-        let mut store = NodeStore::new();
-        let ids = ingest_body_fragment("First paragraph\n\nSecond paragraph\n", &grammar, &mut store)
-            .expect("should parse");
-        assert_eq!(ids.len(), 2, "expected two paragraphs");
-        for id in &ids {
-            assert_eq!(
-                element_name(&store, *id).as_deref(),
-                Some("paragraph"),
-                "both elements should be paragraphs"
-            );
+    fn kinds_a_payload_cannot_carry_are_refused() {
+        for (src, kind) in [("<div>x</div>\n", "html-block"), ("One.\n\n---\n\nTwo.\n", "separator")] {
+            let err = refusal(src);
+            assert!(err.contains(&format!("a {kind} cannot be written through a program")), "{err}");
         }
-        let first_text = first_child_text(&store, ids[0]);
-        let second_text = first_child_text(&store, ids[1]);
-        assert_eq!(first_text.as_deref(), Some("First paragraph"));
-        assert_eq!(second_text.as_deref(), Some("Second paragraph"));
-    }
-
-    /// A malformed grammar-constraint violation. Since `parse_document` is
-    /// fairly permissive (pulldown_cmark never hard-fails), this test uses a
-    /// heading level that exceeds what the spec allows (> 6) to trigger an error.
-    /// If the parser is too lenient, we verify empty result instead.
-    #[test]
-    fn invalid_fragment_returns_error_or_empty() {
-        // pulldown_cmark is very permissive; a "####### H7" is just a paragraph.
-        // We test a heading level parse path by using a valid fragment — this
-        // test documents that we get Ok for any syntactically valid markdown.
-        let grammar = empty_grammar();
-        let mut store = NodeStore::new();
-        // This is valid markdown so we expect Ok
-        let result = ingest_body_fragment("Normal text\n", &grammar, &mut store);
-        assert!(result.is_ok(), "valid input should succeed");
     }
 
     #[test]
-    fn round_trip_equivalence() {
-        // Build a whole document with a separator so it has real body elements,
-        // then verify that ingest_body_fragment of the body-only portion produces
-        // identical element structure.
-        //
-        // The source includes a separator (----) so that assign_slots places the
-        // heading and paragraphs into doc.body rather than the preamble.
-        // The blank line before ---- ensures the separator is parsed as a
-        // horizontal rule (ContentElement::Separator) rather than a setext
-        // heading underline.
+    fn parses_single_paragraph() {
+        assert_eq!(parse("Hello world\n"), vec![paragraph("Hello world")]);
+    }
+
+    #[test]
+    fn parses_heading_and_paragraph() {
+        assert_eq!(
+            parse("# Title\n\nBody text\n"),
+            vec![
+                NodeTree::element("heading")
+                    .with_attr("level", "1")
+                    .with_child(NodeTree::text("Title")),
+                paragraph("Body text"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_multiple_paragraphs() {
+        assert_eq!(
+            parse("First paragraph\n\nSecond paragraph\n"),
+            vec![paragraph("First paragraph"), paragraph("Second paragraph")]
+        );
+    }
+
+    #[test]
+    fn parsed_trees_decode_as_payload_blocks() {
+        for tree in parse("# Title\n\nSome text\n\n```rust\nfn a() {}\n```\n") {
+            content_store::tree_to_block(&tree).expect("a payload block");
+        }
+    }
+
+    #[test]
+    fn fragment_matches_the_body_of_a_whole_document() {
+        // The same body, parsed as part of a whole document and as a fragment,
+        // gives the same blocks.
         let src = "Some preamble text.\n\n----\n\n# Introduction\n\nFirst paragraph.\n\nSecond paragraph.\n";
         let grammar = empty_grammar();
-
-        // Full document path
         let doc = parse_and_assign(src, &grammar).expect("full doc parse");
         assert_eq!(doc.body.len(), 3, "full doc should have 3 body elements");
-
-        let mut full_store = NodeStore::new();
-        let root = document_to_store(&doc, &mut full_store, None);
-        let body_node = find_child_by_name(&full_store, root, "body")
-            .expect("body node");
-        let full_body_ids = full_store.children(body_node);
-
-        // Fragment path — body only (no separator needed; ingest_body_fragment wraps it)
-        let body_src = "# Introduction\n\nFirst paragraph.\n\nSecond paragraph.\n";
-        let mut frag_store = NodeStore::new();
-        let frag_ids = ingest_body_fragment(body_src, &grammar, &mut frag_store)
-            .expect("fragment parse");
-
-        assert_eq!(
-            full_body_ids.len(),
-            frag_ids.len(),
-            "element count must match"
-        );
-
-        for (full_id, frag_id) in full_body_ids.iter().zip(frag_ids.iter()) {
-            // Compare element name
-            let full_name = element_name(&full_store, *full_id);
-            let frag_name = element_name(&frag_store, *frag_id);
-            assert_eq!(full_name, frag_name, "element names must match");
-
-            // Compare child text
-            let full_text = first_child_text(&full_store, *full_id);
-            let frag_text = first_child_text(&frag_store, *frag_id);
-            assert_eq!(full_text, frag_text, "element text must match");
-        }
+        let whole: Vec<NodeTree> =
+            doc.body.iter().map(|b| block_to_tree(&b.node).expect("payload")).collect();
+        let fragment =
+            parse_body_fragment("# Introduction\n\nFirst paragraph.\n\nSecond paragraph.\n", &grammar)
+                .expect("fragment parse");
+        assert_eq!(fragment, whole);
     }
 }

@@ -11,6 +11,7 @@ forms = { workspace = true }
 macros = { workspace = true }
 template = { workspace = true }
 content = { workspace = true }
+content_store = { workspace = true }
 expressions = { workspace = true }
 site_index = { workspace = true }
 editorial_types = { workspace = true }

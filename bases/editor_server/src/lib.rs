@@ -151,6 +151,26 @@ pub fn register_conductor_builtins(root: &evaluator::RootEnv, conductor: &Arc<Co
 
 }
 
+/// What an eval changed, for the nREPL's `out`: `None` when it changed and
+/// skipped nothing (a query).
+fn applied_message(outcome: &conductor::ProgramOutcome) -> Option<String> {
+    let (applied, skipped) = (outcome.applied, outcome.skipped);
+    if applied == 0 && skipped == 0 {
+        return None;
+    }
+    let mut message = format!("{applied} edit(s) applied");
+    if skipped > 0 {
+        message.push_str(&format!(", {skipped} already in place"));
+    }
+    if !outcome.rebuilt_pages.is_empty() {
+        message.push_str(&format!("; rebuilt: {}", outcome.rebuilt_pages.join(", ")));
+    }
+    if !outcome.failed_pages.is_empty() {
+        message.push_str(&format!("; failed: {}", outcome.failed_pages.join(", ")));
+    }
+    Some(message)
+}
+
 struct PresembleNreplHandler {
     conductor: Arc<Conductor>,
     doc_registry: evaluator::DocRegistry,
@@ -163,20 +183,28 @@ impl nrepl::NreplHandler for PresembleNreplHandler {
         let root = evaluator::RootEnv::new();
         evaluator::init_root(&root).map_err(|e| format!("init failed: {e}"))?;
         register_conductor_builtins(&root, &self.conductor);
-        evaluator::ned_primitives::register_ned_builtins(&root, self.conductor.node_store());
+        // Mutating builtins record into this eval's own plan: the conductor
+        // runs it (all or nothing), marks the documents dirty and re-renders.
+        let recorder = evaluator::ned_primitives::PlanRecorder::new();
+        evaluator::ned_primitives::register_ned_builtins(
+            &root,
+            self.conductor.node_store(),
+            &recorder,
+        );
         evaluator::load_ned_prelude(&root).map_err(|e| format!("ned prelude failed: {e}"))?;
-        let value = evaluator::eval_str_with_root(code, &root)?;
+        let (value, outcome) = self.conductor.run_ned_program(&root, &recorder, code)?;
         let edn_str = edn::value_to_edn(&value);
+        let applied = applied_message(&outcome);
         // Multi-line text (e.g. from doc) is sent as nREPL "out" so the
         // client prints it directly instead of showing an EDN-escaped string.
-        if edn_str.starts_with('"') && edn_str.contains("\\n") {
+        if applied.is_none() && edn_str.starts_with('"') && edn_str.contains("\\n") {
             let text = edn_str.trim_matches('"').replace("\\n", "\n");
             return Ok(nrepl::EvalResult {
                 value: "nil".to_string(),
                 out: Some(text),
             });
         }
-        Ok(nrepl::EvalResult { value: edn_str, out: None })
+        Ok(nrepl::EvalResult { value: edn_str, out: applied })
     }
 
     fn completions(&self, _session: &str, prefix: &str) -> Vec<nrepl::CompletionEntry> {
@@ -222,7 +250,11 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
         evaluator::register_macro_docs(&root.doc_registry);
         // Register NED builtins for completions (uses a temporary empty store)
         let temp_store = Arc::new(RwLock::new(node_store::NodeStore::new()));
-        evaluator::ned_primitives::register_ned_builtins(&root, temp_store);
+        evaluator::ned_primitives::register_ned_builtins(
+            &root,
+            temp_store,
+            &evaluator::ned_primitives::PlanRecorder::new(),
+        );
         root.doc_registry.clone()
     };
 

@@ -10,7 +10,7 @@ pub mod graph_view_impl;
 pub mod slot_edit;
 pub mod block_edit;
 
-pub use body_fragment::ingest_body_fragment;
+pub use body_fragment::parse_body_fragment;
 pub use schema_document::synthesize_schema_document;
 pub use content_bridge::{
     BLOCK_KINDS, BlockDecodeError, DocumentDecodeError, DocumentMeta, PAYLOAD_BLOCK_KINDS,

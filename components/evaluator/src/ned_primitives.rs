@@ -1,4 +1,5 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use content_store::edit::{NedMutation, Plan, PlannedMutation};
 use template::Value;
 use node_store::{Node, NodeStore};
 use ned::Selection;
@@ -13,17 +14,6 @@ use crate::doc_registry::{DocEntry, DocSource};
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub fn extract_store(val: &Value) -> Result<Arc<RwLock<NodeStore>>, String> {
-    match val {
-        Value::Opaque(any) => {
-            any.downcast_ref::<Arc<RwLock<NodeStore>>>()
-                .cloned()
-                .ok_or_else(|| "expected a NodeStore".into())
-        }
-        _ => Err("expected a NodeStore".into()),
-    }
-}
-
 pub fn extract_selection(val: &Value) -> Result<Selection, String> {
     match val {
         Value::Opaque(any) => {
@@ -37,10 +27,6 @@ pub fn extract_selection(val: &Value) -> Result<Selection, String> {
 
 pub fn wrap_selection(sel: Selection) -> Value {
     Value::Opaque(Arc::new(sel))
-}
-
-pub fn wrap_store(store: Arc<RwLock<NodeStore>>) -> Value {
-    Value::Opaque(Arc::new(store))
 }
 
 pub fn extract_node_tree(val: &Value) -> Result<NodeTree, String> {
@@ -117,13 +103,42 @@ fn extract_non_negative_index(fn_name: &str, val: &Value) -> Result<usize, Strin
 // Registration entry point
 // ---------------------------------------------------------------------------
 
+/// The mutations a program asked for, in evaluation order (select-then-apply,
+/// ADR-059 stage 2e).
+///
+/// The planning builtins record into it instead of writing; the caller takes
+/// the [`Plan`] after evaluation and runs it with `content_store::edit::execute`.
+/// If evaluation fails, the caller drops the recorder and nothing is applied.
+#[derive(Debug, Clone, Default)]
+pub struct PlanRecorder(Arc<Mutex<Vec<PlannedMutation>>>);
+
+impl PlanRecorder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&self, step: PlannedMutation) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).push(step);
+    }
+
+    /// The recorded steps, leaving the recorder empty.
+    pub fn take(&self) -> Plan {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(|e| e.into_inner()))
+            .into_iter()
+            .collect()
+    }
+}
+
 /// Names of every builtin registered by [`register_ned_mutation_builtins`].
 ///
-/// These are the primitives that can write to the node store (or, in the case
-/// of `ned/store`, hand out the raw store handle that would allow writing).
-/// A root populated only by [`register_ned_query_builtins`] binds none of them.
+/// These are the builtins bound only in program roots, never in the
+/// query-only root that evaluates addresses (a root populated only by
+/// [`register_ned_query_builtins`] binds none of them).
+///
+/// All but `ned/parse-body` record plan steps; they write nothing themselves.
+/// `ned/parse-body` is pure: it is listed only because it has no use in an
+/// address. Whether it belongs in the query root is decided in 2e-2.
 pub const NED_MUTATING_BUILTINS: &[&str] = &[
-    "ned/store",
     "ned/set-text",
     "ned/search-replace",
     "ned/delete",
@@ -135,13 +150,14 @@ pub const NED_MUTATING_BUILTINS: &[&str] = &[
 ];
 
 /// Register all NED primitives (query and mutation) as core evaluator builtins.
-/// The store is shared via Arc<RwLock<NodeStore>>.
+/// The store is shared via Arc<RwLock<NodeStore>>; the mutating builtins
+/// record into `recorder` and never touch it.
 ///
 /// Equivalent to calling [`register_ned_query_builtins`] followed by
 /// [`register_ned_mutation_builtins`].
-pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
-    register_ned_query_builtins(root, store.clone());
-    register_ned_mutation_builtins(root, store);
+pub fn register_ned_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>, recorder: &PlanRecorder) {
+    register_ned_query_builtins(root, store);
+    register_ned_mutation_builtins(root, recorder);
 }
 
 /// Register the read-only NED primitives: selection constructors, traversal,
@@ -526,34 +542,48 @@ pub fn register_ned_query_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>
     });
 }
 
-/// Register the NED primitives that write to the node store (plus `ned/store`,
-/// which exposes the raw store handle). The registered names are exactly
-/// [`NED_MUTATING_BUILTINS`].
-pub fn register_ned_mutation_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>) {
-    // ── Store access ─────────────────────────────────────────────────────────
-
-    let s = store.clone();
-    reg(root, "ned/store", "(ned/store)", "Return the current node store.", move |_args| {
-        Ok(wrap_store(s.clone()))
+/// Register a builtin that records one planned mutation and returns `nil`.
+///
+/// The nodes a mutation creates do not exist while the program runs, so there
+/// is nothing to return: a program that feeds the result of one mutation into
+/// another builtin fails loudly ("expected a Selection").
+fn reg_planned(
+    root: &RootEnv,
+    recorder: &PlanRecorder,
+    name: &'static str,
+    sig: &str,
+    doc: &str,
+    build: impl Fn(Vec<Value>) -> Result<(Selection, NedMutation), String> + Send + Sync + 'static,
+) {
+    let recorder = recorder.clone();
+    reg(root, name, sig, doc, move |args| {
+        let (targets, mutation) = build(args)?;
+        recorder.record(PlannedMutation { targets, mutation, origin: name });
+        Ok(Value::Absent)
     });
+}
 
+/// Register the NED primitives that plan mutations, and `ned/parse-body`. The
+/// registered names are exactly [`NED_MUTATING_BUILTINS`].
+///
+/// The planning builtins write nothing: each records a [`PlannedMutation`] in
+/// `recorder` (the selection as it was when the program ran, and the
+/// mutation) and returns `nil`. Whether a selection addresses exactly one node
+/// of the right kind is decided later, by `content_store::edit::execute`.
+pub fn register_ned_mutation_builtins(root: &RootEnv, recorder: &PlanRecorder) {
     // ── Mutations ─────────────────────────────────────────────────────────────
 
-    let s = store.clone();
-    reg(root, "ned/set-text", "(ned/set-text sel text)", "Replace text content of selected Text nodes.", move |args| {
+    reg_planned(root, recorder, "ned/set-text", "(ned/set-text sel text)", "Plan: set the text of the one Text node sel addresses.", |args| {
         if args.len() < 2 { return Err("ned/set-text requires selection and text".into()); }
         let sel = extract_selection(&args[0])?;
         let text = match &args[1] {
             Value::Text(s) => s.clone(),
             _ => return Err("ned/set-text: second argument must be a string".into()),
         };
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::set_text(&mut st, &sel, &text);
-        Ok(wrap_selection(result))
+        Ok((sel, NedMutation::SetText(text)))
     });
 
-    let s = store.clone();
-    reg(root, "ned/search-replace", "(ned/search-replace sel search replace)", "Replace all occurrences of search with replace in every Text descendant of sel.", move |args| {
+    reg_planned(root, recorder, "ned/search-replace", "(ned/search-replace sel search replace)", "Plan: replace the one occurrence of search with replace in the one Text node sel addresses.", |args| {
         if args.len() < 3 { return Err("ned/search-replace requires selection, search, and replace".into()); }
         let sel = extract_selection(&args[0])?;
         let search = match &args[1] {
@@ -564,86 +594,57 @@ pub fn register_ned_mutation_builtins(root: &RootEnv, store: Arc<RwLock<NodeStor
             Value::Text(s) => s.clone(),
             _ => return Err("ned/search-replace: replace must be a string".into()),
         };
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        // The primitive returns its input selection; the replacement count is
-        // not surfaced to scripts.
-        ned::mutation::search_replace_text(&mut st, &sel, &search, &replace);
-        Ok(wrap_selection(sel))
+        Ok((sel, NedMutation::SearchReplace { search, replace }))
     });
 
-    let s = store.clone();
-    reg(root, "ned/delete", "(ned/delete sel)", "Delete selected nodes and their descendants.", move |args| {
+    reg_planned(root, recorder, "ned/delete", "(ned/delete sel)", "Plan: delete the one block sel addresses.", |args| {
         if args.is_empty() { return Err("ned/delete requires a selection".into()); }
-        let sel = extract_selection(&args[0])?;
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        // The primitive returns an empty selection; the removed-node count is
-        // not surfaced to scripts.
-        ned::mutation::delete(&mut st, &sel);
-        Ok(wrap_selection(Selection::new()))
+        Ok((extract_selection(&args[0])?, NedMutation::Delete))
     });
 
     // ── Tree-based mutation bindings ──────────────────────────────────────────
 
-    let s = store.clone();
-    reg(root, "ned/insert-child", "(ned/insert-child sel tree)", "Insert a NodeTree as the last child under selected elements.", move |args| {
+    reg_planned(root, recorder, "ned/insert-child", "(ned/insert-child sel tree)", "Plan: insert a NodeTree as the last child of the one body or slot sel addresses.", |args| {
         if args.len() < 2 { return Err("ned/insert-child requires selection and tree".into()); }
         let sel = extract_selection(&args[0])?;
         let tree = extract_node_tree(&args[1])?;
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::insert_child_tree(&mut st, &sel, tree);
-        Ok(wrap_selection(result))
+        Ok((sel, NedMutation::InsertChild(vec![tree])))
     });
 
-    let s = store.clone();
-    reg(root, "ned/insert-before", "(ned/insert-before sel tree)", "Insert a NodeTree before each selected node.", move |args| {
+    reg_planned(root, recorder, "ned/insert-before", "(ned/insert-before sel tree)", "Plan: insert a NodeTree before the one block sel addresses.", |args| {
         if args.len() < 2 { return Err("ned/insert-before requires selection and tree".into()); }
         let sel = extract_selection(&args[0])?;
         let tree = extract_node_tree(&args[1])?;
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::insert_before_tree(&mut st, &sel, tree);
-        Ok(wrap_selection(result))
+        Ok((sel, NedMutation::InsertBefore(vec![tree])))
     });
 
-    let s = store.clone();
-    reg(root, "ned/insert-after", "(ned/insert-after sel tree)", "Insert a NodeTree after each selected node.", move |args| {
+    reg_planned(root, recorder, "ned/insert-after", "(ned/insert-after sel tree)", "Plan: insert a NodeTree after the one block sel addresses.", |args| {
         if args.len() < 2 { return Err("ned/insert-after requires selection and tree".into()); }
         let sel = extract_selection(&args[0])?;
         let tree = extract_node_tree(&args[1])?;
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::insert_after_tree(&mut st, &sel, tree);
-        Ok(wrap_selection(result))
+        Ok((sel, NedMutation::InsertAfter(vec![tree])))
     });
 
-    let s = store.clone();
-    reg(root, "ned/replace", "(ned/replace sel trees)", "Replace selected nodes with a list of NodeTrees.", move |args| {
+    reg_planned(root, recorder, "ned/replace", "(ned/replace sel trees)", "Plan: replace the one block sel addresses with a list of NodeTrees.", |args| {
         if args.len() < 2 { return Err("ned/replace requires selection and list of trees".into()); }
         let sel = extract_selection(&args[0])?;
         let trees = extract_node_tree_list(&args[1])?;
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let result = ned::mutation::replace(&mut st, &sel, trees);
-        Ok(wrap_selection(result))
+        Ok((sel, NedMutation::Replace(trees)))
     });
 
-    // ── Body-fragment parsing (writes ingested nodes into the store) ──────────
+    // ── Body-fragment parsing (pure) ──────────────────────────────────────────
 
-    let s = store;
-    reg(root, "ned/parse-body", "(ned/parse-body md-source grammar)", "Parse a markdown body fragment into a list of NodeTrees (already stored).", move |args| {
+    reg(root, "ned/parse-body", "(ned/parse-body md-source grammar)", "Parse a markdown body fragment into a list of NodeTrees. Pure: nothing is written. html blocks, separators and comments are refused.", |args| {
         if args.len() < 2 { return Err("ned/parse-body requires markdown source and grammar".into()); }
         let md_src = match &args[0] {
             Value::Text(s) => s.clone(),
             _ => return Err("ned/parse-body: first argument must be a string".into()),
         };
         let grammar = extract_grammar(&args[1])?;
-        let mut st = s.write().map_err(|e| e.to_string())?;
-        let ids = node_store_bridge::ingest_body_fragment(&md_src, &grammar, &mut st)
+        let trees = node_store_bridge::parse_body_fragment(&md_src, &grammar)
             .map_err(|e| format!("ned/parse-body: {e}"))?;
-        let trees: Vec<Value> = ids
-            .into_iter()
-            .map(|id| wrap_node_tree(NodeTree::Existing(id)))
-            .collect();
-        Ok(Value::List(trees))
+        Ok(Value::List(trees.into_iter().map(wrap_node_tree).collect()))
     });
-
 }
 
 // ---------------------------------------------------------------------------
@@ -680,9 +681,36 @@ mod tests {
     }
 
     fn setup(store: Arc<RwLock<NodeStore>>) -> RootEnv {
+        setup_recording(store).0
+    }
+
+    /// A root whose planning builtins record into the returned recorder.
+    fn setup_recording(store: Arc<RwLock<NodeStore>>) -> (RootEnv, PlanRecorder) {
         let root = RootEnv::new();
-        register_ned_builtins(&root, store);
-        root
+        let recorder = PlanRecorder::new();
+        register_ned_builtins(&root, store, &recorder);
+        (root, recorder)
+    }
+
+    /// Evaluate `program` against `store` as a plan, then execute the plan
+    /// (select-then-apply, as the conductor does).
+    fn run(
+        store: &Arc<RwLock<NodeStore>>,
+        program: &str,
+    ) -> Result<content_store::edit::Executed, String> {
+        let root = RootEnv::new();
+        crate::init_root(&root).expect("core init failed");
+        let recorder = PlanRecorder::new();
+        register_ned_builtins(&root, store.clone(), &recorder);
+        crate::load_ned_prelude(&root).expect("ned prelude load failed");
+        crate::eval_str_with_root(program, &root)?;
+        let mut st = store.write().unwrap();
+        content_store::edit::execute(&mut st, recorder.take()).map_err(|e| e.to_string())
+    }
+
+    /// A Clojure string literal for `s`.
+    fn clj_str(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     }
 
     fn call(root: &RootEnv, name: &str, args: Vec<Value>) -> Result<Value, String> {
@@ -801,72 +829,65 @@ mod tests {
         assert_eq!(sel.len(), 2);
     }
 
-    #[test]
-    fn ned_set_text_mutates_store() {
-        let store = make_store_with_tree();
-        let root = setup(store.clone());
-        let all = call(&root, "ned/all", vec![]).unwrap();
-        let text_kw = Value::Keyword { namespace: None, name: "text".to_string() };
-        let texts_sel = call(&root, "ned/filter", vec![all, text_kw]).unwrap();
-        let new_text = Value::Text("Changed".to_string());
-        let result = call(&root, "ned/set-text", vec![texts_sel, new_text]).unwrap();
-        // result is a selection of modified nodes
-        let modified = match &result {
-            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
-            _ => panic!("expected Opaque"),
-        };
-        assert_eq!(modified.len(), 2); // both text nodes modified
+    // The "doc" the planning tests address: content/post/foo.md, body
+    // paragraphs "First", "Second", "Third" (see `make_doc_store`).
+    const FOO: &str = r#"(ned/doc-by-path "content/post/foo.md")"#;
+
+    /// The texts of foo's body blocks, in document order (a selection is a
+    /// set, so it cannot tell).
+    fn foo_body_texts(store: &Arc<RwLock<NodeStore>>) -> Vec<String> {
+        let root_env = setup_with_prelude(store.clone());
+        let body = extract_selection(&eval(&root_env, &format!("(ned/slot {FOO} \"body\")")))
+            .unwrap()
+            .iter()
+            .next()
+            .expect("foo has a body");
+        let st = store.read().unwrap();
+        st.children(body)
+            .into_iter()
+            .map(|block| match st.children(block).first().and_then(|t| st.get(*t)) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("expected a text child, got {other:?}"),
+            })
+            .collect()
     }
 
     #[test]
-    fn ned_search_replace_mutates_text_nodes() {
-        let store = make_store_with_tree();
-        let root = setup(store.clone());
-        // Select all text nodes (Hello, World) and replace "o" with "0"
-        let all = call(&root, "ned/all", vec![]).unwrap();
-        let text_kw = Value::Keyword { namespace: None, name: "text".to_string() };
-        let texts_sel = call(&root, "ned/filter", vec![all, text_kw]).unwrap();
-        let search = Value::Text("o".to_string());
-        let replace = Value::Text("0".to_string());
-        let result = call(&root, "ned/search-replace", vec![texts_sel, search, replace]).unwrap();
-        // result is the same selection (both nodes)
-        let modified = match &result {
-            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
-            _ => panic!("expected Opaque"),
-        };
-        assert_eq!(modified.len(), 2);
-        // Verify text content in store
-        let st = store.read().unwrap();
-        let all_texts: Vec<_> = modified.iter()
-            .filter_map(|id| if let Some(Node::Text(s)) = st.get(id) { Some(s.clone()) } else { None })
-            .collect();
-        assert!(all_texts.contains(&"Hell0".to_string()), "expected Hell0");
-        assert!(all_texts.contains(&"W0rld".to_string()), "expected W0rld");
+    fn set_text_plans_and_executes() {
+        let store = make_doc_store();
+        let program = format!(r#"(ned/set-text (ned/text-in (ned/body-at {FOO} 1)) "Changed")"#);
+        run(&store, &program).unwrap();
+        assert_eq!(foo_body_texts(&store), vec!["First", "Changed", "Third"]);
     }
 
     #[test]
-    fn ned_search_replace_empty_search_is_noop() {
-        let store = make_store_with_tree();
-        let root = setup(store.clone());
-        let all = call(&root, "ned/all", vec![]).unwrap();
-        let text_kw = Value::Keyword { namespace: None, name: "text".to_string() };
-        let texts_sel = call(&root, "ned/filter", vec![all, text_kw]).unwrap();
-        let search = Value::Text("".to_string());
-        let replace = Value::Text("X".to_string());
-        let result = call(&root, "ned/search-replace", vec![texts_sel, search, replace]).unwrap();
-        let sel = match &result {
-            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
-            _ => panic!("expected Opaque"),
-        };
-        // Selection returned unchanged
-        assert_eq!(sel.len(), 2);
-        // Text content is unchanged
-        let st = store.read().unwrap();
-        let texts: Vec<_> = sel.iter()
-            .filter_map(|id| if let Some(Node::Text(s)) = st.get(id) { Some(s.clone()) } else { None })
-            .collect();
-        assert!(texts.contains(&"Hello".to_string()), "Hello should be unchanged");
-        assert!(texts.contains(&"World".to_string()), "World should be unchanged");
+    fn set_text_over_several_texts_is_refused_and_applies_nothing() {
+        let store = make_doc_store();
+        let program = format!(
+            r#"(ned/set-text (ned/texts (ned/descendants (ned/slot {FOO} "body"))) "X")"#
+        );
+        let err = run(&store, &program).unwrap_err();
+        assert!(err.starts_with("step 1 (ned/set-text):") && err.contains("3 nodes"), "{err}");
+        assert_eq!(foo_body_texts(&store), vec!["First", "Second", "Third"]);
+    }
+
+    #[test]
+    fn search_replace_replaces_the_one_occurrence() {
+        let store = make_doc_store();
+        let program = format!(
+            r#"(ned/search-replace (ned/text-in (ned/body-at {FOO} 1)) "eco" "ECO")"#
+        );
+        run(&store, &program).unwrap();
+        assert_eq!(foo_body_texts(&store), vec!["First", "SECOnd", "Third"]);
+    }
+
+    #[test]
+    fn search_replace_with_empty_search_is_refused() {
+        let store = make_doc_store();
+        let program = format!(r#"(ned/search-replace (ned/text-in (ned/body-at {FOO} 1)) "" "X")"#);
+        let err = run(&store, &program).unwrap_err();
+        assert!(err.contains("empty search text"), "{err}");
+        assert_eq!(foo_body_texts(&store), vec!["First", "Second", "Third"]);
     }
 
     #[test]
@@ -1002,64 +1023,32 @@ mod tests {
     }
 
     #[test]
-    fn insert_child_wires_materialized_subtree() {
-        let store = make_store_with_tree();
-        let root_env = setup(store.clone());
-        // Select all elements of kind "heading"
-        let all = call(&root_env, "ned/all", vec![]).unwrap();
-        let heading_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
-        let heading_name = Value::Text("heading".to_string());
-        let headings = call(&root_env, "ned/filter", vec![all, heading_kw, heading_name]).unwrap();
-        // Build a span tree and insert as child
-        let span_tree = call(&root_env, "ned/mk-element", vec![Value::Text("span".to_string())]).unwrap();
-        let result = call(&root_env, "ned/insert-child", vec![headings, span_tree]).unwrap();
-        let created = match &result {
-            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
-            _ => panic!("expected Opaque Selection"),
-        };
-        assert_eq!(created.len(), 1);
-        // Verify the span is in the store and is a child of the heading
-        let st = store.read().unwrap();
-        let span_id = created.iter().next().unwrap();
-        match st.get(span_id) {
-            Some(Node::Element(n)) => assert_eq!(st.resolve_name(*n), "span"),
-            other => panic!("expected Element(span), got {other:?}"),
-        }
+    fn insert_child_appends_the_tree_to_the_body() {
+        let store = make_doc_store();
+        let program = format!(
+            r#"(ned/insert-child (ned/slot {FOO} "body")
+                 (ned/with-child (ned/mk-element "paragraph") (ned/mk-text "Fourth")))"#
+        );
+        run(&store, &program).unwrap();
+        assert_eq!(foo_body_texts(&store), vec!["First", "Second", "Third", "Fourth"]);
     }
 
     #[test]
-    fn replace_swaps_subtree_via_binding() {
-        let store = make_store_with_tree();
-        let root_env = setup(store.clone());
-        // Use ned/filter :kind heading then ned/children to isolate the heading's text child
-        let all = call(&root_env, "ned/all", vec![]).unwrap();
-        let heading_kw = Value::Keyword { namespace: None, name: "kind".to_string() };
-        let heading_name = Value::Text("heading".to_string());
-        let headings = call(&root_env, "ned/filter", vec![all, heading_kw, heading_name]).unwrap();
-        let heading_children = call(&root_env, "ned/children", vec![headings]).unwrap();
-        // Build replacement list: [(ned/mk-text "new")]
-        let new_text_tree = call(&root_env, "ned/mk-text", vec![Value::Text("new".to_string())]).unwrap();
-        let trees_list = Value::List(vec![new_text_tree]);
-        let _result = call(&root_env, "ned/replace", vec![heading_children, trees_list]).unwrap();
-        // Verify the heading now has a child with text "new"
-        let st = store.read().unwrap();
-        let all_sel = {
-            let all_v = call(&root_env, "ned/all", vec![]).unwrap();
-            match &all_v {
-                Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
-                _ => panic!(),
-            }
+    fn insert_before_and_after_place_the_tree_next_to_the_block() {
+        let store = make_doc_store();
+        let new = |text: &str| {
+            format!(r#"(ned/with-child (ned/mk-element "paragraph") (ned/mk-text {}))"#, clj_str(text))
         };
-        // Find text nodes: look for Node::Text("new") in store
-        let has_new = all_sel.iter().any(|id| {
-            matches!(st.get(id), Some(Node::Text(s)) if s == "new")
-        });
-        assert!(has_new, "expected 'new' text node in store");
-        // The old "Hello" text should be gone
-        let has_hello = all_sel.iter().any(|id| {
-            matches!(st.get(id), Some(Node::Text(s)) if s == "Hello")
-        });
-        assert!(!has_hello, "expected 'Hello' to be removed");
+        let program = format!(
+            "(do (ned/insert-before (ned/body-at {FOO} 0) {}) (ned/insert-after (ned/body-at {FOO} 2) {}))",
+            new("Zeroth"),
+            new("Fourth")
+        );
+        run(&store, &program).unwrap();
+        assert_eq!(
+            foo_body_texts(&store),
+            vec!["Zeroth", "First", "Second", "Third", "Fourth"]
+        );
     }
 
     // ── ned/nth-child tests ───────────────────────────────────────────────────
@@ -1106,7 +1095,7 @@ mod tests {
     fn setup_with_prelude(store: Arc<RwLock<NodeStore>>) -> RootEnv {
         let root = RootEnv::new();
         crate::init_root(&root).expect("core init failed");
-        register_ned_builtins(&root, store);
+        register_ned_builtins(&root, store, &PlanRecorder::new());
         crate::load_ned_prelude(&root).expect("ned prelude load failed");
         root
     }
@@ -1331,8 +1320,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_body_ingests_paragraph() {
+    fn parse_body_returns_trees_and_does_not_touch_the_store() {
         let store = make_store_with_tree();
+        let nodes_before = store.read().unwrap().node_count();
         let root_env = setup(store.clone());
         let grammar = make_grammar_value(&root_env);
         let result = call(
@@ -1346,25 +1336,86 @@ mod tests {
             _ => panic!("expected List"),
         };
         assert_eq!(trees.len(), 1, "expected exactly one element");
+        assert_eq!(
+            extract_node_tree(&trees[0]).expect("expected NodeTree"),
+            NodeTree::element("paragraph").with_child(NodeTree::text("Hello world"))
+        );
+        assert_eq!(store.read().unwrap().node_count(), nodes_before, "the store is not touched");
+    }
 
-        let tree = extract_node_tree(&trees[0]).expect("expected NodeTree");
-        let st = store.read().unwrap();
-        match tree {
-            NodeTree::Existing(id) => {
-                match st.get(id) {
-                    Some(Node::Element(name)) => {
-                        assert_eq!(st.resolve_name(*name), "paragraph");
-                    }
-                    other => panic!("expected Element(paragraph), got {other:?}"),
-                }
-                let children = st.children(id);
-                assert!(
-                    children.iter().any(|&cid| matches!(st.get(cid), Some(Node::Text(s)) if s == "Hello world")),
-                    "expected 'Hello world' text child"
-                );
-            }
-            _ => panic!("expected NodeTree::Existing"),
+    #[test]
+    fn parse_body_refuses_separator_and_html_block() {
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        let grammar = make_grammar_value(&root_env);
+        for (src, kind) in [("One.\n\n---\n\nTwo.\n", "separator"), ("<div>x</div>\n", "html-block")] {
+            let err = call(
+                &root_env,
+                "ned/parse-body",
+                vec![Value::Text(src.to_string()), grammar.clone()],
+            )
+            .expect_err(kind);
+            assert!(
+                err.contains(&format!("a {kind} cannot be written through a program")),
+                "{kind}: {err}"
+            );
         }
+    }
+
+    #[test]
+    fn parse_body_refuses_comments() {
+        let store = make_store_with_tree();
+        let root_env = setup(store);
+        let grammar = make_grammar_value(&root_env);
+        let err = call(
+            &root_env,
+            "ned/parse-body",
+            vec![Value::Text("<!-- c -->\n\nOne.\n".to_string()), grammar],
+        )
+        .expect_err("comments are refused");
+        assert!(
+            err.contains("comments in a parse-body fragment are not supported yet"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ned_store_is_not_bound() {
+        let root_env = setup(make_store_with_tree());
+        assert!(root_env.get("ned/store").is_none());
+        assert!(!NED_MUTATING_BUILTINS.contains(&"ned/store"));
+    }
+
+    #[test]
+    fn mutating_builtins_return_nil_and_record() {
+        let store = make_store_with_tree();
+        let (root, recorder) = setup_recording(store.clone());
+        let nodes_before = store.read().unwrap().node_count();
+        let all = call(&root, "ned/all", vec![]).unwrap();
+        let texts_sel = call(
+            &root,
+            "ned/filter",
+            vec![all, Value::Keyword { namespace: None, name: "text".to_string() }],
+        )
+        .unwrap();
+        let tree = || call(&root, "ned/mk-element", vec![Value::Text("paragraph".to_string())]).unwrap();
+        let text = |s: &str| Value::Text(s.to_string());
+        let calls: Vec<(&str, Vec<Value>)> = vec![
+            ("ned/set-text", vec![texts_sel.clone(), text("x")]),
+            ("ned/search-replace", vec![texts_sel.clone(), text("o"), text("0")]),
+            ("ned/delete", vec![texts_sel.clone()]),
+            ("ned/insert-child", vec![texts_sel.clone(), tree()]),
+            ("ned/insert-before", vec![texts_sel.clone(), tree()]),
+            ("ned/insert-after", vec![texts_sel.clone(), tree()]),
+            ("ned/replace", vec![texts_sel.clone(), Value::List(vec![tree()])]),
+        ];
+        for (name, args) in calls {
+            let result = call(&root, name, args).unwrap();
+            assert!(matches!(result, Value::Absent), "{name} returns nil, got {result:?}");
+            assert_eq!(recorder.take().len(), 1, "{name} records exactly one step");
+        }
+        assert!(recorder.take().is_empty(), "take leaves the recorder empty");
+        assert_eq!(store.read().unwrap().node_count(), nodes_before, "nothing is written");
     }
 
     #[test]
@@ -1425,36 +1476,24 @@ mod tests {
         document_to_store(&doc, &mut raw_store, Some(&meta));
         let store = Arc::new(RwLock::new(raw_store));
 
+        let program = format!(
+            "(let [g (ned/parse-grammar {})]
+               (ned/replace
+                 (ned/body-at (ned/doc-by-path \"content/post/replace-test.md\") 0)
+                 (ned/parse-body {} g)))",
+            clj_str(EMPTY_SCHEMA_SRC),
+            clj_str("# New heading\n")
+        );
+        let executed = run(&store, &program).unwrap();
+        assert_eq!(executed.documents.len(), 1);
+
         let root_env = setup_with_prelude(store.clone());
-        let grammar = make_grammar_value(&root_env);
-
-        let doc_sel = crate::eval_str_with_root(
-            r#"(ned/doc-by-path "content/post/replace-test.md")"#,
-            &root_env,
-        ).unwrap();
-        let body_elem = call(&root_env, "ned/body-at", vec![doc_sel, Value::Integer(0)]).unwrap();
-
-        let new_trees = call(
-            &root_env,
-            "ned/parse-body",
-            vec![Value::Text("# New heading\n".to_string()), grammar],
-        ).unwrap();
-
-        let result = call(&root_env, "ned/replace", vec![body_elem, new_trees]).unwrap();
-        let inserted = match &result {
-            Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
-            _ => panic!("expected Opaque Selection"),
-        };
-        assert_eq!(inserted.len(), 1, "expected one inserted node");
-
-        let st = store.read().unwrap();
-        let inserted_id = inserted.iter().next().unwrap();
-        match st.get(inserted_id) {
-            Some(Node::Element(name)) => {
-                assert_eq!(st.resolve_name(*name), "heading", "inserted node should be a heading");
-            }
-            other => panic!("expected Element(heading), got {other:?}"),
-        }
+        let body = r#"(ned/body-at (ned/doc-by-path "content/post/replace-test.md") 0)"#;
+        assert!(matches!(
+            eval(&root_env, &format!("(ned/kind-of {body})")),
+            Value::List(items) if matches!(items.as_slice(), [Value::Text(k)] if k == "heading")
+        ));
+        assert_eq!(texts_of(&root_env, &format!("(ned/text-in {body})")), vec!["New heading"]);
     }
 
     // ── HTML blocks (ADR-062 D4) ──────────────────────────────────────────────
@@ -1516,8 +1555,9 @@ mod tests {
     fn delete_html_block_removes_it_and_validates_clean() {
         let (store, root, grammar) = make_html_doc_store();
         let root_env = setup_with_prelude(store.clone());
-        let block = html_body_block(&root_env);
-        call(&root_env, "ned/delete", vec![block]).unwrap();
+        html_body_block(&root_env);
+        run(&store, r#"(ned/delete (ned/body-at (ned/doc-by-path "content/post/html.md") 1))"#)
+            .unwrap();
         let (saved, valid) = saved_and_validity(&store, root, &grammar);
         assert!(!saved.contains("<div") && !saved.contains("secret"), "{saved}");
         assert!(saved.contains("Before.") && saved.contains("After."), "{saved}");
@@ -1528,20 +1568,16 @@ mod tests {
     fn replace_html_block_with_a_paragraph_succeeds() {
         let (store, root, grammar) = make_html_doc_store();
         let root_env = setup_with_prelude(store.clone());
-        let block = html_body_block(&root_env);
-        let grammar_value = call(
-            &root_env,
-            "ned/parse-grammar",
-            vec![Value::Text(HTML_SCHEMA_SRC.to_string())],
-        )
-        .unwrap();
-        let trees = call(
-            &root_env,
-            "ned/parse-body",
-            vec![Value::Text("Replaced.\n".to_string()), grammar_value],
-        )
-        .unwrap();
-        call(&root_env, "ned/replace", vec![block, trees]).unwrap();
+        html_body_block(&root_env);
+        let program = format!(
+            "(let [g (ned/parse-grammar {})]
+               (ned/replace
+                 (ned/body-at (ned/doc-by-path \"content/post/html.md\") 1)
+                 (ned/parse-body {} g)))",
+            clj_str(HTML_SCHEMA_SRC),
+            clj_str("Replaced.\n")
+        );
+        run(&store, &program).unwrap();
         let (saved, valid) = saved_and_validity(&store, root, &grammar);
         assert!(!saved.contains("<div"), "{saved}");
         assert!(saved.contains("Before.\n\nReplaced.\n\nAfter."), "{saved}");
@@ -1566,21 +1602,13 @@ mod tests {
         (Arc::new(RwLock::new(raw_store)), root, grammar)
     }
 
-    fn body_at(root_env: &RootEnv, idx: usize) -> Value {
-        crate::eval_str_with_root(
-            &format!(r#"(ned/body-at (ned/doc-by-path "content/post/html.md") {idx})"#),
-            root_env,
-        )
-        .unwrap()
-    }
-
     #[test]
     fn delete_html_block_moves_its_comment_to_the_next_block() {
         let (store, root, grammar) = make_doc_store_from(
             "# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n\n<div>x</div>\n\nAfter.\n",
         );
-        let root_env = setup_with_prelude(store.clone());
-        call(&root_env, "ned/delete", vec![body_at(&root_env, 1)]).unwrap();
+        run(&store, r#"(ned/delete (ned/body-at (ned/doc-by-path "content/post/html.md") 1))"#)
+            .unwrap();
         let (saved, valid) = saved_and_validity(&store, root, &grammar);
         assert_eq!(saved, "# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n\nAfter.\n");
         assert!(valid, "{saved}");
@@ -1590,8 +1618,8 @@ mod tests {
     fn deleting_the_last_block_moves_its_comment_to_the_body_end() {
         let (store, root, grammar) =
             make_doc_store_from("# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n\n<div>x</div>\n");
-        let root_env = setup_with_prelude(store.clone());
-        call(&root_env, "ned/delete", vec![body_at(&root_env, 1)]).unwrap();
+        run(&store, r#"(ned/delete (ned/body-at (ned/doc-by-path "content/post/html.md") 1))"#)
+            .unwrap();
         // The document still decodes and saves: the edit is accepted.
         let (saved, valid) = saved_and_validity(&store, root, &grammar);
         assert_eq!(saved, "# Title\n\n----\n\nBefore.\n\n<!-- keep -->\n");
@@ -1609,13 +1637,11 @@ mod tests {
 
     fn set_body_paragraph_text(text: &str) -> (String, bool) {
         let (store, root, grammar) = make_doc_store_from("# Title\n\n----\n\nBefore.\n");
-        let root_env = setup_with_prelude(store.clone());
-        let selection = crate::eval_str_with_root(
-            r#"(ned/filter (ned/descendants (ned/body-at (ned/doc-by-path "content/post/html.md") 0)) :text)"#,
-            &root_env,
-        )
-        .unwrap();
-        call(&root_env, "ned/set-text", vec![selection, Value::Text(text.to_string())]).unwrap();
+        let program = format!(
+            r#"(ned/set-text (ned/filter (ned/descendants (ned/body-at (ned/doc-by-path "content/post/html.md") 0)) :text) {})"#,
+            clj_str(text)
+        );
+        run(&store, &program).unwrap();
         saved_and_validity(&store, root, &grammar)
     }
 

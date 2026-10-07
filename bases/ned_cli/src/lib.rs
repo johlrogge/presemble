@@ -729,7 +729,8 @@ pub fn run() {
     // Create evaluator with NED builtins
     let root = RootEnv::new();
     evaluator::init_root(&root).expect("failed to init evaluator");
-    ned_primitives::register_ned_builtins(&root, store.clone());
+    // The demo runs queries only; nothing it records is ever applied.
+    ned_primitives::register_ned_builtins(&root, store.clone(), &ned_primitives::PlanRecorder::new());
     evaluator::load_ned_prelude(&root).expect("failed to load ned.clj");
 
     // Test expressions
