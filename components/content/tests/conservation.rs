@@ -47,8 +47,11 @@
 //! - L12 is resolved (ADR-062): HTML blocks and comments are in the domain;
 //! - L14: HTML blocks of types 1–5 always have their end condition, so none
 //!   runs to the end of the file;
-//! - a leading link followed by text with no marker (`[a](/x) trailing`), a
-//!   pinned limit for inline segments (S-A).
+//!
+//! Paragraphs hold inline nodes (ADR-059 stage 5), so the domain has inline
+//! pools: images and links inside text, a leading link followed by text, and
+//! several images in one paragraph. They are one paragraph each, and nothing
+//! in them is dropped.
 
 use content::{
     assign_slots, parse_document, serialize_document, CommentAnchor, Container, ContentElement,
@@ -174,6 +177,17 @@ const LITERAL_MARKER_PARAGRAPHS: &[&str] = &[
     "Text \\{#x} ![i](x.png)",
     "`{#x}` ![i](x.png)",
 ];
+/// Paragraphs with links and images inside their text (ADR-059 stage 5):
+/// each is one paragraph and keeps everything it has.
+const INLINE_PARAGRAPHS: &[&str] = &[
+    "See ![c](c.png) here.",
+    "[a](/x) trailing",
+    "text [l](/post/l) more",
+    "a ![i](i.jpg) b ![j](j.jpg) c",
+    "*em* and [l](/x) and `code`",
+    "[a](/x) and ![i](i.jpg)",
+    "![i](i.jpg) caption",
+];
 const BODY_HEADINGS: &[&str] = &["### Section", "#### Deeper", "## Too high"];
 
 /// HTML comments (trivia, ADR-062). Each is a complete comment-only block.
@@ -205,7 +219,7 @@ fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: b
 }
 
 fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
-    match rng.below(26) {
+    match rng.below(29) {
         0..=2 => rng.pick(HEADINGS).to_string(),
         3..=5 => rng.pick(PARAGRAPHS).to_string(),
         6..=7 => rng.pick(LINKS).to_string(),
@@ -218,12 +232,14 @@ fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_
         17..=19 => rng.pick(MARKER_MISUSE).to_string(),
         20..=21 => rng.pick(OTHER_BLOCKS).to_string(),
         22..=23 => rng.pick(HTML_BLOCKS).to_string(),
+        24..=26 => rng.pick(INLINE_PARAGRAPHS).to_string(),
         _ => rng.pick(LITERAL_MARKER_PARAGRAPHS).to_string(),
     }
 }
 
 fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
-    match rng.below(11) {
+    match rng.below(13) {
+        11 => rng.pick(INLINE_PARAGRAPHS).to_string(),
         0..=1 => rng.pick(BODY_HEADINGS).to_string(),
         2..=4 => rng.pick(PARAGRAPHS).to_string(),
         5 => gen_list(rng, previous_ordered, after_comment),
@@ -539,12 +555,14 @@ fn generator_exercises_unassigned_bound_and_body() {
                 .count();
         }
         let is_marker = |e: &ContentElement| {
-            matches!(e, ContentElement::Paragraph { text } if text.contains("{#"))
+            matches!(e, ContentElement::Paragraph { marker: Some(_), .. })
         };
         marker_paragraphs += doc.unassigned.iter().filter(|e| is_marker(&e.node)).count();
         body_marker_paragraphs += doc.body.iter().filter(|e| is_marker(&e.node)).count();
         let is_escaped = |e: &schema::Spanned<ContentElement>| {
-            matches!(&e.node, ContentElement::Paragraph { text } if text.contains("\\{#"))
+            // A literal `{#` is text in the paragraph's nodes, not its marker.
+            matches!(&e.node, ContentElement::Paragraph { content, marker: None }
+                if content.edit_text().as_str().contains("{#"))
         };
         escaped_marker_paragraphs += doc
             .preamble
@@ -618,7 +636,7 @@ fn literal_markers_are_never_misuse() {
 fn text_before_a_marker_is_marker_misuse() {
     let (_, grammar) = grammars().pop().expect("with body");
     let src = "# Home\n\ntext {#x}\n";
-    let expected = vec![ContentElement::Paragraph { text: "text {#x}".to_string() }];
+    let expected = vec![ContentElement::paragraph_from_markdown("text {#x}")];
     let check = |doc: &Document, label: &str| {
         assert_eq!(nodes(&doc.unassigned), expected, "{label}: {doc:#?}");
         let summary = doc.preamble.iter().find(|s| s.name.as_str() == "summary");

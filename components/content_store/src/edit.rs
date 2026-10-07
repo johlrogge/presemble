@@ -529,9 +529,19 @@ fn no_text(store: &NodeStore, block: NodeId) -> EditError {
     })
 }
 
+/// Whether `text` has a blank line inside it: written as a paragraph it would
+/// be two. A paragraph's nodes cannot hold one (ADR-059 normal form), so a
+/// text that has one is refused rather than silently joined.
+fn splits_a_paragraph(text: &str) -> bool {
+    text.trim().lines().any(|line| line.trim().is_empty())
+}
+
 /// Check that `block` with its text replaced by `value` round-trips.
 fn check_text_value(store: &NodeStore, block: NodeId, value: &str) -> Result<(), EditError> {
     let el = block_from_node(store, block).map_err(EditError::OwningBlock)?;
+    if matches!(el, ContentElement::Paragraph { .. }) && splits_a_paragraph(value) {
+        return Err(EditError::Postcondition(RoundTripError::BlockCount(2)));
+    }
     let edited = el.with_text(value).ok_or_else(|| no_text(store, block))?;
     check_block_round_trip(&edited).map_err(EditError::Postcondition)
 }
@@ -551,6 +561,13 @@ fn decode_payload(trees: &[NodeTree]) -> Result<Vec<ContentElement>, EditError> 
     trees
         .iter()
         .map(|tree| {
+            if let NodeTree::Element { name, children, .. } = tree
+                && name == "paragraph"
+                && let [NodeTree::Text(text)] = children.as_slice()
+                && splits_a_paragraph(text)
+            {
+                return Err(EditError::Postcondition(RoundTripError::BlockCount(2)));
+            }
             let block = tree_to_block(tree).map_err(|e| match e {
                 BlockDecodeError::ExistingNode => EditError::ExistingNode,
                 other => EditError::Payload(other),

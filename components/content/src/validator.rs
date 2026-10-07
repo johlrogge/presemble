@@ -2,7 +2,7 @@ use crate::document::{ContentElement, Document, Keyword, LinkText};
 use crate::inline::AsPlainText;
 use crate::link_expression::{diagnose_paragraph, parse_destination, LinkExpressionDiagnostic};
 use crate::parse_list_items;
-use crate::parser::{diagnose_marker_paragraph, is_link_expression, is_marker_paragraph};
+use crate::parser::{diagnose_paragraph_marker, is_link_expression};
 use crate::serializer::serialize_element;
 use crate::slot_assignment::{element_matches_slot, unassigned_reason, UnassignedReason};
 use schema::{
@@ -239,8 +239,11 @@ fn validate_unassigned(
                 if grammar.body.is_some() && !doc.has_separator {
                     message.push_str("; did you forget `----` before the body?");
                 }
-                if let ContentElement::Paragraph { text } = el
-                    && let Some(d) = diagnose_paragraph(text)
+                if let ContentElement::Paragraph { content, marker } = el
+                    && let Some(d) = diagnose_paragraph(&crate::inline::paragraph_diagnosis_source(
+                        content,
+                        marker.as_ref(),
+                    ))
                 {
                     message.push_str(&format!("; {d}"));
                 }
@@ -303,10 +306,11 @@ fn validate_inline_html(
 ) {
     for spanned in elements {
         let html = match &spanned.node {
-            ContentElement::Paragraph { text } => crate::html::first_inline_html(text),
             ContentElement::List { source } => crate::html::first_inline_html(source),
-            // A heading's HTML is in its nodes.
-            ContentElement::Heading { content, .. } => first_html_node(content.as_slice()),
+            // A heading's or paragraph's HTML is in its nodes.
+            ContentElement::Heading { content, .. } | ContentElement::Paragraph { content, .. } => {
+                first_html_node(content.as_slice())
+            }
             _ => continue,
         };
         let Some(html) = html else {
@@ -430,10 +434,12 @@ fn validate_link_expressions(
     for spanned in elements {
         match &spanned.node {
             // Marker misuse is an error in any section (ADR-060 P1).
-            ContentElement::Paragraph { text } if is_marker_paragraph(text) => {
-                push(Severity::Error, diagnose_marker_paragraph(text).to_string());
+            ContentElement::Paragraph { content, marker: Some(marker) } => {
+                push(Severity::Error, diagnose_paragraph_marker(content, marker).to_string());
             }
-            ContentElement::Paragraph { text } => match diagnose_paragraph(text) {
+            ContentElement::Paragraph { content, marker: None } => match diagnose_paragraph(
+                &crate::inline::paragraph_diagnosis_source(content, None),
+            ) {
                 Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
                     push(Severity::Warning, d.to_string());
                 }
@@ -1410,7 +1416,7 @@ mod tests {
         let doc = parse_and_assign(src, &g).expect("parses");
         assert_eq!(
             doc.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-            vec![ContentElement::Paragraph { text: "Summary text {#summary}".to_string() }]
+            vec![ContentElement::paragraph_from_markdown("Summary text {#summary}")]
         );
         let d = validate(&doc, &g).diagnostics;
         assert_eq!(d.len(), 2, "{d:#?}");
@@ -1492,6 +1498,17 @@ mod tests {
         );
         let span = d[0].span.expect("span");
         assert_eq!(src[span.start..span.end].trim_end(), "a <b>x</b> b");
+    }
+
+    /// L15, resolved by stage 5: a paragraph that carries an image keeps its
+    /// inline HTML (it used to be decoded away with the image extracted), so
+    /// the validator sees it and reports it.
+    #[test]
+    fn inline_html_in_image_bearing_paragraph_is_error_l15() {
+        let d = body_diagnostics("t <b>x</b> ![i](i.png)");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains("inline HTML `<b>`"), "{}", d[0].message);
     }
 
     #[test]

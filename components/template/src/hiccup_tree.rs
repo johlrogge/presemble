@@ -77,7 +77,7 @@ mod tests {
     const CORPUS_JSON: &str = include_str!("../../../resources/test/inline-corpus.json");
 
     fn paragraph(text: &str) -> ContentElement {
-        ContentElement::Paragraph { text: text.to_string() }
+        ContentElement::paragraph_from_markdown(text)
     }
 
     #[test]

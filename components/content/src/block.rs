@@ -23,6 +23,36 @@ impl ContentElement {
         ContentElement::Heading { level, content, marker }
     }
 
+    /// A paragraph from the markdown source of its content: a trailing
+    /// `{#name}` is the marker (ADR-059 §5), the rest is read as inlines. A
+    /// source that does not read as one paragraph's content (a blank line in
+    /// it, say) is kept as literal text, so a later write-back shows that it
+    /// does not round-trip.
+    pub fn paragraph_from_markdown(source: &str) -> ContentElement {
+        let (content, marker) = crate::inline::read_paragraph_source(source)
+            .unwrap_or_else(|| crate::inline::literal_paragraph_content(source.trim()));
+        ContentElement::Paragraph { content, marker }
+    }
+
+    /// The markdown source of a paragraph: canonical inlines plus
+    /// ` {#marker}`, the string a paragraph used to store. `None` for other
+    /// kinds.
+    ///
+    /// Temporary adapter (ADR-059 stage 5): readers outside `content` use it
+    /// until stage 5.4 moves them onto the inline nodes. A non-breaking space
+    /// is the character itself, not the `&nbsp;` the file writer uses (C8): the
+    /// readers show this text, and the character is what paragraphs held.
+    #[deprecated(note = "stage 5.4: read the paragraph's inline nodes instead")]
+    pub fn paragraph_source(&self) -> Option<String> {
+        match self {
+            ContentElement::Paragraph { content, marker } => Some(
+                crate::inline::paragraph_source_text(content, marker.as_ref())
+                    .replace("&nbsp;", "\u{a0}"),
+            ),
+            _ => None,
+        }
+    }
+
     /// The text of a single-text block, or `None` for kinds that do not carry
     /// exactly one editable text value (Image, Table, Separator,
     /// LinkExpression, and HtmlBlock, which cannot be text-edited: ADR-062 D4).
@@ -37,9 +67,12 @@ impl ContentElement {
             ContentElement::Heading { content, marker, .. } => {
                 Some(Cow::Owned(crate::inline::heading_source_text(content, marker.as_ref())))
             }
-            ContentElement::Paragraph { text }
-            | ContentElement::Link { text, .. }
-            | ContentElement::Blockquote { text } => Some(Cow::Borrowed(text)),
+            ContentElement::Paragraph { content, marker } => {
+                Some(Cow::Owned(crate::inline::paragraph_source_text(content, marker.as_ref())))
+            }
+            ContentElement::Link { text, .. } | ContentElement::Blockquote { text } => {
+                Some(Cow::Borrowed(text))
+            }
             ContentElement::List { source } => Some(Cow::Borrowed(source)),
             ContentElement::CodeBlock { code, .. } => Some(Cow::Borrowed(code)),
             ContentElement::Image { .. }
@@ -59,7 +92,7 @@ impl ContentElement {
             ContentElement::Heading { level, .. } => {
                 Some(ContentElement::heading_from_markdown(*level, &text))
             }
-            ContentElement::Paragraph { .. } => Some(ContentElement::Paragraph { text }),
+            ContentElement::Paragraph { .. } => Some(ContentElement::paragraph_from_markdown(&text)),
             ContentElement::Link { href, .. } => Some(ContentElement::Link {
                 text,
                 href: href.clone(),
@@ -204,9 +237,7 @@ mod tests {
     }
 
     fn paragraph(text: &str) -> ContentElement {
-        ContentElement::Paragraph {
-            text: text.to_string(),
-        }
+        ContentElement::paragraph_from_markdown(text)
     }
 
     // ── projections ─────────────────────────────────────────────────────────
@@ -503,22 +534,28 @@ mod tests {
         assert_eq!(check_block_round_trip(&h), Ok(()));
     }
 
+    /// A paragraph's nodes never hold a blank line (ADR-059 normal form): the
+    /// source that had one is read as the one paragraph it can be, and writes
+    /// back as itself.
     #[test]
-    fn rejects_blank_line_in_paragraph() {
+    fn a_blank_line_is_not_part_of_a_paragraphs_nodes() {
         let p = paragraph("first\n\nsecond");
-        assert_eq!(check_block_round_trip(&p), Err(RoundTripError::BlockCount(2)));
+        assert_eq!(check_block_round_trip(&p), Ok(()));
+        let ContentElement::Paragraph { content, .. } = &p else { panic!("{p:?}") };
+        assert!(!content.edit_text().as_str().contains("\n\n"), "{content:?}");
     }
 
+    /// Heading and list syntax in a paragraph's source is literal text: it is
+    /// stored as text and written escaped, so the paragraph reads back as
+    /// itself (it used to be rejected because the escape read back as text).
     #[test]
-    fn rejects_heading_syntax_in_paragraph() {
-        let err = check_block_round_trip(&paragraph("# x")).unwrap_err();
-        assert!(matches!(err, RoundTripError::Changed { .. }), "{err:?}");
-    }
-
-    #[test]
-    fn rejects_list_syntax_in_paragraph() {
-        let err = check_block_round_trip(&paragraph("- x")).unwrap_err();
-        assert!(matches!(err, RoundTripError::Changed { .. }), "{err:?}");
+    fn heading_and_list_syntax_in_a_paragraph_is_literal_text() {
+        for (source, text) in [("# x", "# x"), ("- x", "- x")] {
+            let p = paragraph(source);
+            assert_eq!(check_block_round_trip(&p), Ok(()), "{source:?}");
+            let ContentElement::Paragraph { content, .. } = &p else { panic!("{p:?}") };
+            assert_eq!(content.as_slice(), &[crate::inline::Inline::Text(text.to_string())]);
+        }
     }
 
     #[test]
@@ -618,9 +655,8 @@ mod tests {
 
     #[test]
     fn paragraph_with_leading_opener_stays_one_paragraph() {
-        // The opener is escaped so the block kind survives, but a text-only
-        // paragraph stores its source span, so the text reads back escaped and
-        // the strict check still reports `Changed` (see ADR-057 gap report).
+        // The opener is escaped so the block kind survives, and the escape is
+        // not part of what reads back: the paragraph round-trips exactly.
         for text in [
             "# x",
             "- x",
@@ -634,13 +670,7 @@ mod tests {
             "a | b\n--- | ---",
             "x\n| a | b |\n--- | ---",
         ] {
-            let err = check_block_round_trip(&paragraph(text)).unwrap_err();
-            match err {
-                RoundTripError::Changed { got } => {
-                    assert!(got.starts_with("Paragraph"), "{text:?} read back as {got}")
-                }
-                other => panic!("{text:?}: expected Changed paragraph, got {other:?}"),
-            }
+            assert_eq!(check_block_round_trip(&paragraph(text)), Ok(()), "{text:?}");
         }
     }
 

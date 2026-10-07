@@ -332,8 +332,11 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                 let paragraphs: Vec<Value> = elements
                     .iter()
                     .filter_map(|s| {
-                        if let ContentElement::Paragraph { text } = &s.node {
-                            Some(Value::Text(text.clone()))
+                        if let ContentElement::Paragraph { .. } = &s.node {
+                            // stage 5.4: paragraph slots become inline content.
+                            #[allow(deprecated)]
+                            let source = s.node.paragraph_source().unwrap_or_default();
+                            Some(Value::Text(source))
                         } else {
                             None
                         }
@@ -732,7 +735,7 @@ mod tests {
         // ADR-058 §4: a link expression in the body is ignored.
         let mut graph = DataGraph::new();
         let body: im::Vector<_> = vec![
-            spanned(ContentElement::Paragraph { text: "before".to_string() }),
+            spanned(ContentElement::paragraph_from_markdown("before")),
             spanned(ContentElement::LinkExpression {
                 text: content::LinkText::Static("label".to_string()),
                 target: content::LinkTarget::PathRef("post".to_string()),
@@ -909,7 +912,7 @@ mod tests {
     #[test]
     fn body_nodes_elements_have_data_presemble_slot_body() {
         let elements: im::Vector<_> = vec![
-            spanned(ContentElement::Paragraph { text: "para".to_string() }),
+            spanned(ContentElement::paragraph_from_markdown("para")),
             spanned(ContentElement::heading_from_markdown(schema::HeadingLevel::new(3).unwrap(), "head")),
         ].into_iter().collect();
         let html = body_html(&elements, false);
@@ -925,9 +928,9 @@ mod tests {
     #[test]
     fn body_nodes_do_not_emit_legacy_ids() {
         let elements: im::Vector<_> = vec![
-            spanned(ContentElement::Paragraph { text: "first".to_string() }),
+            spanned(ContentElement::paragraph_from_markdown("first")),
             spanned(ContentElement::Separator),
-            spanned(ContentElement::Paragraph { text: "second".to_string() }),
+            spanned(ContentElement::paragraph_from_markdown("second")),
         ].into_iter().collect();
         let html = body_html(&elements, false);
         assert!(!html.contains("presemble-body-"),
@@ -1322,7 +1325,7 @@ mod tests {
     #[test]
     fn body_paragraph_with_bold_renders_as_strong() {
         // **bold** in a paragraph stored with markdown syntax should render as <strong>
-        let para = spanned(ContentElement::Paragraph { text: "This has **bold** text.".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("This has **bold** text."));
         let html = body_html(&im::vector![para], false);
         assert!(
             html.contains("<strong>bold</strong>"),
@@ -1337,7 +1340,7 @@ mod tests {
 
     #[test]
     fn body_paragraph_with_italic_renders_as_em() {
-        let para = spanned(ContentElement::Paragraph { text: "This has _italic_ text.".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("This has _italic_ text."));
         let html = body_html(&im::vector![para], false);
         assert!(
             html.contains("<em>italic</em>"),
@@ -1386,7 +1389,7 @@ mod tests {
 
     #[test]
     fn body_paragraph_inline_html_renders_escaped() {
-        let para = spanned(ContentElement::Paragraph { text: "a <script>x</script> b".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("a <script>x</script> b"));
         let html = body_html(&im::vector![para], false);
         assert!(!html.contains("<script"), "inline HTML must not be rendered; got: {html}");
         assert!(html.contains("&lt;script&gt;"), "inline HTML must render escaped; got: {html}");
@@ -1415,7 +1418,7 @@ mod tests {
 
     #[test]
     fn body_paragraph_inline_comment_is_stripped() {
-        let para = spanned(ContentElement::Paragraph { text: "a <!-- secret --> b".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("a <!-- secret --> b"));
         let html = body_html(&im::vector![para], false);
         assert!(!html.contains("secret"), "inline comment must be stripped; got: {html}");
     }
@@ -1500,7 +1503,7 @@ mod tests {
 
     #[test]
     fn body_paragraph_code_and_link_still_render() {
-        let para = spanned(ContentElement::Paragraph { text: "Use `x<y` and [here](/a)".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("Use `x<y` and [here](/a)"));
         let html = body_html(&im::vector![para], false);
         assert!(html.contains("<code>x&lt;y</code>"), "expected code span; got: {html}");
         assert!(html.contains(r#"<a href="/a">here</a>"#), "expected link; got: {html}");
@@ -1508,7 +1511,7 @@ mod tests {
 
     #[test]
     fn body_nodes_editorial_adds_canonical_data_presemble_md_attr() {
-        let para = spanned(ContentElement::Paragraph { text: "Hello".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("Hello"));
         let html = body_html(&im::vector![para], true);
         assert!(
             html.contains("data-presemble-md=\"Hello\""),
@@ -1518,7 +1521,7 @@ mod tests {
 
     #[test]
     fn body_nodes_editorial_escapes_html_in_md_attr() {
-        let para = spanned(ContentElement::Paragraph { text: "a \\<b> text".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("a \\<b> text"));
         let html = body_html(&im::vector![para], true);
         assert!(
             html.contains("data-presemble-md=\"a \\&lt;b&gt; text\""),
@@ -1528,7 +1531,7 @@ mod tests {
 
     #[test]
     fn body_nodes_published_has_no_data_presemble_md_attr() {
-        let para = spanned(ContentElement::Paragraph { text: "hello".to_string() });
+        let para = spanned(ContentElement::paragraph_from_markdown("hello"));
         let html = body_html(&im::vector![para], false);
         assert!(
             !html.contains("data-presemble-md"),

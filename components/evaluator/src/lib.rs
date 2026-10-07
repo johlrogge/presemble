@@ -1481,7 +1481,7 @@ mod tests {
         let doc_no_link = content::Document {
             preamble: im::vector![],
             body: im::vector![Spanned {
-                node: content::ContentElement::Paragraph { text: "No links here.".to_string() },
+                node: content::ContentElement::paragraph_from_markdown("No links here."),
                 span: schema::Span { start: 0, end: 0 },
             }],
             has_separator: false,

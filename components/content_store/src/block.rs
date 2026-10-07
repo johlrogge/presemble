@@ -36,9 +36,13 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
             inlines_to_store(store, node, content);
             node
         }
-        ContentElement::Paragraph { text } => {
+        ContentElement::Paragraph { .. } => {
             let node = make_element(store, "paragraph");
-            add_child_text(store, node, text);
+            // stage 5.4: the store holds the paragraph's inline nodes (5.2); until
+            // then it holds the canonical markdown source.
+            #[allow(deprecated)]
+            let source = element.paragraph_source().unwrap_or_default();
+            add_child_text(store, node, &source);
             node
         }
         ContentElement::Image { alt, path } => {
@@ -477,9 +481,11 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
             let content = inlines_from_store(store, id, InlineContext::Heading)?;
             Ok(ContentElement::Heading { level, content, marker })
         }
-        "paragraph" => Ok(ContentElement::Paragraph {
-            text: try_child_text(store, id, kind)?,
-        }),
+        // The stored source read as inlines and a marker (stage 5.2 stores
+        // the nodes themselves).
+        "paragraph" => Ok(ContentElement::paragraph_from_markdown(&try_child_text(
+            store, id, kind,
+        )?)),
         "image" => {
             let path = try_attr_text(store, id, kind, "path")?;
             let alt = find_attr_text(store, id, "alt");

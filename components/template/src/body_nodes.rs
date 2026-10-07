@@ -58,8 +58,11 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             slot_attrs(ctx),
             crate::inline_nodes::inline_nodes(content),
         )],
-        ContentElement::Paragraph { text } => {
-            vec![el("p", slot_attrs(ctx), inline_children(text))]
+        ContentElement::Paragraph { .. } => {
+            // stage 5.4: render the paragraph's inline nodes, not its source.
+            #[allow(deprecated)]
+            let source = element.paragraph_source().unwrap_or_default();
+            vec![el("p", slot_attrs(ctx), inline_children(&source))]
         }
         ContentElement::Image { path, alt } => {
             let mut attrs = slot_attrs(ctx);
@@ -240,7 +243,7 @@ mod tests {
     fn stamp_file_marks_only_top_level_slot_elements() {
         let mut nodes = render_body_nodes(
             &im::vector![
-                spanned(ContentElement::Paragraph { text: "a *b*".to_string() }),
+                spanned(ContentElement::paragraph_from_markdown("a *b*")),
                 spanned(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() }),
             ],
             false,
@@ -259,7 +262,7 @@ mod tests {
     #[test]
     fn editorial_blocks_carry_canonical_md_escaped() {
         let nodes = render_body_nodes(
-            &im::vector![spanned(ContentElement::Paragraph { text: "a \"b\" & c".to_string() })],
+            &im::vector![spanned(ContentElement::paragraph_from_markdown("a \"b\" & c"))],
             true,
         );
         let html = serialize_nodes(&nodes);

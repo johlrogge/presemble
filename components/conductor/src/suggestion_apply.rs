@@ -144,7 +144,7 @@ mod tests {
         let doc = Document {
             preamble: im::vector![],
             body: im::vector![Spanned {
-                node: ContentElement::Paragraph { text: "X".to_string() },
+                node: ContentElement::paragraph_from_markdown("X"),
                 span: Span { start: 0, end: 0 },
             }],
             has_separator: true,

@@ -752,9 +752,7 @@ mod tests {
                     "Hello World",
                 )]
             )],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "Some body text.".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Some body text."))],
             has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -771,7 +769,7 @@ mod tests {
     fn round_trip_all_content_element_variants() {
         let elements = vec![
             ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Section"),
-            ContentElement::Paragraph { text: "Para text".to_string() },
+            ContentElement::paragraph_from_markdown("Para text"),
             ContentElement::Image {
                 alt: Some("alt text".to_string()),
                 path: "/img/photo.jpg".to_string(),
@@ -916,8 +914,8 @@ mod tests {
     fn round_trip_unassigned_elements_of_every_kind() {
         let unassigned = vec![
             ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Aside"),
-            ContentElement::Paragraph { text: "{#stray}".to_string() },
-            ContentElement::Paragraph { text: "![c](i.jpg) {#cover}".to_string() },
+            ContentElement::paragraph_from_markdown("{#stray}"),
+            ContentElement::paragraph_from_markdown("![c](i.jpg) {#cover}"),
             ContentElement::Image { alt: Some("alt".to_string()), path: "/i.jpg".to_string() },
             ContentElement::Image { alt: None, path: "/j.jpg".to_string() },
             ContentElement::Link { text: "x".to_string(), href: "/x".to_string() },
@@ -945,7 +943,7 @@ mod tests {
                 vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "T")]
             )],
             unassigned: unassigned.into_iter().map(zero_spanned).collect(),
-            body: im::vector![zero_spanned(ContentElement::Paragraph { text: "b".to_string() })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("b"))],
             has_separator: true,
             separator_span: None,
             comments: im::Vector::new(),
@@ -1156,13 +1154,9 @@ mod tests {
         let doc = Document {
             preamble: im::vector![slot(
                 "intro",
-                vec![ContentElement::Paragraph {
-                    text: "Intro text".to_string(),
-                }]
+                vec![ContentElement::paragraph_from_markdown("Intro text")]
             )],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "Body text".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Body text"))],
             has_separator: true,
             separator_span: Some(Span { start: 10, end: 14 }),
             unassigned: im::Vector::new(),
@@ -1180,9 +1174,7 @@ mod tests {
     fn round_trip_has_separator_false() {
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "No separator".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("No separator"))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1198,9 +1190,7 @@ mod tests {
     fn document_meta_attributes() {
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "Hello".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Hello"))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1230,9 +1220,7 @@ mod tests {
         // Pinned so save routing in Phase B can rely on :file surviving any subtree mutation.
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "Original body".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Original body"))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1314,14 +1302,10 @@ mod tests {
                 ),
                 slot(
                     "summary",
-                    vec![ContentElement::Paragraph {
-                        text: "A short summary.".to_string(),
-                    }]
+                    vec![ContentElement::paragraph_from_markdown("A short summary.")]
                 ),
             ],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "Body text goes here.".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Body text goes here."))],
             has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1686,8 +1670,8 @@ mod tests {
             preamble: im::vector![slot(
                 "summary",
                 vec![
-                    ContentElement::Paragraph { text: "One".to_string() },
-                    ContentElement::Paragraph { text: "Two".to_string() },
+                    ContentElement::paragraph_from_markdown("One"),
+                    ContentElement::paragraph_from_markdown("Two"),
                 ]
             )],
             body: im::vector![],
@@ -1834,7 +1818,7 @@ mod tests {
     fn decode_encode_decode_is_stable() {
         let elements = vec![
             h(2, "Section"),
-            ContentElement::Paragraph { text: "Para".to_string() },
+            ContentElement::paragraph_from_markdown("Para"),
             ContentElement::Image { alt: None, path: "/i.jpg".to_string() },
             ContentElement::Link { text: "L".to_string(), href: "/l".to_string() },
             ContentElement::Separator,
@@ -1879,7 +1863,7 @@ mod tests {
     fn block_kinds_match_encoder_output() {
         let samples = [
             h(1, "x"),
-            ContentElement::Paragraph { text: "x".to_string() },
+            ContentElement::paragraph_from_markdown("x"),
             ContentElement::Image { alt: None, path: "p".to_string() },
             ContentElement::Link { text: "x".to_string(), href: "h".to_string() },
             ContentElement::Separator,
@@ -1931,9 +1915,7 @@ mod tests {
     fn serialize_from_store_returns_non_empty_for_minimal_doc() {
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "Hello".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Hello"))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1952,9 +1934,7 @@ mod tests {
         // the store and compare the reconstructed Document against the original.
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::Paragraph {
-                text: "Hello".to_string(),
-            })],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Hello"))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1981,7 +1961,7 @@ mod tests {
     fn serialize_from_store_round_trip_covers_variants() {
         let elements = vec![
             ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Section"),
-            ContentElement::Paragraph { text: "Para text".to_string() },
+            ContentElement::paragraph_from_markdown("Para text"),
             ContentElement::Image {
                 alt: Some("alt text".to_string()),
                 path: "/img/photo.jpg".to_string(),
@@ -2026,8 +2006,8 @@ mod tests {
             preamble: im::vector![slot(
                 "summary",
                 vec![
-                    ContentElement::Paragraph { text: "First paragraph.".to_string() },
-                    ContentElement::Paragraph { text: "Second paragraph.".to_string() },
+                    ContentElement::paragraph_from_markdown("First paragraph."),
+                    ContentElement::paragraph_from_markdown("Second paragraph."),
                 ]
             )],
             body: im::vector![],

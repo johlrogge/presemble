@@ -107,7 +107,13 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
         ContentElement::Heading { level, content, marker } => {
             crate::inline::heading_markdown(*level, content, marker.as_ref())
         }
-        ContentElement::Paragraph { text } => escape_block_lines(text).join("\n"),
+        // A paragraph holds inline nodes (ADR-059 stage 5): written as
+        // canonical inlines plus its marker. The first line is escaped when it
+        // would read as a link expression (ADR-058).
+        ContentElement::Paragraph { content, marker } => {
+            let source = crate::inline::paragraph_source_text(content, marker.as_ref());
+            if reads_as_link_expression(&source) { format!("\\{source}") } else { source }
+        }
         ContentElement::Link { text, href } => format!("[{text}]({})", destination(href)),
         ContentElement::Image { alt, path } => {
             let alt_text = alt.as_deref().unwrap_or("");
@@ -245,7 +251,7 @@ fn quote(s: &str) -> String {
 
 /// Where a line sits within its block, which decides which openers apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LineContext {
+pub(crate) enum LineContext {
     /// First line of a block: every block opener applies.
     BlockStart,
     /// Later line of a paragraph: only openers that can interrupt a
@@ -255,7 +261,7 @@ enum LineContext {
 
 /// Escape the lines of paragraph or blockquote text so they stay one
 /// paragraph. Lines are split on `\n` only (paragraphs and blockquotes alike).
-fn escape_block_lines(text: &str) -> Vec<String> {
+pub(crate) fn escape_block_lines(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.split('\n') {
         let escaped = match out.last() {
@@ -560,7 +566,7 @@ const HTML_BLOCK_TAGS: &[&str] = &[
 
 /// Whether `rest` (starting with `<`) opens a CommonMark HTML block.
 /// Types 1-6 can interrupt a paragraph; type 7 only starts one on a fresh line.
-fn starts_html_block(rest: &str, ctx: LineContext) -> bool {
+pub(crate) fn starts_html_block(rest: &str, ctx: LineContext) -> bool {
     let Some(after) = rest.strip_prefix('<') else { return false };
     let lower = after.to_ascii_lowercase();
     let ends_tag_name = |tail: &str| tail.is_empty() || tail.starts_with([' ', '\t', '>']);
@@ -853,9 +859,7 @@ headings
 
     #[test]
     fn serialize_paragraph() {
-        let d = doc_from_elements(vec![ContentElement::Paragraph {
-            text: "Some text.".to_string(),
-        }]);
+        let d = doc_from_elements(vec![ContentElement::paragraph_from_markdown("Some text.")]);
         assert_eq!(serialize_document(&d), "Some text.\n");
     }
 
@@ -932,8 +936,18 @@ headings
         flat.elements[0].node.clone()
     }
 
+    /// The paragraph that markdown `source` reads as.
+    fn src_para(source: &str) -> ContentElement {
+        ContentElement::paragraph_from_markdown(source)
+    }
+
+    /// A paragraph whose content is exactly the literal text `text`.
     fn para(text: &str) -> ContentElement {
-        ContentElement::Paragraph { text: text.to_string() }
+        use crate::inline::{Inline, InlineContext, Inlines};
+        ContentElement::Paragraph {
+            content: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::Paragraph),
+            marker: None,
+        }
     }
 
     #[test]
@@ -951,10 +965,10 @@ headings
             ("42) x", "42\\) x"),
             ("1.", "1\\."),
             ("---", "\\---"),
-            ("***", "\\***"),
-            ("___", "\\___"),
+            ("***", "\\*\\*\\*"),
+            ("___", "\\_\\_\\_"),
             ("- - -", "\\- - -"),
-            ("```", "\\```"),
+            ("```", "\\`\\``"),
             ("~~~ x", "\\~~~ x"),
             ("<div>", "\\<div>"),
             ("<div> hello", "\\<div> hello"),
@@ -969,21 +983,32 @@ headings
             ("   x", "x"),
             (" \t- x", "\\- x"),
         ];
+        let mut bad = Vec::new();
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
-            assert_eq!(out, expected, "paragraph {text:?}");
-            assert!(
-                matches!(reparse_one(&out), ContentElement::Paragraph { .. }),
-                "paragraph {text:?} serialized as {out:?} did not read back as a paragraph"
-            );
+            if out != expected {
+                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+            }
+            if !matches!(reparse_one(&out), ContentElement::Paragraph { .. }) {
+                bad.push(format!("{text:?} written {out:?} did not read back as a paragraph"));
+            }
         }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
     #[test]
     fn paragraph_non_openers_are_left_alone() {
-        for text in ["#tag", "-x", "+1 point", "1.5 litres", "2024 was good", "<span> text", "=== x", "a > b"] {
-            assert_eq!(serialize_element(&para(text)), text, "paragraph {text:?}");
+        let mut bad = Vec::new();
+        for text in ["#tag", "-x", "+1 point", "1.5 litres", "2024 was good", "=== x", "a > b"] {
+            let out = serialize_element(&para(text));
+            if out != text {
+                bad.push(format!("{text:?} was written {out:?}"));
+            }
         }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+        // A literal `<span>` is text, not HTML: written escaped so that it
+        // stays text.
+        assert_eq!(serialize_element(&para("<span> text")), "\\<span> text");
     }
 
     #[test]
@@ -996,21 +1021,26 @@ headings
             ("a\n===", "a\n\\==="),
             ("a\n---", "a\n\\---"),
             ("a\n-", "a\n\\-"),
-            ("a\n```", "a\n\\```"),
+            ("a\n```", "a\n\\`\\``"),
             ("a\n<div>", "a\n\\<div>"),
             // These cannot interrupt a paragraph, so they stay as written.
             ("a\n2. b", "a\n2. b"),
-            ("a\n<span>", "a\n<span>"),
-            ("a\n    b", "a\n    b"),
+            // Literal text, not HTML: the tag is escaped to stay text.
+            ("a\n<span>", "a\n\\<span>"),
+            // Indentation after a line break is not part of the nodes.
+            ("a\n    b", "a\nb"),
         ];
+        let mut bad = Vec::new();
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
-            assert_eq!(out, expected, "paragraph {text:?}");
-            assert!(
-                matches!(reparse_one(&out), ContentElement::Paragraph { .. }),
-                "paragraph {text:?} serialized as {out:?} did not read back as a paragraph"
-            );
+            if out != expected {
+                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+            }
+            if !matches!(reparse_one(&out), ContentElement::Paragraph { .. }) {
+                bad.push(format!("{text:?} written {out:?} did not read back as a paragraph"));
+            }
         }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
     #[test]
@@ -1203,12 +1233,12 @@ headings
         // A table interrupts a paragraph only when its header line starts
         // with `|` (behind at most three spaces); otherwise only the first
         // line of a paragraph can head a table.
-        assert_eq!(blocks("x\na | b\n--- | ---"), vec![para("x\na | b\n--- | ---")]);
-        assert_eq!(blocks("x\ny\na | b\n--- | ---"), vec![para("x\ny\na | b\n--- | ---")]);
-        assert_eq!(blocks("x\na | b |\n--- | ---"), vec![para("x\na | b |\n--- | ---")]);
+        assert_eq!(blocks("x\na | b\n--- | ---"), vec![src_para("x\na | b\n--- | ---")]);
+        assert_eq!(blocks("x\ny\na | b\n--- | ---"), vec![src_para("x\ny\na | b\n--- | ---")]);
+        assert_eq!(blocks("x\na | b |\n--- | ---"), vec![src_para("x\na | b |\n--- | ---")]);
         let interrupted = |md: &str, before: &str| {
             let got = blocks(md);
-            assert_eq!(got.first(), Some(&para(before)), "{md:?}: {got:?}");
+            assert_eq!(got.first(), Some(&src_para(before)), "{md:?}: {got:?}");
             assert!(matches!(got.get(1), Some(ContentElement::Table { .. })), "{md:?}: {got:?}");
         };
         interrupted("x\n| a | b |\n--- | ---", "x");
@@ -1218,11 +1248,11 @@ headings
         interrupted("x\n  | a | b |\n--- | ---", "x");
         interrupted("x\n| a | b |\n   --- | ---", "x");
         interrupted("| a | b |\n| c | d |\n--- | ---", "| a | b |");
-        assert_eq!(blocks("x\n    | a | b |\n--- | ---"), vec![para("x\n    | a | b |\n--- | ---")]);
-        assert_eq!(blocks("x\n| a | b |\n    --- | ---"), vec![para("x\n| a | b |\n    --- | ---")]);
-        assert_eq!(blocks("x\n| a | b | c\n--- | ---"), vec![para("x\n| a | b | c\n--- | ---")]);
-        assert_eq!(blocks("x\n| a \\| b |\n--- | ---"), vec![para("x\n| a \\| b |\n--- | ---")]);
-        assert_eq!(blocks("x\n| a | b |"), vec![para("x\n| a | b |")]);
+        assert_eq!(blocks("x\n    | a | b |\n--- | ---"), vec![src_para("x\n    | a | b |\n--- | ---")]);
+        assert_eq!(blocks("x\n| a | b |\n    --- | ---"), vec![src_para("x\n| a | b |\n    --- | ---")]);
+        assert_eq!(blocks("x\n| a | b | c\n--- | ---"), vec![src_para("x\n| a | b | c\n--- | ---")]);
+        assert_eq!(blocks("x\n| a \\| b |\n--- | ---"), vec![src_para("x\n| a \\| b |\n--- | ---")]);
+        assert_eq!(blocks("x\n| a | b |"), vec![src_para("x\n| a | b |")]);
     }
 
     #[test]
@@ -1299,24 +1329,23 @@ headings
         );
     }
 
-    /// L24: link reference definitions are not kept. An unused definition is
-    /// dropped. A definition used inside running text is dropped too, while the
-    /// paragraph keeps its `[a][r]` source, so the link is lost on save. (A
-    /// paragraph that is only `[a][r]` becomes a Link block with the resolved
-    /// href, so it is not affected.) ADR-059 stage 5 resolves the used case
-    /// (C3: written inline); dropping unused definitions is canonical.
+    /// L24 (stage 5): reference links are resolved when the file is read, so a
+    /// definition that is used keeps its link: the paragraph holds an inline
+    /// link and is written with the destination inline (C3). An unused
+    /// definition is dropped, which is canonical.
     #[test]
-    fn unused_reference_definition_behaviour_is_pinned_l24() {
+    fn a_used_reference_definition_keeps_its_link_l24() {
         let src = "See [a][r].\n\n[r]: /x\n\nText.\n\n[u]: /unused\n";
         let flat = crate::parser::parse_document(src).expect("parses");
-        assert_eq!(blocks(src), vec![para("See [a][r]."), para("Text.")]);
+        assert_eq!(blocks(src), vec![src_para("See [a](/x)."), src_para("Text.")]);
         let saved = serialize_elements(&flat.elements);
-        assert_eq!(saved, "See [a][r].\n\nText.");
-        // Before the save the paragraph links to /x; after it, it links nowhere.
+        assert_eq!(saved, "See [a](/x).\n\nText.");
+        // The paragraph links to /x before the save and after it.
         assert_eq!(crate::parser::paragraph_link_destinations(src), vec!["/x".to_string()]);
-        assert!(
-            crate::parser::paragraph_link_destinations(&saved).is_empty(),
-            "the used definition is lost on save: {saved:?}"
+        assert_eq!(
+            crate::parser::paragraph_link_destinations(&saved),
+            vec!["/x".to_string()],
+            "the used definition's link survives a save: {saved:?}"
         );
         // A paragraph that is only `[a][r]` resolves to a Link block.
         assert_eq!(
@@ -1332,27 +1361,37 @@ headings
             ("a|b\n-|-", "a|b\n\\-|-"),
             ("| a |\n| - |", "| a |\n| \\- |"),
             ("a | b\n:--- | ---:", "a | b\n:\\--- | ---:"),
-            ("a | b\n   --- | ---", "a | b\n   \\--- | ---"),
-            ("`a | b`\n--- | ---", "`a | b`\n\\--- | ---"),
+            // Indentation after a line break is not part of the nodes.
+            ("a | b\n   --- | ---", "a | b\n\\--- | ---"),
+            ("`a | b`\n--- | ---", "\\`a | b`\n\\--- | ---"),
             ("# a | b\n--- | ---", "\\# a | b\n\\--- | ---"),
             // A header starting with `|` on a later line interrupts.
             ("x\n| a | b |\n--- | ---", "x\n| a | b |\n\\--- | ---"),
-            ("x\ny\n  | a\n|---|", "x\ny\n  | a\n|\\---|"),
+            ("x\ny\n  | a\n|---|", "x\ny\n| a\n|\\---|"),
             ("| a |\n|-|\n|-|", "| a |\n|\\-|\n|\\-|"),
             // Not a table, so left alone.
             ("a\n--- | ---", "a\n--- | ---"),
             ("a | b | c\n--- | ---", "a | b | c\n--- | ---"),
-            ("a \\| b\n--- | ---", "a \\| b\n--- | ---"),
+            // A literal backslash is written doubled.
+            ("a \\| b\n--- | ---", "a \\\\| b\n--- | ---"),
             ("x\na | b\n--- | ---", "x\na | b\n--- | ---"),
-            ("a | b\n    --- | ---", "a | b\n    --- | ---"),
-            ("x\n    | a | b |\n--- | ---", "x\n    | a | b |\n--- | ---"),
+            // Without the indentation (which is not in the nodes) these would
+            // be tables, so the delimiter row is escaped.
+            ("a | b\n    --- | ---", "a | b\n\\--- | ---"),
+            ("x\n    | a | b |\n--- | ---", "x\n| a | b |\n\\--- | ---"),
             ("x\n| a | b | c\n--- | ---", "x\n| a | b | c\n--- | ---"),
         ];
+        let mut bad = Vec::new();
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
-            assert_eq!(out, expected, "paragraph {text:?}");
-            assert_eq!(reparse_one(&out), para(&out), "paragraph {text:?}");
+            if out != expected {
+                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+            }
+            if reparse_one(&out) != para(text) {
+                bad.push(format!("{text:?} written {out:?} read back as {:?}", reparse_one(&out)));
+            }
         }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
         let quote = ContentElement::Blockquote { text: "a | b\n--- | ---".to_string() };
         let out = serialize_element(&quote);
         assert_eq!(out, "> a | b\n> \\--- | ---");
@@ -1367,7 +1406,9 @@ headings
             ("[a\nb]: /x", "\\[a\nb]: /x"),
             ("[a]:\n/x", "\\[a]:\n/x"),
             ("  [a]: /x", "\\[a]: /x"),
-            ("[a\\]b]: /x", "\\[a\\]b]: /x"),
+            // The backslash is text, so it is written doubled; this is not a
+            // definition either way.
+            ("[a\\]b]: /x", "[a\\\\]b]: /x"),
             // Escaped unnecessarily (no destination): lossless, accepted.
             ("[a]:", "\\[a]:"),
             // Not a definition.
@@ -1376,21 +1417,27 @@ headings
             ("[a[b]]: /x", "[a[b]]: /x"),
             ("x\n[a]: /y", "x\n[a]: /y"),
         ];
+        let mut bad = Vec::new();
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
-            assert_eq!(out, expected, "paragraph {text:?}");
-            assert_eq!(reparse_one(&out), para(&out), "paragraph {text:?}");
+            if out != expected {
+                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+            }
+            if reparse_one(&out) != para(text.trim()) {
+                bad.push(format!("{text:?} written {out:?} read back as {:?}", reparse_one(&out)));
+            }
         }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
     #[test]
     fn html_block_tags_interrupt_a_paragraph() {
         for tag in HTML_BLOCK_TAGS {
             let md = format!("a\n<{tag}>");
-            assert_ne!(blocks(&md), vec![para(&md)], "<{tag}> should interrupt a paragraph");
+            assert_ne!(blocks(&md), vec![src_para(&md)], "<{tag}> should interrupt a paragraph");
             let out = serialize_element(&para(&md));
             assert_eq!(out, format!("a\n\\<{tag}>"));
-            assert_eq!(reparse_one(&out), para(&out), "<{tag}> escaped");
+            assert_eq!(reparse_one(&out), para(&md), "<{tag}> escaped");
         }
     }
 
@@ -1405,11 +1452,12 @@ headings
             vec![para("a"), ContentElement::HtmlBlock { source: "<search>".to_string() }]
         );
         assert!(!HTML_BLOCK_TAGS.contains(&"source"));
-        assert_eq!(blocks("a\n<source>"), vec![para("a\n<source>")]);
+        assert_eq!(blocks("a\n<source>"), vec![src_para("a\n<source>")]);
         for tag in ["span", "a", "em", "img", "input", "button", "select", "source", "picture", "video"] {
             let md = format!("a\n<{tag}>");
             assert!(!HTML_BLOCK_TAGS.contains(&tag), "{tag}");
-            assert_eq!(blocks(&md), vec![para(&md)], "<{tag}> should not interrupt a paragraph");
+            // One paragraph holding the tag as inline HTML.
+            assert_eq!(blocks(&md), vec![src_para(&md)], "<{tag}> should not interrupt a paragraph");
         }
     }
 
@@ -1596,24 +1644,26 @@ headings
 
     #[test]
     fn paragraph_that_reads_as_marked_path_ref_is_escaped() {
+        // The literal text `[x](:p) {#news}`: written with the expression and
+        // the marker both escaped, so it reads back as the same text.
         let text = "[x](:p) {#news}";
         let out = serialize_element(&para(text));
-        assert_eq!(out, format!("\\{text}"));
-        assert_eq!(reparse_one(&out), para(&out));
-        assert_eq!(serialize_element(&para(&out)), out);
+        assert_eq!(out, "\\[x](:p) \\{#news}");
+        assert_eq!(reparse_one(&out), para(text));
+        assert_eq!(serialize_element(&reparse_one(&out)), out);
     }
 
     #[test]
     fn paragraph_that_reads_as_marked_link_expression_is_escaped() {
         let text = "[p](->> :post) {#news}";
         let out = serialize_element(&para(text));
-        assert_eq!(out, format!("\\{text}"));
-        assert_eq!(reparse_one(&out), para(&out));
-        assert_eq!(serialize_element(&para(&out)), out);
-        // An invalid marker is not a link expression: left alone.
+        assert_eq!(out, "\\[p](->> :post) \\{#news}");
+        assert_eq!(reparse_one(&out), para(text));
+        assert_eq!(serialize_element(&reparse_one(&out)), out);
+        // A marker with an invalid name is escaped too: it is literal text.
         let invalid = "[p](->> :post) {#a b}";
-        assert_eq!(serialize_element(&para(invalid)), invalid);
-        assert_eq!(reparse_one(invalid), para(invalid));
+        let out = serialize_element(&para(invalid));
+        assert_eq!(reparse_one(&out), para(invalid), "{out:?}");
     }
 
     #[test]
@@ -1639,12 +1689,14 @@ headings
     fn paragraph_that_reads_as_link_expression_is_escaped() {
         let out = serialize_element(&para("[p](->> :post)"));
         assert_eq!(out, "\\[p](->> :post)");
-        assert_eq!(reparse_one(&out), para("\\[p](->> :post)"));
+        assert_eq!(reparse_one(&out), para("[p](->> :post)"));
         // A fixed point.
-        assert_eq!(serialize_element(&para(&out)), out);
-        // Not a link expression (does not parse): left alone.
-        assert_eq!(serialize_element(&para("[p](->> :post (map :x))")), "[p](->> :post (map :x))");
-        assert_eq!(reparse_one("[p](->> :post (map :x))"), para("[p](->> :post (map :x))"));
+        assert_eq!(serialize_element(&reparse_one(&out)), out);
+        // Not a link expression (does not parse): it is text either way, and
+        // reads back as that text.
+        let text = "[p](->> :post (map :x))";
+        assert_eq!(reparse_one(&serialize_element(&para(text))), para(text));
+        assert_eq!(reparse_one(text), para(text));
     }
 
     #[test]
@@ -1704,15 +1756,11 @@ headings
     /// - L10: two same-kind lists that end up adjacent on save merge into one,
     ///   unless a comment separates them.
     /// - L11: a store-originated paragraph whose text is
-    ///   `[x](->> :post) {#news}` is not marker-shaped (it is in the remaining
-    ///   set). It is written escaped, then re-read as marker-shaped. So for
-    ///   store-originated text, slot assignment is not a fixed point on the
-    ///   first save. The text is stable from the second save on. The real fix
-    ///   comes with ADR-059. Likewise, a store-originated slotted paragraph
-    ///   whose text ends in a slot marker (`text {#summary}`) is written as
-    ///   is, re-read as marker misuse and moves to `unassigned` on its first
-    ///   save; the text is stable from the second save on. Pinned by
-    ///   `store_paragraph_ending_in_a_marker_moves_to_unassigned_l11`.
+    ///   `[x](->> :post) {#news}` is written with the expression and the marker
+    ///   escaped, and reads back as the same text. Resolved by ADR-059 stage 5:
+    ///   a store-originated slotted paragraph whose text ends in a slot marker
+    ///   (`text {#summary}`) is written escaped and stays in its slot. Pinned
+    ///   by `store_paragraph_ending_in_a_marker_stays_in_its_slot_l11`.
     /// - L12: resolved (ADR-062). HTML blocks are `HtmlBlock` elements and
     ///   comments are trivia; pinned by `html_comments_are_trivia` in
     ///   `parser.rs`. A comment between two same-kind lists keeps them apart
@@ -1749,9 +1797,12 @@ headings
         assert_eq!(serialize_document(&second), saved);
     }
 
-    /// L11, for text: a slotted store paragraph ending in a marker.
+    /// L11 (stage 5), for text: a slotted store paragraph whose literal text
+    /// ends in `{#summary}` is written escaped, so it reads back as the same
+    /// text and stays in its slot. (It used to be written as is, read back as
+    /// marker misuse, and move to `unassigned`.)
     #[test]
-    fn store_paragraph_ending_in_a_marker_moves_to_unassigned_l11() {
+    fn store_paragraph_ending_in_a_marker_stays_in_its_slot_l11() {
         let grammar = simple_grammar();
         let mut doc = parse_and_assign("# T\n\nOne.\n\n----\n\nBody.\n", &grammar)
             .expect("parses");
@@ -1765,13 +1816,20 @@ headings
             span: Span { start: 0, end: 0 },
         }];
         let saved = serialize_document(&doc);
+        assert!(saved.contains("text \\{#summary}"), "saved:\n{saved}");
         let reassigned = parse_and_assign(&saved, &grammar).expect("parses");
+        assert!(reassigned.unassigned.is_empty(), "saved:\n{saved}");
+        let summary = reassigned
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == "summary")
+            .expect("summary slot");
         assert_eq!(
-            reassigned.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            summary.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
             vec![para("text {#summary}")],
             "saved:\n{saved}"
         );
-        // The text is stable from the second save on.
+        // The first save is already stable.
         assert_eq!(serialize_document(&reassigned), saved);
     }
 
@@ -1949,12 +2007,22 @@ headings
     }
 
     #[test]
-    fn marker_shaped_paragraphs_are_written_verbatim() {
+    fn marker_shaped_paragraphs_are_written_canonically_with_the_marker_last() {
         let grammar = simple_grammar();
         let src = "# Title\n\nSummary.\n\n![c](i.jpg) {#cover}\n\n[x](:p)\n{#n}\n\n----\n\nBody.\n";
         let doc = parse_and_assign(src, &grammar).expect("parses");
         assert_eq!(doc.unassigned.len(), 2, "{doc:#?}");
-        assert_eq!(serialize_document(&doc), src);
+        // The marker on its own line is structure, so it is written after the
+        // text; the text is escaped so that it does not read as a marked link
+        // expression (it would bind to a slot).
+        let saved = serialize_document(&doc);
+        assert_eq!(
+            saved,
+            "# Title\n\nSummary.\n\n![c](i.jpg) {#cover}\n\n\\[x](:p) {#n}\n\n----\n\nBody.\n"
+        );
+        let again = parse_and_assign(&saved, &grammar).expect("parses");
+        assert_eq!(again.unassigned.len(), 2);
+        assert_eq!(serialize_document(&again), saved);
     }
 
     #[test]

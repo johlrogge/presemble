@@ -21,7 +21,7 @@ fn heading(level: u8, text: &str) -> ContentElement {
 }
 
 fn para(text: &str) -> ContentElement {
-    ContentElement::Paragraph { text: text.to_string() }
+    ContentElement::paragraph_from_markdown(text)
 }
 
 fn para_tree(text: &str) -> NodeTree {

@@ -101,13 +101,26 @@ pub(crate) fn capitalize_slot(
     if let Some(first) = doc_slot.elements.front_mut()
         && let ContentElement::Heading { level, content, marker } = &first.node
     {
-        return Ok(match capitalize_first_text(content) {
+        return Ok(match capitalize_first_text(content, InlineContext::Heading) {
             Some(capitalized) => {
                 first.node = ContentElement::Heading {
                     level: *level,
                     content: capitalized,
                     marker: marker.clone(),
                 };
+                true
+            }
+            None => false,
+        });
+    }
+
+    // A paragraph: the same, on its first Text node.
+    if let Some(first) = doc_slot.elements.front_mut()
+        && let ContentElement::Paragraph { content, marker } = &first.node
+    {
+        return Ok(match capitalize_first_text(content, InlineContext::Paragraph) {
+            Some(capitalized) => {
+                first.node = ContentElement::Paragraph { content: capitalized, marker: marker.clone() };
                 true
             }
             None => false,
@@ -181,7 +194,7 @@ fn text_at<'a>(items: &'a [Inline], path: &[usize]) -> Option<&'a str> {
 /// SetText on that node), or `None` when there is nothing to change: the
 /// letter is already upper case or has no upper case form, there is no text,
 /// or a code span or inline HTML comes before any text (comments are skipped).
-fn capitalize_first_text(content: &Inlines) -> Option<Inlines> {
+fn capitalize_first_text(content: &Inlines, ctx: InlineContext) -> Option<Inlines> {
     let FirstText::At(path) = find_first_text(content.as_slice(), &mut Vec::new()) else {
         return None;
     };
@@ -196,7 +209,7 @@ fn capitalize_first_text(content: &Inlines) -> Option<Inlines> {
     value.push_str(&text[..lead]);
     value.push_str(&upper);
     value.push_str(&text[lead + first.len_utf8()..]);
-    content.with_text_at(&path, &value, InlineContext::Heading)
+    content.with_text_at(&path, &value, ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,9 +223,7 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
                 .ok_or_else(|| format!("invalid heading level: {}", level.min.value()))?;
             Ok(ContentElement::heading_from_markdown(heading_level, new_value))
         }
-        Element::Paragraph => Ok(ContentElement::Paragraph {
-            text: new_value.to_string(),
-        }),
+        Element::Paragraph => Ok(ContentElement::paragraph_from_markdown(new_value)),
         Element::Link { .. } => {
             // Parse "text|href" format.
             if let Some((text, href)) = new_value.split_once('|') {
@@ -253,7 +264,6 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
 /// nodes (see `capitalize_first_text`).
 fn element_text_mut(element: &mut ContentElement) -> Option<&mut String> {
     match element {
-        ContentElement::Paragraph { text } => Some(text),
         ContentElement::Link { text, .. } => Some(text),
         ContentElement::Image { alt: Some(alt), .. } => Some(alt),
         ContentElement::Blockquote { text } => Some(text),

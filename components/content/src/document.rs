@@ -141,7 +141,13 @@ pub enum ContentElement {
         content: crate::inline::Inlines,
         marker: Option<SlotMarker>,
     },
-    Paragraph { text: String },
+    /// A paragraph of inline content and an optional trailing slot marker
+    /// (ADR-059 §5). A paragraph that is exactly one link or one image is a
+    /// `Link` or an `Image` block until stage 5b.
+    Paragraph {
+        content: crate::inline::Inlines,
+        marker: Option<SlotMarker>,
+    },
     Image { alt: Option<String>, path: String },
     Link { text: String, href: String },
     Separator,
@@ -299,9 +305,9 @@ mod tests {
 
     #[test]
     fn content_element_partial_eq_paragraph() {
-        let a = ContentElement::Paragraph { text: "hello".to_string() };
-        let b = ContentElement::Paragraph { text: "hello".to_string() };
-        let c = ContentElement::Paragraph { text: "world".to_string() };
+        let a = ContentElement::paragraph_from_markdown("hello");
+        let b = ContentElement::paragraph_from_markdown("hello");
+        let c = ContentElement::paragraph_from_markdown("world");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -363,7 +369,7 @@ mod tests {
     fn flat_document_holds_spanned_elements() {
         use schema::Span;
         let span = Span { start: 0, end: 5 };
-        let elem = ContentElement::Paragraph { text: "hello".to_string() };
+        let elem = ContentElement::paragraph_from_markdown("hello");
         let spanned = Spanned { node: elem, span };
         let doc = FlatDocument::from_elements(im::vector![spanned]);
         assert_eq!(doc.elements.len(), 1);

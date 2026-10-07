@@ -69,6 +69,7 @@ use content::{
     parse_document, serialize_document, ContentElement, Document, DocumentSlot, Keyword, LinkOp,
     LinkTarget, LinkText, RefsToTarget,
 };
+use content::inline::{Inline, InlineContext, Inlines};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
 
 /// Fixed seed list. Each seed produces one document.
@@ -240,7 +241,16 @@ fn gen_paragraph_line(rng: &mut Rng) -> String {
 fn gen_multiline_paragraph(rng: &mut Rng) -> ContentElement {
     let n = 2 + rng.below(3);
     let text = (0..n).map(|_| gen_paragraph_line(rng)).collect::<Vec<_>>().join("\n");
-    ContentElement::Paragraph { text }
+    literal_paragraph(&text)
+}
+
+/// A paragraph whose content is exactly the literal text `text` (ADR-059
+/// stage 5): its markup characters are text, and the serializer escapes them.
+fn literal_paragraph(text: &str) -> ContentElement {
+    ContentElement::Paragraph {
+        content: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::Paragraph),
+        marker: None,
+    }
 }
 
 /// A heading's source in canonical form (ADR-063): one line, trimmed, with a
@@ -388,7 +398,7 @@ fn gen_block(rng: &mut Rng, previous_list: Option<bool>) -> ContentElement {
     match rng.below(10) {
         9 => gen_list(rng, previous_list),
         0 => gen_heading(rng),
-        1 => ContentElement::Paragraph { text: gen_paragraph_line(rng) },
+        1 => literal_paragraph(&gen_paragraph_line(rng)),
         7 => gen_multiline_paragraph(rng),
         // Blockquote text is trimmed by the parser, so leading whitespace is
         // outside the lossless domain (ADR-057 open questions 5/6).
@@ -464,23 +474,12 @@ fn body_only(blocks: &[ContentElement]) -> Document {
     }
 }
 
-/// The block we expect to read back after serialize → parse.
-///
-/// Tracked in ADR-057 open questions 5/6; paragraphs are source text until the
-/// inline-model cutover (staged plan: thin (ii) → ADR-059 (inline segments)): a text-only `Paragraph` stores its
-/// raw markdown SOURCE span, not literal text (parser.rs, `End(Paragraph)`).
-/// So the backslash the serializer adds to keep `# x` a paragraph reads back
-/// as part of the text (`\# x`). The block kind is preserved and the result is
-/// a fixed point, but the text is the escaped source. Every other block kind
-/// stores literal text and must read back exactly.
+/// The block we expect to read back after serialize → parse: the block itself.
+/// A paragraph holds inline nodes (ADR-059 stage 5), so the backslash the
+/// serializer adds to keep `# x` a paragraph is not part of what it reads back
+/// as; every block kind reads back exactly.
 fn expected_after_round_trip(block: &ContentElement) -> ContentElement {
-    match block {
-        ContentElement::Paragraph { .. } => {
-            let source = serialize_document(&body_only(std::slice::from_ref(block)));
-            ContentElement::Paragraph { text: source.trim().to_string() }
-        }
-        other => other.clone(),
-    }
+    block.clone()
 }
 
 #[test]
@@ -550,7 +549,8 @@ fn generator_exercises_every_block_kind_and_opener() {
     let mut escaped_definitions = 0;
     for seed in SEEDS {
         for block in flatten(&gen_document(seed)) {
-            if let ContentElement::Paragraph { text } = &block {
+            if let ContentElement::Paragraph { content, .. } = &block {
+                let [Inline::Text(text)] = content.as_slice() else { continue };
                 let out = serialize_document(&body_only(std::slice::from_ref(&block)));
                 let out = out.trim();
                 if out != text.as_str() {
@@ -720,7 +720,7 @@ fn markdown_between_html_tags_is_three_elements() {
     let parsed = parse_blocks(src);
     assert_eq!(
         parsed,
-        vec![html("<div>"), ContentElement::Paragraph { text: "*md*".to_string() }, html("</div>")]
+        vec![html("<div>"), ContentElement::paragraph_from_markdown("*md*"), html("</div>")]
     );
     assert_eq!(serialize_document(&body_only(&parsed)), src);
 }
@@ -730,11 +730,11 @@ fn markdown_between_html_tags_is_three_elements() {
 fn html_block_and_paragraph_interplay() {
     assert_eq!(
         parse_blocks("A paragraph line\n<div>x</div>\n"),
-        vec![ContentElement::Paragraph { text: "A paragraph line".to_string() }, html("<div>x</div>")]
+        vec![ContentElement::paragraph_from_markdown("A paragraph line"), html("<div>x</div>")]
     );
     assert_eq!(
         parse_blocks("A paragraph line\n<custom-el a=\"1\">\n"),
-        vec![ContentElement::Paragraph { text: "A paragraph line\n<custom-el a=\"1\">".to_string() }]
+        vec![ContentElement::paragraph_from_markdown("A paragraph line\n<custom-el a=\"1\">")]
     );
 }
 
@@ -757,9 +757,7 @@ fn from_disk_corpus_is_written_unchanged() {
     let corpus = [
         "a\n2. b",
         "a\n<span>",
-        "a\n*",
         "a\n+ ",
-        "a\n    - b",
         "a\n=== x",
         "x\n[a]: /y",
         "a | b\nc | d",
@@ -771,7 +769,6 @@ fn from_disk_corpus_is_written_unchanged() {
         "1.5 litres\nmore",
         "a | b | c\n--- | ---",
         "x\na | b\n--- | ---",
-        "a \\| b\n--- | ---",
         "[ ]: /x",
         "\\[a]: /x",
         "a | b\n\\--- | ---",
@@ -798,6 +795,26 @@ fn from_disk_corpus_is_written_unchanged() {
         }
     }
     assert!(failures.is_empty(), "from-disk markdown changed:\n{}", failures.join("\n"));
+}
+
+/// A paragraph is written canonically (ADR-059 stage 5): what its nodes do
+/// not keep is not written back. These were written as read before; now a
+/// lone `*` is escaped (the writer cannot tell it from the start of
+/// emphasis), indentation after a line break is not part of the nodes, and
+/// an escaped `|` is the plain character, which then needs the delimiter row
+/// escaped. Each reads back as the same nodes.
+#[test]
+fn from_disk_markdown_that_is_canonicalised_by_a_save() {
+    for (md, canonical) in [
+        ("a\n*", "a\n\\*"),
+        ("a\n    - b", "a\n\\- b"),
+        ("a \\| b\n--- | ---", "a | b\n\\--- | ---"),
+    ] {
+        let parsed = parse_blocks(md);
+        let out = serialize_document(&body_only(&parsed));
+        assert_eq!(out.trim(), canonical, "{md:?}");
+        assert_eq!(parse_blocks(&out), parsed, "{md:?} did not read back as the same nodes");
+    }
 }
 
 /// Representative markdown files from the repository: parse → serialize →

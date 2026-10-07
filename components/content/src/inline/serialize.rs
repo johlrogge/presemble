@@ -57,7 +57,9 @@ pub fn serialize_inlines(inlines: &Inlines, ctx: InlineContext) -> String {
     let mut ahead = Ahead::new(inlines.as_slice(), place.bracket);
     write_run(inlines.as_slice(), place, &mut ahead, &mut out);
     match ctx {
-        InlineContext::Paragraph => escape_line_starts(&out, true),
+        // Line starts are escaped by the block writer, which knows pulldown's
+        // exact rules (tables, link reference definitions, HTML blocks).
+        InlineContext::Paragraph => crate::serializer::escape_block_lines(&out).join("\n"),
         // The first line sits behind `[` or `![`, so it opens no block.
         InlineContext::LinkText | InlineContext::Alt => escape_line_starts(&out, false),
         InlineContext::Heading => crate::serializer::escape_closing_hashes(&out),
@@ -608,6 +610,16 @@ fn opener_escape_at(line: &str, first: bool) -> Option<usize> {
             ((1..=6).contains(&hashes) && space_or_end(&line[hashes..])).then_some(0)
         }
         '>' => Some(0),
+        // An HTML block opener (a comment, a processing instruction, a block
+        // tag): written with a backslash whether or not a `>` follows.
+        '<' => {
+            let ctx = if first {
+                crate::serializer::LineContext::BlockStart
+            } else {
+                crate::serializer::LineContext::Continuation
+            };
+            crate::serializer::starts_html_block(line, ctx).then_some(0)
+        }
         '-' | '+' | '*' => space_or_end(rest).then_some(0),
         '~' => (line.len() - line.trim_start_matches('~').len() >= 3).then_some(0),
         '0'..='9' => {

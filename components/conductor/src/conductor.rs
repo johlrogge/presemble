@@ -4340,7 +4340,7 @@ mod query_edges_tests {
         let doc = content::Document {
             preamble: im::vector![],
             body: im::vector![schema::Spanned {
-                node: content::ContentElement::Paragraph { text: "No links here.".to_string() },
+                node: content::ContentElement::paragraph_from_markdown("No links here."),
                 span: schema::Span { start: 0, end: 0 },
             }],
             has_separator: false,
@@ -6044,11 +6044,11 @@ mod creation_check_tests {
                     name: SlotName::new("summary"),
                     elements: im::vector![
                         Spanned {
-                            node: ContentElement::Paragraph { text: "First.".to_string() },
+                            node: ContentElement::paragraph_from_markdown("First."),
                             span: Span { start: 0, end: 0 },
                         },
                         Spanned {
-                            node: ContentElement::Paragraph { text: "Second.".to_string() },
+                            node: ContentElement::paragraph_from_markdown("Second."),
                             span: Span { start: 0, end: 0 },
                         },
                     ],
@@ -6056,7 +6056,7 @@ mod creation_check_tests {
             ],
             body: im::vector![
                 Spanned {
-                    node: ContentElement::Paragraph { text: "Body text".to_string() },
+                    node: ContentElement::paragraph_from_markdown("Body text"),
                     span: Span { start: 0, end: 0 },
                 },
             ],
@@ -6308,7 +6308,7 @@ mod ned_suggestion_handler_tests {
             ],
             body: im::vector![
                 Spanned {
-                    node: ContentElement::Paragraph { text: "Body text".to_string() },
+                    node: ContentElement::paragraph_from_markdown("Body text"),
                     span: Span { start: 0, end: 0 },
                 },
             ],
@@ -9209,7 +9209,7 @@ mod ned_program_plan_tests {
     }
 
     fn p(text: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::Paragraph { text: text.to_string() })
+        spanned(ContentElement::paragraph_from_markdown(text))
     }
 
     fn title(text: &str) -> DocumentSlot {
@@ -9504,7 +9504,7 @@ mod body_structural_bsave_tests {
     }
 
     fn p(text: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::Paragraph { text: text.to_string() })
+        spanned(ContentElement::paragraph_from_markdown(text))
     }
 
     /// A Clojure string literal for `s` (see `content::address::clj_str`).
@@ -9574,6 +9574,11 @@ mod body_structural_bsave_tests {
         )
     }
 
+    /// The markdown of a paragraph, as a test compares it.
+    fn other_text(el: &ContentElement) -> String {
+        el.text().map(|t| t.into_owned()).unwrap_or_default()
+    }
+
     fn body_texts(conductor: &Conductor, doc_root: node_store::NodeId) -> Vec<(String, String)> {
         let store = conductor.node_store.read().unwrap();
         let doc = store_to_document(&store, doc_root).expect("store_to_document");
@@ -9583,7 +9588,9 @@ mod body_structural_bsave_tests {
                 ContentElement::Heading { content, .. } => {
                     ("heading".to_string(), content::AsPlainText::plain_text(content))
                 }
-                ContentElement::Paragraph { text } => ("paragraph".to_string(), text.clone()),
+                ContentElement::Paragraph { .. } => {
+                    ("paragraph".to_string(), other_text(&el.node))
+                }
                 other => ("other".to_string(), format!("{other:?}")),
             })
             .collect()
@@ -10500,7 +10507,7 @@ mod link_expression_pipeline_tests {
         let conductor = make_conductor(&tmp);
         assert_eq!(
             unassigned(&conductor, "/post/p5"),
-            vec![content::ContentElement::Paragraph { text: "Stray paragraph.".to_string() }]
+            vec![content::ContentElement::paragraph_from_markdown("Stray paragraph.")]
         );
         assert_eq!(
             slot_urls(&conductor, "/author/a", "posts"),
@@ -10540,7 +10547,7 @@ mod link_expression_pipeline_tests {
         let conductor = make_conductor(&tmp);
         assert_eq!(
             unassigned(&conductor, "/post/p7"),
-            vec![content::ContentElement::Paragraph { text: "[A](/author/a) {#nope}".to_string() }]
+            vec![content::ContentElement::paragraph_from_markdown("[A](/author/a) {#nope}")]
         );
         assert_eq!(
             slot_urls(&conductor, "/author/a", "posts"),
@@ -10576,7 +10583,7 @@ mod link_expression_pipeline_tests {
         let conductor = make_conductor(&tmp);
         assert_eq!(
             unassigned(&conductor, "/post/p8"),
-            vec![content::ContentElement::Paragraph { text: "See [A](/author/a) for more.".to_string() }]
+            vec![content::ContentElement::paragraph_from_markdown("See [A](/author/a) for more.")]
         );
         assert_eq!(
             slot_urls(&conductor, "/author/a", "posts"),

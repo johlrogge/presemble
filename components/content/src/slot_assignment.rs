@@ -3,7 +3,7 @@ use crate::document::{
     FlatDocument, Keyword,
 };
 use crate::link_expression::LinkExpressionDiagnostic;
-use crate::parser::{diagnose_marker_paragraph, is_marker_paragraph};
+use crate::parser::diagnose_paragraph_marker;
 use schema::{Element, Grammar, Slot, Span, Spanned};
 
 // ---------------------------------------------------------------------------
@@ -41,8 +41,8 @@ pub fn unassigned_reason(el: &ContentElement, grammar: &Grammar) -> UnassignedRe
                 UnassignedReason::MarkerNamesNoSlot(name.clone())
             }
         }
-        ContentElement::Paragraph { text } if is_marker_paragraph(text) => {
-            UnassignedReason::MisplacedMarker(diagnose_marker_paragraph(text))
+        ContentElement::Paragraph { content, marker: Some(marker) } => {
+            UnassignedReason::MisplacedMarker(diagnose_paragraph_marker(content, marker))
         }
         ContentElement::HtmlBlock { .. } => UnassignedReason::Html,
         _ => UnassignedReason::NotAllowedHere,
@@ -144,7 +144,8 @@ pub fn assign_slots(flat: &FlatDocument, grammar: &Grammar) -> Document {
                         None => true,
                     }
                 }
-                ContentElement::Paragraph { text } => is_marker_paragraph(text),
+                // A paragraph with a marker is never slotted (ADR-060 P1).
+                ContentElement::Paragraph { marker, .. } => marker.is_some(),
                 ContentElement::HtmlBlock { .. } => true,
                 _ => false,
             };
@@ -483,7 +484,7 @@ headings
     }
 
     fn paragraph(text: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::Paragraph { text: text.to_string() })
+        spanned(ContentElement::paragraph_from_markdown(text))
     }
 
     fn link(text: &str, href: &str) -> Spanned<ContentElement> {
@@ -617,7 +618,7 @@ headings
         assert_eq!(slotted.unassigned.len(), 1);
         assert_eq!(
             slotted.unassigned[0].node,
-            ContentElement::Paragraph { text: "Para 4 - extra.".to_string() }
+            ContentElement::paragraph_from_markdown("Para 4 - extra.")
         );
         assert!(slotted.has_separator, "separator should be found by forward scan");
         assert!(slotted.body.is_empty(), "nothing after separator");
@@ -667,7 +668,7 @@ headings
         ));
         assert_eq!(
             slotted.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-            vec![ContentElement::Paragraph { text: "{#title}".to_string() }]
+            vec![ContentElement::paragraph_from_markdown("{#title}")]
         );
     }
 
@@ -1067,7 +1068,9 @@ headings
             .unassigned
             .iter()
             .map(|e| match &e.node {
-                ContentElement::Paragraph { text } => text.clone(),
+                ContentElement::Paragraph { content, marker } => {
+                    crate::inline::paragraph_source_text(content, marker.as_ref())
+                }
                 ContentElement::Heading { content, .. } => content.plain_text(),
                 ContentElement::LinkExpression { slot: Some(k), .. } => k.to_string(),
                 other => format!("{other:?}"),

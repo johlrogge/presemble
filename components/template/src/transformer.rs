@@ -3881,11 +3881,8 @@ mod tests {
             store.add_edge(host, node_store::Edge::Attribute { name, value });
         }
         let block = match el {
-            ContentElement::Heading { .. } => content_store::block_to_store(el, store),
-            ContentElement::Paragraph { text } => {
-                let b = element(store, "paragraph");
-                text_child(store, b, text);
-                b
+            ContentElement::Heading { .. } | ContentElement::Paragraph { .. } => {
+                content_store::block_to_store(el, store)
             }
             ContentElement::Blockquote { text } => {
                 let b = element(store, "blockquote");
@@ -3977,7 +3974,7 @@ mod tests {
         use content::{ContentElement as C, LinkTarget, LinkText};
         vec![
             C::heading_from_markdown(schema::HeadingLevel::new(3).unwrap(), "Head *em* <b>x</b>"),
-            C::Paragraph { text: "a <script>x</script> **b** `c<d` [l](/a \"t\")".to_string() },
+            C::paragraph_from_markdown("a <script>x</script> **b** `c<d` [l](/a \"t\")"),
             C::Separator,
             C::HtmlBlock { source: "<div>secret</div>".to_string() },
             C::Link { text: "A link".to_string(), href: "/a?x=1&y=2".to_string() },
@@ -4031,9 +4028,7 @@ mod tests {
                 schema::HeadingLevel::new(2).unwrap(),
                 "Section",
             )),
-            mk_spanned(content::ContentElement::Paragraph {
-                text: "A paragraph.".to_string(),
-            }),
+            mk_spanned(content::ContentElement::paragraph_from_markdown("A paragraph.")),
             mk_spanned(content::ContentElement::CodeBlock {
                 language: Some("rust".to_string()),
                 code: "fn main() {}\n".to_string(),
@@ -4153,7 +4148,7 @@ mod tests {
     fn body_md_attr_is_canonical_block_markdown_for_store_built_document() {
         let elements = vec![
             heading_el(2, "Section *em*"),
-            content::ContentElement::Paragraph { text: "A *para*".to_string() },
+            content::ContentElement::paragraph_from_markdown("A *para*"),
         ];
         let html = native_body_html(&elements);
         for el in &elements {
@@ -4191,7 +4186,7 @@ mod tests {
     fn legacy_body_md_attr_equals_native_body_md_attr() {
         let elements = vec![
             heading_el(2, "Section"),
-            content::ContentElement::Paragraph { text: "A *para*".to_string() },
+            content::ContentElement::paragraph_from_markdown("A *para*"),
             content::ContentElement::Image { path: "/i.png".to_string(), alt: None },
         ];
         let spanned: im::Vector<_> = elements
@@ -4448,10 +4443,10 @@ mod tests {
 
         // Native: the same body in a store, and slot elements.
         let elements = vec![
-            content::ContentElement::Paragraph { text: "Intro text.".to_string() },
+            content::ContentElement::paragraph_from_markdown("Intro text."),
             heading_el(2, "Intro"),
-            content::ContentElement::Paragraph { text: "Para one.".to_string() },
-            content::ContentElement::Paragraph { text: "Para two.".to_string() },
+            content::ContentElement::paragraph_from_markdown("Para one."),
+            content::ContentElement::paragraph_from_markdown("Para two."),
         ];
         let native = native_body_html(&elements);
         let file_free = |a: String| a.replace("content/post/x.md", BODY_FILE);
@@ -4818,7 +4813,7 @@ mod tests {
                 .collect();
             crate::dom::serialize_nodes(&crate::body_nodes::render_body_nodes(&spanned, false))
         };
-        let body = published(&[heading_el(2, "S"), content::ContentElement::Paragraph { text: "p".into() }]);
+        let body = published(&[heading_el(2, "S"), content::ContentElement::paragraph_from_markdown("p")]);
         assert!(!body.contains("data-presemble-md"), "{body}");
         let slot = render_for(
             &heading_store("Plain *em* title"),

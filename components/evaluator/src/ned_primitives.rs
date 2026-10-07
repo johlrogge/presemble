@@ -1129,15 +1129,15 @@ mod tests {
             ],
             body: im::vector![
                 Spanned {
-                    node: ContentElement::Paragraph { text: "First".to_string() },
+                    node: ContentElement::paragraph_from_markdown("First"),
                     span: Span { start: 0, end: 0 },
                 },
                 Spanned {
-                    node: ContentElement::Paragraph { text: "Second".to_string() },
+                    node: ContentElement::paragraph_from_markdown("Second"),
                     span: Span { start: 0, end: 0 },
                 },
                 Spanned {
-                    node: ContentElement::Paragraph { text: "Third".to_string() },
+                    node: ContentElement::paragraph_from_markdown("Third"),
                     span: Span { start: 0, end: 0 },
                 },
             ],
@@ -1465,7 +1465,7 @@ mod tests {
             ],
             body: im::vector![
                 Spanned {
-                    node: ContentElement::Paragraph { text: "Old content".to_string() },
+                    node: ContentElement::paragraph_from_markdown("Old content"),
                     span: Span { start: 0, end: 0 },
                 },
             ],
@@ -1753,7 +1753,7 @@ mod tests {
             let doc = Document {
                 preamble: im::vector![],
                 body: im::vector![Spanned {
-                    node: ContentElement::Paragraph { text: text.to_string() },
+                    node: ContentElement::paragraph_from_markdown(text),
                     span: Span { start: 0, end: 0 },
                 }],
                 has_separator: false,
@@ -2146,7 +2146,7 @@ mod tests {
             spanned(ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), text))
         }
         fn p(text: &str) -> Spanned<ContentElement> {
-            spanned(ContentElement::Paragraph { text: text.to_string() })
+            spanned(ContentElement::paragraph_from_markdown(text))
         }
 
         let doc = Document {
@@ -2361,7 +2361,7 @@ mod tests {
             Spanned { node, span: Span { start: 0, end: 0 } }
         }
         let h2 = |t: &str| spanned(ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), t));
-        let p = |t: &str| spanned(ContentElement::Paragraph { text: t.to_string() });
+        let p = |t: &str| spanned(ContentElement::paragraph_from_markdown(t));
 
         let doc = Document {
             preamble: im::vector![],

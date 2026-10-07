@@ -54,6 +54,87 @@ pub(crate) fn heading_source_text(content: &Inlines, marker: Option<&SlotMarker>
     }
 }
 
+/// A paragraph as markdown: the canonical inlines (ADR-059 C10 at line starts)
+/// and ` {#marker}` when there is a marker. A paragraph that is only a marker
+/// is written `{#name}`.
+pub(crate) fn paragraph_source_text(content: &Inlines, marker: Option<&SlotMarker>) -> String {
+    let text = serialize_inlines(content, InlineContext::Paragraph);
+    match marker {
+        None => text,
+        Some(marker) if text.is_empty() => format!("{{#{marker}}}"),
+        Some(marker) => format!("{text} {{#{marker}}}"),
+    }
+}
+
+/// What an author would have typed for a paragraph, as the checks that look
+/// for link-expression and marker mistakes read it (ADR-058, ADR-060): the
+/// literal text, with code spans, links and images as written, and the marker
+/// after it. Not escaped: a text that looks like a link expression is
+/// diagnosed as one, whichever way it was written.
+pub(crate) fn paragraph_diagnosis_source(content: &Inlines, marker: Option<&SlotMarker>) -> String {
+    fn push(items: &[Inline], out: &mut String) {
+        for item in items {
+            match item {
+                // A `{#` in text is literal, so it is written escaped: it is
+                // not a marker.
+                Inline::Text(s) => out.push_str(&s.replace("{#", "\\{#")),
+                Inline::Emph(inner) | Inline::Strong(inner) => push(inner.as_slice(), out),
+                Inline::Code(code) => {
+                    out.push('`');
+                    out.push_str(code);
+                    out.push('`');
+                }
+                Inline::LineBreak => out.push('\n'),
+                Inline::Link { destination, text, .. } => {
+                    out.push('[');
+                    push(text.as_slice(), out);
+                    out.push_str("](");
+                    out.push_str(destination.as_str());
+                    out.push(')');
+                }
+                Inline::Image { source, alt, .. } => {
+                    out.push_str("![");
+                    push(alt.as_slice(), out);
+                    out.push_str("](");
+                    out.push_str(source.as_str());
+                    out.push(')');
+                }
+                Inline::Html(html) => out.push_str(html.as_str()),
+                Inline::Comment(_) => {}
+            }
+        }
+    }
+    let mut out = String::new();
+    push(content.as_slice(), &mut out);
+    match marker {
+        None => out,
+        Some(marker) if out.is_empty() => format!("{{#{marker}}}"),
+        Some(marker) => format!("{out} {{#{marker}}}"),
+    }
+}
+
+/// Read the markdown source of a paragraph as inlines and a marker: a
+/// trailing `{#name}` (after a space, or alone on the last line) is the
+/// marker, and what remains must read as exactly one paragraph of inlines.
+/// `None` when it does not.
+pub(crate) fn read_paragraph_source(source: &str) -> Option<(Inlines, Option<SlotMarker>)> {
+    let trimmed = source.trim();
+    let (text, marker) = match crate::parser::paragraph_marker(trimmed) {
+        Some(found) => (found.content, Some(found.marker)),
+        None => (trimmed, None),
+    };
+    let content = parse_inlines(text, InlineContext::Paragraph).ok()?;
+    // A source that is all link reference definitions reads as nothing: it is
+    // text, not an empty paragraph.
+    (!content.is_empty() || text.is_empty()).then_some((content, marker))
+}
+
+/// The fallback for a source that does not read as one paragraph's content:
+/// the whole source as one text value, no marker. Nothing is lost.
+pub(crate) fn literal_paragraph_content(source: &str) -> (Inlines, Option<SlotMarker>) {
+    (Inlines::new(vec![Inline::Text(source.to_string())], InlineContext::Paragraph), None)
+}
+
 /// Read the markdown source of a heading line's content (no `#` markers) as
 /// inlines and a marker: a trailing `{#name}` that follows a space, or a
 /// source that is only `{#name}`, is the marker (a code span or an escaped

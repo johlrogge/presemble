@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn paragraph_round_trips_through_the_store() {
         let mut store = NodeStore::new();
-        let el = ContentElement::Paragraph { text: "hello *there*".to_string() };
+        let el = ContentElement::paragraph_from_markdown("hello *there*");
         let id = block_to_store(&el, &mut store);
         assert_eq!(block_from_node(&store, id), Ok(el));
     }

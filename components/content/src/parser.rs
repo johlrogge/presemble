@@ -82,6 +82,61 @@ pub(crate) fn is_marker_paragraph(source: &str) -> bool {
     split_marker(trimmed).is_some() || last_line_marker(trimmed).is_some()
 }
 
+/// The trailing slot marker of a paragraph source, split off (ADR-059 §5).
+pub(crate) struct ParagraphMarker<'a> {
+    /// The source before the marker, trailing whitespace removed.
+    pub content: &'a str,
+    pub marker: crate::document::SlotMarker,
+    /// The byte offset of the marker's `{#` in the trimmed source.
+    pub start: usize,
+}
+
+/// The marker of a paragraph source with the same grammar as
+/// [`is_marker_paragraph`]: `… {#name}` after a space or tab, or a last line
+/// that is only `{#name}`. A link expression is never marker-shaped (its marker
+/// is part of the expression); an escaped `\{#name}` is literal.
+pub(crate) fn paragraph_marker(trimmed: &str) -> Option<ParagraphMarker<'_>> {
+    if read_link_expression_paragraph(trimmed).is_some() {
+        return None;
+    }
+    let (content, name) = match split_marker(trimmed) {
+        Some((expression, name)) => (expression, name),
+        None => {
+            let name = last_line_marker(trimmed)?;
+            let start = trimmed.rfind("{#")?;
+            (trimmed[..start].trim_end(), name)
+        }
+    };
+    let marker = crate::document::SlotMarker::new(name)?;
+    let start = trimmed.len() - name.len() - 3;
+    Some(ParagraphMarker { content, marker, start })
+}
+
+/// What is wrong with a paragraph that carries a marker (ADR-060 P1), read
+/// from the model: the marker is structure, so a marker alone on its own line
+/// and one after the text read the same. A marker whose valid name follows
+/// content that reads as a link expression is the common mistake of putting
+/// the marker on its own line ([`LinkExpressionDiagnostic::MarkerOnOwnLine`]);
+/// when the content spans lines it is
+/// [`LinkExpressionDiagnostic::MarkedExpressionSpansLines`]. Everything else is
+/// diagnosed from the paragraph as the author would have written it
+/// ([`diagnose_marker_paragraph`]).
+pub(crate) fn diagnose_paragraph_marker(
+    content: &crate::inline::Inlines,
+    marker: &crate::document::SlotMarker,
+) -> LinkExpressionDiagnostic {
+    let name = marker.as_str();
+    let expression = crate::inline::paragraph_diagnosis_source(content, None);
+    if Keyword::is_valid(name) && reads_as_link_expression(&expression.replace('\n', " ")) {
+        return if expression.contains('\n') {
+            LinkExpressionDiagnostic::MarkedExpressionSpansLines(name.to_string())
+        } else {
+            LinkExpressionDiagnostic::MarkerOnOwnLine(name.to_string())
+        };
+    }
+    diagnose_marker_paragraph(&crate::inline::paragraph_diagnosis_source(content, Some(marker)))
+}
+
 /// The name of a bare `{#name}` on the last line of `trimmed`, if any.
 fn last_line_marker(trimmed: &str) -> Option<&str> {
     bare_marker(trimmed.rsplit('\n').next().unwrap_or(trimmed))
@@ -207,22 +262,16 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             level: HeadingLevel,
             byte_range: std::ops::Range<usize>,
         },
+        /// A top-level paragraph keeps its events (with their source ranges)
+        /// until it ends: its content is read from them, and nothing is
+        /// extracted or dropped (ADR-059 §5).
         Paragraph {
-            text: String,
-            images: Vec<Spanned<ContentElement>>,
+            events: Vec<(Event<'static>, std::ops::Range<usize>)>,
             byte_range: std::ops::Range<usize>,
-            /// A marker-shaped paragraph (`is_marker_paragraph`): links and
-            /// images inside it do not change the state, and it is emitted as
-            /// a paragraph whose text is its trimmed source (ADR-060 P1).
-            forced: bool,
         },
         Image {
             alt: String,
             path: String,
-            inside_paragraph: bool,
-            paragraph_prefix: String,
-            prior_images: Vec<Spanned<ContentElement>>,
-            paragraph_range: std::ops::Range<usize>,
             image_range: std::ops::Range<usize>,
         },
         Link {
@@ -313,6 +362,20 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             continue;
         }
 
+        // A paragraph collects its events up to its end.
+        if let State::Paragraph { events, .. } = &mut state {
+            if matches!(event, Event::End(TagEnd::Paragraph)) {
+                if let State::Paragraph { events, byte_range } =
+                    std::mem::replace(&mut state, State::Idle)
+                {
+                    finish_paragraph(input, events, byte_range, &mut elements);
+                }
+            } else {
+                events.push((event.into_static(), range));
+            }
+            continue;
+        }
+
         // A heading is captured as source: its inline events (text, code,
         // links, images, HTML, breaks) are consumed here.
         if let State::Heading { level, byte_range } = &state {
@@ -363,139 +426,34 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 if let Some((text, target, slot)) = link_expression {
                     state = State::LinkExpression { text, target, slot, byte_range: range };
                 } else if !matches!(state, State::Blockquote { .. }) {
-                    // If we're inside a blockquote, the inner paragraph events
-                    // are suppressed — raw source captures the content.
-                    // A marker-shaped paragraph is kept verbatim (ADR-060 P1).
-                    let forced = top_level_source.is_some_and(is_marker_paragraph);
-                    state = State::Paragraph {
-                        text: String::new(),
-                        images: Vec::new(),
-                        byte_range: range,
-                        forced,
-                    };
-                }
-            }
-            Event::End(TagEnd::Paragraph) => {
-                // Inside a blockquote the paragraph end is a no-op.
-                if let State::Paragraph { forced: true, byte_range, .. } = &state {
-                    let text = input
-                        .get(byte_range.clone())
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default();
-                    elements.push_back(Spanned {
-                        node: ContentElement::Paragraph { text },
-                        span: Span::from(byte_range.clone()),
-                    });
-                    state = State::Idle;
-                } else if let State::Paragraph { text, images, byte_range, .. } = state {
-                    // A text-only paragraph is kept whenever its source is
-                    // non-empty: one holding only inline HTML has no text
-                    // events but is content (ADR-062 D3).
-                    let has_source = images.is_empty()
-                        && input.get(byte_range.clone()).is_some_and(|s| !s.trim().is_empty());
-                    if has_source || !text.trim().is_empty() {
-                        // When the paragraph contains only text (no images), use the original
-                        // markdown source text so inline markers (**bold**, `code`, _italic_)
-                        // are preserved for the renderer. When images are mixed in, the source
-                        // span includes image syntax, so fall back to the extracted text.
-                        let para_text = if images.is_empty() {
-                            input.get(byte_range.clone())
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or_else(|| text.trim().to_string())
-                        } else {
-                            // The accumulated text is decoded (`\{#x}` reads
-                            // as `{#x}`), so a literal `{#` is escaped again
-                            // here, on the whole text: otherwise the emitted
-                            // paragraph would read as marker misuse.
-                            text.trim().replace("{#", "\\{#")
-                        };
-                        elements.push_back(Spanned {
-                            node: ContentElement::Paragraph { text: para_text },
-                            span: Span::from(byte_range),
-                        });
-                    }
-                    elements.extend(images);
-                    state = State::Idle;
+                    // Inside a blockquote the inner paragraph events are
+                    // suppressed: its raw source captures the content.
+                    state = State::Paragraph { events: Vec::new(), byte_range: range };
                 }
             }
 
-            // Inside a marker-shaped paragraph images stay part of its text.
-            Event::Start(Tag::Image { .. }) if matches!(state, State::Paragraph { forced: true, .. }) => {}
             Event::Start(Tag::Image { dest_url, .. }) => {
-                let path = dest_url.to_string();
-                match state {
-                    State::Paragraph { ref text, ref images, ref byte_range, .. } => {
-                        let prefix = text.clone();
-                        let existing_images = images.clone();
-                        let para_range = byte_range.clone();
-                        state = State::Image {
-                            alt: String::new(),
-                            path,
-                            inside_paragraph: true,
-                            paragraph_prefix: prefix,
-                            prior_images: existing_images,
-                            paragraph_range: para_range,
-                            image_range: range,
-                        };
-                    }
-                    _ => {
-                        state = State::Image {
-                            alt: String::new(),
-                            path,
-                            inside_paragraph: false,
-                            paragraph_prefix: String::new(),
-                            prior_images: Vec::new(),
-                            paragraph_range: 0..0,
-                            image_range: range,
-                        };
-                    }
-                }
+                state = State::Image {
+                    alt: String::new(),
+                    path: dest_url.to_string(),
+                    image_range: range,
+                };
             }
             Event::End(TagEnd::Image) => {
-                if let State::Image {
-                    alt,
-                    path,
-                    inside_paragraph,
-                    paragraph_prefix,
-                    mut prior_images,
-                    paragraph_range,
-                    image_range,
-                } = state
-                {
+                if let State::Image { alt, path, image_range } = state {
                     let alt_opt = if alt.is_empty() { None } else { Some(alt) };
-                    let image_spanned = Spanned {
+                    elements.push_back(Spanned {
                         node: ContentElement::Image { alt: alt_opt, path },
                         span: Span::from(image_range),
-                    };
-                    if inside_paragraph {
-                        prior_images.push(image_spanned);
-                        state = State::Paragraph {
-                            text: paragraph_prefix,
-                            images: prior_images,
-                            byte_range: paragraph_range,
-                            forced: false,
-                        };
-                    } else {
-                        elements.push_back(image_spanned);
-                        state = State::Idle;
-                    }
+                    });
+                    state = State::Idle;
                 }
             }
 
             Event::Start(Tag::Link { dest_url, .. }) => {
-                // When inside a paragraph that already has non-whitespace text,
-                // the link is inline — stay in paragraph state.
-                // The raw source text captures `[text](url)` and the renderer handles it.
-                // When the paragraph has no text yet, the link IS the paragraph
-                // (a standalone link-type preamble slot like `[Author](/author/name)`).
-                // Inside a marker-shaped paragraph links stay part of its text.
-                let is_inline = match &state {
-                    State::Paragraph { forced: true, .. } => true,
-                    State::Paragraph { text, .. } => !text.trim().is_empty(),
-                    State::Blockquote { .. } => true,
-                    _ => false,
-                };
+                // Inside a blockquote the link is inline: its raw source
+                // captures it.
+                let is_inline = matches!(&state, State::Blockquote { .. });
                 if !is_inline {
                     let href = dest_url.to_string();
                     state = State::Link {
@@ -507,32 +465,14 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::End(TagEnd::Link) => {
                 if let State::Link { text, href, byte_range } = state {
-                    // Legacy spellings that pulldown reads as a link: `:path`,
-                    // `%20`-encoded and escaped angle-bracket destinations.
-                    let node = if is_link_expression(&href) {
-                        let link_text = parse_link_text(&text);
-                        // `%20` is decoded only here, for the legacy spelling.
-                        let decoded = href.replace("%20", " ");
-                        match parse_link_target(&decoded) {
-                            // Legacy spellings never carry a slot marker.
-                            Ok(target) => ContentElement::LinkExpression {
-                                text: link_text,
-                                target,
-                                slot: None,
-                            },
-                            Err(_) => ContentElement::Link { text, href },
-                        }
-                    } else {
-                        ContentElement::Link { text, href }
-                    };
                     elements.push_back(Spanned {
-                        node,
+                        node: link_element(text, href),
                         span: Span::from(byte_range),
                     });
                     state = State::Idle;
                 }
-                // If in Paragraph or Blockquote state, the link end is a no-op —
-                // the text was accumulated normally.
+                // In a blockquote the link end is a no-op: the text was
+                // accumulated normally.
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
@@ -663,19 +603,16 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             Event::Text(text) => {
                 let s = text.as_ref();
                 match &mut state {
-                    // Only an image-bearing paragraph uses this text (others
-                    // keep their source): a literal `<` stays literal
-                    // (ADR-062, limit L15).
-                    State::Paragraph { text: buf, .. } => buf.push_str(&s.replace('<', "\\<")),
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
                     // Table cells, HTML blocks and headings are read from
-                    // their source range. List, link-expression and heading
-                    // events never reach here (consumed at the top of the
-                    // loop).
+                    // their source range. Paragraph, list, link-expression
+                    // and heading events never reach here (consumed at the
+                    // top of the loop).
                     State::Table { .. }
+                    | State::Paragraph { .. }
                     | State::HtmlBlock { .. }
                     | State::Heading { .. }
                     | State::List { .. }
@@ -686,19 +623,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             Event::Code(text) => {
                 let s = text.as_ref();
                 match &mut state {
-                    // Only an image-bearing paragraph uses this text (others
-                    // keep their source): a literal `<` stays literal
-                    // (ADR-062, limit L15).
-                    State::Paragraph { text: buf, .. } => buf.push_str(&s.replace('<', "\\<")),
                     State::Image { alt, .. } => alt.push_str(s),
                     State::Link { text: buf, .. } => buf.push_str(s),
                     State::CodeBlock { code, .. } => code.push_str(s),
                     State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // Table cells, HTML blocks and headings are read from
-                    // their source range. List, link-expression and heading
-                    // events never reach here (consumed at the top of the
-                    // loop).
                     State::Table { .. }
+                    | State::Paragraph { .. }
                     | State::HtmlBlock { .. }
                     | State::Heading { .. }
                     | State::List { .. }
@@ -708,16 +638,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::SoftBreak | Event::HardBreak => {
-                match &mut state {
-                    State::Paragraph { text, .. } => text.push(' '),
-                    State::Blockquote { text, .. } => text.push(' '),
-                    _ => {}
+                if let State::Blockquote { text, .. } = &mut state {
+                    text.push(' ');
                 }
             }
 
             // Inline HTML in blockquote text is kept as literal text:
             // rendered escaped, not reported, written as `\<` (limit L13).
-            // Paragraphs and headings keep their source.
             Event::InlineHtml(s) => {
                 if let State::Blockquote { text, .. } = &mut state {
                     text.push_str(&s);
@@ -814,6 +741,165 @@ pub fn parse_link_text(text: &str) -> LinkText {
 pub fn parse_link_target(href: &str) -> Result<LinkTarget, ContentError> {
     parse_destination(href)
         .map_err(|e| ContentError::ParseError(format!("malformed link expression `{href}`: {e}")))
+}
+
+/// The element for a link that is a whole paragraph. Legacy spellings that
+/// pulldown reads as a link (`:path`, `%20`-encoded and escaped angle-bracket
+/// destinations) are link expressions.
+fn link_element(text: String, href: String) -> ContentElement {
+    if is_link_expression(&href) {
+        let link_text = parse_link_text(&text);
+        // `%20` is decoded only here, for the legacy spelling.
+        let decoded = href.replace("%20", " ");
+        match parse_link_target(&decoded) {
+            // Legacy spellings never carry a slot marker.
+            Ok(target) => ContentElement::LinkExpression { text: link_text, target, slot: None },
+            Err(_) => ContentElement::Link { text, href },
+        }
+    } else {
+        ContentElement::Link { text, href }
+    }
+}
+
+type ParagraphEvents = Vec<(Event<'static>, std::ops::Range<usize>)>;
+
+/// A paragraph that is exactly one link or one image, ignoring comments and
+/// whitespace: still a `Link` or an `Image` block (until stage 5b).
+fn sole_link_or_image(events: &ParagraphEvents) -> Option<Spanned<ContentElement>> {
+    let is_trivia = |event: &Event<'_>| match event {
+        Event::Text(t) => t.trim().is_empty(),
+        Event::SoftBreak | Event::HardBreak => true,
+        Event::InlineHtml(h) | Event::Html(h) => Comment::new(h).is_some(),
+        _ => false,
+    };
+    let significant: Vec<usize> =
+        (0..events.len()).filter(|&i| !is_trivia(&events[i].0)).collect();
+    let (&first, &last) = (significant.first()?, significant.last()?);
+    if first == last {
+        return None;
+    }
+    let inner = &events[first + 1..last];
+    let inner_text = || {
+        inner
+            .iter()
+            .filter_map(|(e, _)| match e {
+                Event::Text(t) | Event::Code(t) => Some(t.as_ref()),
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    let has = |pick: fn(&Event<'_>) -> bool| inner.iter().any(|(e, _)| pick(e));
+    let nested = |e: &Event<'_>| {
+        matches!(
+            e,
+            Event::Start(Tag::Link { .. } | Tag::Image { .. })
+                | Event::End(TagEnd::Link | TagEnd::Image)
+        )
+    };
+    match (&events[first].0, &events[last].0) {
+        (Event::Start(Tag::Link { dest_url, .. }), Event::End(TagEnd::Link)) if !has(nested) => {
+            Some(Spanned {
+                node: link_element(inner_text(), dest_url.to_string()),
+                span: Span::from(events[first].1.clone()),
+            })
+        }
+        (Event::Start(Tag::Image { dest_url, .. }), Event::End(TagEnd::Image)) if !has(nested) => {
+            let alt = inner_text();
+            Some(Spanned {
+                node: ContentElement::Image {
+                    alt: (!alt.is_empty()).then_some(alt),
+                    path: dest_url.to_string(),
+                },
+                span: Span::from(events[first].1.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `events` without the trailing marker that starts at byte `cut` of the
+/// input and is written `literal`. `None` when the marker cannot be cut off
+/// the events (the event that holds it does not end in it as text).
+fn without_marker(events: ParagraphEvents, cut: usize, literal: &str) -> Option<Vec<Event<'static>>> {
+    let mut out: Vec<Event<'static>> = Vec::new();
+    for (event, range) in events {
+        if range.end <= cut {
+            out.push(event);
+        } else if range.start >= cut {
+            // Part of the marker.
+        } else {
+            match event {
+                Event::Text(t) if t.ends_with(literal) => {
+                    let kept = &t[..t.len() - literal.len()];
+                    if !kept.is_empty() {
+                        out.push(Event::Text(kept.to_string().into()));
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+    // A marker alone on the last line leaves the break before it.
+    while matches!(out.last(), Some(Event::SoftBreak | Event::HardBreak)) {
+        out.pop();
+    }
+    Some(out)
+}
+
+/// A finished top-level paragraph: a `Link` or `Image` block when it is
+/// exactly one of them, else a paragraph of all its inline content and its
+/// trailing marker (ADR-059 §5). Nothing is dropped.
+fn finish_paragraph(
+    input: &str,
+    events: ParagraphEvents,
+    byte_range: std::ops::Range<usize>,
+    elements: &mut im::Vector<Spanned<ContentElement>>,
+) {
+    use crate::inline::{inlines_from_events, InlineContext};
+    let source = input.get(byte_range.clone()).unwrap_or_default();
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let found = paragraph_marker(trimmed);
+    if found.is_none()
+        && let Some(block) = sole_link_or_image(&events)
+    {
+        elements.push_back(block);
+        return;
+    }
+    let (content, marker) = match found {
+        None => {
+            let content =
+                inlines_from_events(events.into_iter().map(|(event, _)| event), InlineContext::Paragraph);
+            (content, None)
+        }
+        Some(found) => {
+            let lead = source.len() - source.trim_start().len();
+            let cut = byte_range.start + lead + found.start;
+            let literal = format!("{{#{}}}", found.marker);
+            let content = match without_marker(events, cut, &literal) {
+                Some(kept) => inlines_from_events(kept, InlineContext::Paragraph),
+                // The marker is not text at the end of one event (an entity or
+                // an escape inside it): read what precedes it on its own.
+                None => crate::inline::parse_inlines(found.content, InlineContext::Paragraph)
+                    .unwrap_or_else(|_| {
+                        debug_assert!(
+                            false,
+                            "invariant: the source before a paragraph's marker reads back as \
+                             one paragraph's content, but {:?} did not",
+                            found.content
+                        );
+                        crate::inline::literal_paragraph_content(found.content).0
+                    }),
+            };
+            (content, Some(found.marker))
+        }
+    };
+    elements.push_back(Spanned {
+        node: ContentElement::Paragraph { content, marker },
+        span: Span::from(byte_range),
+    });
 }
 
 /// Say once that a heading was kept as literal text. The parser does not know
@@ -953,7 +1039,7 @@ mod tests {
             assert_eq!(doc.comments[0].1.node.as_str(), comment);
             assert_eq!(
                 doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-                vec![ContentElement::Paragraph { text: "After.".to_string() }],
+                vec![ContentElement::paragraph_from_markdown("After.")],
                 "{comment:?}"
             );
         }
@@ -1078,19 +1164,15 @@ mod tests {
         }
     }
 
-    /// Limit L15 also covers image-bearing paragraphs: their text is built
-    /// from events, with a literal `<` kept as `\<`.
+    /// An image-bearing paragraph is one paragraph: a literal `<` stays a
+    /// literal `<` in its text, and it survives a save.
     #[test]
     fn image_bearing_paragraph_keeps_a_literal_angle_bracket() {
         let doc = parse_document("![i](a.png) a \\<b>\n").unwrap();
         let nodes: Vec<ContentElement> = doc.elements.iter().map(|e| e.node.clone()).collect();
-        assert_eq!(
-            nodes,
-            vec![
-                ContentElement::Paragraph { text: "a \\<b>".to_string() },
-                ContentElement::Image { alt: Some("i".to_string()), path: "a.png".to_string() },
-            ]
-        );
+        assert_eq!(nodes, vec![ContentElement::paragraph_from_markdown("![i](a.png) a \\<b>")]);
+        let ContentElement::Paragraph { content, .. } = &nodes[0] else { panic!("{nodes:?}") };
+        assert_eq!(content.as_slice().last(), Some(&Inline::Text(" a <b>".to_string())));
         let saved = crate::serializer::serialize_elements(&doc.elements);
         let again: Vec<ContentElement> =
             parse_document(&saved).unwrap().elements.iter().map(|e| e.node.clone()).collect();
@@ -1101,13 +1183,13 @@ mod tests {
     fn image_bearing_paragraph_keeps_a_literal_marker() {
         let doc = parse_document("Text \\{#x} ![i](x.png)\n").unwrap();
         let nodes: Vec<ContentElement> = doc.elements.iter().map(|e| e.node.clone()).collect();
-        assert_eq!(
-            nodes,
-            vec![
-                ContentElement::Paragraph { text: "Text \\{#x}".to_string() },
-                ContentElement::Image { alt: Some("i".to_string()), path: "x.png".to_string() },
-            ]
-        );
+        let ContentElement::Paragraph { content, marker } = &nodes[..].first().cloned().unwrap()
+        else {
+            panic!("{nodes:?}")
+        };
+        assert_eq!(nodes.len(), 1, "{nodes:?}");
+        assert_eq!(*marker, None, "an escaped marker is literal text");
+        assert_eq!(content.as_slice().first(), Some(&Inline::Text("Text {#x} ".to_string())));
         let saved = crate::serializer::serialize_elements(&doc.elements);
         let again: Vec<ContentElement> =
             parse_document(&saved).unwrap().elements.iter().map(|e| e.node.clone()).collect();
@@ -1134,15 +1216,16 @@ mod tests {
         let doc = parse_document(&format!("{src}\n")).unwrap();
         assert_eq!(
             doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-            vec![ContentElement::Paragraph { text: src.to_string() }]
+            vec![ContentElement::paragraph_from_markdown(src)]
         );
         assert_eq!(crate::serializer::serialize_elements(&doc.elements), src);
     }
 
-    /// Limit L15 (until ADR-059): inline HTML in link text, image alt text
-    /// and paragraphs that carry inline images is dropped on load.
+    /// Limit L15 (until stage 5b): inline HTML in link text and image alt
+    /// text of a sole link or image block is dropped on load. A paragraph
+    /// that carries an image keeps its HTML (it is reported by the validator).
     #[test]
-    fn inline_html_in_links_alt_text_and_image_paragraphs_is_dropped_l15() {
+    fn inline_html_in_links_and_alt_text_is_dropped_l15() {
         let nodes = |md: &str| -> Vec<ContentElement> {
             parse_document(md).unwrap().elements.iter().map(|e| e.node.clone()).collect()
         };
@@ -1156,10 +1239,7 @@ mod tests {
         );
         assert_eq!(
             nodes("t <b>x</b> ![i](i.png)\n"),
-            vec![
-                ContentElement::Paragraph { text: "t x".to_string() },
-                ContentElement::Image { alt: Some("i".to_string()), path: "i.png".to_string() },
-            ]
+            vec![ContentElement::paragraph_from_markdown("t <b>x</b> ![i](i.png)")]
         );
     }
 
@@ -1262,7 +1342,10 @@ mod tests {
         let doc = parse_document("Hello, world.").unwrap();
         assert_element_count(&doc, 1);
         match &doc.elements[0].node {
-            ContentElement::Paragraph { text } => assert_eq!(text, "Hello, world."),
+            ContentElement::Paragraph { content, marker } => {
+                assert_eq!(content.as_slice(), &[Inline::Text("Hello, world.".to_string())]);
+                assert_eq!(*marker, None);
+            }
             other => panic!("expected Paragraph, got {other:?}"),
         }
     }
@@ -1272,10 +1355,10 @@ mod tests {
         let doc = parse_document("  Leading and trailing whitespace  ").unwrap();
         assert_element_count(&doc, 1);
         match &doc.elements[0].node {
-            ContentElement::Paragraph { text } => {
-                assert!(
-                    !text.starts_with(' '),
-                    "paragraph text should not start with whitespace"
+            ContentElement::Paragraph { content, .. } => {
+                assert_eq!(
+                    content.as_slice(),
+                    &[Inline::Text("Leading and trailing whitespace".to_string())]
                 );
             }
             other => panic!("expected Paragraph, got {other:?}"),
@@ -1688,10 +1771,10 @@ headings
         assert!(!body_elements.is_empty(), "expected body elements after separator");
         let first = &body_elements[0].node;
         match first {
-            ContentElement::Paragraph { text } => {
+            ContentElement::Paragraph { content, .. } => {
                 assert!(
-                    text.contains("bold"),
-                    "expected 'bold' in paragraph text, got: {text}"
+                    content.as_slice().iter().any(|i| matches!(i, Inline::Strong(_))),
+                    "expected a strong node, got: {content:?}"
                 );
             }
             other => panic!("expected Paragraph for body paragraph with bold, got: {other:?}"),
@@ -1911,7 +1994,7 @@ headings
             nodes,
             vec![
                 ContentElement::List { source: "- a\n  - b".to_string() },
-                ContentElement::Paragraph { text: "after".to_string() },
+                ContentElement::paragraph_from_markdown("after"),
             ]
         );
     }
@@ -2134,7 +2217,7 @@ headings
     fn unknown_op_stays_a_paragraph() {
         assert_eq!(
             nodes("[x](->> :post (map :title))"),
-            vec![ContentElement::Paragraph { text: "[x](->> :post (map :title))".to_string() }]
+            vec![para("[x](->> :post (map :title))")]
         );
     }
 
@@ -2142,7 +2225,7 @@ headings
     fn thread_first_is_rejected() {
         assert_eq!(
             nodes("[x](-> :post)"),
-            vec![ContentElement::Paragraph { text: "[x](-> :post)".to_string() }]
+            vec![para("[x](-> :post)")]
         );
         assert!(super::parse_link_target("(-> :post)").is_err());
         assert!(super::parse_link_target("-> :post").is_err());
@@ -2179,7 +2262,7 @@ headings
     fn invalid_slot_marker_stays_a_paragraph() {
         assert_eq!(
             nodes("[x](->> :post) {#a b}"),
-            vec![ContentElement::Paragraph { text: "[x](->> :post) {#a b}".to_string() }]
+            vec![para("[x](->> :post) {#a b}")]
         );
     }
 
@@ -2200,7 +2283,7 @@ headings
             nodes("[x](->> :post)\n\n{#news}"),
             vec![
                 thread_expr(label("x"), "post", vec![]),
-                ContentElement::Paragraph { text: "{#news}".to_string() },
+                para("{#news}"),
             ]
         );
     }
@@ -2228,12 +2311,44 @@ headings
 
     // ── Marker-shaped paragraphs (ADR-060 P1) ───────────────────────────────
 
-    fn para(text: &str) -> ContentElement {
-        ContentElement::Paragraph { text: text.to_string() }
+    fn para(source: &str) -> ContentElement {
+        ContentElement::paragraph_from_markdown(source)
+    }
+
+    /// A marker-shaped paragraph is its inlines plus a structural marker: the
+    /// content excludes the marker (ADR-059 §5).
+    #[test]
+    fn paragraph_marker_is_structural() {
+        use crate::inline::AsPlainText;
+        let doc = parse_document("see [a](/x) here {#cover}\n").unwrap();
+        let ContentElement::Paragraph { content, marker } = &doc.elements[0].node else {
+            panic!("{:?}", doc.elements)
+        };
+        assert_eq!(marker.as_ref().map(|m| m.as_str()), Some("cover"));
+        assert_eq!(content.plain_text(), "see a here");
+        assert!(!format!("{content:?}").contains("{#"), "{content:?}");
+
+        // On its own line, or alone.
+        for src in ["some text\n{#x}", "{#x}"] {
+            let doc = parse_document(&format!("{src}\n")).unwrap();
+            let ContentElement::Paragraph { content, marker } = &doc.elements[0].node else {
+                panic!("{:?}", doc.elements)
+            };
+            assert_eq!(marker.as_ref().map(|m| m.as_str()), Some("x"), "{src:?}");
+            assert!(!content.plain_text().contains("{#"), "{src:?}: {content:?}");
+        }
+
+        // A literal marker is escaped, and is text.
+        let doc = parse_document("text \\{#x}\n").unwrap();
+        let ContentElement::Paragraph { content, marker } = &doc.elements[0].node else {
+            panic!("{:?}", doc.elements)
+        };
+        assert_eq!(*marker, None);
+        assert_eq!(content.as_slice(), &[Inline::Text("text {#x}".to_string())]);
     }
 
     #[test]
-    fn marker_shaped_paragraphs_are_kept_verbatim() {
+    fn marker_shaped_paragraphs_are_inlines_and_a_marker() {
         for md in [
             "[a](/x) {#s}",
             "![c](i.jpg) {#cover}",
@@ -2262,11 +2377,82 @@ headings
         assert_eq!(src[span.start..span.end].trim(), "![c](i.jpg) {#cover}");
     }
 
+    /// Flipped from the pin that kept only the link (the text after a leading
+    /// link was dropped): the paragraph keeps all its content.
     #[test]
-    fn a_leading_link_followed_by_text_without_a_marker_is_unchanged() {
-        // Pinned limit for S-A (inline segments): not marker-shaped.
+    fn a_leading_link_followed_by_text_keeps_the_text() {
         let got = nodes("[a](/x) trailing");
-        assert_eq!(got, vec![ContentElement::Link { text: "a".to_string(), href: "/x".to_string() }]);
+        let [ContentElement::Paragraph { content, marker: None }] = got.as_slice() else {
+            panic!("{got:?}")
+        };
+        let [Inline::Link { destination, text, .. }, Inline::Text(rest)] = content.as_slice()
+        else {
+            panic!("{content:?}")
+        };
+        assert_eq!(destination.as_str(), "/x");
+        assert_eq!(text.as_slice(), &[Inline::Text("a".to_string())]);
+        assert_eq!(rest, " trailing");
+    }
+
+    #[test]
+    fn a_leading_link_followed_by_text_survives_a_save() {
+        let doc = parse_document("[a](/x) trailing\n").unwrap();
+        let saved = crate::serializer::serialize_elements(&doc.elements);
+        assert_eq!(saved, "[a](/x) trailing");
+        assert_eq!(nodes(&saved), nodes("[a](/x) trailing"));
+    }
+
+    /// Guard until stage 5b: a paragraph that is exactly one link (comments
+    /// and whitespace aside) is still a `Link` block.
+    #[test]
+    fn a_sole_link_paragraph_is_still_a_link_block() {
+        let link = ContentElement::Link { text: "a".to_string(), href: "/x".to_string() };
+        assert_eq!(nodes("[a](/x)"), vec![link.clone()]);
+        assert_eq!(nodes("  [a](/x)  "), vec![link]);
+    }
+
+    /// Guard until stage 5b.
+    #[test]
+    fn a_sole_image_paragraph_is_still_an_image_block() {
+        let image =
+            ContentElement::Image { alt: Some("c".to_string()), path: "c.png".to_string() };
+        assert_eq!(nodes("![c](c.png)"), vec![image]);
+    }
+
+    /// Nothing is pulled out of a paragraph: an image between text stays an
+    /// inline node of one paragraph.
+    #[test]
+    fn image_inside_text_stays_inline() {
+        let got = nodes("See ![c](c.png) here.");
+        let [ContentElement::Paragraph { content, marker: None }] = got.as_slice() else {
+            panic!("{got:?}")
+        };
+        assert!(matches!(
+            content.as_slice(),
+            [Inline::Text(a), Inline::Image { alt, .. }, Inline::Text(b)]
+                if a == "See " && alt.as_slice() == [Inline::Text("c".to_string())] && b == " here."
+        ), "{content:?}");
+    }
+
+    #[test]
+    fn image_inside_text_survives_a_save() {
+        let doc = parse_document("See ![c](c.png) here.\n").unwrap();
+        let first = crate::serializer::serialize_elements(&doc.elements);
+        assert_eq!(first, "See ![c](c.png) here.");
+        let again = parse_document(&first).unwrap();
+        assert_eq!(nodes(&first), nodes("See ![c](c.png) here."));
+        assert_eq!(crate::serializer::serialize_elements(&again.elements), first);
+    }
+
+    /// `\# x` is the literal text `# x`: stored without the backslash, and
+    /// written escaped again at the start of the line (ADR-059 C10).
+    #[test]
+    fn escaped_paragraph_reloads_without_backslash() {
+        let got = nodes("\\# x");
+        let [ContentElement::Paragraph { content, .. }] = got.as_slice() else { panic!("{got:?}") };
+        assert_eq!(content.as_slice(), &[Inline::Text("# x".to_string())]);
+        let doc = parse_document("\\# x\n").unwrap();
+        assert_eq!(crate::serializer::serialize_elements(&doc.elements), "\\# x");
     }
 
     #[test]

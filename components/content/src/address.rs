@@ -166,7 +166,7 @@ mod tests {
     }
 
     fn p(text: &str) -> ContentElement {
-        ContentElement::Paragraph { text: text.to_string() }
+        ContentElement::paragraph_from_markdown(text)
     }
 
     fn code() -> ContentElement {
