@@ -289,15 +289,56 @@ pub fn create_semantic_content(
     url_to_root: &std::collections::HashMap<String, NodeId>,
     url_to_semantic: Option<&std::collections::HashMap<String, NodeId>>,
 ) -> NodeId {
+    let sem = new_semantic_node(store, meta);
+    fill_semantic_content(
+        store,
+        sem,
+        doc_root,
+        grammar,
+        meta,
+        stem_to_roots,
+        url_to_root,
+        url_to_semantic,
+    );
+    sem
+}
+
+/// The semantic content node of a document and its metadata attributes; no
+/// edges to the document yet ([`fill_semantic_content`] adds them).
+pub fn new_semantic_node(store: &mut NodeStore, meta: &DocumentMeta) -> NodeId {
     let sem_name = store.intern("semantic-content");
     let sem = store.add_node(Node::Element(sem_name));
-
-    // Metadata attributes
     add_text_attr(store, sem, "url", &meta.url);
     add_text_attr(store, sem, "stem", &meta.stem);
     add_text_attr(store, sem, "file", &meta.file);
     add_text_attr(store, sem, "page-kind", &meta.page_kind);
+    sem
+}
 
+/// Remove the edges [`fill_semantic_content`] adds to `sem`: the derived
+/// `_document` edge, the slot references and the link. The node, its id and
+/// its metadata attributes stay, so whatever points at it keeps pointing at it.
+pub fn clear_semantic_content(store: &mut NodeStore, sem: NodeId) {
+    store.remove_edges_where(sem, |e| {
+        matches!(e, Edge::Derived { .. } | Edge::Reference { .. } | Edge::ConsistsOf { .. })
+    });
+}
+
+/// Add to `sem` the derived `_document` edge to `doc_root`, the references
+/// its grammar's slots name, and the synthesized link. Reads the store's
+/// current content, so it can run again after an edit, on the same node, once
+/// [`clear_semantic_content`] has removed what it added before.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_semantic_content(
+    store: &mut NodeStore,
+    sem: NodeId,
+    doc_root: NodeId,
+    grammar: &schema::Grammar,
+    meta: &DocumentMeta,
+    stem_to_roots: &std::collections::HashMap<String, Vec<NodeId>>,
+    url_to_root: &std::collections::HashMap<String, NodeId>,
+    url_to_semantic: Option<&std::collections::HashMap<String, NodeId>>,
+) {
     // The document this node is a view of. Derived: the semantic node is
     // computed, rebuilt with the store and never serialized. The leading
     // underscore keeps the name out of slot names, and graph views read only
@@ -428,8 +469,6 @@ pub fn create_semantic_content(
     add_text_attr(store, link_node, "text", &text);
     let link_name = store.intern("link");
     store.add_edge(sem, Edge::ConsistsOf { name: link_name, part: link_node });
-
-    sem
 }
 
 // ── store_to_document ─────────────────────────────────────────────────────────

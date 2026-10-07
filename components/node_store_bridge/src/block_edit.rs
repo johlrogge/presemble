@@ -290,21 +290,25 @@ pub fn lower(
         proposed: PreviewText::new(projected.join("\n\n")),
     };
 
-    // A heading with the same level and marker: only its content changes. Its
-    // text is nodes, so a text edit would write the proposed markdown as
-    // literal text; the content is set as inline trees instead, in place, so
-    // the node stays where the page links to it. (Stage 4c narrows this to a
-    // text search when only the text changes.)
-    if let [
-        ContentElement::Heading { level, content, marker },
-    ] = elements.as_slice()
-        && let ContentElement::Heading { level: l0, marker: m0, .. } = current_el
+    // A heading with the same level and marker: only its content changes, in
+    // place, so the node stays where the page links to it (ADR-059 §10).
+    // Its text is nodes, so the proposed markdown is never written as text:
+    // - only the text differs: a search over the heading's whole text across
+    //   its formatting, addressed by the block selection itself;
+    // - anything else about the content (formatting, an atom): the content is
+    //   set as inline trees.
+    if let [ContentElement::Heading { level, content, marker }] = elements.as_slice()
+        && let ContentElement::Heading { level: l0, content: current, marker: m0 } = current_el
         && level == l0
         && marker == m0
     {
+        let mutation = match text_only_change(current, content) {
+            Some((search, replace)) => NedMutation::SearchReplace { search, replace },
+            None => NedMutation::SetInlines(content_store::inlines_to_tree(content)),
+        };
         return Ok(Lowering::Lowered(Lowered {
             selection: block_selection.to_string(),
-            mutation: NedMutation::SetInlines(content_store::inlines_to_tree(content)),
+            mutation,
             preview,
         }));
     }
@@ -338,6 +342,33 @@ pub fn lower(
         mutation: NedMutation::Replace(trees),
         preview,
     }))
+}
+
+/// The search and replacement that turn the heading content `current` into
+/// `proposed`, when a text search over its edit text does exactly that: the
+/// minimal unique diff of the two edit texts, checked by applying it. `None`
+/// when there is no text difference (the formatting differs), when the diff
+/// would reach an atom (an image, raw HTML), or when applying it gives
+/// anything but `proposed` (a replacement takes the formatting of the first
+/// matched character).
+fn text_only_change(
+    current: &content::inline::Inlines,
+    proposed: &content::inline::Inlines,
+) -> Option<(String, String)> {
+    const ATOM: char = '\u{fffc}';
+    let (old, new) = (current.edit_text(), proposed.edit_text());
+    let Some(TextDiff::SearchReplace { search, replace }) =
+        minimal_unique_diff(old.as_str(), new.as_str())
+    else {
+        return None; // identical text, or an empty base: not a search
+    };
+    if search.contains(ATOM) || replace.contains(ATOM) {
+        return None;
+    }
+    let applied = current
+        .search_replace(&search, &replace, content::inline::InlineContext::Heading)
+        .ok()?;
+    (&applied == proposed).then_some((search, replace))
 }
 
 fn normalize_newlines(s: &str) -> String {
@@ -567,6 +598,59 @@ mod tests {
                 proposed: pv("The quick red fox."),
             }
         );
+    }
+
+    fn title(md_source: &str) -> ContentElement {
+        ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), md_source)
+    }
+
+    /// Guard: the text is the same and the formatting differs, so the content
+    /// is set as inline trees (a text search could not change formatting).
+    #[test]
+    fn formatting_change_in_heading_lowers_to_set_inlines() {
+        let l = expect_lowered(lowered("slot", &title("Hello *World*"), "Hello *World*", "Hello **World**"));
+        assert_eq!(l.selection, SEL);
+        let ContentElement::Heading { content, .. } = title("Hello **World**") else { unreachable!() };
+        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+    }
+
+    /// Only text differs: a search over the heading's whole text, addressed
+    /// by the block selection itself (not by `ned/text-in`).
+    #[test]
+    fn text_change_in_formatted_heading_lowers_to_container_search_replace() {
+        let l = expect_lowered(lowered("slot", &title("Hello *World*"), "Hello *World*", "Hello *Presemble*"));
+        assert_eq!(l.selection, SEL);
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace { search: "World".to_string(), replace: "Presemble".to_string() }
+        );
+        // The same, across formatting: the text changes where it meets emphasis.
+        let l = expect_lowered(lowered("slot", &title("a *bc* d"), "a *bc* d", "a *bX* d"));
+        assert_eq!(l.selection, SEL);
+        assert!(matches!(l.mutation, NedMutation::SearchReplace { .. }), "{:?}", l.mutation);
+    }
+
+    /// Guard: a level change is a structural edit.
+    #[test]
+    fn heading_level_change_is_replace() {
+        let h2 = ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Title");
+        let h3 = ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "Title");
+        let l = expect_lowered(lowered("body", &h2, "## Title", "### Title"));
+        assert_eq!(l.selection, SEL);
+        assert_eq!(l.mutation, NedMutation::Replace(vec![block_to_tree(&h3).unwrap()]));
+    }
+
+    /// A change that a text search cannot reproduce (two text nodes change
+    /// around an image) sets the content instead.
+    #[test]
+    fn heading_change_a_search_cannot_reproduce_sets_inlines() {
+        let l = expect_lowered(lowered(
+            "slot",
+            &title("a ![i](p.png) b"),
+            "a ![i](p.png) b",
+            "x ![i](p.png) y",
+        ));
+        assert!(matches!(l.mutation, NedMutation::SetInlines(_)), "{:?}", l.mutation);
     }
 
     #[test]
@@ -849,6 +933,26 @@ mod tests {
         assert_eq!(seen, 2, "expected the two EDN fixtures");
     }
 
+    /// The EDN fixture shows a heading as inline nodes; a change of its text
+    /// is a search over the heading's text, as for markdown.
+    #[test]
+    fn edn_heading_with_inline_nodes_lowers_to_search_replace() {
+        let h = title("Hello *World*");
+        let (store, block) = store_with("slot", &h);
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &edn("[:heading {:level \"1\"} \"Hello \" [:emph \"World\"]]"),
+            &edn("[:heading {:level \"1\"} \"Hello \" [:emph \"Presemble\"]]"),
+        ));
+        assert_eq!(l.selection, SEL);
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace { search: "World".to_string(), replace: "Presemble".to_string() }
+        );
+    }
+
     #[test]
     fn lower_drifted_base_is_refused() {
         let err = lowered("body", &paragraph("Current text."), "Old text.", "New text.")
@@ -873,15 +977,16 @@ mod tests {
     fn lower_slot_heading_uses_content_projection() {
         let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let l = expect_lowered(lowered("slot", &h, "Hello *World*", "Hello *Presemble*"));
-        // Until stage 4c narrows it to a text search, a heading whose level
-        // and marker stay sets its inline content, in place.
+        // Only the text differs: a search over the heading's text, addressed
+        // by the block selection.
         assert_eq!(l.selection, SEL);
-        let proposed = ContentElement::heading_from_markdown(
-            HeadingLevel::new(1).unwrap(),
-            "Hello *Presemble*",
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace {
+                search: "World".to_string(),
+                replace: "Presemble".to_string()
+            }
         );
-        let ContentElement::Heading { content, .. } = &proposed else { panic!("{proposed:?}") };
-        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(content)));
         assert_eq!(l.preview.base, pv("Hello *World*"));
 
         // The block projection (with markers) is not the base of a slot heading.

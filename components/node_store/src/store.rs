@@ -465,6 +465,37 @@ impl NodeStore {
         }
     }
 
+    /// The edges that point at `id`, of every kind, as `(source, edge)`.
+    pub fn incoming(&self, id: NodeId) -> Vec<(NodeId, Edge)> {
+        self.edges_to
+            .get(&id)
+            .map(|rev| rev.iter().map(|re| (re.source, re.edge.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Remove every outgoing edge of `from` for which `remove` is true.
+    /// Updates both forward and reverse indexes; the order of the edges that
+    /// stay is kept.
+    pub fn remove_edges_where(&mut self, from: NodeId, remove: impl Fn(&Edge) -> bool) {
+        self.record_touched(from);
+        let removed: Vec<NodeId> = self
+            .edges_from
+            .get(&from)
+            .map(|fwd| fwd.iter().filter(|e| remove(e)).map(Edge::target).collect())
+            .unwrap_or_default();
+        if removed.is_empty() {
+            return;
+        }
+        if let Some(fwd) = self.edges_from.get_mut(&from) {
+            fwd.retain(|e| !remove(e));
+        }
+        for target in removed {
+            if let Some(rev) = self.edges_to.get_mut(&target) {
+                rev.retain(|re| !(re.source == from && remove(&re.edge)));
+            }
+        }
+    }
+
     /// The sources of `Derived { name }` edges pointing at `id`, read from the
     /// reverse index.
     pub fn derived_sources(&self, id: NodeId, name: Name) -> Vec<NodeId> {
@@ -581,6 +612,68 @@ mod tests {
     use super::*;
     use crate::journal::TouchLog;
     use crate::node::Node;
+
+    #[test]
+    fn incoming_lists_every_edge_into_a_node() {
+        let mut store = NodeStore::new();
+        let tag = store.intern("n");
+        let name = store.intern("ref");
+        let target = store.add_node(Node::Element(tag));
+        let a = store.add_node(Node::Element(tag));
+        let b = store.add_node(Node::Element(tag));
+        let c = store.add_node(Node::Element(tag));
+        let d = store.add_node(Node::Element(tag));
+        let other = store.add_node(Node::Element(tag));
+        store.add_edge(a, Edge::Child(target));
+        store.add_edge(b, Edge::Reference { name, target });
+        store.add_edge(c, Edge::ConsistsOf { name, part: target });
+        store.add_edge(d, Edge::Derived { name, target });
+        store.add_edge(a, Edge::Child(other));
+
+        let mut incoming = store.incoming(target);
+        incoming.sort_by_key(|(source, _)| *source);
+        assert_eq!(
+            incoming,
+            vec![
+                (a, Edge::Child(target)),
+                (b, Edge::Reference { name, target }),
+                (c, Edge::ConsistsOf { name, part: target }),
+                (d, Edge::Derived { name, target }),
+            ]
+        );
+        assert_eq!(store.incoming(a), vec![]);
+    }
+
+    #[test]
+    fn remove_edges_where_keeps_both_indexes_consistent() {
+        let mut store = NodeStore::new();
+        let tag = store.intern("n");
+        let name = store.intern("ref");
+        let from = store.add_node(Node::Element(tag));
+        let to = store.add_node(Node::Element(tag));
+        let child = store.add_node(Node::Element(tag));
+        let elsewhere = store.add_node(Node::Element(tag));
+        store.add_edge(from, Edge::Child(child));
+        store.add_edge(from, Edge::Reference { name, target: to });
+        store.add_edge(from, Edge::ConsistsOf { name, part: to });
+        store.add_edge(from, Edge::Child(to));
+        // An edge into `to` from another node is not `from`'s to remove.
+        store.add_edge(elsewhere, Edge::Reference { name, target: to });
+
+        store.remove_edges_where(from, |e| {
+            matches!(e, Edge::Reference { .. } | Edge::ConsistsOf { .. })
+        });
+
+        let forward: Vec<Edge> = store.edges_from(from).unwrap().iter().cloned().collect();
+        assert_eq!(forward, vec![Edge::Child(child), Edge::Child(to)]);
+        let mut into_to = store.incoming(to);
+        into_to.sort_by_key(|(source, _)| *source);
+        assert_eq!(
+            into_to,
+            vec![(from, Edge::Child(to)), (elsewhere, Edge::Reference { name, target: to })]
+        );
+        assert_eq!(store.incoming(child), vec![(from, Edge::Child(child))]);
+    }
 
     #[test]
     fn add_and_get_node() {

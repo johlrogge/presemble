@@ -3,8 +3,8 @@
   "request": {
     "file": "content/post/hello.md",
     "selection": "(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path \"content/post/hello.md\") \"title\")) \"heading\" 0)",
-    "base": { "edn": "[:heading {:level \"1\"} \"Hello *World*\"]" },
-    "proposed": { "edn": "[:heading {:level \"1\"} \"Hello *Presemble*\"]" },
+    "base": { "edn": "[:heading {:level \"1\"} \"Hello \" [:emph \"World\"]]" },
+    "proposed": { "edn": "[:heading {:level \"1\"} \"Hello \" [:emph \"Presemble\"]]" },
     "intent": "suggest"
   },
   "response": { "done": { "suggestion-created": { "id": "<id>" } } }

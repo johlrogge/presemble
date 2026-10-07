@@ -2131,6 +2131,104 @@ impl Conductor {
         self.render_page_output(root)
     }
 
+    /// Where the content file at `content_path` (site-relative) sits: its
+    /// schema stem, slug and URL, and the grammar of its schema.
+    fn document_coordinates(
+        &self,
+        content_path: &Path,
+    ) -> Result<(String, String, String, schema::Grammar), String> {
+        let stem = match self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(content_path) {
+            site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
+            _ => return Err(format!("not a content file: {}", content_path.display())),
+        };
+        let slug = content_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let schema_key = site_index::schema_cache_key(&stem, &slug);
+        let schema_src = self
+            .schema_source(&schema_key)
+            .ok_or_else(|| format!("no schema for {schema_key}"))?;
+        let grammar = schema::parse_schema(&schema_src)
+            .map_err(|e| format!("schema error: {e:?}"))?;
+        let url = site_index::url_for_stem_slug(&stem, &slug);
+        Ok((stem, slug, url, grammar))
+    }
+
+    /// Recompute the references of a page's semantic content from the store's
+    /// current content, in place: the semantic node and the document root keep
+    /// their ids, nothing is parsed or serialized. Nothing is rendered.
+    ///
+    /// A block that an edit removed or replaced took its incoming edges with
+    /// it, among them the page's semantic references to it; filling the same
+    /// node again recomputes them (ADR-059 §6). Whatever points at the
+    /// semantic node (a listing page) keeps pointing at it.
+    ///
+    /// The fill has no thread context, so a thread slot comes out as every
+    /// item of its stem, unsorted and unlimited. The thread slots are
+    /// evaluated again by `propagate_document_changes`, which
+    /// `rebuild_pages_for_modified_nodes` runs right after this: a page with
+    /// thread expressions builds the context and re-resolves its own queries
+    /// (`resolve_page`). Pinned by
+    /// `structural_edit_on_a_page_with_a_thread_slot_keeps_its_listing`.
+    ///
+    /// Returns the URLs of the other pages that point at this page's semantic
+    /// content: they show it, so they must render again.
+    fn refresh_semantic_content(&self, content_path: &Path) -> Result<Vec<String>, String> {
+        let (stem, slug, url, grammar) =
+            self.document_coordinates(&self.site_dir.join(content_path))?;
+        let doc_root = self
+            .doc_root_for_path(content_path)
+            .ok_or_else(|| format!("no document in the store for {}", content_path.display()))?;
+        let sem = self
+            .semantic_content_by_url(&url)
+            .ok_or_else(|| format!("no semantic content for {url}"))?;
+        let meta = node_store_bridge::content_bridge::DocumentMeta {
+            url: url.clone(),
+            stem: stem.clone(),
+            file: site_index::content_file_path(&stem, &slug),
+            page_kind: if slug == "index" { "collection" } else { "item" }.to_string(),
+        };
+        let stem_roots = stem_root_lists(
+            &self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner()),
+        );
+        let (url_to_semantic, url_to_root) = self.index_snapshots();
+
+        let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
+        node_store_bridge::content_bridge::clear_semantic_content(&mut store, sem);
+        node_store_bridge::content_bridge::fill_semantic_content(
+            &mut store,
+            sem,
+            doc_root,
+            &grammar,
+            &meta,
+            &stem_roots,
+            &url_to_root,
+            Some(&url_to_semantic),
+        );
+
+        // The pages that point at this semantic node, directly or through a
+        // collection of references.
+        let mut dependents = Vec::new();
+        let mut seen = std::collections::HashSet::from([sem]);
+        let mut queue = vec![sem];
+        while let Some(node) = queue.pop() {
+            for (source, edge) in store.incoming(node) {
+                if matches!(edge, node_store::Edge::Derived { .. }) || !seen.insert(source) {
+                    continue;
+                }
+                match node_store_bridge::content_bridge::find_attr_text(&store, source, "url") {
+                    Some(page) => dependents.push(page),
+                    None => queue.push(source),
+                }
+            }
+        }
+        dependents.sort();
+        dependents.dedup();
+        Ok(dependents)
+    }
+
     /// Rebuild a single content page from in-memory text.
     ///
     /// Re-ingests `text` into the NodeStore via `update_document_in_store`,
@@ -2143,27 +2241,8 @@ impl Conductor {
     /// logged and left out. Errors here are non-fatal: the caller logs and
     /// continues.
     fn rebuild_page(&self, content_path: &Path, text: &str) -> Result<Vec<String>, String> {
-        // Classify file to get schema stem
-        let stem = match self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(content_path) {
-            site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
-            _ => return Err(format!("not a content file: {}", content_path.display())),
-        };
-
-        // Load grammar
-        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = site_index::schema_cache_key(&stem, slug);
-        let schema_src = self
-            .schema_source(&schema_key)
-            .ok_or_else(|| format!("no schema for {schema_key}"))?;
-        let grammar = schema::parse_schema(&schema_src)
-            .map_err(|e| format!("schema error: {e:?}"))?;
-
-        // Compute slug and URL
-        let slug = content_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        let url_path = site_index::url_for_stem_slug(&stem, slug);
+        let (stem, slug, url_path, grammar) = self.document_coordinates(content_path)?;
+        let slug = slug.as_str();
 
         // The root this re-ingest supersedes (it keeps its fingerprint).
         let previous_root = self
@@ -2776,13 +2855,70 @@ impl Conductor {
     ///
     /// Returns `(rebuilt_urls, failed_urls)`.
     fn mark_dirty_and_rebuild(&self, paths: &[PathBuf]) -> (Vec<String>, Vec<String>) {
+        self.mark_dirty_and_rebuild_with(paths, false)
+    }
+
+    /// [`Conductor::mark_dirty_and_rebuild`]; with `blocks_changed` the
+    /// pages' references are recomputed first, in place, so a replaced or
+    /// removed block is not referenced any more
+    /// ([`Conductor::refresh_semantic_content`]), and the pages that show
+    /// those pages render again. A page whose references could not be rebuilt
+    /// gets a build error and is reported as failed.
+    fn mark_dirty_and_rebuild_with(
+        &self,
+        paths: &[PathBuf],
+        blocks_changed: bool,
+    ) -> (Vec<String>, Vec<String>) {
         {
             let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
             for path in paths {
                 dirty.mark(path.clone());
             }
         }
-        self.rebuild_pages_for_modified_nodes(paths)
+        let mut dependents = Vec::new();
+        let mut refresh_failed = Vec::new();
+        if blocks_changed {
+            for path in paths {
+                match self.refresh_semantic_content(path) {
+                    Ok(urls) => dependents.extend(urls),
+                    Err(e) => {
+                        let url = self
+                            .url_for_content_path(&self.site_dir.join(path))
+                            .unwrap_or_else(|| path.display().to_string());
+                        eprintln!("conductor: references could not be rebuilt for {url}: {e}");
+                        self.build_errors
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .entry(url.clone())
+                            .or_default()
+                            .push(format!("references could not be rebuilt: {e}"));
+                        refresh_failed.push(url);
+                    }
+                }
+            }
+        }
+        let (mut rebuilt, mut failed) = self.rebuild_pages_for_modified_nodes(paths);
+        dependents.sort();
+        dependents.dedup();
+        for url in dependents {
+            match self.render_url(&url) {
+                Ok(pages) => rebuilt.extend(pages),
+                Err(e) => {
+                    eprintln!("conductor: rebuild failed for dependent page {url}: {e}");
+                    failed.push(url);
+                }
+            }
+        }
+        if blocks_changed {
+            rebuilt.sort();
+            rebuilt.dedup();
+        }
+        for url in refresh_failed {
+            if !failed.contains(&url) {
+                failed.push(url);
+            }
+        }
+        (rebuilt, failed)
     }
 
     /// Evaluate `selection`, then, under one store write lock, resolve it,
@@ -2840,7 +2976,8 @@ impl Conductor {
             }
             document_file
         };
-        let (pages, failed) = self.mark_dirty_and_rebuild(&[path]);
+        let (pages, failed) =
+            self.mark_dirty_and_rebuild_with(&[path], edit::changes_blocks(mutation));
         Ok(MutationOutcome::Changed { pages, failed })
     }
 
@@ -3157,6 +3294,7 @@ impl Conductor {
             return Ok((ProgramOutcome::default(), vec![]));
         }
         let steps = plan.len();
+        let blocks_changed = plan.changes_blocks();
 
         let (dirty_paths, skipped) = {
             let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
@@ -3178,7 +3316,7 @@ impl Conductor {
         let (rebuilt_pages, failed_pages) = if dirty_paths.is_empty() {
             (vec![], vec![])
         } else {
-            self.mark_dirty_and_rebuild(&dirty_paths)
+            self.mark_dirty_and_rebuild_with(&dirty_paths, blocks_changed)
         };
         let mut events = Vec::new();
         if !rebuilt_pages.is_empty() {
@@ -8194,6 +8332,219 @@ mod block_edit_tests {
         }
     }
 
+    /// A site whose title is `# Hello *World*`.
+    fn formatted_title_site() -> tempfile::TempDir {
+        let tmp = build_site();
+        std::fs::write(
+            tmp.path().join(FILE),
+            "# Hello *World*\n\n----\n\nAlpha para.\n\nBeta para.\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn saved_file(tmp: &tempfile::TempDir, conductor: &Conductor) -> String {
+        let result = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        std::fs::read_to_string(tmp.path().join(FILE)).expect("content file")
+    }
+
+    /// BlockEdit Apply, and Suggest then accept, on `Hello *World*` write the
+    /// same bytes to disk, for a text change, a formatting change and both.
+    #[test]
+    fn heading_block_edit_apply_equals_suggest_then_accept_on_disk() {
+        let cases = [
+            ("Hello *Presemble*", "# Hello *Presemble*\n\n----\n\nAlpha para.\n\nBeta para.\n"),
+            ("Hello **World**", "# Hello **World**\n\n----\n\nAlpha para.\n\nBeta para.\n"),
+            ("Howdy **World**", "# Howdy **World**\n\n----\n\nAlpha para.\n\nBeta para.\n"),
+        ];
+        for (proposed, expected) in cases {
+            let tmp_a = formatted_title_site();
+            let applier = make_conductor(&tmp_a);
+            let applied = edit(&applier, TITLE_HEADING, "Hello *World*", proposed, BlockEditIntent::Apply);
+            assert!(
+                matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+                "{proposed:?}: {:?}",
+                response(&applied)
+            );
+
+            let tmp_s = formatted_title_site();
+            let suggester = make_conductor(&tmp_s);
+            let id = created_id(&edit(&suggester, TITLE_HEADING, "Hello *World*", proposed, BlockEditIntent::Suggest));
+            let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
+            assert!(matches!(accepted.response, Response::Ok), "{proposed:?}: {:?}", accepted.response);
+
+            let (a, s) = (saved_file(&tmp_a, &applier), saved_file(&tmp_s, &suggester));
+            assert_eq!(a, expected, "apply {proposed:?}");
+            assert_eq!(s, a, "suggest then accept {proposed:?}");
+        }
+    }
+
+    /// A level change replaces the title block. The page's references follow
+    /// it (ADR-059 §6: references are recomputed when an affected document is
+    /// rebuilt): the semantic title and link resolve, and the page renders the
+    /// new title.
+    #[test]
+    fn replacing_a_slot_title_keeps_page_references() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let mut req = request(FILE, TITLE_HEADING, "", "", BlockEditIntent::Apply);
+        req.base = BlockText::Edn("[:heading {:level \"1\"} \"First Post\"]".to_string());
+        req.proposed = BlockText::Edn("[:heading {:level \"2\"} \"Second Post\"]".to_string());
+
+        let result = conductor.handle_command(Command::BlockEdit(req));
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+
+        let sem = conductor.semantic_content_by_url("/post/first").expect("the page has semantic content");
+        {
+            let store = conductor.node_store.read().unwrap();
+            let part = |name: &str| {
+                store
+                    .consists_of(sem)
+                    .into_iter()
+                    .chain(store.references(sem))
+                    .find(|(n, _)| store.resolve_name(*n) == name)
+                    .map(|(_, id)| id)
+            };
+            let title = part("title").expect("the title is referenced");
+            assert_eq!(
+                content_store::heading_plain_text(&store, title).as_deref(),
+                Some("Second Post"),
+                "the reference is the live heading, not the removed one"
+            );
+            let link = part("link").expect("the title link exists");
+            assert_eq!(
+                node_store_bridge::content_bridge::find_attr_text(&store, link, "text").as_deref(),
+                Some("Second Post")
+            );
+        }
+        let html = std::fs::read_to_string(site_index::output_path_for_stem_slug(
+            &conductor.output_dir,
+            "post",
+            "first",
+        ))
+        .expect("the page is rendered");
+        assert!(html.contains("Second Post"), "{html}");
+        assert!(!html.contains("First Post"), "{html}");
+    }
+
+    /// `build_site` plus a root page that lists the post by link.
+    fn site_with_listing() -> tempfile::TempDir {
+        let tmp = build_site();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("schemas/index.md"),
+            "[<name>](/post/<name>) {#highlight}\ntype\n: link(post)\noccurs\n: 1..6\n\n----\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("templates/index.html"),
+            r#"<ul><template data-each="input.highlight"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("content/index.md"),
+            "[First Post](/post/first)\n\n----\n\nIndex body.\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn change_title_level(conductor: &Conductor) {
+        let mut req = request(FILE, TITLE_HEADING, "", "", BlockEditIntent::Apply);
+        req.base = BlockText::Edn("[:heading {:level \"1\"} \"First Post\"]".to_string());
+        req.proposed = BlockText::Edn("[:heading {:level \"2\"} \"Second Post\"]".to_string());
+        let result = conductor.handle_command(Command::BlockEdit(req));
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+    }
+
+    /// A page that lists a post shows the post's new title after a structural
+    /// edit of that title: the listing follows the post's semantic content.
+    #[test]
+    fn replacing_a_slot_title_updates_the_collection_listing() {
+        let tmp = site_with_listing();
+        let conductor = make_conductor(&tmp);
+        change_title_level(&conductor);
+
+        let listing = std::fs::read_to_string(site_index::output_path_for_stem_slug(
+            &conductor.output_dir,
+            "",
+            "index",
+        ))
+        .expect("the listing page is rendered");
+        assert!(listing.contains("Second Post"), "{listing}");
+        assert!(!listing.contains("First Post"), "{listing}");
+    }
+
+    /// When the references of a page cannot be rebuilt after a structural
+    /// edit, the page has a build error and is reported in `BuildFailed`; it
+    /// is not left silently stale.
+    #[test]
+    fn failed_reference_refresh_is_a_build_error() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        conductor.url_to_semantic.write().unwrap().remove("/post/first");
+
+        let mut req = request(FILE, TITLE_HEADING, "", "", BlockEditIntent::Apply);
+        req.base = BlockText::Edn("[:heading {:level \"1\"} \"First Post\"]".to_string());
+        req.proposed = BlockText::Edn("[:heading {:level \"2\"} \"Second Post\"]".to_string());
+        let result = conductor.handle_command(Command::BlockEdit(req));
+
+        assert!(
+            result.events.iter().any(|e| matches!(
+                e,
+                ConductorEvent::BuildFailed { error_pages } if error_pages.iter().any(|p| p == "/post/first")
+            )),
+            "{:?}",
+            result.events
+        );
+        let errors = conductor.build_errors.read().unwrap();
+        let messages = errors.get("/post/first").expect("a build error for the page");
+        assert!(
+            messages.iter().any(|m| m.contains("references could not be rebuilt")),
+            "{messages:?}"
+        );
+    }
+
+    /// A structural edit changes the blocks it names and nothing else: the
+    /// untouched blocks and the page's semantic node keep their ids.
+    #[test]
+    fn structural_edit_keeps_other_blocks_node_ids() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let blocks_before = body_blocks(&conductor);
+        let sem_before = conductor.semantic_content_by_url("/post/first").expect("semantic node");
+        let untouched = blocks_before[1];
+
+        let applied = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha one.\n\nAlpha two.",
+            BlockEditIntent::Apply,
+        );
+        assert!(
+            matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&applied)
+        );
+
+        assert!(
+            body_blocks(&conductor).contains(&untouched),
+            "the sibling block kept its node id"
+        );
+        assert_eq!(conductor.semantic_content_by_url("/post/first"), Some(sem_before));
+    }
+
     /// A guard, green on arrival: it pins that an EDN edit and an EDN
     /// suggestion differ only by approval, and that a stored preview is
     /// markdown.
@@ -9868,6 +10219,73 @@ mod link_expression_pipeline_tests {
         assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
         assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
         assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2"]));
+    }
+
+    fn apply_edn_block_edit(
+        conductor: &Conductor,
+        file: &str,
+        selection: &str,
+        base: editorial_types::BlockText,
+        proposed: editorial_types::BlockText,
+    ) {
+        let result = conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
+            file: editorial_types::ContentPath::new(file),
+            selection: selection.to_string(),
+            base,
+            proposed,
+            intent: editorial_types::BlockEditIntent::Apply,
+            reason: None,
+        }));
+        assert!(
+            matches!(
+                result.response,
+                Response::BlockEdited(editorial_types::BlockEditResponse::Done(
+                    editorial_types::BlockEditOutcome::Applied { .. }
+                ))
+            ),
+            "{:?}",
+            result.response
+        );
+    }
+
+    /// A structural edit refreshes the page's references (`fill_semantic_content`
+    /// builds a thread slot without a thread context, listing every post), and
+    /// the thread slots are evaluated again after it: the listing keeps its
+    /// sort and its limit, on the page that holds it and on a page it lists.
+    #[test]
+    fn structural_edit_on_a_page_with_a_thread_slot_keeps_its_listing() {
+        let tmp = build_site();
+        std::fs::write(
+            tmp.path().join("content/page/home.md"),
+            "# Home\n\n[Latest post](->> :post (sort-by :published :desc) (take 1)) {#latest}\n\n\
+             [In the news](->> :post (filter :category \"news\")) {#news}\n\n----\n\nWelcome.\n",
+        )
+        .unwrap();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3"]));
+
+        // A Replace of a body block on the page that holds the listing.
+        apply_edn_block_edit(
+            &conductor,
+            "content/page/home.md",
+            r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/page/home.md"))) "paragraph" 0)"#,
+            editorial_types::BlockText::Markdown("Welcome.".to_string()),
+            editorial_types::BlockText::Markdown("Welcome.\n\nAgain.".to_string()),
+        );
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
+
+        // A Replace of the title of a post that the listing shows.
+        apply_edn_block_edit(
+            &conductor,
+            "content/post/p3.md",
+            r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/p3.md") "title")) "heading" 0)"#,
+            editorial_types::BlockText::Edn("[:heading {:level \"1\"} \"Post three\"]".to_string()),
+            editorial_types::BlockText::Edn("[:heading {:level \"2\"} \"Third post\"]".to_string()),
+        );
+        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
+        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
     }
 
     /// Pin: how the two PathRef spellings read back, and whether they match

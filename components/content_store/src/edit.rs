@@ -743,9 +743,30 @@ pub struct PlannedMutation {
 #[derive(Debug, Clone, Default)]
 pub struct Plan(Vec<PlannedMutation>);
 
+/// Whether `mutation` adds, removes or replaces blocks (as opposed to
+/// changing the text or inline content of a block in place). A block that is
+/// removed or replaced takes the edges that reference it with it: whoever owns
+/// those references (the page's semantic content) must be rebuilt for the
+/// document (ADR-059 §6).
+pub fn changes_blocks(mutation: &NedMutation) -> bool {
+    matches!(
+        mutation,
+        NedMutation::Replace(_)
+            | NedMutation::Delete
+            | NedMutation::InsertBefore(_)
+            | NedMutation::InsertAfter(_)
+            | NedMutation::InsertChild(_)
+    )
+}
+
 impl Plan {
     pub fn push(&mut self, m: PlannedMutation) {
         self.0.push(m);
+    }
+
+    /// Whether some step adds, removes or replaces blocks ([`changes_blocks`]).
+    pub fn changes_blocks(&self) -> bool {
+        self.0.iter().any(|step| changes_blocks(&step.mutation))
     }
 
     pub fn is_empty(&self) -> bool {
