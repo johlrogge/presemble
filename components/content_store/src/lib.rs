@@ -23,7 +23,7 @@ pub use block::{
     BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS,
     add_trivia,
     block_from_node, block_to_store, block_to_tree, content_element_to_store, decode_trivia,
-    link_target_from_node, tree_to_block,
+    inline_context_of, link_target_from_node, tree_to_block,
 };
 pub use inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store, inlines_to_tree};
 
@@ -52,6 +52,24 @@ pub fn heading_plain_text(
 ) -> Option<String> {
     use content::AsPlainText;
     heading_inlines(store, id).map(|content| content.plain_text())
+}
+
+/// The canonical markdown source of the paragraph node `id`, or `None` when
+/// it does not decode (not a paragraph, or malformed).
+///
+/// What the store held before paragraphs stored inline nodes (ADR-059 stage
+/// 5.2): readers that still render or scan a paragraph as markdown read it
+/// through here.
+// stage 5.4: renderers read the nodes and this goes.
+#[allow(deprecated)]
+pub fn paragraph_source(
+    store: &node_store::NodeStore,
+    id: node_store::NodeId,
+) -> Option<String> {
+    (element_name_of(store, id).as_deref() == Some("paragraph"))
+        .then(|| block_from_node(store, id).ok())
+        .flatten()
+        .and_then(|el| el.paragraph_source())
 }
 
 #[cfg(test)]

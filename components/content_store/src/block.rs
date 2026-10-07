@@ -36,13 +36,13 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
             inlines_to_store(store, node, content);
             node
         }
-        ContentElement::Paragraph { .. } => {
+        // An optional `marker`, and the inline nodes as children (ADR-059 §6).
+        ContentElement::Paragraph { content, marker } => {
             let node = make_element(store, "paragraph");
-            // stage 5.4: the store holds the paragraph's inline nodes (5.2); until
-            // then it holds the canonical markdown source.
-            #[allow(deprecated)]
-            let source = element.paragraph_source().unwrap_or_default();
-            add_child_text(store, node, &source);
+            if let Some(marker) = marker {
+                add_text_attr(store, node, "marker", marker.as_str());
+            }
+            inlines_to_store(store, node, content);
             node
         }
         ContentElement::Image { alt, path } => {
@@ -224,18 +224,22 @@ pub fn decode_trivia(
 /// Element names of single-text blocks: exactly one `Text` child carries the
 /// block's text (see `ContentElement::text`). `html-block` also stores its
 /// source as one `Text` child, but cannot be text-edited (ADR-062 D4).
-pub const TEXT_BLOCK_KINDS: &[&str] = &[
-    "paragraph",
-    "link",
-    "blockquote",
-    "list",
-    "code-block",
-];
+pub const TEXT_BLOCK_KINDS: &[&str] = &["link", "blockquote", "list", "code-block"];
 
 /// Element names of inline containers: their children are inline nodes
 /// (ADR-059 §6), at any depth. A Text node inside one is addressed through
 /// the container, not as the block's only text.
-pub const INLINE_CONTAINER_KINDS: &[&str] = &["heading"];
+pub const INLINE_CONTAINER_KINDS: &[&str] = &["heading", "paragraph"];
+
+/// The inline context of the children of a container of kind `kind`; `None`
+/// when `kind` is not in [`INLINE_CONTAINER_KINDS`].
+pub fn inline_context_of(kind: &str) -> Option<InlineContext> {
+    match kind {
+        "heading" => Some(InlineContext::Heading),
+        "paragraph" => Some(InlineContext::Paragraph),
+        _ => None,
+    }
+}
 
 /// Every block element name emitted by [`block_to_store`].
 pub const BLOCK_KINDS: &[&str] = &[
@@ -455,6 +459,24 @@ fn heading_level(store: &NodeStore, node: NodeId) -> Result<HeadingLevel, BlockD
         .ok_or_else(|| BlockDecodeError::InvalidHeadingLevel(raw.to_string()))
 }
 
+/// The optional `marker` attribute of a heading or paragraph.
+fn slot_marker(
+    store: &NodeStore,
+    node: NodeId,
+    kind: &str,
+) -> Result<Option<SlotMarker>, BlockDecodeError> {
+    match find_attr_text(store, node, "marker") {
+        Some(name) => SlotMarker::new(&name).map(Some).ok_or_else(|| {
+            BlockDecodeError::InvalidAttribute {
+                kind: kind.to_string(),
+                attr: "marker".to_string(),
+                value: name,
+            }
+        }),
+        None => Ok(None),
+    }
+}
+
 /// Decode a block element node into a [`ContentElement`].
 ///
 /// Accepts every kind in [`BLOCK_KINDS`]; never panics on malformed input.
@@ -468,24 +490,15 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
     match kind {
         "heading" => {
             let level = heading_level(store, id)?;
-            let marker = match find_attr_text(store, id, "marker") {
-                Some(name) => Some(SlotMarker::new(&name).ok_or_else(|| {
-                    BlockDecodeError::InvalidAttribute {
-                        kind: kind.to_string(),
-                        attr: "marker".to_string(),
-                        value: name,
-                    }
-                })?),
-                None => None,
-            };
+            let marker = slot_marker(store, id, kind)?;
             let content = inlines_from_store(store, id, InlineContext::Heading)?;
             Ok(ContentElement::Heading { level, content, marker })
         }
-        // The stored source read as inlines and a marker (stage 5.2 stores
-        // the nodes themselves).
-        "paragraph" => Ok(ContentElement::paragraph_from_markdown(&try_child_text(
-            store, id, kind,
-        )?)),
+        "paragraph" => {
+            let marker = slot_marker(store, id, kind)?;
+            let content = inlines_from_store(store, id, InlineContext::Paragraph)?;
+            Ok(ContentElement::Paragraph { content, marker })
+        }
         "image" => {
             let path = try_attr_text(store, id, kind, "path")?;
             let alt = find_attr_text(store, id, "alt");
@@ -656,6 +669,7 @@ pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecode
 fn payload_attributes(kind: &str) -> &'static [&'static str] {
     match kind {
         "heading" => &["level", "marker"],
+        "paragraph" => &["marker"],
         "link" => &["href"],
         "code-block" => &["language"],
         "image" => &["path", "alt"],

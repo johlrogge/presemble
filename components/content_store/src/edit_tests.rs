@@ -335,6 +335,90 @@ fn set_text_at_depth_in_a_heading() {
     assert_eq!(f.title(), heading(1, "Hello *Presemble*"));
 }
 
+/// A fixture whose body holds the single paragraph `md`.
+fn fixture_with_paragraph(md: &str) -> Fixture {
+    let mut store = NodeStore::new();
+    let doc = make_element(&mut store, "document");
+    add_child_element(&mut store, doc, "preamble");
+    let body = add_child_element(&mut store, doc, "body");
+    add_block(&mut store, body, &para(md));
+    Fixture { store, doc }
+}
+
+impl Fixture {
+    fn paragraph_block(&self) -> NodeId {
+        self.store.children(self.body())[0]
+    }
+    fn paragraph(&self) -> ContentElement {
+        block_from_node(&self.store, self.paragraph_block()).expect("the paragraph decodes")
+    }
+    fn prepare_paragraph_scope(&self, m: &NedMutation) -> Result<PreparedEdit, EditError> {
+        let target = self.resolve(&[self.paragraph_block()], m.target_kind()).expect("resolves");
+        prepare(&self.store, &target, m)
+    }
+}
+
+/// A Text node inside the emphasis of `Hello *World*`: depth 2.
+#[test]
+fn set_text_at_depth_in_a_paragraph() {
+    let mut f = fixture_with_paragraph("Hello *World*");
+    let block = f.paragraph_block();
+    let emph = f.store.children(block)[1];
+    let inner = f.store.children(emph)[0];
+    assert_eq!(
+        f.resolve(&[inner], TargetKind::Text),
+        Ok(Target::Text { text: inner, block, document: f.doc })
+    );
+    f.run(inner, &NedMutation::SetText("Presemble".to_string()));
+    assert_eq!(f.paragraph(), para("Hello *Presemble*"));
+}
+
+/// The scope of a search in a paragraph is its whole text, across formatting.
+#[test]
+fn search_replace_on_paragraph_spans_formatting() {
+    let mut f = fixture_with_paragraph("a *bc* d");
+    let m = NedMutation::SearchReplace { search: "c d".to_string(), replace: "X".to_string() };
+    let edit = f.prepare_paragraph_scope(&m).expect("valid");
+    commit(&mut f.store, vec![edit]);
+    assert_eq!(f.paragraph(), para("a *bX*"));
+}
+
+/// L22 (ADR-059 §9): emptying a paragraph is refused; delete it instead.
+#[test]
+fn emptying_a_paragraph_is_refused() {
+    let f = fixture_with_paragraph("Hello");
+    let text = f.store.children(f.paragraph_block())[0];
+    for m in [
+        NedMutation::SetText(String::new()),
+        NedMutation::SetText("  \n ".to_string()),
+        sr("Hello", ""),
+    ] {
+        let err = f.prepare(text, &m).expect_err(&format!("{m:?} must be refused"));
+        assert!(err.to_string().contains("delete it instead"), "{m:?}: {err}");
+    }
+    let scope = NedMutation::SearchReplace { search: "Hello".to_string(), replace: String::new() };
+    let err = f.prepare_paragraph_scope(&scope).expect_err("refused");
+    assert!(err.to_string().contains("delete it instead"), "{err}");
+    let err = f.prepare_paragraph_scope(&NedMutation::SetInlines(vec![])).expect_err("refused");
+    assert!(err.to_string().contains("delete it instead"), "{err}");
+    // A refused edit surfaces as an invalid value, not as a stale selection.
+    assert!(matches!(StaleCause::from(err), StaleCause::InvalidValue { .. }));
+}
+
+/// A blank line in a paragraph's text would be two paragraphs: refused for
+/// every way of writing it, not joined.
+#[test]
+fn a_blank_line_in_a_paragraph_edit_is_refused() {
+    let f = fixture_with_paragraph("Hello *there*");
+    let block = f.paragraph_block();
+    let text = f.store.children(block)[0];
+    assert!(f.prepare(text, &NedMutation::SetText("a\n\nb".to_string())).is_err());
+    assert!(f.prepare(text, &sr("Hello", "a\n\nb")).is_err());
+    assert!(f.prepare_paragraph_scope(&sr("there", "a\n\nb")).is_err());
+    let blank = NodeTree::element("paragraph").with_child(NodeTree::text("a\n\nb"));
+    assert!(f.prepare(block, &NedMutation::Replace(vec![blank])).is_err());
+}
+
 /// The scope of a search is the heading's whole text, across its formatting.
 #[test]
 fn search_replace_on_heading_spans_formatting() {
@@ -374,13 +458,26 @@ fn set_inlines_replaces_heading_content() {
     assert_eq!(f.title(), heading(1, "New *x*"));
 }
 
-/// Only an inline container is a text scope: a paragraph block is not.
+/// Only an inline container is a text scope: a paragraph block is one, a
+/// code block is not.
 #[test]
-fn a_paragraph_block_is_not_a_text_scope() {
+fn a_paragraph_block_is_a_text_scope_and_a_code_block_is_not() {
     let f = fixture();
     let block = f.body_blocks()[0];
     assert!(matches!(
         f.resolve(&[block], TargetKind::TextScope),
+        Ok(Target::TextScope { block: b, .. }) if b == block
+    ));
+
+    let mut f = fixture();
+    let body = f.body();
+    let code = add_block(
+        &mut f.store,
+        body,
+        &ContentElement::CodeBlock { language: None, code: "x".to_string() },
+    );
+    assert!(matches!(
+        f.resolve(&[code], TargetKind::TextScope),
         Err(AddressError::WrongKind { expected: TargetKind::TextScope, .. })
     ));
 }

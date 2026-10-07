@@ -5,6 +5,7 @@
 //! then either applies the mutation now or stores it as a suggestion. The
 //! lowering is the same for both intents.
 
+use content::inline::InlineContext;
 use content::{
     ContentElement, Projection, check_block_round_trip, parse_markdown_projection, project_markdown,
 };
@@ -304,19 +305,27 @@ pub fn lower(
         proposed: PreviewText::new(projected.join("\n\n")),
     };
 
-    // A heading with the same level and marker: only its content changes, in
-    // place, so the node stays where the page links to it (ADR-059 §10).
-    // Its text is nodes, so the proposed markdown is never written as text:
-    // - only the text differs: a search over the heading's whole text across
+    // An inline container (a heading, a paragraph) with the same level and
+    // marker: only its content changes, in place, so the node stays where the
+    // page links to it (ADR-059 §10). Its text is nodes, so the proposed
+    // markdown is never written as text:
+    // - only the text differs: a search over the block's whole text across
     //   its formatting, addressed by the block selection itself;
     // - anything else about the content (formatting, an atom): the content is
     //   set as inline trees.
-    if let [ContentElement::Heading { level, content, marker }] = elements.as_slice()
-        && let ContentElement::Heading { level: l0, content: current, marker: m0 } = current_el
-        && level == l0
-        && marker == m0
-    {
-        let mutation = match text_only_change(current, content) {
+    let same_container = match (elements.as_slice(), current_el) {
+        (
+            [ContentElement::Heading { level, content, marker }],
+            ContentElement::Heading { level: l0, content: current, marker: m0 },
+        ) if level == l0 && marker == m0 => Some((content, current, InlineContext::Heading)),
+        (
+            [ContentElement::Paragraph { content, marker }],
+            ContentElement::Paragraph { content: current, marker: m0 },
+        ) if marker == m0 => Some((content, current, InlineContext::Paragraph)),
+        _ => None,
+    };
+    if let Some((content, current, ctx)) = same_container {
+        let mutation = match text_only_change(current, content, ctx) {
             Some((search, replace)) => NedMutation::SearchReplace { search, replace },
             None => NedMutation::SetInlines(content_store::inlines_to_tree(content)),
         };
@@ -330,7 +339,7 @@ pub fn lower(
     // Text-only change: one block that differs from the current one in its
     // text alone.
     if let [new] = elements.as_slice()
-        && !matches!(current_el, ContentElement::Heading { .. })
+        && !matches!(current_el, ContentElement::Heading { .. } | ContentElement::Paragraph { .. })
         && let (Some(old_text), Some(new_text)) = (current_el.text(), new.text())
         && current_el.with_text(&new_text).as_ref() == Some(new)
     {
@@ -358,16 +367,17 @@ pub fn lower(
     }))
 }
 
-/// The search and replacement that turn the heading content `current` into
-/// `proposed`, when a text search over its edit text does exactly that: the
-/// minimal unique diff of the two edit texts, checked by applying it. `None`
-/// when there is no text difference (the formatting differs), when the diff
-/// would reach an atom (an image, raw HTML), or when applying it gives
-/// anything but `proposed` (a replacement takes the formatting of the first
-/// matched character).
+/// The search and replacement that turn the content `current` of a block in
+/// context `ctx` into `proposed`, when a text search over its edit text does
+/// exactly that: the minimal unique diff of the two edit texts, checked by
+/// applying it. `None` when there is no text difference (the formatting
+/// differs), when the diff would reach an atom (an image, raw HTML), or when
+/// applying it gives anything but `proposed` (a replacement takes the
+/// formatting of the first matched character).
 fn text_only_change(
     current: &content::inline::Inlines,
     proposed: &content::inline::Inlines,
+    ctx: content::inline::InlineContext,
 ) -> Option<(String, String)> {
     const ATOM: char = '\u{fffc}';
     let (old, new) = (current.edit_text(), proposed.edit_text());
@@ -379,9 +389,7 @@ fn text_only_change(
     if search.contains(ATOM) || replace.contains(ATOM) {
         return None;
     }
-    let applied = current
-        .search_replace(&search, &replace, content::inline::InlineContext::Heading)
-        .ok()?;
+    let applied = current.search_replace(&search, &replace, ctx).ok()?;
     (&applied == proposed).then_some((search, replace))
 }
 
@@ -589,15 +597,17 @@ mod tests {
         );
     }
 
+    /// A paragraph is an inline container: a text change is a search over its
+    /// whole text, addressed by the block selection (as for a heading).
     #[test]
-    fn lower_text_change_is_search_replace_on_text_in() {
+    fn lower_text_change_in_a_paragraph_is_a_container_search_replace() {
         let l = expect_lowered(lowered(
             "body",
             &paragraph("The quick brown fox."),
             "The quick brown fox.",
             "The quick red fox.",
         ));
-        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+        assert_eq!(l.selection, SEL);
         assert_eq!(
             l.mutation,
             NedMutation::SearchReplace {
@@ -667,11 +677,38 @@ mod tests {
         assert!(matches!(l.mutation, NedMutation::SetInlines(_)), "{:?}", l.mutation);
     }
 
+    /// An empty base cannot be searched: the content is set as inline trees.
     #[test]
-    fn lower_empty_base_text_is_set_text() {
+    fn lower_empty_base_paragraph_sets_inlines() {
         let l = expect_lowered(lowered("body", &paragraph(""), "", "hello"));
-        assert_eq!(l.selection, "(ned/text-in (block-selection))");
-        assert_eq!(l.mutation, NedMutation::SetText("hello".to_string()));
+        assert_eq!(l.selection, SEL);
+        let ContentElement::Paragraph { content, .. } = paragraph("hello") else { unreachable!() };
+        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+    }
+
+    /// The proposed markdown is never written as text: typing `**fox**` makes
+    /// the fox strong, it does not put asterisks into the text.
+    #[test]
+    fn lower_formatting_change_in_a_paragraph_sets_inlines() {
+        let l = expect_lowered(lowered(
+            "body",
+            &paragraph("The quick brown fox."),
+            "The quick brown fox.",
+            "The quick brown **fox**.",
+        ));
+        assert_eq!(l.selection, SEL);
+        let ContentElement::Paragraph { content, .. } = paragraph("The quick brown **fox**.") else {
+            unreachable!()
+        };
+        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+    }
+
+    /// A paragraph that changes its marker is a different block: a Replace.
+    #[test]
+    fn lower_marker_change_on_a_paragraph_is_replace() {
+        let l = expect_lowered(lowered("body", &paragraph("Text"), "Text", "Text {#intro}"));
+        assert_eq!(l.selection, SEL);
+        assert!(matches!(l.mutation, NedMutation::Replace(_)), "{:?}", l.mutation);
     }
 
     #[test]
@@ -794,7 +831,7 @@ mod tests {
             &md("The quick brown fox."),
             &edn("[:paragraph \"The quick red fox.\"]"),
         ));
-        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+        assert_eq!(l.selection, SEL);
         assert_eq!(
             l.mutation,
             NedMutation::SearchReplace {
@@ -896,7 +933,7 @@ mod tests {
             &base,
             &edn("[:paragraph \"The quick red fox.\"]"),
         ));
-        assert_eq!(l.selection, "(ned/text-in (block-selection))");
+        assert_eq!(l.selection, SEL);
 
         // The base is checked against the block: drift is drift in any
         // representation.

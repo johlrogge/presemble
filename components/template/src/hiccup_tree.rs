@@ -152,8 +152,12 @@ mod tests {
 
     #[test]
     fn paragraph_edn_is_the_store_shape() {
+        // The nodes the store holds (ADR-059 §6), not the markdown source.
         let tree = block_to_tree(&paragraph("source *md*")).unwrap();
-        assert_eq!(tree_to_hiccup(&[tree]).unwrap(), "[:paragraph \"source *md*\"]");
+        let edn = tree_to_hiccup(&[tree.clone()]).unwrap();
+        assert_eq!(hiccup_to_trees(&edn).unwrap(), vec![tree]);
+        assert!(edn.contains("[:emph \"md\"]"), "{edn}");
+        assert!(!edn.contains("*md*"), "{edn}");
     }
 
     #[test]

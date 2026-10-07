@@ -27,16 +27,8 @@ pub fn node_text(store: &NodeStore, id: NodeId) -> Option<String> {
             let element_name = store.resolve_name(*name);
             match element_name {
                 "heading" => content_store::heading_plain_text(store, id),
-                "paragraph" => {
-                    // Extract text from first Text child
-                    store.children(id).into_iter().find_map(|c| {
-                        if let Some(Node::Text(s)) = store.get(c) {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
-                }
+                // stage 5.4: a paragraph's text is its plain text.
+                "paragraph" => content_store::paragraph_source(store, id),
                 _ => None,
             }
         }

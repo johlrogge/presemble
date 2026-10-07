@@ -45,17 +45,11 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                         // Does not decode — fall through to Record
                     }
                     "paragraph" => {
-                        let text = store.children(id).into_iter().find_map(|c| {
-                            if let Some(Node::Text(s)) = store.get(c) {
-                                Some(s.clone())
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(t) = text {
+                        // stage 5.4: a paragraph's value is its inline nodes.
+                        if let Some(t) = content_store::paragraph_source(store, id) {
                             return template::Value::Text(t);
                         }
-                        // No text child — fall through to Record
+                        // Does not decode — fall through to Record
                     }
                     _ => {}
                 }

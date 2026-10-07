@@ -18,12 +18,9 @@ use node_store::{Node, NodeId, NodeStore};
 
 use crate::block::{
     BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, TEXT_BLOCK_KINDS, block_from_node,
-    block_to_store, tree_to_block,
+    block_to_store, inline_context_of, tree_to_block,
 };
 use crate::inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store};
-
-/// The context of the inlines of an inline container.
-const CONTAINER_CONTEXT: InlineContext = InlineContext::Heading;
 
 /// Element names an inline Text node can sit under, below its container: the
 /// nodes whose children `InlinePath` descends through.
@@ -285,6 +282,8 @@ pub enum EditError {
     /// The edited inline content would not read back as itself when written
     /// as markdown (ADR-059 §7).
     InlinesNotWritable,
+    /// The edit would leave a paragraph with no content (ADR-059 L22).
+    EmptiesParagraph,
     NoChange,
 }
 
@@ -306,6 +305,9 @@ impl fmt::Display for EditError {
             EditError::SpansAtom => StaleCause::SpansAtom.fmt(f),
             EditError::InlinesNotWritable => {
                 f.write_str("the edited text cannot be written as markdown")
+            }
+            EditError::EmptiesParagraph => {
+                f.write_str("this would leave the paragraph empty; delete it instead")
             }
             EditError::NoChange => StaleCause::NoChange.fmt(f),
         }
@@ -411,9 +413,11 @@ pub fn prepare(
             if search.is_empty() {
                 return Err(EditError::EmptySearch);
             }
-            let current = container_inlines(store, block)?;
+            let ctx = container_context(store, block)?;
+            let current = container_inlines(store, block, ctx)?;
+            check_not_split(ctx, replace)?;
             let edited = current
-                .search_replace(search, replace, CONTAINER_CONTEXT)
+                .search_replace(search, replace, ctx)
                 .map_err(|e| match e {
                     SearchReplaceError::NotFound => EditError::SearchNotFound,
                     SearchReplaceError::NotUnique(occurrences) => {
@@ -422,15 +426,16 @@ pub fn prepare(
                     SearchReplaceError::SpansAtom => EditError::SpansAtom,
                     SearchReplaceError::NotWritable => EditError::InlinesNotWritable,
                 })?;
-            return set_inlines(block, document, &current, edited);
+            return set_inlines(block, document, ctx, &current, edited);
         }
         (NedMutation::SetInlines(trees), Target::TextScope { block, .. }) => {
-            let current = container_inlines(store, block)?;
-            let edited = inlines_from_tree(trees, CONTAINER_CONTEXT).map_err(|e| match e {
+            let ctx = container_context(store, block)?;
+            let current = container_inlines(store, block, ctx)?;
+            let edited = inlines_from_tree(trees, ctx).map_err(|e| match e {
                 BlockDecodeError::ExistingNode => EditError::ExistingNode,
                 other => EditError::Payload(other),
             })?;
-            return set_inlines(block, document, &current, edited);
+            return set_inlines(block, document, ctx, &current, edited);
         }
         (NedMutation::Delete, Target::Block { block, .. }) => (block, Change::Delete { block }),
         (NedMutation::Replace(trees), Target::Block { block, container, .. }) => {
@@ -461,9 +466,20 @@ fn is_inline_container(store: &NodeStore, block: NodeId) -> bool {
     element_name(store, block).is_some_and(|n| INLINE_CONTAINER_KINDS.contains(&n))
 }
 
+/// The context of the inlines of the inline container `block`.
+fn container_context(store: &NodeStore, block: NodeId) -> Result<InlineContext, EditError> {
+    element_name(store, block)
+        .and_then(inline_context_of)
+        .ok_or_else(|| no_text(store, block))
+}
+
 /// The inlines of an inline container, decoded strictly.
-fn container_inlines(store: &NodeStore, block: NodeId) -> Result<Inlines, EditError> {
-    inlines_from_store(store, block, CONTAINER_CONTEXT).map_err(EditError::OwningBlock)
+fn container_inlines(
+    store: &NodeStore,
+    block: NodeId,
+    ctx: InlineContext,
+) -> Result<Inlines, EditError> {
+    inlines_from_store(store, block, ctx).map_err(EditError::OwningBlock)
 }
 
 /// The indices from `block` down to the Text node `text`: the child position
@@ -493,28 +509,33 @@ fn set_text_in_container(
     document: NodeId,
     value: &str,
 ) -> Result<PreparedEdit, EditError> {
-    let current = container_inlines(store, block)?;
+    let ctx = container_context(store, block)?;
+    let current = container_inlines(store, block, ctx)?;
+    check_not_split(ctx, value)?;
     let path = path_to_text(store, block, text).ok_or_else(|| no_text(store, block))?;
     let edited = current
-        .with_text_at(&path, value, CONTAINER_CONTEXT)
+        .with_text_at(&path, value, ctx)
         .ok_or_else(|| no_text(store, block))?;
-    set_inlines(block, document, &current, edited)
+    set_inlines(block, document, ctx, &current, edited)
 }
 
 /// The edit that makes `block`'s content `edited`: refused when it would not
-/// be written back as itself, and a no-change when it equals `current`.
+/// be written back as itself (or leaves a paragraph empty), and a no-change
+/// when it equals `current`.
 fn set_inlines(
     block: NodeId,
     document: NodeId,
+    ctx: InlineContext,
     current: &Inlines,
     edited: Inlines,
 ) -> Result<PreparedEdit, EditError> {
     if edited == *current {
         return Err(EditError::NoChange);
     }
-    edited
-        .check_writable(CONTAINER_CONTEXT)
-        .map_err(|_| EditError::InlinesNotWritable)?;
+    if ctx == InlineContext::Paragraph && edited.is_empty() {
+        return Err(EditError::EmptiesParagraph);
+    }
+    edited.check_writable(ctx).map_err(|_| EditError::InlinesNotWritable)?;
     Ok(PreparedEdit {
         footprint: block,
         document,
@@ -536,12 +557,28 @@ fn splits_a_paragraph(text: &str) -> bool {
     text.trim().lines().any(|line| line.trim().is_empty())
 }
 
+/// Refuse `text` going into the inlines of `ctx` when it would split a
+/// paragraph (normalisation would otherwise join the two halves).
+fn check_not_split(ctx: InlineContext, text: &str) -> Result<(), EditError> {
+    if ctx == InlineContext::Paragraph && splits_a_paragraph(text) {
+        Err(EditError::Postcondition(RoundTripError::BlockCount(2)))
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether any Text node of `tree` has a blank line inside it.
+fn tree_splits_a_paragraph(tree: &NodeTree) -> bool {
+    match tree {
+        NodeTree::Text(text) => splits_a_paragraph(text),
+        NodeTree::Element { children, .. } => children.iter().any(tree_splits_a_paragraph),
+        NodeTree::Existing(_) => false,
+    }
+}
+
 /// Check that `block` with its text replaced by `value` round-trips.
 fn check_text_value(store: &NodeStore, block: NodeId, value: &str) -> Result<(), EditError> {
     let el = block_from_node(store, block).map_err(EditError::OwningBlock)?;
-    if matches!(el, ContentElement::Paragraph { .. }) && splits_a_paragraph(value) {
-        return Err(EditError::Postcondition(RoundTripError::BlockCount(2)));
-    }
     let edited = el.with_text(value).ok_or_else(|| no_text(store, block))?;
     check_block_round_trip(&edited).map_err(EditError::Postcondition)
 }
@@ -561,10 +598,9 @@ fn decode_payload(trees: &[NodeTree]) -> Result<Vec<ContentElement>, EditError> 
     trees
         .iter()
         .map(|tree| {
-            if let NodeTree::Element { name, children, .. } = tree
+            if let NodeTree::Element { name, .. } = tree
                 && name == "paragraph"
-                && let [NodeTree::Text(text)] = children.as_slice()
-                && splits_a_paragraph(text)
+                && tree_splits_a_paragraph(tree)
             {
                 return Err(EditError::Postcondition(RoundTripError::BlockCount(2)));
             }

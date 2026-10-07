@@ -104,6 +104,73 @@ fn heading_payload_text_is_literal() {
     assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedAttribute { .. })));
 }
 
+fn p(md: &str) -> ContentElement {
+    ContentElement::paragraph_from_markdown(md)
+}
+
+/// A paragraph is its optional marker attribute plus its inline nodes
+/// (ADR-059 §6), as a heading is.
+#[test]
+fn paragraph_stores_inline_nodes() {
+    let mut store = NodeStore::new();
+    let el = p("Hello *World* and `code`");
+    let id = block_to_store(&el, &mut store);
+    let kinds: Vec<String> = store
+        .children(id)
+        .iter()
+        .map(|c| match store.get(*c) {
+            Some(Node::Text(s)) => format!("text:{s}"),
+            Some(Node::Element(n)) => store.resolve_name(*n).to_string(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(kinds, vec!["text:Hello ", "emph", "text: and ", "code"]);
+    assert_eq!(block_from_node(&store, id), Ok(el));
+    // No marker attribute without a marker.
+    assert_eq!(find_attr_text(&store, id, "marker"), None);
+
+    // A marker is an attribute, not text.
+    let marked = p("Intro {#intro}");
+    let id = block_to_store(&marked, &mut store);
+    assert_eq!(find_attr_text(&store, id, "marker").as_deref(), Some("intro"));
+    let texts: Vec<_> = store.children(id).iter().map(|c| store.get(*c).cloned()).collect();
+    assert_eq!(texts, vec![Some(Node::Text("Intro".to_string()))]);
+    assert_eq!(block_from_node(&store, id), Ok(marked));
+}
+
+/// The text of a paragraph payload is literal (ADR-059 §6): `a *b*` means
+/// asterisks, not emphasis.
+#[test]
+fn paragraph_payload_text_is_literal() {
+    let tree = NodeTree::element("paragraph").with_child(NodeTree::text("a *b*"));
+    let el = tree_to_block(&tree).expect("decodes");
+    let ContentElement::Paragraph { content, marker } = &el else { panic!("{el:?}") };
+    assert_eq!(
+        content.as_slice(),
+        &[content::inline::Inline::Text("a *b*".to_string())],
+        "literal text, no emphasis"
+    );
+    assert_eq!(*marker, None);
+    // A literal marker-shaped text is text, not a marker.
+    let tree = NodeTree::element("paragraph").with_child(NodeTree::text("x {#y}"));
+    let ContentElement::Paragraph { content, marker } = tree_to_block(&tree).expect("decodes")
+    else {
+        panic!()
+    };
+    assert_eq!(content.as_slice(), &[content::inline::Inline::Text("x {#y}".to_string())]);
+    assert_eq!(marker, None);
+    // A formatted payload is built from inline trees.
+    let tree = NodeTree::element("paragraph")
+        .with_child(NodeTree::text("a "))
+        .with_child(NodeTree::element("emph").with_child(NodeTree::text("b")));
+    assert_eq!(tree_to_block(&tree), Ok(p("a *b*")));
+    // The marker is the one attribute a paragraph payload takes.
+    let tree = NodeTree::element("paragraph").with_attr("marker", "m").with_child(NodeTree::text("a"));
+    assert_eq!(tree_to_block(&tree), Ok(p("a {#m}")));
+    let tree = NodeTree::element("paragraph").with_attr("id", "x").with_child(NodeTree::text("a"));
+    assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedAttribute { .. })));
+}
+
 #[test]
 fn heading_level_integer_decodes() {
     let mut store = NodeStore::new();
@@ -183,13 +250,23 @@ fn non_element_is_error() {
 #[test]
 fn missing_text_child_is_error() {
     let mut store = NodeStore::new();
-    let id = make_element(&mut store, "paragraph");
+    let id = make_element(&mut store, "blockquote");
     assert_eq!(
         block_from_node(&store, id),
         Err(BlockDecodeError::MissingTextChild {
-            kind: "paragraph".to_string()
+            kind: "blockquote".to_string()
         })
     );
+}
+
+/// A paragraph with no children is an empty paragraph (a marker-only one is
+/// still a paragraph), not a malformed block.
+#[test]
+fn paragraph_without_children_decodes_as_empty() {
+    let mut store = NodeStore::new();
+    let id = make_element(&mut store, "paragraph");
+    let el = block_from_node(&store, id).expect("decodes");
+    assert!(matches!(&el, ContentElement::Paragraph { content, marker: None } if content.is_empty()));
 }
 
 #[test]

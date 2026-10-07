@@ -286,6 +286,37 @@ enum SlotShape {
     Missing,
 }
 
+/// One change to what the suggestion records mean (ADR-059): from some point
+/// on, a kind of block holds inline nodes, and a pending suggestion made
+/// before that point which touches such a block no longer means what it said.
+struct ModelStep {
+    /// What `.presemble/suggestions/ned/MODEL` holds once the step has run.
+    name: &'static str,
+    /// The element kind the step is about.
+    kind: &'static str,
+}
+
+/// The steps in the order they were introduced.
+const MODEL_STEPS: &[ModelStep] = &[
+    ModelStep { name: "heading-inlines", kind: "heading" },
+    ModelStep { name: "paragraph-inlines", kind: "paragraph" },
+];
+
+/// The steps still to run when `recorded` is the last one applied (nothing
+/// recorded: all of them).
+///
+/// A recorded name this conductor does not know was written by a newer one:
+/// nothing runs, and nothing is recorded over it.
+fn model_steps_after(recorded: Option<&str>) -> &'static [ModelStep] {
+    match recorded {
+        None => MODEL_STEPS,
+        Some(name) => match MODEL_STEPS.iter().position(|step| step.name == name) {
+            Some(done) => &MODEL_STEPS[done + 1..],
+            None => &[],
+        },
+    }
+}
+
 impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let conductor = Self::load(site_dir)?;
@@ -378,85 +409,93 @@ impl Conductor {
     /// validate it (what `presemble build` does) writes nothing to
     /// `.presemble`.
     ///
-    /// First the legacy cleanup (ADR-047), then the heading discard, which
-    /// needs the store.
+    /// First the legacy cleanup (ADR-047), then the model steps, which need
+    /// the store.
     fn migrate_suggestion_records(&self) {
         // Delete any legacy sug-*.json files left over from before Wave C-ε
         // (ADR-047). Idempotent: later runs find nothing.
         Self::delete_legacy_suggestion_files(&self.site_dir);
-        self.discard_suggestions_from_before_heading_nodes();
+        self.discard_suggestions_from_before_inline_nodes();
     }
 
-    /// Once per workspace, drop the pending suggestions that touch a heading
-    /// and were made before headings held inline nodes (ADR-059 stage 4).
+    /// Once per workspace and step, drop the pending suggestions that touch a
+    /// kind of block and were made before that kind held inline nodes
+    /// (ADR-059 stages 4 and 5; [`MODEL_STEPS`]).
     ///
     /// Their text is markdown source and the new model reads text as literal,
     /// so applying them would write the markup as text. They are discarded
     /// silently: the file is deleted and nothing else is said but one log
-    /// line. Accepted, rejected and stale records are history and stay.
+    /// line per step. Accepted, rejected and stale records are history and
+    /// stay.
     ///
-    /// Marked by `.presemble/suggestions/ned/MODEL`: when it exists nothing is
-    /// discarded, ever, so suggestions made after the upgrade are safe. It is
-    /// written even when there is nothing to discard.
-    fn discard_suggestions_from_before_heading_nodes(&self) {
+    /// `.presemble/suggestions/ned/MODEL` holds the name of the last step
+    /// applied. Every step after it runs, in order, and then the last one's
+    /// name is written, so a suggestion made after a step is never discarded
+    /// by it. An absent file means no step has run. It is written even when
+    /// there is nothing to discard.
+    fn discard_suggestions_from_before_inline_nodes(&self) {
         const MARKER: &str = "MODEL";
-        const MODEL: &str = "heading-inlines";
         let dir = self.ned_suggestions_dir();
         let marker = dir.join(MARKER);
-        if marker.exists() {
+        let recorded = std::fs::read_to_string(&marker).ok();
+        let steps = model_steps_after(recorded.as_deref().map(str::trim));
+        let Some(last) = steps.last() else {
             return;
-        }
+        };
 
-        let pending: Vec<editorial_types::NedSuggestion> = self
-            .ned_suggestions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter(|s| matches!(s.status, editorial_types::NedSuggestionStatus::Pending))
-            .cloned()
-            .collect();
-        let mut discarded: Vec<String> = Vec::new();
-        for suggestion in pending {
-            if !self.touches_a_heading(&suggestion) {
-                continue;
-            }
-            let file = dir.join(format!("{}.json", suggestion.id));
-            if let Err(e) = std::fs::remove_file(&file)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                eprintln!("conductor: could not delete {}: {e}", file.display());
-                continue; // kept: it would be loaded again, so it is not discarded
-            }
-            self.ned_suggestions
-                .write()
+        for step in steps {
+            let pending: Vec<editorial_types::NedSuggestion> = self
+                .ned_suggestions
+                .read()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&suggestion.id);
-            discarded.push(suggestion.id.to_string());
-        }
-        if !discarded.is_empty() {
-            discarded.sort();
-            eprintln!(
-                "conductor: discarded {} pending suggestion(s) made before headings stored inline nodes: {}",
-                discarded.len(),
-                discarded.join(", ")
-            );
+                .values()
+                .filter(|s| matches!(s.status, editorial_types::NedSuggestionStatus::Pending))
+                .cloned()
+                .collect();
+            let mut discarded: Vec<String> = Vec::new();
+            for suggestion in pending {
+                if !self.touches_kind(&suggestion, step.kind) {
+                    continue;
+                }
+                let file = dir.join(format!("{}.json", suggestion.id));
+                if let Err(e) = std::fs::remove_file(&file)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    eprintln!("conductor: could not delete {}: {e}", file.display());
+                    continue; // kept: it would be loaded again, so it is not discarded
+                }
+                self.ned_suggestions
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&suggestion.id);
+                discarded.push(suggestion.id.to_string());
+            }
+            if !discarded.is_empty() {
+                discarded.sort();
+                eprintln!(
+                    "conductor: discarded {} pending suggestion(s) made before {}s stored inline nodes: {}",
+                    discarded.len(),
+                    step.kind,
+                    discarded.join(", ")
+                );
+            }
         }
 
-        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&marker, MODEL)) {
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&marker, last.name)) {
             eprintln!("conductor: could not write {}: {e}", marker.display());
         }
     }
 
-    /// Whether `suggestion` changes a heading: its payload holds a heading
-    /// anywhere, or its selection resolves to a heading or to a node inside
-    /// one. A selection that does not resolve is not counted: it cannot apply
-    /// anyway, and on accept it goes Stale as unresolved.
-    fn touches_a_heading(&self, suggestion: &editorial_types::NedSuggestion) -> bool {
+    /// Whether `suggestion` changes a block of element kind `kind`: its
+    /// payload holds one anywhere, or its selection resolves to one or to a
+    /// node inside one. A selection that does not resolve is not counted: it
+    /// cannot apply anyway, and on accept it goes Stale as unresolved.
+    fn touches_kind(&self, suggestion: &editorial_types::NedSuggestion, kind: &str) -> bool {
         use editorial_types::NedMutation;
-        fn holds_heading(tree: &ned::NodeTree) -> bool {
+        fn holds_kind(tree: &ned::NodeTree, kind: &str) -> bool {
             match tree {
                 ned::NodeTree::Element { name, children, .. } => {
-                    name == "heading" || children.iter().any(holds_heading)
+                    name == kind || children.iter().any(|child| holds_kind(child, kind))
                 }
                 _ => false,
             }
@@ -466,7 +505,7 @@ impl Conductor {
             | NedMutation::InsertChild(trees)
             | NedMutation::InsertBefore(trees)
             | NedMutation::InsertAfter(trees)
-            | NedMutation::SetInlines(trees) => trees.iter().any(holds_heading),
+            | NedMutation::SetInlines(trees) => trees.iter().any(|tree| holds_kind(tree, kind)),
             NedMutation::SetText(_) | NedMutation::SearchReplace { .. } | NedMutation::Delete => false,
         };
         if payload {
@@ -476,8 +515,8 @@ impl Conductor {
             return false;
         };
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let is_heading = |id: node_store::NodeId| {
-            matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "heading")
+        let is_kind = |id: node_store::NodeId| {
+            matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == kind)
         };
         selection.iter().any(|id| {
             // The node and its structural ancestors (semantic collections are
@@ -488,7 +527,7 @@ impl Conductor {
                 if !seen.insert(node) {
                     continue;
                 }
-                if is_heading(node) {
+                if is_kind(node) {
                     return true;
                 }
                 pending.extend(
@@ -7881,17 +7920,18 @@ mod suggestion_accept_tests {
         let id = create(
             &conductor,
             ALPHA_TEXT,
-            NedMutation::SearchReplace { search: "para.".into(), replace: "x".into() },
+            NedMutation::SearchReplace { search: "Alpha".into(), replace: String::new() },
         );
 
-        // The text now splits into two paragraphs once "para." is replaced.
+        // The paragraph is now only "Alpha": the replacement would empty it,
+        // which is refused (ADR-059 L22: delete it instead).
         {
             let root = live_root(&conductor);
             let mut store = conductor.node_store.write().unwrap();
             let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
             let first = store.children(body)[0];
             let text = store.children(first)[0];
-            store.replace_node(text, node_store::Node::Text("Alpha para.\n\nmore".into()));
+            store.replace_node(text, node_store::Node::Text("Alpha".into()));
         }
         let (before, nodes_before) = {
             let root = live_root(&conductor);
@@ -7904,10 +7944,15 @@ mod suggestion_accept_tests {
 
         let result = accept(&conductor, &id);
         assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
-        assert!(matches!(
-            status(&conductor, &id),
-            NedSuggestionStatus::Stale { cause: StaleCause::InvalidValue { .. }, .. }
-        ));
+        let stale = status(&conductor, &id);
+        assert!(
+            matches!(
+                &stale,
+                NedSuggestionStatus::Stale { cause: StaleCause::InvalidValue { detail }, .. }
+                    if detail.contains("delete it instead")
+            ),
+            "{stale:?}"
+        );
         let root = live_root(&conductor);
         let store = conductor.node_store.read().unwrap();
         assert_eq!(
@@ -10948,10 +10993,11 @@ mod link_expression_pipeline_tests {
     }
 }
 
-/// ADR-059 stage 4: pending suggestions made before headings held inline
-/// nodes are discarded once, marked by `.presemble/suggestions/ned/MODEL`.
+/// ADR-059 stages 4 and 5: pending suggestions made before headings and
+/// paragraphs held inline nodes are discarded once per step, the last step
+/// applied being recorded in `.presemble/suggestions/ned/MODEL`.
 #[cfg(test)]
-mod heading_model_discard_tests {
+mod model_migration_tests {
     use super::*;
     use editorial_types::{
         Author, ContentPath, NedMutation, NedSuggestion, NedSuggestionStatus, SuggestionId,
@@ -10962,11 +11008,14 @@ mod heading_model_discard_tests {
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str =
         r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
-    const CONTENT: &str = "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n";
+    const CONTENT: &str =
+        "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```\nlet x = 1;\n```\n";
     const TITLE_TEXT: &str =
         r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")))"#;
     const PARAGRAPH_TEXT: &str = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "paragraph" 0))"#;
     const BODY_PARAGRAPH: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "paragraph" 0)"#;
+    const CODE_BLOCK: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "code-block" 0)"#;
+    const CODE_TEXT: &str = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "code-block" 0))"#;
 
     fn site() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -11052,7 +11101,7 @@ mod heading_model_discard_tests {
 
         assert!(!listed(&conductor).contains(&"sug-heading".to_string()), "not listed");
         assert!(!file_exists(&tmp, "sug-heading"), "its file is gone");
-        assert_eq!(marker(&tmp).as_deref(), Some("heading-inlines"));
+        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"), "the last step is recorded");
     }
 
     #[test]
@@ -11076,21 +11125,138 @@ mod heading_model_discard_tests {
     }
 
     #[test]
-    fn pending_non_heading_suggestion_survives_the_upgrade() {
+    fn pending_suggestion_on_another_kind_survives_the_upgrade() {
         let tmp = site();
         write_suggestion(
             &tmp,
-            "sug-para",
-            PARAGRAPH_TEXT,
-            NedMutation::SetText("Alpha paragraph.".to_string()),
+            "sug-code",
+            CODE_TEXT,
+            NedMutation::SetText("let x = 2;".to_string()),
             NedSuggestionStatus::Pending,
         );
 
         let conductor = start(&tmp);
 
-        assert_eq!(listed(&conductor), vec!["sug-para".to_string()]);
-        assert!(file_exists(&tmp, "sug-para"));
-        assert_eq!(marker(&tmp).as_deref(), Some("heading-inlines"), "marked all the same");
+        assert_eq!(listed(&conductor), vec!["sug-code".to_string()]);
+        assert!(file_exists(&tmp, "sug-code"));
+        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"), "marked all the same");
+    }
+
+    /// The user's decision: every pending suggestion that touches a paragraph
+    /// is discarded, plain text or not.
+    #[test]
+    fn pending_paragraph_suggestion_is_discarded() {
+        let tmp = site();
+        write_suggestion(
+            &tmp,
+            "sug-text",
+            PARAGRAPH_TEXT,
+            NedMutation::SetText("Alpha paragraph.".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+        write_suggestion(
+            &tmp,
+            "sug-search",
+            PARAGRAPH_TEXT,
+            NedMutation::SearchReplace { search: "Alpha".to_string(), replace: "*Alpha*".to_string() },
+            NedSuggestionStatus::Pending,
+        );
+        write_suggestion(
+            &tmp,
+            "sug-block",
+            BODY_PARAGRAPH,
+            NedMutation::Delete,
+            NedSuggestionStatus::Pending,
+        );
+        let paragraph = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text("New."));
+        write_suggestion(
+            &tmp,
+            "sug-payload",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![paragraph]),
+            NedSuggestionStatus::Pending,
+        );
+        write_suggestion(
+            &tmp,
+            "sug-code",
+            CODE_TEXT,
+            NedMutation::SetText("let x = 2;".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+
+        let conductor = start(&tmp);
+
+        assert_eq!(listed(&conductor), vec!["sug-code".to_string()], "only the code suggestion is left");
+        for id in ["sug-text", "sug-search", "sug-block", "sug-payload"] {
+            assert!(!file_exists(&tmp, id), "{id}: its file is gone");
+        }
+        assert!(file_exists(&tmp, "sug-code"));
+    }
+
+    /// An absent `MODEL` runs both steps; `heading-inlines` runs only the
+    /// paragraph step; `paragraph-inlines` runs none. Each step runs once.
+    #[test]
+    fn migration_runs_each_step_once_in_order() {
+        let both = |tmp: &tempfile::TempDir| {
+            write_suggestion(
+                tmp,
+                "sug-heading",
+                TITLE_TEXT,
+                NedMutation::SetText("Renamed".to_string()),
+                NedSuggestionStatus::Pending,
+            );
+            write_suggestion(
+                tmp,
+                "sug-para",
+                PARAGRAPH_TEXT,
+                NedMutation::SetText("Alpha paragraph.".to_string()),
+                NedSuggestionStatus::Pending,
+            );
+        };
+
+        // No MODEL: both steps run.
+        let tmp = site();
+        both(&tmp);
+        assert_eq!(listed(&start(&tmp)), Vec::<String>::new());
+        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"));
+
+        // heading-inlines: the paragraph step only; the heading suggestion
+        // was made after headings held nodes.
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "heading-inlines").unwrap();
+        both(&tmp);
+        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string()]);
+        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"));
+
+        // paragraph-inlines: nothing runs.
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "paragraph-inlines").unwrap();
+        both(&tmp);
+        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"));
+
+        // Once: a suggestion made after the migration survives the next start.
+        let tmp = site();
+        both(&tmp);
+        drop(start(&tmp));
+        both(&tmp);
+        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+    }
+
+    /// The order of the steps, and what is left to run after each.
+    #[test]
+    fn model_steps_follow_the_recorded_one() {
+        let names = |recorded: Option<&str>| -> Vec<&'static str> {
+            model_steps_after(recorded).iter().map(|step| step.name).collect()
+        };
+        assert_eq!(names(None), vec!["heading-inlines", "paragraph-inlines"]);
+        assert_eq!(names(Some("heading-inlines")), vec!["paragraph-inlines"]);
+        assert!(names(Some("paragraph-inlines")).is_empty());
+        // A name this conductor does not know was written by a newer one:
+        // nothing runs.
+        assert!(names(Some("something-newer")).is_empty());
     }
 
     #[test]
@@ -11110,11 +11276,22 @@ mod heading_model_discard_tests {
             NedMutation::SetText("B".to_string()),
             NedSuggestionStatus::Rejected,
         );
+        write_suggestion(
+            &tmp,
+            "sug-accepted-para",
+            PARAGRAPH_TEXT,
+            NedMutation::SetText("C".to_string()),
+            NedSuggestionStatus::Accepted,
+        );
 
         let conductor = start(&tmp);
 
-        assert_eq!(listed(&conductor), vec!["sug-accepted".to_string(), "sug-rejected".to_string()]);
+        assert_eq!(
+            listed(&conductor),
+            vec!["sug-accepted".to_string(), "sug-accepted-para".to_string(), "sug-rejected".to_string()]
+        );
         assert!(file_exists(&tmp, "sug-accepted") && file_exists(&tmp, "sug-rejected"));
+        assert!(file_exists(&tmp, "sug-accepted-para"));
     }
 
     /// Every file under `.presemble` with its bytes, by path.
@@ -11136,7 +11313,7 @@ mod heading_model_discard_tests {
     }
 
     /// `presemble build` loads the site to validate it: that never writes to
-    /// `.presemble`, neither the legacy cleanup nor the heading discard.
+    /// `.presemble`, neither the legacy cleanup nor a model discard.
     #[test]
     fn loading_a_site_never_writes_to_presemble() {
         let tmp = site();
@@ -11145,6 +11322,13 @@ mod heading_model_discard_tests {
             "sug-heading",
             TITLE_TEXT,
             NedMutation::SetText("Renamed".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+        write_suggestion(
+            &tmp,
+            "sug-paragraph",
+            PARAGRAPH_TEXT,
+            NedMutation::SetText("Alpha paragraph.".to_string()),
             NedSuggestionStatus::Pending,
         );
         let legacy = tmp.path().join(".presemble/suggestions/sug-old.json");
@@ -11161,7 +11345,7 @@ mod heading_model_discard_tests {
     fn suggestions_made_after_the_upgrade_are_never_discarded() {
         let tmp = site();
         std::fs::create_dir_all(dir(&tmp)).unwrap();
-        std::fs::write(dir(&tmp).join("MODEL"), "heading-inlines").unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "paragraph-inlines").unwrap();
         write_suggestion(
             &tmp,
             "sug-new",

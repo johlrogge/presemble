@@ -207,13 +207,8 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
                         if elem_name == "heading" {
                             content_store::heading_plain_text(store, id).unwrap_or_default()
                         } else if elem_name == "paragraph" {
-                            store.children(id).into_iter().find_map(|c| {
-                                if let Some(node_store::Node::Text(s)) = store.get(c) {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            }).unwrap_or_default()
+                            // stage 5.4: read the nodes, not the source.
+                            content_store::paragraph_source(store, id).unwrap_or_default()
                         } else {
                             String::new()
                         }
@@ -909,13 +904,9 @@ fn render_insert_native(
                         content_store::heading_inlines(store, id)
                             .map(|content| crate::inline_nodes::inline_nodes(&content))
                     } else {
-                        store.children(id).into_iter().find_map(|c| {
-                            if let Some(node_store::Node::Text(s)) = store.get(c) {
-                                Some(vec![Node::Text(s.clone())])
-                            } else {
-                                None
-                            }
-                        })
+                        // stage 5.4: render the nodes, not the source.
+                        content_store::paragraph_source(store, id)
+                            .map(|source| vec![Node::Text(source)])
                     };
                     if let Some(shown) = shown {
                         let tag = as_tag.unwrap_or("span").to_string();
@@ -4846,6 +4837,12 @@ mod tests {
             let level = schema::HeadingLevel::new(level.unwrap_or(1) as u8).unwrap();
             content_store::block_to_store(
                 &content::ContentElement::heading_from_markdown(level, text),
+                &mut store,
+            )
+        } else if kind == "paragraph" {
+            // A paragraph as the store holds it: inline nodes (ADR-059 §6).
+            content_store::block_to_store(
+                &content::ContentElement::paragraph_from_markdown(text),
                 &mut store,
             )
         } else {

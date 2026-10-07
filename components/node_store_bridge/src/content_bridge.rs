@@ -829,6 +829,42 @@ mod tests {
             .collect()
     }
 
+    /// L11 on the store path (ADR-059 stage 5): the Text node of a slotted
+    /// paragraph is literal text. One that ends in `{#summary}` is written
+    /// escaped and stays in its slot after a save and a reload; it is not read
+    /// as markdown, so it is never taken for a marker.
+    #[test]
+    fn l11_store_path_literal_marker_text_stays_in_its_slot() {
+        let grammar = schema::parse_schema(TRIVIA_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign("# T\n\nOne.\n\n----\n\nBody.\n", &grammar)
+            .expect("doc parses");
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+
+        let preamble = find_child_by_name(&store, root, "preamble").expect("preamble");
+        let summary = store
+            .children(preamble)
+            .into_iter()
+            .find(|s| content_store::find_attr_text(&store, *s, "name").as_deref() == Some("summary"))
+            .expect("summary slot");
+        let paragraph = store.children(summary)[0];
+        let text = store.children(paragraph)[0];
+        store.replace_node(text, Node::Text("text {#summary}".to_string()));
+
+        let saved = serialize_from_store(&store, root).expect("serialises");
+        assert!(saved.contains("text \\{#summary}"), "saved:\n{saved}");
+        let reloaded = content::parse_and_assign(&saved, &grammar).expect("parses");
+        assert!(reloaded.unassigned.is_empty(), "saved:\n{saved}");
+        let summary = reloaded.preamble.iter().find(|s| s.name.as_str() == "summary").unwrap();
+        assert_eq!(
+            summary.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![ContentElement::paragraph_from_markdown("text \\{#summary}")],
+            "saved:\n{saved}"
+        );
+        // The first save is already stable.
+        assert_eq!(content::serialize_document(&reloaded), saved);
+    }
+
     #[test]
     fn comments_are_stored_as_trivia_and_read_back() {
         let src = "<!-- t -->\n\n# Title\n\nSummary.\n\n<!-- u -->\n\n----\n\n<!-- b0 -->\n\nOne.\n\nTwo.\n\n<!-- end -->\n";
@@ -1793,13 +1829,13 @@ mod tests {
 
     #[test]
     fn tree_to_block_rejects_text_kind_with_two_children() {
-        let tree = ned::NodeTree::element("paragraph")
+        let tree = ned::NodeTree::element("blockquote")
             .with_child(ned::NodeTree::text("a"))
             .with_child(ned::NodeTree::text("b"));
         assert_eq!(
             tree_to_block(&tree),
             Err(BlockDecodeError::TextChildCount {
-                kind: "paragraph".to_string(),
+                kind: "blockquote".to_string(),
                 found: 2
             })
         );
@@ -1807,11 +1843,26 @@ mod tests {
 
     #[test]
     fn tree_to_block_rejects_text_kind_with_element_child() {
-        let tree = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::element("span"));
+        let tree = ned::NodeTree::element("blockquote").with_child(ned::NodeTree::element("span"));
         assert!(matches!(
             tree_to_block(&tree),
             Err(BlockDecodeError::TextChildCount { .. })
         ));
+    }
+
+    /// A paragraph's children are inline nodes: two adjacent texts are not in
+    /// normal form, and a `span` is not an inline kind.
+    #[test]
+    fn tree_to_block_rejects_a_paragraph_that_is_not_inline_nodes() {
+        let tree = ned::NodeTree::element("paragraph")
+            .with_child(ned::NodeTree::text("a"))
+            .with_child(ned::NodeTree::text("b"));
+        assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::NotNormalForm { .. })));
+        let tree = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::element("span"));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::UnknownInline { kind: "span".to_string() })
+        );
     }
 
     #[test]

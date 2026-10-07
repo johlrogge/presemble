@@ -1652,17 +1652,21 @@ mod tests {
         saved_and_validity(&store, root, &grammar)
     }
 
+    /// A paragraph's Text node is literal text (ADR-059 §6): one that ends in
+    /// `{#summary}` is written escaped, so it is text and not marker misuse.
     #[test]
-    fn set_text_ending_in_a_marker_saves_and_is_invalid() {
+    fn set_text_ending_in_a_marker_shape_is_literal_and_saved_escaped() {
         let (saved, valid) = set_body_paragraph_text("Summary text {#summary}");
-        assert!(saved.contains("Summary text {#summary}"), "{saved}");
-        assert!(!valid, "marker misuse is an Error: {saved}");
+        assert!(saved.contains("Summary text \\{#summary}"), "{saved}");
+        assert!(valid, "literal text is not marker misuse: {saved}");
     }
 
+    /// A literal backslash before the marker shape is written as `\\`; the
+    /// text still reads back as text.
     #[test]
-    fn set_text_ending_in_an_escaped_marker_saves_and_is_valid() {
+    fn set_text_with_a_literal_backslash_before_a_marker_shape_stays_text() {
         let (saved, valid) = set_body_paragraph_text("Summary text \\{#summary}");
-        assert!(saved.contains("Summary text \\{#summary}"), "{saved}");
+        assert!(saved.contains("Summary text \\\\{#summary}"), "{saved}");
         assert!(valid, "{saved}");
     }
 

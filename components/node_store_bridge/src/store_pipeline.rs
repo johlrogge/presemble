@@ -92,7 +92,11 @@ impl expressions::ThreadItem for SemItem<'_> {
             Node::Element(name) if store.resolve_name(*name) == "heading" => {
                 content_store::heading_plain_text(store, target)
             }
-            Node::Element(name) if matches!(store.resolve_name(*name), "paragraph" | "link") => {
+            // A paragraph reads as its canonical markdown source.
+            Node::Element(name) if store.resolve_name(*name) == "paragraph" => {
+                content_store::paragraph_source(store, target)
+            }
+            Node::Element(name) if store.resolve_name(*name) == "link" => {
                 store.children(target).into_iter().find_map(|c| match store.get(c) {
                     Some(Node::Text(s)) => Some(s.clone()),
                     _ => None,
@@ -131,11 +135,7 @@ pub fn declared_references(store: &NodeStore, doc_root: NodeId) -> Vec<String> {
                 }
                 Some(SlotElementTarget::Thread { .. }) => {}
                 None if unassigned && element_name(store, el).as_deref() == Some("paragraph") => {
-                    let text = store.children(el).into_iter().find_map(|c| match store.get(c) {
-                        Some(Node::Text(s)) => Some(s.clone()),
-                        _ => None,
-                    });
-                    if let Some(text) = text {
+                    if let Some(text) = content_store::paragraph_source(store, el) {
                         out.extend(
                             content::paragraph_link_destinations(&text)
                                 .iter()
