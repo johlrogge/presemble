@@ -1,6 +1,10 @@
-use conductor::{socket_url, Command, Conductor, Response}; // Response kept for parse-error path
+use conductor::{
+    socket_url, Command, CommandResult, Conductor, ConductorEvent, Plan, ProgramError,
+    ProgramOutcome, Response, // Response kept for parse-error path
+};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, RwLock};
 
 // ── Conductor-specific builtins ──────────────────────────────────────────────
 
@@ -171,9 +175,83 @@ fn applied_message(outcome: &conductor::ProgramOutcome) -> Option<String> {
     Some(message)
 }
 
+/// Work for the writer: the one thread that changes the conductor.
+///
+/// Every mutation reaches the conductor as a `Job`, so mutations run one after
+/// another in the order they arrive, and the events of every one of them are
+/// published (an nREPL edit tells the browser as much as a browser edit does).
+/// Readers (the nREPL's queries) still run on their own threads under the
+/// store's read locks; a plan's selections are checked again under the write
+/// lock, so a stale read cannot corrupt anything.
+enum Job {
+    /// A command from an IPC client; the reply goes back on the sender.
+    Ipc(Command, Sender<CommandResult>),
+    /// A plan recorded by an nREPL eval; the outcome goes back on the sender.
+    Plan(Plan, Sender<Result<ProgramOutcome, ProgramError>>),
+}
+
+/// The writer thread's loop: take jobs in arrival order, run each on the
+/// conductor, answer its sender, then publish its events.
+///
+/// Ends after a `Shutdown` command, or when every sender is gone (the channel
+/// is closed). A requester that has gone away (its receiver dropped) does not
+/// stop the loop.
+fn writer_loop(
+    conductor: &Conductor,
+    jobs: &Receiver<Job>,
+    publish: &mut dyn FnMut(&ConductorEvent),
+) {
+    while let Ok(job) = jobs.recv() {
+        match job {
+            Job::Ipc(cmd, reply) => {
+                let is_shutdown = matches!(cmd, Command::Shutdown);
+                let CommandResult { response, events } = conductor.handle_command(cmd);
+                // The requester gets its answer before the subscribers get the
+                // events, as before.
+                let _ = reply.send(CommandResult { response, events: vec![] });
+                events.iter().for_each(&mut *publish);
+                if is_shutdown {
+                    break;
+                }
+            }
+            Job::Plan(plan, reply) => {
+                match conductor.execute_plan(plan) {
+                    Ok((outcome, events)) => {
+                        let _ = reply.send(Ok(outcome));
+                        events.iter().for_each(&mut *publish);
+                    }
+                    Err(refused) => {
+                        let _ = reply.send(Err(refused));
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct PresembleNreplHandler {
     conductor: Arc<Conductor>,
     doc_registry: evaluator::DocRegistry,
+    /// To the writer thread: where this handler's plans run.
+    jobs: Mutex<Sender<Job>>,
+}
+
+impl PresembleNreplHandler {
+    /// Run a recorded plan on the writer and wait for its outcome.
+    fn run_plan(&self, plan: Plan) -> Result<ProgramOutcome, ProgramError> {
+        if plan.is_empty() {
+            return Ok(ProgramOutcome::default());
+        }
+        let (reply, outcome) = mpsc::channel();
+        self.jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send(Job::Plan(plan, reply))
+            .map_err(|_| ProgramError::Eval("the conductor is shutting down".to_string()))?;
+        outcome
+            .recv()
+            .map_err(|_| ProgramError::Eval("the conductor is shutting down".to_string()))?
+    }
 }
 
 impl nrepl::NreplHandler for PresembleNreplHandler {
@@ -192,10 +270,11 @@ impl nrepl::NreplHandler for PresembleNreplHandler {
             &recorder,
         );
         evaluator::load_ned_prelude(&root).map_err(|e| format!("ned prelude failed: {e}"))?;
-        let (value, outcome) = self
-            .conductor
-            .run_ned_program(&root, &recorder, code)
-            .map_err(|e| e.to_string())?;
+        // Evaluate here (queries read, mutating builtins record), then hand the
+        // recorded plan to the writer.
+        let value = evaluator::eval_str_with_root(code, &root)
+            .map_err(|e| ProgramError::Eval(e).to_string())?;
+        let outcome = self.run_plan(recorder.take()).map_err(|e| e.to_string())?;
         let edn_str = edn::value_to_edn(&value);
         let applied = applied_message(&outcome);
         // Multi-line text (e.g. from doc) is sent as nREPL "out" so the
@@ -261,10 +340,15 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
         root.doc_registry.clone()
     };
 
+    // Every mutation reaches the conductor through this channel and runs on
+    // this thread (the writer, below), in arrival order.
+    let (jobs, job_queue) = mpsc::channel::<Job>();
+
     // Spawn the nREPL server thread before the nng event loop
     let nrepl_handler = Arc::new(PresembleNreplHandler {
         conductor: Arc::clone(&conductor),
         doc_registry,
+        jobs: Mutex::new(jobs.clone()),
     });
     let nrepl_server = nrepl::NreplServer::new(nrepl_handler);
     // Write .nrepl-port to the workspace root (site_dir's parent), not the site dir.
@@ -293,10 +377,41 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
 
     println!("Conductor ready. Waiting for commands...");
 
-    // Main command loop
+    // The socket thread: receive a command, hand it to the writer, send back
+    // the writer's answer. It never touches the conductor.
+    let socket_thread = {
+        let rep_socket = rep_socket.clone();
+        std::thread::spawn(move || serve_rep_socket(&rep_socket, &jobs))
+    };
+
+    // The writer: the only thread that changes the conductor. It publishes the
+    // events of every job, whether it came from a client or from the nREPL.
+    writer_loop(&conductor, &job_queue, &mut |event| {
+        if let Ok(event_data) = serde_json::to_vec(event) {
+            let _ = pub_socket.send(nng::Message::from(event_data.as_slice()));
+        }
+    });
+    println!("Conductor shutting down.");
+
+    // The writer ended: after a `Shutdown` (the socket thread ends itself once
+    // it has sent the reply) or because the socket thread is already gone (it
+    // held the last sender). Wait for it, so the last reply is sent before the
+    // sockets close.
+    let _ = socket_thread.join();
+    rep_socket.close();
+
+    Ok(())
+}
+
+/// Receive commands on the REP socket and run each through the writer.
+///
+/// Ends when the socket is closed, after the reply to a `Shutdown`, or when the
+/// writer is gone (its queue is closed).
+fn serve_rep_socket(rep_socket: &nng::Socket, jobs: &Sender<Job>) {
     loop {
         let msg = match rep_socket.recv() {
             Ok(m) => m,
+            Err(nng::Error::Closed) => break,
             Err(e) => {
                 eprintln!("recv error: {e}");
                 continue;
@@ -313,29 +428,172 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
             }
         };
 
-        // Check for shutdown before handling
         let is_shutdown = matches!(cmd, Command::Shutdown);
+        let (reply, result) = mpsc::channel();
+        if jobs.send(Job::Ipc(cmd, reply)).is_err() {
+            break; // the writer is gone
+        }
+        let Ok(result) = result.recv() else {
+            break; // the writer ended without answering
+        };
 
-        let result = conductor.handle_command(cmd);
-
-        // Send response to the caller
         let data = serde_json::to_vec(&result.response).unwrap_or_default();
         let _ = rep_socket.send(nng::Message::from(data.as_slice()));
 
-        // Broadcast any events to all subscribers
-        for event in &result.events {
-            if let Ok(event_data) = serde_json::to_vec(event) {
-                let _ = pub_socket.send(nng::Message::from(event_data.as_slice()));
-            }
-        }
-
         if is_shutdown {
-            println!("Conductor shutting down.");
             break;
         }
     }
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nrepl::NreplHandler;
+
+    const SCHEMA: &str =
+        "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+    const TEMPLATE: &str =
+        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+    const FILE: &str = "content/post/first.md";
+
+    fn site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in ["schemas/post", "templates/post", "content/post"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
+        std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
+        std::fs::write(root.join(FILE), "# First Post\n\n----\n\nAlpha.\n").unwrap();
+        tmp
+    }
+
+    /// A conductor and a running writer over an in-process queue. The events
+    /// the writer publishes are collected. Dropping the harness stops the writer.
+    struct Harness {
+        conductor: Arc<Conductor>,
+        jobs: Sender<Job>,
+        published: Arc<Mutex<Vec<ConductorEvent>>>,
+        writer: Option<std::thread::JoinHandle<()>>,
+        _site: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn start() -> Self {
+            let site = site();
+            let conductor = Arc::new(Conductor::new(site.path().to_path_buf()).expect("conductor"));
+            let (jobs, queue) = mpsc::channel();
+            let published = Arc::new(Mutex::new(Vec::new()));
+            let writer = {
+                let (conductor, published) = (Arc::clone(&conductor), Arc::clone(&published));
+                std::thread::spawn(move || {
+                    writer_loop(&conductor, &queue, &mut |event| {
+                        published.lock().unwrap().push(event.clone());
+                    })
+                })
+            };
+            Harness { conductor, jobs, published, writer: Some(writer), _site: site }
+        }
+
+        fn handler(&self) -> PresembleNreplHandler {
+            PresembleNreplHandler {
+                conductor: Arc::clone(&self.conductor),
+                doc_registry: evaluator::RootEnv::new().doc_registry.clone(),
+                jobs: Mutex::new(self.jobs.clone()),
+            }
+        }
+
+        /// Run a command through the writer, like a client of the socket.
+        fn ipc(&self, cmd: Command) -> CommandResult {
+            let (reply, result) = mpsc::channel();
+            self.jobs.send(Job::Ipc(cmd, reply)).unwrap();
+            result.recv().expect("the writer answers")
+        }
+
+        /// Stop the writer (a `Shutdown` job) and wait until it has finished
+        /// publishing, then return everything it published.
+        fn finish(mut self) -> Vec<ConductorEvent> {
+            let _ = self.ipc(Command::Shutdown);
+            self.writer.take().unwrap().join().expect("the writer ends");
+            let events = self.published.lock().unwrap().clone();
+            events
+        }
+    }
+
+    fn set_title(value: &str) -> String {
+        format!(
+            r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "{FILE}") "title"))) "{value}")"#
+        )
+    }
+
+    /// Save through the writer and read the file back: what the store holds
+    /// for the document now.
+    fn saved_text(harness: &Harness) -> String {
+        let saved = harness.ipc(Command::SaveBuffer {
+            path: FILE.to_string(),
+            consent: Default::default(),
+        });
+        assert!(matches!(saved.response, Response::Ok), "{:?}", saved.response);
+        std::fs::read_to_string(harness._site.path().join(FILE)).unwrap()
+    }
+
+    #[test]
+    fn nrepl_plan_runs_on_the_writer_and_publishes_its_events() {
+        let harness = Harness::start();
+
+        let result = harness.handler().eval("s", &set_title("Via nREPL")).ok().expect("evals");
+        assert!(
+            result.out.as_deref().is_some_and(|m| m.contains("1 edit(s) applied")),
+            "{:?}",
+            result.out
+        );
+        assert!(saved_text(&harness).starts_with("# Via nREPL"));
+
+        let events = harness.finish();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ConductorEvent::PagesRebuilt { pages, .. } if pages.contains(&"/post/first".to_string())
+            )),
+            "the nREPL edit's events are published: {events:?}"
+        );
+    }
+
+    #[test]
+    fn jobs_apply_in_arrival_order() {
+        let harness = Harness::start();
+        let handler = harness.handler();
+
+        // An nREPL edit, then an IPC save that must see it, then another edit.
+        handler.eval("s", &set_title("One")).ok().expect("evals");
+        let on_disk = saved_text(&harness);
+        assert!(on_disk.starts_with("# One"), "the save saw the earlier edit: {on_disk}");
+
+        handler.eval("s", &set_title("Two")).ok().expect("evals");
+        let on_disk = saved_text(&harness);
+        assert!(on_disk.starts_with("# Two"), "the later edit came after: {on_disk}");
+        harness.finish();
+    }
+
+    #[test]
+    fn a_refused_plan_answers_the_nrepl_and_publishes_nothing() {
+        let harness = Harness::start();
+        // Two steps that change what the same node holds: refused as a whole.
+        let program = format!("(do {} {})", set_title("A"), set_title("B"));
+        let error = harness.handler().eval("s", &program).err().expect("refused");
+        assert!(error.contains("step 2"), "{error}");
+        assert!(harness.finish().is_empty());
+    }
+
+    #[test]
+    fn the_writer_ends_when_every_sender_is_gone() {
+        let harness = Harness::start();
+        let Harness { conductor: _c, jobs, published: _p, writer, _site } = harness;
+        drop(jobs);
+        writer.unwrap().join().expect("the writer ends on a closed queue");
+        drop(_site);
+    }
 }
 
 /// Legacy stub — kept so existing callers continue to compile.

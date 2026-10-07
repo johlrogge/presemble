@@ -36,7 +36,7 @@ fn stem_root_lists(stem_roots: &StemRoots) -> HashMap<String, Vec<node_store::No
 // Clojure string literal escaping
 // ---------------------------------------------------------------------------
 
-/// What running a NED program changed (see [`Conductor::run_ned_program`]).
+/// What running a NED program changed (see [`Conductor::execute_plan`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProgramOutcome {
     /// Files of the documents the program changed, marked dirty.
@@ -51,7 +51,7 @@ pub struct ProgramOutcome {
     pub skipped: usize,
 }
 
-/// Why a NED program did not run (see [`Conductor::run_ned_program`]). Nothing
+/// Why a NED program did not run (see [`Conductor::execute_plan`]). Nothing
 /// was applied in either case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramError {
@@ -2607,7 +2607,8 @@ impl Conductor {
     /// component (`evaluator_bridge`) if MCP needs them.
     ///
     /// The mutating builtins record into `recorder` and write nothing; run the
-    /// program with [`Conductor::run_ned_program`].
+    /// program with `run_ned_program_with_events`, or evaluate it yourself and
+    /// pass `recorder.take()` to [`Conductor::execute_plan`].
     pub(crate) fn make_ned_root(
         &self,
         recorder: &evaluator::ned_primitives::PlanRecorder,
@@ -2979,32 +2980,52 @@ impl Conductor {
         }
     }
 
-    /// Run a NED program as a plan (select-then-apply, ADR-059 stage 2e).
+    /// Run a NED program as a plan (select-then-apply, ADR-059 stage 2e), for
+    /// `/apply` behind `handle_command`.
     ///
     /// `root` is a root built with [`Conductor::make_ned_root`] around
-    /// `recorder` (or one that registers the NED builtins with it). The
-    /// program is evaluated with no store lock held: its queries see the
-    /// store as it is now, and its mutating builtins only record. The
-    /// recorded plan then runs under one write lock with
-    /// `content_store::edit::execute`: all of it, or nothing. The changed
-    /// documents are marked dirty and their pages re-rendered.
+    /// `recorder`. The program is evaluated with no store lock held: its
+    /// queries see the store as it is now, and its mutating builtins only
+    /// record. The recorded plan then goes to [`Conductor::execute_plan`].
     ///
-    /// Returns the program's value and what changed. Why it did not run
-    /// (nothing is applied) is a [`ProgramError`]: an evaluation error, or the
-    /// structured refusal of one step. Its `Display` is `eval error: ...` or
-    /// the step's sentence, e.g. `step 2 (ned/set-text): ...`.
-    pub fn run_ned_program(
+    /// Returns the program's value, what changed, and the events to publish.
+    /// Why it did not run (nothing is applied) is a [`ProgramError`]: an
+    /// evaluation error, or the structured refusal of one step. Its `Display`
+    /// is `eval error: ...` or the step's sentence, e.g.
+    /// `step 2 (ned/set-text): ...`.
+    fn run_ned_program_with_events(
         &self,
         root: &evaluator::RootEnv,
         recorder: &evaluator::ned_primitives::PlanRecorder,
         code: &str,
-    ) -> Result<(template::Value, ProgramOutcome), ProgramError> {
+    ) -> Result<(template::Value, ProgramOutcome, Vec<ConductorEvent>), ProgramError> {
         // The primitives take their own read locks: hold none here.
         let value = evaluator::eval_str_with_root(code, root).map_err(ProgramError::Eval)?;
 
-        let plan = recorder.take();
+        let (outcome, events) = self.execute_plan(recorder.take())?;
+        Ok((value, outcome, events))
+    }
+
+    /// Run a recorded plan: all of it, or nothing (`content_store::edit::execute`
+    /// under one write lock), then mark the changed documents dirty and
+    /// re-render their pages.
+    ///
+    /// The single writer entry point for plans from outside the conductor: the
+    /// daemon's command loop calls it for the nREPL's plans, and `/apply`
+    /// reaches it through `handle_command`. Nothing else may write to the
+    /// store from another thread.
+    ///
+    /// Returns what changed and the events to publish for it
+    /// (`PagesRebuilt`, `BuildFailed`); the caller owns publishing them. The
+    /// daemon's command loop is the one place that calls this for the nREPL,
+    /// so every writer runs on one thread. An empty plan changes nothing and
+    /// has no events.
+    pub fn execute_plan(
+        &self,
+        plan: edit::Plan,
+    ) -> Result<(ProgramOutcome, Vec<ConductorEvent>), ProgramError> {
         if plan.is_empty() {
-            return Ok((value, ProgramOutcome::default()));
+            return Ok((ProgramOutcome::default(), vec![]));
         }
         let steps = plan.len();
 
@@ -3030,13 +3051,20 @@ impl Conductor {
         } else {
             self.mark_dirty_and_rebuild(&dirty_paths)
         };
+        let mut events = Vec::new();
+        if !rebuilt_pages.is_empty() {
+            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages.clone(), anchor: None });
+        }
+        if !failed_pages.is_empty() {
+            events.push(ConductorEvent::BuildFailed { error_pages: failed_pages.clone() });
+        }
         Ok((
-            value,
             ProgramOutcome { dirty_paths, rebuilt_pages, failed_pages, applied: steps - skipped, skipped },
+            events,
         ))
     }
 
-    /// Run a NED program for `/apply` (see [`Conductor::run_ned_program`]).
+    /// Run a NED program for `/apply` (see `run_ned_program_with_events`).
     ///
     /// The response shape is unchanged: `Response::Applied` with the number of
     /// dirty documents, or `Response::Error` with why the program was
@@ -3048,8 +3076,8 @@ impl Conductor {
             Ok(r) => r,
             Err(e) => return CommandResult::error(format!("evaluator init: {e}")),
         };
-        let outcome = match self.run_ned_program(&root, &recorder, program) {
-            Ok((_value, outcome)) => outcome,
+        let (outcome, events) = match self.run_ned_program_with_events(&root, &recorder, program) {
+            Ok((_value, outcome, events)) => (outcome, events),
             Err(ProgramError::Plan(failure)) => {
                 return CommandResult::with_response(Response::PlanRefused(failure));
             }
@@ -3059,13 +3087,6 @@ impl Conductor {
         let ProgramOutcome { dirty_paths, rebuilt_pages: rebuilt_urls, failed_pages: failed_urls, .. } =
             outcome;
         let dirty_path_count = dirty_paths.len();
-        let mut events = Vec::new();
-        if !rebuilt_urls.is_empty() {
-            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_urls.clone(), anchor: None });
-        }
-        if !failed_urls.is_empty() {
-            events.push(ConductorEvent::BuildFailed { error_pages: failed_urls.clone() });
-        }
 
         CommandResult {
             response: Response::Applied {
@@ -7473,8 +7494,9 @@ mod suggestion_accept_tests {
         assert!(accepted_pages(&result).contains(&"/post/first".to_string()));
     }
 
-    /// The entry the nREPL uses: a root of the caller's making and its own
-    /// recorder. Marks the changed document dirty and re-renders its page.
+    /// A root of the caller's making and its own recorder, then the recorded
+    /// plan through `execute_plan`. Marks the changed document dirty,
+    /// re-renders its page, and returns the events to publish.
     #[test]
     fn run_ned_program_marks_dirty_and_rebuilds() {
         let tmp = build_site();
@@ -7483,9 +7505,14 @@ mod suggestion_accept_tests {
         let root = conductor.make_ned_root(&recorder).expect("root");
         let program = format!(r#"(ned/set-text {TITLE_TEXT} "Renamed Post")"#);
 
-        let (value, outcome) = conductor.run_ned_program(&root, &recorder, &program).expect("runs");
+        let (value, outcome, events) =
+            conductor.run_ned_program_with_events(&root, &recorder, &program).expect("runs");
 
         assert!(matches!(value, template::Value::Absent), "{value:?}");
+        assert!(
+            events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
+            "{events:?}"
+        );
         assert_eq!(outcome.dirty_paths, vec![PathBuf::from(FILE)]);
         assert_eq!((outcome.applied, outcome.skipped), (1, 0));
         assert!(outcome.rebuilt_pages.contains(&"/post/first".to_string()), "{outcome:?}");
