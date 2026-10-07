@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use content::inline::{InlineContext, InlinePath, Inlines, SearchReplaceError};
 use content::{ContentElement, RoundTripError, check_block_round_trip};
 use editorial_types::{PlanFailure, StaleCause};
 pub use editorial_types::{NedMutation, TargetKind};
@@ -16,9 +17,17 @@ use ned::{NodeTree, Selection};
 use node_store::{Node, NodeId, NodeStore};
 
 use crate::block::{
-    BLOCK_KINDS, BlockDecodeError, TEXT_BLOCK_KINDS, block_from_node, block_to_store,
-    tree_to_block,
+    BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, TEXT_BLOCK_KINDS, block_from_node,
+    block_to_store, tree_to_block,
 };
+use crate::inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store};
+
+/// The context of the inlines of an inline container.
+const CONTAINER_CONTEXT: InlineContext = InlineContext::Heading;
+
+/// Element names an inline Text node can sit under, below its container: the
+/// nodes whose children `InlinePath` descends through.
+const INLINE_TEXT_PARENTS: &[&str] = &["emph", "strong", "inline-link"];
 
 /// Element kind of a live document root. Superseded roots are renamed and are
 /// therefore not addressable.
@@ -59,6 +68,9 @@ impl From<AddressError> for StaleCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     Text { text: NodeId, block: NodeId, document: NodeId },
+    /// An inline container (a heading) as the scope of a text search or of
+    /// `SetInlines`.
+    TextScope { block: NodeId, document: NodeId },
     Block { block: NodeId, container: NodeId, document: NodeId },
     Container { container: NodeId, document: NodeId },
 }
@@ -68,6 +80,7 @@ impl Target {
     pub fn document(&self) -> NodeId {
         match self {
             Target::Text { document, .. }
+            | Target::TextScope { document, .. }
             | Target::Block { document, .. }
             | Target::Container { document, .. } => *document,
         }
@@ -77,6 +90,7 @@ impl Target {
     pub fn kind(&self) -> TargetKind {
         match self {
             Target::Text { .. } => TargetKind::Text,
+            Target::TextScope { .. } => TargetKind::TextScope,
             Target::Block { .. } => TargetKind::Block,
             Target::Container { .. } => TargetKind::Container,
         }
@@ -177,6 +191,36 @@ fn block_context(
     Ok((container, document))
 }
 
+/// A Text node of an edit: the only child of a text block, or at any depth
+/// inside an inline container (below emphasis, strong or link text).
+fn resolve_text(
+    store: &NodeStore,
+    id: NodeId,
+    expected: TargetKind,
+) -> Result<Target, AddressError> {
+    let wrong = || AddressError::WrongKind { expected, found: kind_label(store, id) };
+    if !matches!(store.get(id), Some(Node::Text(_))) {
+        return Err(wrong());
+    }
+    // Climb through inline formatting to the block that owns the text.
+    let mut block = single_parent(store, id, expected)?;
+    let mut depth = 0usize;
+    while element_name(store, block).is_some_and(|n| INLINE_TEXT_PARENTS.contains(&n)) {
+        block = single_parent(store, block, expected)?;
+        depth += 1;
+    }
+    let owner = element_name(store, block);
+    let in_text_block = depth == 0
+        && owner.is_some_and(|n| TEXT_BLOCK_KINDS.contains(&n))
+        && store.children(block) == [id];
+    let in_inline_container = owner.is_some_and(|n| INLINE_CONTAINER_KINDS.contains(&n));
+    if !in_text_block && !in_inline_container {
+        return Err(wrong());
+    }
+    let (_container, document) = block_context(store, block, expected)?;
+    Ok(Target::Text { text: id, block, document })
+}
+
 /// Exactly one node of `kind`, inside a live document.
 pub fn resolve(
     store: &NodeStore,
@@ -195,24 +239,15 @@ pub fn resolve(
     }
 
     match kind {
-        TargetKind::Text => {
-            if !matches!(store.get(id), Some(Node::Text(_))) {
-                return Err(AddressError::WrongKind {
-                    expected: kind,
-                    found: kind_label(store, id),
-                });
+        TargetKind::Text => resolve_text(store, id, kind),
+        TargetKind::TextScope => {
+            if element_name(store, id).is_some_and(|n| INLINE_CONTAINER_KINDS.contains(&n)) {
+                let (_container, document) = block_context(store, id, kind)?;
+                Ok(Target::TextScope { block: id, document })
+            } else {
+                // A Text node is a scope too: the search runs inside it.
+                resolve_text(store, id, kind)
             }
-            let block = single_parent(store, id, kind)?;
-            let is_text_block =
-                element_name(store, block).is_some_and(|n| TEXT_BLOCK_KINDS.contains(&n));
-            if !is_text_block || store.children(block) != [id] {
-                return Err(AddressError::WrongKind {
-                    expected: kind,
-                    found: kind_label(store, id),
-                });
-            }
-            let (_container, document) = block_context(store, block, kind)?;
-            Ok(Target::Text { text: id, block, document })
         }
         TargetKind::Block => {
             let (container, document) = block_context(store, id, kind)?;
@@ -245,6 +280,11 @@ pub enum EditError {
     EmptySearch,
     SearchNotFound,
     SearchNotUnique { occurrences: usize },
+    /// The search text matches across an image, raw HTML or a hard break.
+    SpansAtom,
+    /// The edited inline content would not read back as itself when written
+    /// as markdown (ADR-059 §7).
+    InlinesNotWritable,
     NoChange,
 }
 
@@ -263,6 +303,10 @@ impl fmt::Display for EditError {
             EditError::SearchNotUnique { occurrences } => {
                 StaleCause::SearchNotUnique { occurrences: *occurrences }.fmt(f)
             }
+            EditError::SpansAtom => StaleCause::SpansAtom.fmt(f),
+            EditError::InlinesNotWritable => {
+                f.write_str("the edited text cannot be written as markdown")
+            }
             EditError::NoChange => StaleCause::NoChange.fmt(f),
         }
     }
@@ -278,6 +322,7 @@ impl From<EditError> for StaleCause {
             EditError::SearchNotUnique { occurrences } => {
                 StaleCause::SearchNotUnique { occurrences }
             }
+            EditError::SpansAtom => StaleCause::SpansAtom,
             EditError::NoChange => StaleCause::NoChange,
             other => StaleCause::InvalidValue { detail: other.to_string() },
         }
@@ -314,6 +359,8 @@ impl PreparedEdit {
 #[derive(Debug, Clone, PartialEq)]
 enum Change {
     SetText { text: NodeId, value: String },
+    /// Replace the children of an inline container with `inlines`.
+    SetInlines { container: NodeId, inlines: Inlines },
     Delete { block: NodeId },
     Replace { block: NodeId, container: NodeId, blocks: Vec<ContentElement> },
     InsertBefore { anchor: NodeId, container: NodeId, blocks: Vec<ContentElement> },
@@ -331,6 +378,9 @@ pub fn prepare(
     let document = target.document();
     let (footprint, change) = match (mutation, *target) {
         (NedMutation::SetText(value), Target::Text { text, block, .. }) => {
+            if is_inline_container(store, block) {
+                return set_text_in_container(store, text, block, document, value);
+            }
             check_text_value(store, block, value)?;
             if current_text(store, text, block)? == value {
                 return Err(EditError::NoChange);
@@ -351,8 +401,36 @@ pub fn prepare(
             if value == current {
                 return Err(EditError::NoChange);
             }
+            if is_inline_container(store, block) {
+                return set_text_in_container(store, text, block, document, &value);
+            }
             check_text_value(store, block, &value)?;
             (block, Change::SetText { text, value })
+        }
+        (NedMutation::SearchReplace { search, replace }, Target::TextScope { block, .. }) => {
+            if search.is_empty() {
+                return Err(EditError::EmptySearch);
+            }
+            let current = container_inlines(store, block)?;
+            let edited = current
+                .search_replace(search, replace, CONTAINER_CONTEXT)
+                .map_err(|e| match e {
+                    SearchReplaceError::NotFound => EditError::SearchNotFound,
+                    SearchReplaceError::NotUnique(occurrences) => {
+                        EditError::SearchNotUnique { occurrences }
+                    }
+                    SearchReplaceError::SpansAtom => EditError::SpansAtom,
+                    SearchReplaceError::NotWritable => EditError::InlinesNotWritable,
+                })?;
+            return set_inlines(block, document, &current, edited);
+        }
+        (NedMutation::SetInlines(trees), Target::TextScope { block, .. }) => {
+            let current = container_inlines(store, block)?;
+            let edited = inlines_from_tree(trees, CONTAINER_CONTEXT).map_err(|e| match e {
+                BlockDecodeError::ExistingNode => EditError::ExistingNode,
+                other => EditError::Payload(other),
+            })?;
+            return set_inlines(block, document, &current, edited);
         }
         (NedMutation::Delete, Target::Block { block, .. }) => (block, Change::Delete { block }),
         (NedMutation::Replace(trees), Target::Block { block, container, .. }) => {
@@ -379,6 +457,71 @@ pub fn prepare(
     Ok(PreparedEdit { footprint, document, change })
 }
 
+fn is_inline_container(store: &NodeStore, block: NodeId) -> bool {
+    element_name(store, block).is_some_and(|n| INLINE_CONTAINER_KINDS.contains(&n))
+}
+
+/// The inlines of an inline container, decoded strictly.
+fn container_inlines(store: &NodeStore, block: NodeId) -> Result<Inlines, EditError> {
+    inlines_from_store(store, block, CONTAINER_CONTEXT).map_err(EditError::OwningBlock)
+}
+
+/// The indices from `block` down to the Text node `text`: the child position
+/// at each step (the store's children are the inline nodes, one to one).
+fn path_to_text(store: &NodeStore, block: NodeId, text: NodeId) -> Option<InlinePath> {
+    let mut indices = Vec::new();
+    let mut node = text;
+    while node != block {
+        let parent = store
+            .parents(node)
+            .into_iter()
+            .find(|p| !matches!(store.get(*p), Some(Node::Collection)))?;
+        indices.push(store.children(parent).iter().position(|c| *c == node)?);
+        node = parent;
+    }
+    indices.reverse();
+    Some(InlinePath::new(indices))
+}
+
+/// SetText on a Text node inside an inline container: the node's literal text
+/// becomes `value`, located by its path; the content is normalised (a line
+/// break is a space, ADR-059 N5) and must be writable.
+fn set_text_in_container(
+    store: &NodeStore,
+    text: NodeId,
+    block: NodeId,
+    document: NodeId,
+    value: &str,
+) -> Result<PreparedEdit, EditError> {
+    let current = container_inlines(store, block)?;
+    let path = path_to_text(store, block, text).ok_or_else(|| no_text(store, block))?;
+    let edited = current
+        .with_text_at(&path, value, CONTAINER_CONTEXT)
+        .ok_or_else(|| no_text(store, block))?;
+    set_inlines(block, document, &current, edited)
+}
+
+/// The edit that makes `block`'s content `edited`: refused when it would not
+/// be written back as itself, and a no-change when it equals `current`.
+fn set_inlines(
+    block: NodeId,
+    document: NodeId,
+    current: &Inlines,
+    edited: Inlines,
+) -> Result<PreparedEdit, EditError> {
+    if edited == *current {
+        return Err(EditError::NoChange);
+    }
+    edited
+        .check_writable(CONTAINER_CONTEXT)
+        .map_err(|_| EditError::InlinesNotWritable)?;
+    Ok(PreparedEdit {
+        footprint: block,
+        document,
+        change: Change::SetInlines { container: block, inlines: edited },
+    })
+}
+
 /// A block that carries no text cannot be the owner of a text edit.
 fn no_text(store: &NodeStore, block: NodeId) -> EditError {
     EditError::OwningBlock(BlockDecodeError::MissingTextChild {
@@ -389,13 +532,6 @@ fn no_text(store: &NodeStore, block: NodeId) -> EditError {
 /// Check that `block` with its text replaced by `value` round-trips.
 fn check_text_value(store: &NodeStore, block: NodeId, value: &str) -> Result<(), EditError> {
     let el = block_from_node(store, block).map_err(EditError::OwningBlock)?;
-    // A heading is one line. Its nodes would read a line break as a space
-    // (ADR-059 N5); until stage 4b decides that for SetText, it is refused.
-    if matches!(el, ContentElement::Heading { .. }) && value.contains(['\n', '\r']) {
-        return Err(EditError::Postcondition(RoundTripError::Changed {
-            got: format!("a heading is one line: {value:?}"),
-        }));
-    }
     let edited = el.with_text(value).ok_or_else(|| no_text(store, block))?;
     check_block_round_trip(&edited).map_err(EditError::Postcondition)
 }
@@ -459,6 +595,14 @@ fn write(store: &mut NodeStore, change: Change) {
                 set_text(store, text, &value),
                 "the prepared text node is a live Text node"
             );
+        }
+        Change::SetInlines { container, inlines } => {
+            // The old children go; the canonical encoding of the new content
+            // takes their place.
+            for child in store.children(container) {
+                delete(store, child);
+            }
+            inlines_to_store(store, container, &inlines);
         }
         Change::Delete { block } => {
             assert!(delete(store, block) > 0, "the prepared block is a live node");

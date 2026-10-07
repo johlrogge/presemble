@@ -741,10 +741,13 @@ mod tests {
         let mut store = NodeStore::new();
         let page_name = store.intern("page");
         let root = store.add_node(Node::Element(page_name));
-        let heading_name = store.intern("heading");
-        let heading = store.add_node(Node::Element(heading_name));
-        let text = store.add_node(Node::Text("Use \\<div>".into()));
-        store.add_edge(heading, Edge::Child(text));
+        let heading = content_store::block_to_store(
+            &content::ContentElement::heading_from_markdown(
+                schema::HeadingLevel::new(1).unwrap(),
+                "Use \\<div>",
+            ),
+            &mut store,
+        );
         let title_name = store.intern("title");
         store.add_edge(root, Edge::ConsistsOf { name: title_name, part: heading });
 

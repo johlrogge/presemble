@@ -103,6 +103,12 @@ impl Inlines {
         search_replace::search_replace(self, search, replace, ctx)
     }
 
+    /// A copy with the `Text` node at `path` set to `value` (literal text),
+    /// normalised for `ctx`. `None` when `path` is not a `Text` node.
+    pub fn with_text_at(&self, path: &super::InlinePath, value: &str, ctx: InlineContext) -> Option<Inlines> {
+        super::text::with_text_at(self, path, value, ctx)
+    }
+
     /// The text for SearchReplace and edit lowering, with an offset map back
     /// to its nodes (ADR-059 §8).
     pub fn edit_text(&self) -> EditText {

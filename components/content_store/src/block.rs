@@ -6,9 +6,11 @@ use crate::access::{
     children_by_name, element_name_of, find_attr_int, find_attr_node, find_attr_text,
     find_child_by_name, make_element,
 };
+use crate::inline_store::{inlines_from_store, inlines_to_store};
 use content::inline::InlineContext;
 use content::{
-    Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection,
+    Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
+    SortDirection,
 };
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::HeadingLevel;
@@ -23,15 +25,15 @@ use schema::HeadingLevel;
 /// still accept an explicit `parent` parameter and wire the edge themselves.
 pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore) -> NodeId {
     match element {
-        // One Text child holding the heading's markdown source (ADR-063).
-        ContentElement::Heading { level, .. } => {
+        // `level`, an optional `marker`, and the inline nodes as children
+        // (ADR-059 §6).
+        ContentElement::Heading { level, content, marker } => {
             let node = make_element(store, "heading");
             add_int_attr(store, node, "level", level.value() as i64);
-            // stage 4b: the store holds the inline nodes; until then the
-            // markdown the model writes for them.
-            #[allow(deprecated)]
-            let source = element.heading_source().unwrap_or_default();
-            add_child_text(store, node, &source);
+            if let Some(marker) = marker {
+                add_text_attr(store, node, "marker", marker.as_str());
+            }
+            inlines_to_store(store, node, content);
             node
         }
         ContentElement::Paragraph { text } => {
@@ -219,13 +221,17 @@ pub fn decode_trivia(
 /// block's text (see `ContentElement::text`). `html-block` also stores its
 /// source as one `Text` child, but cannot be text-edited (ADR-062 D4).
 pub const TEXT_BLOCK_KINDS: &[&str] = &[
-    "heading",
     "paragraph",
     "link",
     "blockquote",
     "list",
     "code-block",
 ];
+
+/// Element names of inline containers: their children are inline nodes
+/// (ADR-059 §6), at any depth. A Text node inside one is addressed through
+/// the container, not as the block's only text.
+pub const INLINE_CONTAINER_KINDS: &[&str] = &["heading"];
 
 /// Every block element name emitted by [`block_to_store`].
 pub const BLOCK_KINDS: &[&str] = &[
@@ -458,8 +464,18 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
     match kind {
         "heading" => {
             let level = heading_level(store, id)?;
-            let source = try_child_text(store, id, kind)?;
-            Ok(ContentElement::heading_from_markdown(level, &source))
+            let marker = match find_attr_text(store, id, "marker") {
+                Some(name) => Some(SlotMarker::new(&name).ok_or_else(|| {
+                    BlockDecodeError::InvalidAttribute {
+                        kind: kind.to_string(),
+                        attr: "marker".to_string(),
+                        value: name,
+                    }
+                })?),
+                None => None,
+            };
+            let content = inlines_from_store(store, id, InlineContext::Heading)?;
+            Ok(ContentElement::Heading { level, content, marker })
         }
         "paragraph" => Ok(ContentElement::Paragraph {
             text: try_child_text(store, id, kind)?,
@@ -633,7 +649,7 @@ pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecode
 /// no others.
 fn payload_attributes(kind: &str) -> &'static [&'static str] {
     match kind {
-        "heading" => &["level"],
+        "heading" => &["level", "marker"],
         "link" => &["href"],
         "code-block" => &["language"],
         "image" => &["path", "alt"],

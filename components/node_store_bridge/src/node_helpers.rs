@@ -26,7 +26,8 @@ pub fn node_text(store: &NodeStore, id: NodeId) -> Option<String> {
         Node::Element(name) => {
             let element_name = store.resolve_name(*name);
             match element_name {
-                "heading" | "paragraph" => {
+                "heading" => content_store::heading_markdown_source(store, id),
+                "paragraph" => {
                     // Extract text from first Text child
                     store.children(id).into_iter().find_map(|c| {
                         if let Some(Node::Text(s)) = store.get(c) {

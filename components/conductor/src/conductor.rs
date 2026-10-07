@@ -289,6 +289,7 @@ enum SlotShape {
 impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let conductor = Self::load(site_dir)?;
+        conductor.migrate_suggestion_records();
         // Build all pages during startup so the output directory is populated immediately.
         conductor.build_all_pages(template::OutputMode::Editorial);
         Ok(conductor)
@@ -308,6 +309,7 @@ impl Conductor {
     /// Create a conductor with a pre-built repository. Used in tests.
     pub fn with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
         let conductor = Self::load_with_repo(site_dir, repo)?;
+        conductor.migrate_suggestion_records();
         // Build all pages during startup so the output directory is populated immediately.
         conductor.build_all_pages(template::OutputMode::Editorial);
         Ok(conductor)
@@ -359,11 +361,8 @@ impl Conductor {
             validation_report: RwLock::new(validation::ValidationReport::default()),
         };
 
-        // One-shot cleanup: delete any legacy sug-*.json files left over from
-        // before Wave C-ε (ADR-047). Idempotent — subsequent runs find nothing.
-        Self::delete_legacy_suggestion_files(&conductor.site_dir);
-
-        // Load persisted NED suggestions from disk
+        // Load persisted NED suggestions from disk (read only: a load never
+        // writes to `.presemble`, see `migrate_suggestion_records`)
         let ned_suggestions = Self::load_ned_suggestions(&conductor.ned_suggestions_dir());
         *conductor.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()) = ned_suggestions;
 
@@ -371,6 +370,136 @@ impl Conductor {
         conductor.populate_node_store(&[]);
 
         Ok(conductor)
+    }
+
+    /// The one-time changes to the suggestion records on disk. They run in
+    /// [`Conductor::new`] and [`Conductor::with_repo`], the conductors that
+    /// own the records, and never in [`Conductor::load`]: loading a site to
+    /// validate it (what `presemble build` does) writes nothing to
+    /// `.presemble`.
+    ///
+    /// First the legacy cleanup (ADR-047), then the heading discard, which
+    /// needs the store.
+    fn migrate_suggestion_records(&self) {
+        // Delete any legacy sug-*.json files left over from before Wave C-ε
+        // (ADR-047). Idempotent: later runs find nothing.
+        Self::delete_legacy_suggestion_files(&self.site_dir);
+        self.discard_suggestions_from_before_heading_nodes();
+    }
+
+    /// Once per workspace, drop the pending suggestions that touch a heading
+    /// and were made before headings held inline nodes (ADR-059 stage 4).
+    ///
+    /// Their text is markdown source and the new model reads text as literal,
+    /// so applying them would write the markup as text. They are discarded
+    /// silently: the file is deleted and nothing else is said but one log
+    /// line. Accepted, rejected and stale records are history and stay.
+    ///
+    /// Marked by `.presemble/suggestions/ned/MODEL`: when it exists nothing is
+    /// discarded, ever, so suggestions made after the upgrade are safe. It is
+    /// written even when there is nothing to discard.
+    fn discard_suggestions_from_before_heading_nodes(&self) {
+        const MARKER: &str = "MODEL";
+        const MODEL: &str = "heading-inlines";
+        let dir = self.ned_suggestions_dir();
+        let marker = dir.join(MARKER);
+        if marker.exists() {
+            return;
+        }
+
+        let pending: Vec<editorial_types::NedSuggestion> = self
+            .ned_suggestions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|s| matches!(s.status, editorial_types::NedSuggestionStatus::Pending))
+            .cloned()
+            .collect();
+        let mut discarded: Vec<String> = Vec::new();
+        for suggestion in pending {
+            if !self.touches_a_heading(&suggestion) {
+                continue;
+            }
+            let file = dir.join(format!("{}.json", suggestion.id));
+            if let Err(e) = std::fs::remove_file(&file)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                eprintln!("conductor: could not delete {}: {e}", file.display());
+                continue; // kept: it would be loaded again, so it is not discarded
+            }
+            self.ned_suggestions
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&suggestion.id);
+            discarded.push(suggestion.id.to_string());
+        }
+        if !discarded.is_empty() {
+            discarded.sort();
+            eprintln!(
+                "conductor: discarded {} pending suggestion(s) made before headings stored inline nodes: {}",
+                discarded.len(),
+                discarded.join(", ")
+            );
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&marker, MODEL)) {
+            eprintln!("conductor: could not write {}: {e}", marker.display());
+        }
+    }
+
+    /// Whether `suggestion` changes a heading: its payload holds a heading
+    /// anywhere, or its selection resolves to a heading or to a node inside
+    /// one. A selection that does not resolve is not counted: it cannot apply
+    /// anyway, and on accept it goes Stale as unresolved.
+    fn touches_a_heading(&self, suggestion: &editorial_types::NedSuggestion) -> bool {
+        use editorial_types::NedMutation;
+        fn holds_heading(tree: &ned::NodeTree) -> bool {
+            match tree {
+                ned::NodeTree::Element { name, children, .. } => {
+                    name == "heading" || children.iter().any(holds_heading)
+                }
+                _ => false,
+            }
+        }
+        let payload = match &suggestion.mutation {
+            NedMutation::Replace(trees)
+            | NedMutation::InsertChild(trees)
+            | NedMutation::InsertBefore(trees)
+            | NedMutation::InsertAfter(trees)
+            | NedMutation::SetInlines(trees) => trees.iter().any(holds_heading),
+            NedMutation::SetText(_) | NedMutation::SearchReplace { .. } | NedMutation::Delete => false,
+        };
+        if payload {
+            return true;
+        }
+        let Ok(selection) = self.eval_selection(&suggestion.selection) else {
+            return false;
+        };
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let is_heading = |id: node_store::NodeId| {
+            matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "heading")
+        };
+        selection.iter().any(|id| {
+            // The node and its structural ancestors (semantic collections are
+            // not structure).
+            let mut pending = vec![id];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(node) = pending.pop() {
+                if !seen.insert(node) {
+                    continue;
+                }
+                if is_heading(node) {
+                    return true;
+                }
+                pending.extend(
+                    store
+                        .parents(node)
+                        .into_iter()
+                        .filter(|p| !matches!(store.get(*p), Some(node_store::Node::Collection))),
+                );
+            }
+            false
+        })
     }
 
     /// The validation diagnostics from the latest population of the node
@@ -5851,8 +5980,11 @@ mod creation_check_tests {
     fn no_suggestions_persisted(conductor: &Conductor, tmp: &tempfile::TempDir) {
         assert!(conductor.ned_suggestions.read().unwrap().is_empty());
         let dir = tmp.path().join(".presemble/suggestions/ned");
-        let has_files =
-            dir.exists() && std::fs::read_dir(&dir).map(|mut d| d.next().is_some()).unwrap_or(false);
+        // The `MODEL` marker (written at startup) is not a suggestion.
+        let has_files = dir.exists()
+            && std::fs::read_dir(&dir)
+                .map(|d| d.flatten().any(|e| e.file_name() != "MODEL"))
+                .unwrap_or(false);
         assert!(!has_files, "no suggestion file may be written");
     }
 
@@ -5959,14 +6091,25 @@ mod creation_check_tests {
     #[test]
     fn invalid_value_is_rejected_at_creation() {
         let (conductor, _tmp) = make_conductor_with_doc();
-        let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+        // A blank line would split a paragraph in two.
+        let src = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "summary")) "paragraph" 0))"#;
         let err = create_error(
             &conductor,
             DOC,
             src,
-            editorial_types::NedMutation::SetText("two\nlines".into()),
+            editorial_types::NedMutation::SetText("two\n\nparas".into()),
         );
         assert!(err.contains("invalid"), "{err}");
+    }
+
+    /// ADR-059 N5: a line break in a heading is a space, so the suggestion is
+    /// valid (it was refused before headings held nodes).
+    #[test]
+    fn newline_in_a_heading_suggestion_is_valid() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+        let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+        let resp = create(&conductor, DOC, src, editorial_types::NedMutation::SetText("two\nlines".into()));
+        assert!(matches!(resp, Response::SuggestionCreated(_)), "got {resp:?}");
     }
 }
 
@@ -6146,8 +6289,9 @@ mod ned_suggestion_handler_tests {
 
         // Nothing should be written to disk
         let ned_dir = tmp.path().join(".presemble/suggestions/ned");
+        // (The `MODEL` marker written at startup is not a suggestion.)
         let has_files = ned_dir.exists() && std::fs::read_dir(&ned_dir)
-            .map(|mut d| d.next().is_some())
+            .map(|d| d.flatten().any(|e| e.file_name() != "MODEL"))
             .unwrap_or(false);
         assert!(!has_files, "no suggestion files should exist after rejection");
 
@@ -10283,6 +10427,235 @@ mod link_expression_pipeline_tests {
         let posts = slot_urls(&conductor, "/author/a", "posts");
         assert_eq!(count(&posts, "/post/p7"), 1, "{posts:?}");
         assert_eq!(posts, urls(&["/post/p1", "/post/p3", "/post/p7"]));
+    }
+}
+
+/// ADR-059 stage 4: pending suggestions made before headings held inline
+/// nodes are discarded once, marked by `.presemble/suggestions/ned/MODEL`.
+#[cfg(test)]
+mod heading_model_discard_tests {
+    use super::*;
+    use editorial_types::{
+        Author, ContentPath, NedMutation, NedSuggestion, NedSuggestionStatus, SuggestionId,
+    };
+
+    const FILE: &str = "content/post/first.md";
+    const SCHEMA: &str =
+        "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+    const TEMPLATE: &str =
+        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+    const CONTENT: &str = "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n";
+    const TITLE_TEXT: &str =
+        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")))"#;
+    const PARAGRAPH_TEXT: &str = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "paragraph" 0))"#;
+    const BODY_PARAGRAPH: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "paragraph" 0)"#;
+
+    fn site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in ["schemas/post", "templates/post", "content/post"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
+        std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
+        std::fs::write(root.join(FILE), CONTENT).unwrap();
+        tmp
+    }
+
+    fn dir(tmp: &tempfile::TempDir) -> PathBuf {
+        tmp.path().join(".presemble/suggestions/ned")
+    }
+
+    /// Write a suggestion record as an older conductor would have.
+    fn write_suggestion(
+        tmp: &tempfile::TempDir,
+        id: &str,
+        selection: &str,
+        mutation: NedMutation,
+        status: NedSuggestionStatus,
+    ) {
+        let suggestion = NedSuggestion {
+            id: SuggestionId::from(id.to_string()),
+            author: Author::Claude,
+            file: ContentPath::new(FILE),
+            selection: selection.to_string(),
+            mutation,
+            workspace_hash: "untracked".to_string(),
+            reason: "test".to_string(),
+            status,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            preview: None,
+        };
+        std::fs::create_dir_all(dir(tmp)).unwrap();
+        std::fs::write(
+            dir(tmp).join(format!("{id}.json")),
+            serde_json::to_string_pretty(&suggestion).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn start(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    fn listed(conductor: &Conductor) -> Vec<String> {
+        let mut ids: Vec<String> = conductor
+            .ned_suggestions
+            .read()
+            .unwrap()
+            .keys()
+            .map(|id| id.to_string())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn file_exists(tmp: &tempfile::TempDir, id: &str) -> bool {
+        dir(tmp).join(format!("{id}.json")).exists()
+    }
+
+    fn marker(tmp: &tempfile::TempDir) -> Option<String> {
+        std::fs::read_to_string(dir(tmp).join("MODEL")).ok()
+    }
+
+    #[test]
+    fn pending_heading_suggestion_from_before_stage_4_is_discarded_on_load() {
+        let tmp = site();
+        write_suggestion(
+            &tmp,
+            "sug-heading",
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+
+        let conductor = start(&tmp);
+
+        assert!(!listed(&conductor).contains(&"sug-heading".to_string()), "not listed");
+        assert!(!file_exists(&tmp, "sug-heading"), "its file is gone");
+        assert_eq!(marker(&tmp).as_deref(), Some("heading-inlines"));
+    }
+
+    #[test]
+    fn pending_heading_payload_is_discarded() {
+        let tmp = site();
+        let heading = ned::NodeTree::element("heading")
+            .with_attr("level", "2")
+            .with_child(ned::NodeTree::text("New section"));
+        write_suggestion(
+            &tmp,
+            "sug-payload",
+            BODY_PARAGRAPH,
+            NedMutation::InsertAfter(vec![heading]),
+            NedSuggestionStatus::Pending,
+        );
+
+        let conductor = start(&tmp);
+
+        assert!(listed(&conductor).is_empty(), "{:?}", listed(&conductor));
+        assert!(!file_exists(&tmp, "sug-payload"));
+    }
+
+    #[test]
+    fn pending_non_heading_suggestion_survives_the_upgrade() {
+        let tmp = site();
+        write_suggestion(
+            &tmp,
+            "sug-para",
+            PARAGRAPH_TEXT,
+            NedMutation::SetText("Alpha paragraph.".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+
+        let conductor = start(&tmp);
+
+        assert_eq!(listed(&conductor), vec!["sug-para".to_string()]);
+        assert!(file_exists(&tmp, "sug-para"));
+        assert_eq!(marker(&tmp).as_deref(), Some("heading-inlines"), "marked all the same");
+    }
+
+    #[test]
+    fn history_is_not_discarded() {
+        let tmp = site();
+        write_suggestion(
+            &tmp,
+            "sug-accepted",
+            TITLE_TEXT,
+            NedMutation::SetText("A".to_string()),
+            NedSuggestionStatus::Accepted,
+        );
+        write_suggestion(
+            &tmp,
+            "sug-rejected",
+            TITLE_TEXT,
+            NedMutation::SetText("B".to_string()),
+            NedSuggestionStatus::Rejected,
+        );
+
+        let conductor = start(&tmp);
+
+        assert_eq!(listed(&conductor), vec!["sug-accepted".to_string(), "sug-rejected".to_string()]);
+        assert!(file_exists(&tmp, "sug-accepted") && file_exists(&tmp, "sug-rejected"));
+    }
+
+    /// Every file under `.presemble` with its bytes, by path.
+    fn presemble_snapshot(tmp: &tempfile::TempDir) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(&tmp.path().join(".presemble"), &mut out);
+        out
+    }
+
+    /// `presemble build` loads the site to validate it: that never writes to
+    /// `.presemble`, neither the legacy cleanup nor the heading discard.
+    #[test]
+    fn loading_a_site_never_writes_to_presemble() {
+        let tmp = site();
+        write_suggestion(
+            &tmp,
+            "sug-heading",
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+        let legacy = tmp.path().join(".presemble/suggestions/sug-old.json");
+        std::fs::write(&legacy, "{}").unwrap();
+        let before = presemble_snapshot(&tmp);
+        assert!(before.contains_key(&legacy));
+
+        let _conductor = Conductor::load(tmp.path().to_path_buf()).expect("loads");
+
+        assert_eq!(presemble_snapshot(&tmp), before, "the directory and every file are unchanged");
+    }
+
+    #[test]
+    fn suggestions_made_after_the_upgrade_are_never_discarded() {
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "heading-inlines").unwrap();
+        write_suggestion(
+            &tmp,
+            "sug-new",
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+
+        let conductor = start(&tmp);
+
+        assert_eq!(listed(&conductor), vec!["sug-new".to_string()]);
+        assert!(file_exists(&tmp, "sug-new"));
     }
 }
 

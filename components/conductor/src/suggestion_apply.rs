@@ -29,11 +29,16 @@ pub(crate) fn check_drift(
     mutation: &NedMutation,
     preview: &SuggestionPreview,
 ) -> Result<(), StaleCause> {
-    if !matches!(mutation, NedMutation::Replace(_) | NedMutation::SetText(_)) {
+    if !matches!(
+        mutation,
+        NedMutation::Replace(_) | NedMutation::SetText(_) | NedMutation::SetInlines(_)
+    ) {
         return Ok(());
     }
     let block = match target {
-        Target::Text { block, .. } | Target::Block { block, .. } => *block,
+        Target::Text { block, .. }
+        | Target::TextScope { block, .. }
+        | Target::Block { block, .. } => *block,
         Target::Container { .. } => return Ok(()),
     };
     let base = editorial_types::BlockText::Markdown(preview.base.markdown.clone());
@@ -68,12 +73,17 @@ pub(crate) fn already_in_place(
 ) -> bool {
     if !matches!(
         mutation,
-        NedMutation::SetText(_) | NedMutation::SearchReplace { .. } | NedMutation::Replace(_)
+        NedMutation::SetText(_)
+            | NedMutation::SearchReplace { .. }
+            | NedMutation::SetInlines(_)
+            | NedMutation::Replace(_)
     ) {
         return false;
     }
     let block = match target {
-        Target::Text { block, .. } | Target::Block { block, .. } => *block,
+        Target::Text { block, .. }
+        | Target::TextScope { block, .. }
+        | Target::Block { block, .. } => *block,
         Target::Container { .. } => return false,
     };
     let proposed = editorial_types::BlockText::Markdown(preview.proposed.markdown.clone());
@@ -85,12 +95,12 @@ pub(crate) fn already_in_place(
 /// A short, actionable hint for a suggestion rejected at creation time.
 pub(crate) fn creation_hint(cause: &StaleCause, kind: TargetKind) -> Option<&'static str> {
     match cause {
-        StaleCause::WrongKind { expected: TargetKind::Text, found }
+        StaleCause::WrongKind { expected: TargetKind::Text | TargetKind::TextScope, found }
             if BLOCK_KINDS.contains(&found.as_str()) =>
         {
             Some("address the block's text with (ned/text-in <block address>)")
         }
-        StaleCause::WrongKind { expected: TargetKind::Text, found }
+        StaleCause::WrongKind { expected: TargetKind::Text | TargetKind::TextScope, found }
             if found == SLOT_KIND || found == BODY_KIND || found == UNASSIGNED_KIND =>
         {
             Some(
@@ -98,9 +108,13 @@ pub(crate) fn creation_hint(cause: &StaleCause, kind: TargetKind) -> Option<&'st
                  or (ned/text-in (ned/nth-of-kind (ned/children <slot>) \"paragraph\" i))",
             )
         }
-        StaleCause::Ambiguous { .. } if kind == TargetKind::Text => Some(
-            "the address matches several text nodes; narrow it to one block, e.g. (ned/text-in (ned/nth-of-kind (ned/children <slot>) \"paragraph\" i)), or use a longer search string so it occurs in only one block",
-        ),
+        StaleCause::Ambiguous { .. }
+            if matches!(kind, TargetKind::Text | TargetKind::TextScope) =>
+        {
+            Some(
+                "the address matches several text nodes; narrow it to one block, e.g. (ned/text-in (ned/nth-of-kind (ned/children <slot>) \"paragraph\" i)), or use a longer search string so it occurs in only one block",
+            )
+        }
         StaleCause::Unresolved => {
             Some("check the file path and slot name; empty slots need InsertChild on the slot")
         }

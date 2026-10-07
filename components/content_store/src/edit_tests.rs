@@ -286,13 +286,102 @@ fn set_text_with_same_value_is_no_change() {
     assert_eq!(f.prepare(text, &NedMutation::SetText("a".to_string())), Err(EditError::NoChange));
 }
 
+/// ADR-059 N5: a line break in a heading is a space in its nodes, so a SetText
+/// with a newline is accepted and the heading holds one line.
 #[test]
-fn newline_in_heading_is_invalid() {
+fn newline_in_heading_set_text_becomes_a_space() {
+    let mut f = fixture();
+    let block = f.store.children(f.slot("title"))[0];
+    let text = f.text_of(block);
+    f.run(text, &NedMutation::SetText("Two\nlines".to_string()));
+    assert_eq!(block_from_node(&f.store, block), Ok(heading(1, "Two lines")));
+}
+
+/// A fixture whose title slot holds the heading `md`.
+fn fixture_with_title(md: &str) -> Fixture {
+    let mut store = NodeStore::new();
+    let doc = make_element(&mut store, "document");
+    let preamble = add_child_element(&mut store, doc, "preamble");
+    add_slot(&mut store, preamble, "title", &[heading(1, md)]);
+    add_child_element(&mut store, doc, "body");
+    Fixture { store, doc }
+}
+
+impl Fixture {
+    fn title_block(&self) -> NodeId {
+        self.store.children(self.slot("title"))[0]
+    }
+    fn title(&self) -> ContentElement {
+        block_from_node(&self.store, self.title_block()).expect("the title decodes")
+    }
+    fn prepare_scope(&self, m: &NedMutation) -> Result<PreparedEdit, EditError> {
+        let target = self.resolve(&[self.title_block()], m.target_kind()).expect("resolves");
+        prepare(&self.store, &target, m)
+    }
+}
+
+/// A Text node inside the emphasis of `Hello *World*`: depth 2.
+#[test]
+fn set_text_at_depth_in_a_heading() {
+    let mut f = fixture_with_title("Hello *World*");
+    let heading_block = f.title_block();
+    let emph = f.store.children(heading_block)[1];
+    let inner = f.store.children(emph)[0];
+    assert_eq!(
+        f.resolve(&[inner], TargetKind::Text),
+        Ok(Target::Text { text: inner, block: heading_block, document: f.doc })
+    );
+    f.run(inner, &NedMutation::SetText("Presemble".to_string()));
+    assert_eq!(f.title(), heading(1, "Hello *Presemble*"));
+}
+
+/// The scope of a search is the heading's whole text, across its formatting.
+#[test]
+fn search_replace_on_heading_spans_formatting() {
+    let mut f = fixture_with_title("a *bc* d");
+    let m = NedMutation::SearchReplace { search: "c d".to_string(), replace: "X".to_string() };
+    let edit = f.prepare_scope(&m).expect("valid");
+    commit(&mut f.store, vec![edit]);
+    assert_eq!(f.title(), heading(1, "a *bX*"));
+    // Within one Text node it works as before.
+    let text = f.store.children(f.title_block())[0];
+    let m = NedMutation::SearchReplace { search: "a".to_string(), replace: "Z".to_string() };
+    f.run(text, &m);
+    assert_eq!(f.title(), heading(1, "Z *bX*"));
+}
+
+#[test]
+fn search_replace_refuses_match_spanning_atom() {
+    let f = fixture_with_title("a ![i](p.png) b");
+    let m = NedMutation::SearchReplace {
+        search: "a \u{fffc}".to_string(),
+        replace: "X".to_string(),
+    };
+    assert_eq!(f.prepare_scope(&m), Err(EditError::SpansAtom));
+    // A match next to the atom is fine.
+    let m = NedMutation::SearchReplace { search: "b".to_string(), replace: "X".to_string() };
+    assert!(f.prepare_scope(&m).is_ok());
+}
+
+#[test]
+fn set_inlines_replaces_heading_content() {
+    let mut f = fixture_with_title("Old");
+    let inlines = content::inline::parse_inlines("New *x*", content::inline::InlineContext::Heading)
+        .unwrap();
+    let m = NedMutation::SetInlines(crate::inlines_to_tree(&inlines));
+    let edit = f.prepare_scope(&m).expect("valid");
+    commit(&mut f.store, vec![edit]);
+    assert_eq!(f.title(), heading(1, "New *x*"));
+}
+
+/// Only an inline container is a text scope: a paragraph block is not.
+#[test]
+fn a_paragraph_block_is_not_a_text_scope() {
     let f = fixture();
-    let text = f.text_of(f.store.children(f.slot("title"))[0]);
+    let block = f.body_blocks()[0];
     assert!(matches!(
-        f.prepare(text, &NedMutation::SetText("Two\nlines".to_string())),
-        Err(EditError::Postcondition(_))
+        f.resolve(&[block], TargetKind::TextScope),
+        Err(AddressError::WrongKind { expected: TargetKind::TextScope, .. })
     ));
 }
 

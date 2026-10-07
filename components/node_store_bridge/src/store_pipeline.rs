@@ -87,21 +87,16 @@ impl expressions::ThreadItem for SemItem<'_> {
             .map(|(_, target)| target)?;
         match store.get(target)? {
             Node::Text(s) => Some(s.clone()),
-            Node::Element(name)
-                if matches!(store.resolve_name(*name), "heading" | "paragraph" | "link") =>
-            {
-                let text = store.children(target).into_iter().find_map(|c| match store.get(c) {
+            // Thread operations read a heading's plain text, as
+            // `expressions::graph_field_text` does (ADR-059 §8).
+            Node::Element(name) if store.resolve_name(*name) == "heading" => {
+                content_store::heading_plain_text(store, target)
+            }
+            Node::Element(name) if matches!(store.resolve_name(*name), "paragraph" | "link") => {
+                store.children(target).into_iter().find_map(|c| match store.get(c) {
                     Some(Node::Text(s)) => Some(s.clone()),
                     _ => None,
-                })?;
-                // A heading stores its source; thread operations read its
-                // plain text, as `expressions::graph_field_text` does (ADR-063).
-                if store.resolve_name(*name) == "heading" {
-                    use content::AsPlainText;
-                    Some(content::MarkdownText::from(text).plain_text())
-                } else {
-                    Some(text)
-                }
+                })
             }
             _ => None,
         }

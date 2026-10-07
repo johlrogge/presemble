@@ -128,9 +128,9 @@
 (defn ned/blocks [sel]
   (ned/children sel))
 
-(def-doc! ned/text-in "(ned/text-in sel)" "The direct Text children of each selected block, i.e. \"the\" text of a block. Several Text children (or several blocks) give several results.")
+(def-doc! ned/text-in "(ned/text-in sel)" "Every Text node, at any depth, under each selected block: \"the\" text of a block. A formatted heading (Hello *World*) has several Text nodes, so a SetText on it is ambiguous; address one node, or search the whole heading with SearchReplace.")
 (defn ned/text-in [sel]
-  (-> sel ned/children ned/texts))
+  (-> sel ned/descendants ned/texts))
 
 (def-doc! ned/texts-under "(ned/texts-under sel)" "All Text nodes at any depth under the selected nodes.")
 (defn ned/texts-under [sel]

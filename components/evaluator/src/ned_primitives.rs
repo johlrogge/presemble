@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 use content_store::edit::{NedMutation, Plan, PlannedMutation};
 use template::Value;
-use node_store::{Node, NodeStore};
+use node_store::{Node, NodeId, NodeStore};
 use ned::Selection;
 use ned::NodeTree;
 use ned::selection;
@@ -271,18 +271,19 @@ pub fn register_ned_query_builtins(root: &RootEnv, store: Arc<RwLock<NodeStore>>
                         };
                         Ok(wrap_selection(sel.filter(&st, selection::has_text_equals(&value))))
                     }
-                    // Headings store markdown source; this compares their
-                    // plain text, as rendered (ADR-063).
+                    // Headings hold inline nodes; this compares their plain
+                    // text, as rendered (ADR-059 §8).
                     "heading-text-equals" => {
                         let value = match args.get(2) {
                             Some(Value::Text(s)) => s.clone(),
                             _ => return Err("ned/filter :heading-text-equals requires a string".into()),
                         };
-                        let plain = |s: &str| {
-                            use content::AsPlainText;
-                            content::MarkdownText::from(s).plain_text()
+                        let target = normalize_text(&value);
+                        let matches = move |store: &NodeStore, id: NodeId| {
+                            content_store::heading_plain_text(store, id)
+                                .is_some_and(|plain| normalize_text(&plain) == target)
                         };
-                        Ok(wrap_selection(sel.filter(&st, selection::has_projected_text_equals(&value, plain))))
+                        Ok(wrap_selection(sel.filter(&st, matches)))
                     }
                     other => Err(format!("ned/filter: unknown predicate keyword :{other}")),
                 }
@@ -561,6 +562,12 @@ fn reg_planned(
         recorder.record(PlannedMutation { targets, mutation, origin: name });
         Ok(Value::Absent)
     });
+}
+
+/// `s` with every run of whitespace as one space, trimmed (the comparison
+/// `ned/filter :heading-text-equals` makes).
+fn normalize_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Register the NED primitives that plan mutations, and `ned/parse-body`. The
@@ -2400,8 +2407,64 @@ mod tests {
         Arc::new(RwLock::new(store))
     }
 
-    /// Headings store their source; `ned/heading-with-text` matches their
-    /// plain text, as rendered (ADR-063).
+    /// `ned/text-in` of a formatted heading is every Text node, at any depth,
+    /// not just the direct ones: a SetText on it is ambiguous, never applied to
+    /// a part of the heading (ADR-059 §9).
+    #[test]
+    fn text_in_a_formatted_heading_is_ambiguous_not_partial() {
+        let root_env = setup_with_prelude(make_markdown_body_store("## Hello *World*\n\nPara.\n"));
+        let heading = format!(r#"(ned/nth-of-kind (ned/blocks {BODY}) "heading" 0)"#);
+        assert_eq!(
+            texts_of(&root_env, &format!("(ned/text-in {heading})")),
+            vec!["Hello ".to_string(), "World".to_string()],
+            "both Text nodes, including the one inside the emphasis"
+        );
+        // Several nodes: `resolve` refuses a SetText on them as ambiguous.
+        assert_eq!(count_of(&root_env, &format!("(ned/text-in {heading})")), 2);
+    }
+
+    /// Addresses are unchanged by headings holding nodes: `heading-with-text`
+    /// matches the plain text of every heading in the shared vectors, and
+    /// `block_addresses` writes the same text (guard).
+    #[test]
+    fn heading_addresses_unchanged() {
+        // (heading source, plain text), a selection of the shared vectors.
+        let cases = [
+            ("Hello *World*", "Hello World"),
+            ("The `<div>` element", "The <div> element"),
+            ("A [link](/x) here", "A link here"),
+            ("Title \\#", "Title #"),
+            ("![i](p.png) t", "t"),
+            ("**b** and _i_", "b and i"),
+            ("Plain", "Plain"),
+        ];
+        let mut checked = 0;
+        for (source, plain) in cases {
+            let markdown = format!("## {source}\n\nPara.\n");
+            let flat = content::parse_document(&markdown).expect("parses");
+            assert_eq!(flat.elements.len(), 2, "{source:?} is one heading and a paragraph");
+            let root_env = setup_with_prelude(make_markdown_body_store(&markdown));
+            let with_text = format!(
+                r#"(ned/heading-with-text (ned/blocks {BODY}) {})"#,
+                content::clj_str(plain)
+            );
+            assert_eq!(count_of(&root_env, &with_text), 1, "{source:?} -> {plain:?}");
+            let addresses = content::block_addresses(
+                "content/index.md",
+                content::AddressContainer::Body,
+                &flat.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            );
+            assert!(
+                addresses[0].as_deref().is_some_and(|a| a.contains(&content::clj_str(plain))),
+                "{source:?}: {addresses:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 5, "the vectors exercised: {checked}");
+    }
+
+    /// Headings hold inline nodes; `ned/heading-with-text` matches their plain
+    /// text, as rendered (ADR-059 §8).
     #[test]
     fn heading_with_text_matches_plain_text() {
         let root_env =
@@ -2409,8 +2472,8 @@ mod tests {
         let heading = format!(r#"(ned/nth-of-kind (ned/blocks {BODY}) "heading" 0)"#);
         assert_eq!(
             texts_of(&root_env, &format!("(ned/text-in {heading})")),
-            vec!["The `<div>` element".to_string()],
-            "the store holds the source"
+            vec!["The ".to_string(), "<div>".to_string(), " element".to_string()],
+            "the store holds nodes: text, a code span, text"
         );
         let with_text = |t: &str| {
             format!(r#"(ned/heading-with-text (ned/blocks {BODY}) "{}")"#, t.replace('"', "\\\""))
@@ -2449,13 +2512,13 @@ mod tests {
     }
 
     #[test]
-    fn ned_text_in_returns_direct_text_of_block() {
+    fn ned_text_in_returns_every_text_of_a_block() {
         let root_env = setup_with_prelude(make_structured_body_store());
         let sel = format!(r#"(ned/text-in (ned/nth-of-kind (ned/blocks {BODY}) "paragraph" 1))"#);
         assert_eq!(count_of(&root_env, &sel), 1);
         assert_eq!(texts_of(&root_env, &sel), vec!["Intro para two".to_string()]);
-        // The body element's direct children are blocks, not Text nodes.
-        assert_eq!(count_of(&root_env, &format!("(ned/text-in {BODY})")), 0);
+        // At any depth: the whole body holds five Text nodes.
+        assert_eq!(count_of(&root_env, &format!("(ned/text-in {BODY})")), 5);
     }
 
     #[test]

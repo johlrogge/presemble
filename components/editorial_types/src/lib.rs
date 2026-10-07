@@ -110,10 +110,16 @@ pub enum NedMutation {
     /// round-trip through the block's markdown serializer as the same single
     /// block.
     SetText(String),
-    /// Replace the single occurrence of `search` in the addressed Text node.
-    /// Zero or several occurrences make the suggestion inapplicable (drift
+    /// Replace the single occurrence of `search` in the addressed Text node,
+    /// or, when the selection addresses an inline container (a heading), in
+    /// the container's whole text across its formatting (ADR-059 §9). Zero or
+    /// several occurrences make the suggestion inapplicable (drift
     /// detection). Text-level surgery, not structural.
     SearchReplace { search: String, replace: String },
+    /// Replace the content of the single addressed inline container (a
+    /// heading) with these inline trees: the same shape the store holds, and
+    /// the same payload form as `Replace`. The text in the trees is literal.
+    SetInlines(Vec<NodeTree>),
     /// Replace the single addressed block with the given non-empty list of
     /// blocks, inserted in order.
     Replace(Vec<NodeTree>),
@@ -133,8 +139,12 @@ pub enum NedMutation {
 /// The kind of node a [`NedMutation`]'s selection must resolve to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TargetKind {
-    /// A Text node that is the only child of a text block.
+    /// A Text node: the only child of a text block, or at any depth inside an
+    /// inline container (a heading).
     Text,
+    /// A Text node as above, or an inline container itself (a heading): the
+    /// scope of a text search (ADR-059 §9) and of `SetInlines`.
+    TextScope,
     /// A block: a direct child of a slot or of body.
     Block,
     /// A container: a slot or body element.
@@ -145,6 +155,7 @@ impl fmt::Display for TargetKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TargetKind::Text => f.write_str("text"),
+            TargetKind::TextScope => f.write_str("text or inline container"),
             TargetKind::Block => f.write_str("block"),
             TargetKind::Container => f.write_str("container"),
         }
@@ -155,7 +166,8 @@ impl NedMutation {
     /// The kind of node this mutation's selection must address.
     pub fn target_kind(&self) -> TargetKind {
         match self {
-            NedMutation::SetText(_) | NedMutation::SearchReplace { .. } => TargetKind::Text,
+            NedMutation::SetText(_) => TargetKind::Text,
+            NedMutation::SearchReplace { .. } | NedMutation::SetInlines(_) => TargetKind::TextScope,
             NedMutation::Replace(_)
             | NedMutation::Delete
             | NedMutation::InsertBefore(_)
@@ -194,6 +206,9 @@ pub enum StaleCause {
     /// 1-based). Only plans of several steps (programs) can produce it, so a
     /// persisted suggestion never carries it.
     Overlap { with_step: usize },
+    /// The search text matches across an image, raw HTML or a hard break: an
+    /// atom is never part of a replacement (ADR-059 §9).
+    SpansAtom,
 }
 
 /// Consent to overwrite files that changed on disk while they have unsaved
@@ -265,6 +280,9 @@ impl fmt::Display for StaleCause {
             StaleCause::Overlap { with_step } => {
                 write!(f, "it changes what step {with_step} changes")
             }
+            StaleCause::SpansAtom => f.write_str(
+                "the search text matches across an image, raw HTML or a hard break",
+            ),
         }
     }
 }
@@ -461,7 +479,8 @@ pub fn validate_no_existing(m: &NedMutation) -> Result<(), String> {
         NedMutation::Replace(trees)
         | NedMutation::InsertChild(trees)
         | NedMutation::InsertBefore(trees)
-        | NedMutation::InsertAfter(trees) => check_trees(trees),
+        | NedMutation::InsertAfter(trees)
+        | NedMutation::SetInlines(trees) => check_trees(trees),
     }
 }
 
@@ -783,8 +802,9 @@ mod tests {
                 replace: "b".into()
             }
             .target_kind(),
-            TargetKind::Text
+            TargetKind::TextScope
         );
+        assert_eq!(NedMutation::SetInlines(tree()).target_kind(), TargetKind::TextScope);
         assert_eq!(NedMutation::Replace(tree()).target_kind(), TargetKind::Block);
         assert_eq!(NedMutation::Delete.target_kind(), TargetKind::Block);
         assert_eq!(NedMutation::InsertBefore(tree()).target_kind(), TargetKind::Block);

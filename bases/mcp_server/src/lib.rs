@@ -824,6 +824,7 @@ fn stale_hint(cause: &editorial_types::StaleCause) -> Option<&'static str> {
         | StaleCause::InvalidValue { .. }
         | StaleCause::EvalError { .. }
         | StaleCause::Overlap { .. } => None,
+        StaleCause::SpansAtom => Some("the text now matches across an image or HTML; review manually"),
     }
 }
 
@@ -960,6 +961,15 @@ fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
         editorial_types::NedMutation::InsertAfter(trees) => {
             format!(
                 "{status_prefix}insert-after @ {sel}: {reason} ({n} subtree(s))",
+                status_prefix = status_prefix,
+                sel = s.selection,
+                reason = s.reason,
+                n = trees.len(),
+            )
+        }
+        editorial_types::NedMutation::SetInlines(trees) => {
+            format!(
+                "{status_prefix}set-inlines @ {sel}: {reason} ({n} inline tree(s))",
                 status_prefix = status_prefix,
                 sel = s.selection,
                 reason = s.reason,

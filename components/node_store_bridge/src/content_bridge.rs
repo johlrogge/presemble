@@ -401,28 +401,21 @@ pub fn create_semantic_content(
         let parts = store.consists_of(sem);
         let title_entry = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title").copied();
         title_entry.and_then(|(_, title_node)| {
-            // Walk into the content element (e.g. heading) → first child text
-            let text = store
-                .children(title_node)
-                .iter()
-                .find_map(|&c| {
-                    if let Some(Node::Text(s)) = store.get(c) {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })?;
-            // A heading stores its source; the link text is its plain text
-            // (ADR-063).
+            // A heading's link text is its plain text (ADR-059 §8); any other
+            // content element gives its first child text.
             let is_heading = matches!(
                 store.get(title_node),
                 Some(Node::Element(n)) if store.resolve_name(*n) == "heading"
             );
-            Some(if is_heading {
-                use content::AsPlainText;
-                content::MarkdownText::from(text).plain_text()
-            } else {
-                text
+            if is_heading {
+                return content_store::heading_plain_text(store, title_node);
+            }
+            store.children(title_node).iter().find_map(|&c| {
+                if let Some(Node::Text(s)) = store.get(c) {
+                    Some(s.clone())
+                } else {
+                    None
+                }
             })
         })
     };
@@ -1878,12 +1871,16 @@ mod tests {
             .filter(|(el, _)| el.text().is_some())
             .map(|(_, name)| name.as_str())
             .collect();
+        // Single-text blocks, and the inline containers (headings) whose text
+        // is nodes.
         let mut expected_text = TEXT_BLOCK_KINDS.to_vec();
+        expected_text.extend_from_slice(content_store::INLINE_CONTAINER_KINDS);
         text_kinds.sort_unstable();
         expected_text.sort_unstable();
         assert_eq!(text_kinds, expected_text);
 
-        let mut payload = TEXT_BLOCK_KINDS.to_vec();
+        let mut payload = content_store::INLINE_CONTAINER_KINDS.to_vec();
+        payload.extend_from_slice(TEXT_BLOCK_KINDS);
         payload.push("image");
         payload.push("table");
         assert_eq!(payload, PAYLOAD_BLOCK_KINDS);

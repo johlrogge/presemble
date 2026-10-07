@@ -1,7 +1,6 @@
 use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, OutputMode, Value};
 use crate::dom::{Element, Form, Node};
-use content::AsPlainText;
 use crate::expr::parse_expr;
 use crate::graph_view::{GraphView, ResolvedNode};
 use crate::registry::RenderContext;
@@ -205,19 +204,16 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
                         // heading/paragraph — extract text from first child;
                         // a heading's is its source, read as plain text (ADR-063).
                         let elem_name = store.resolve_name(*name);
-                        if elem_name == "heading" || elem_name == "paragraph" {
-                            let text = store.children(id).into_iter().find_map(|c| {
+                        if elem_name == "heading" {
+                            content_store::heading_plain_text(store, id).unwrap_or_default()
+                        } else if elem_name == "paragraph" {
+                            store.children(id).into_iter().find_map(|c| {
                                 if let Some(node_store::Node::Text(s)) = store.get(c) {
                                     Some(s.clone())
                                 } else {
                                     None
                                 }
-                            }).unwrap_or_default();
-                            if elem_name == "heading" {
-                                content::MarkdownText::from(text).plain_text()
-                            } else {
-                                text
-                            }
+                            }).unwrap_or_default()
                         } else {
                             String::new()
                         }
@@ -890,28 +886,26 @@ fn render_insert_native(
 
                 // Heading or paragraph — extract first text child
                 if element_name == "heading" || element_name == "paragraph" {
-                    let text = store.children(id).into_iter().find_map(|c| {
-                        if let Some(node_store::Node::Text(s)) = store.get(c) {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    if let Some(text) = text {
+                    // A heading shows its plain text until heading slots
+                    // render inline nodes (stage 4d).
+                    let text = if element_name == "heading" {
+                        content_store::heading_plain_text(store, id)
+                    } else {
+                        store.children(id).into_iter().find_map(|c| {
+                            if let Some(node_store::Node::Text(s)) = store.get(c) {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                    if let Some(shown) = text {
                         let tag = as_tag.unwrap_or("span").to_string();
                         let mut elem_attrs = vec![
                             ("class".to_string(), Form::Str(class.to_string())),
                             (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                             (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                         ];
-                        // A heading's Text child is its markdown source
-                        // (ADR-063): the page shows the plain text until
-                        // heading slots render inline nodes.
-                        let shown = if element_name == "heading" {
-                            content::MarkdownText::from(text).plain_text()
-                        } else {
-                            text
-                        };
                         elem_attrs.extend(editor_here());
                         elem_attrs.extend(constraint_attrs.iter().cloned());
                         let element = Element {
@@ -1008,7 +1002,10 @@ fn render_insert_native(
                         let heading = page_document(store, page)
                             .and_then(|document| document_slot_blocks(store, document, "title").into_iter().next());
                         if let Some(heading) = heading {
-                            link_editor.extend(title_text_attrs(first_child_text(store, heading), presemble_file));
+                            // stage 4d: the heading's editor record, not its markdown.
+                            let source = content_store::heading_markdown_source(store, heading)
+                                .unwrap_or_default();
+                            link_editor.extend(title_text_attrs(source, presemble_file));
                         }
                     }
 
@@ -1138,13 +1135,6 @@ fn render_insert_native(
 // ---------------------------------------------------------------------------
 // Body rendering helpers
 // ---------------------------------------------------------------------------
-
-/// Extract the first Text child of a node.
-fn first_child_text(store: &node_store::NodeStore, id: node_store::NodeId) -> String {
-    store.children(id).into_iter().find_map(|c| {
-        if let Some(node_store::Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
-    }).unwrap_or_default()
-}
 
 /// Read a body block out of the store as a [`content::ContentElement`], so the
 /// body path renders it through the same `block_nodes` as the legacy path.
@@ -2774,13 +2764,14 @@ mod tests {
         let mut store = node_store::NodeStore::new();
         let root_name = store.intern("page");
         let root = store.add_node(node_store::Node::Element(root_name));
-        let heading_name = store.intern("heading");
-        let heading = store.add_node(node_store::Node::Element(heading_name));
-        let level_name = store.intern("level");
-        let level = store.add_node(node_store::Node::Integer(1));
-        store.add_edge(heading, node_store::Edge::Attribute { name: level_name, value: level });
-        let text = store.add_node(node_store::Node::Text(source.into()));
-        store.add_edge(heading, node_store::Edge::Child(text));
+        // The heading as the store holds it: inline nodes (ADR-059 §6).
+        let heading = content_store::block_to_store(
+            &content::ContentElement::heading_from_markdown(
+                schema::HeadingLevel::new(1).unwrap(),
+                source,
+            ),
+            &mut store,
+        );
         let title_name = store.intern("title");
         store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
         NodeStoreGraphView { store, root }
@@ -3852,17 +3843,7 @@ mod tests {
             store.add_edge(host, node_store::Edge::Attribute { name, value });
         }
         let block = match el {
-            ContentElement::Heading { level, .. } => {
-                let b = element(store, "heading");
-                let name = store.intern("level");
-                let value = store.add_node(node_store::Node::Integer(i64::from(level.value())));
-                store.add_edge(b, node_store::Edge::Attribute { name, value });
-                // stage 4b: inline-node children
-                #[allow(deprecated)]
-                let source = el.heading_source().unwrap_or_default();
-                text_child(store, b, &source);
-                b
-            }
+            ContentElement::Heading { .. } => content_store::block_to_store(el, store),
             ContentElement::Paragraph { text } => {
                 let b = element(store, "paragraph");
                 text_child(store, b, text);
@@ -4327,15 +4308,21 @@ mod tests {
         let preamble = store.add_node(node_store::Node::Element(preamble_name));
         store.add_edge(root, node_store::Edge::Child(preamble));
         for (slot, kind, text) in [("title", "heading", "My *Title*"), ("summary", "paragraph", "A summary.")] {
-            let kind_name = store.intern(kind);
-            let el = store.add_node(node_store::Node::Element(kind_name));
-            if kind == "heading" {
-                let level_name = store.intern("level");
-                let level = store.add_node(node_store::Node::Integer(1));
-                store.add_edge(el, node_store::Edge::Attribute { name: level_name, value: level });
-            }
-            let t = store.add_node(node_store::Node::Text(text.into()));
-            store.add_edge(el, node_store::Edge::Child(t));
+            let el = if kind == "heading" {
+                content_store::block_to_store(
+                    &content::ContentElement::heading_from_markdown(
+                        schema::HeadingLevel::new(1).unwrap(),
+                        text,
+                    ),
+                    &mut store,
+                )
+            } else {
+                let kind_name = store.intern(kind);
+                let el = store.add_node(node_store::Node::Element(kind_name));
+                let t = store.add_node(node_store::Node::Text(text.into()));
+                store.add_edge(el, node_store::Edge::Child(t));
+                el
+            };
             let slot_element = store.intern("slot");
             let slot_node = store.add_node(node_store::Node::Element(slot_element));
             let name_key = store.intern("name");
@@ -4597,10 +4584,13 @@ mod tests {
         let name_val = store.add_node(node_store::Node::Text("title".into()));
         store.add_edge(slot, node_store::Edge::Attribute { name: name_key, value: name_val });
         store.add_edge(preamble, node_store::Edge::Child(slot));
-        let heading_name = store.intern("heading");
-        let heading = store.add_node(node_store::Node::Element(heading_name));
-        let text = store.add_node(node_store::Node::Text("Plain *em* title".into()));
-        store.add_edge(heading, node_store::Edge::Child(text));
+        let heading = content_store::block_to_store(
+            &content::ContentElement::heading_from_markdown(
+                schema::HeadingLevel::new(1).unwrap(),
+                "Plain *em* title",
+            ),
+            &mut store,
+        );
         store.add_edge(slot, node_store::Edge::Child(heading));
         let title_name = store.intern("title");
         store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
@@ -4672,15 +4662,25 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let body_name = store.intern("body");
         let body = store.add_node(node_store::Node::Element(body_name));
-        let kind_name = store.intern(kind);
-        let block = store.add_node(node_store::Node::Element(kind_name));
-        if let Some(level) = level {
-            let level_name = store.intern("level");
-            let level_val = store.add_node(node_store::Node::Integer(level));
-            store.add_edge(block, node_store::Edge::Attribute { name: level_name, value: level_val });
-        }
-        let text_node = store.add_node(node_store::Node::Text(text.into()));
-        store.add_edge(block, node_store::Edge::Child(text_node));
+        let block = if kind == "heading" {
+            // A heading as the store holds it: inline nodes (ADR-059 §6).
+            let level = schema::HeadingLevel::new(level.unwrap_or(1) as u8).unwrap();
+            content_store::block_to_store(
+                &content::ContentElement::heading_from_markdown(level, text),
+                &mut store,
+            )
+        } else {
+            let kind_name = store.intern(kind);
+            let block = store.add_node(node_store::Node::Element(kind_name));
+            if let Some(level) = level {
+                let level_name = store.intern("level");
+                let level_val = store.add_node(node_store::Node::Integer(level));
+                store.add_edge(block, node_store::Edge::Attribute { name: level_name, value: level_val });
+            }
+            let text_node = store.add_node(node_store::Node::Text(text.into()));
+            store.add_edge(block, node_store::Edge::Child(text_node));
+            block
+        };
         store.add_edge(body, node_store::Edge::Child(block));
         let body_co_name = store.intern("body");
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });

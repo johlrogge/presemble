@@ -35,9 +35,47 @@ impl AsPlainText for Inlines {
 pub struct InlinePath(Vec<usize>);
 
 impl InlinePath {
+    /// The path of the node reached by taking these child indices.
+    pub fn new(indices: Vec<usize>) -> Self {
+        InlinePath(indices)
+    }
+
     pub fn as_slice(&self) -> &[usize] {
         &self.0
     }
+}
+
+/// `inlines` with the `Text` node at `path` set to `value`, normalised for
+/// `ctx`. `None` when `path` does not lead to a `Text` node.
+pub(super) fn with_text_at(
+    inlines: &Inlines,
+    path: &InlinePath,
+    value: &str,
+    ctx: super::model::InlineContext,
+) -> Option<Inlines> {
+    fn rewrite(items: &[Inline], path: &[usize], value: &str) -> Option<Vec<Inline>> {
+        let (&at, rest) = path.split_first()?;
+        let mut out = items.to_vec();
+        let item = out.get_mut(at)?;
+        if rest.is_empty() {
+            match item {
+                Inline::Text(text) => *text = value.to_string(),
+                _ => return None,
+            }
+        } else {
+            match item {
+                Inline::Emph(children) | Inline::Strong(children) => {
+                    *children = Inlines::from_normal(rewrite(children.as_slice(), rest, value)?);
+                }
+                Inline::Link { text, .. } => {
+                    *text = Inlines::from_normal(rewrite(text.as_slice(), rest, value)?);
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+    Some(Inlines::new(rewrite(inlines.as_slice(), path.as_slice(), value)?, ctx))
 }
 
 /// What a stretch of edit text stands for.

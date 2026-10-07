@@ -290,9 +290,29 @@ pub fn lower(
         proposed: PreviewText::new(projected.join("\n\n")),
     };
 
+    // A heading with the same level and marker: only its content changes. Its
+    // text is nodes, so a text edit would write the proposed markdown as
+    // literal text; the content is set as inline trees instead, in place, so
+    // the node stays where the page links to it. (Stage 4c narrows this to a
+    // text search when only the text changes.)
+    if let [
+        ContentElement::Heading { level, content, marker },
+    ] = elements.as_slice()
+        && let ContentElement::Heading { level: l0, marker: m0, .. } = current_el
+        && level == l0
+        && marker == m0
+    {
+        return Ok(Lowering::Lowered(Lowered {
+            selection: block_selection.to_string(),
+            mutation: NedMutation::SetInlines(content_store::inlines_to_tree(content)),
+            preview,
+        }));
+    }
+
     // Text-only change: one block that differs from the current one in its
     // text alone.
     if let [new] = elements.as_slice()
+        && !matches!(current_el, ContentElement::Heading { .. })
         && let (Some(old_text), Some(new_text)) = (current_el.text(), new.text())
         && current_el.with_text(&new_text).as_ref() == Some(new)
     {
@@ -759,8 +779,8 @@ mod tests {
             &store,
             block,
             SEL,
-            &edn("[:heading {:level \"1\"} \"Hello *World*\"]"),
-            &edn("[:heading {:level \"1\"} \"Hello *Presemble*\"]"),
+            &edn("[:heading {:level \"1\"} \"Hello \" [:emph \"World\"]]"),
+            &edn("[:heading {:level \"1\"} \"Hello \" [:emph \"Presemble\"]]"),
         ));
         assert_eq!(
             l.preview,
@@ -853,14 +873,15 @@ mod tests {
     fn lower_slot_heading_uses_content_projection() {
         let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let l = expect_lowered(lowered("slot", &h, "Hello *World*", "Hello *Presemble*"));
-        assert_eq!(l.selection, "(ned/text-in (block-selection))");
-        assert_eq!(
-            l.mutation,
-            NedMutation::SearchReplace {
-                search: "World".to_string(),
-                replace: "Presemble".to_string()
-            }
+        // Until stage 4c narrows it to a text search, a heading whose level
+        // and marker stay sets its inline content, in place.
+        assert_eq!(l.selection, SEL);
+        let proposed = ContentElement::heading_from_markdown(
+            HeadingLevel::new(1).unwrap(),
+            "Hello *Presemble*",
         );
+        let ContentElement::Heading { content, .. } = &proposed else { panic!("{proposed:?}") };
+        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(content)));
         assert_eq!(l.preview.base, pv("Hello *World*"));
 
         // The block projection (with markers) is not the base of a slot heading.

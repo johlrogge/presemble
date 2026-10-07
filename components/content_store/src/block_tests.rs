@@ -55,6 +55,56 @@ fn h(level: u8, text: &str) -> ContentElement {
 }
 
 #[test]
+fn heading_stores_inline_nodes() {
+    let mut store = NodeStore::new();
+    let el = h(2, "Hello *World*");
+    let id = block_to_store(&el, &mut store);
+    // The inline nodes are the heading's children: Text, then `emph`.
+    let children = store.children(id);
+    assert_eq!(children.len(), 2, "children: {children:?}");
+    assert!(matches!(store.get(children[0]), Some(Node::Text(s)) if s == "Hello "));
+    assert!(
+        matches!(store.get(children[1]), Some(Node::Element(n)) if store.resolve_name(*n) == "emph")
+    );
+    assert_eq!(block_from_node(&store, id), Ok(el));
+    // No marker attribute without a marker.
+    assert_eq!(find_attr_text(&store, id, "marker"), None);
+
+    // A marker is an attribute, not text.
+    let marked = h(2, "Intro {#intro}");
+    let id = block_to_store(&marked, &mut store);
+    assert_eq!(find_attr_text(&store, id, "marker").as_deref(), Some("intro"));
+    let texts: Vec<_> = store.children(id).iter().map(|c| store.get(*c).cloned()).collect();
+    assert_eq!(texts, vec![Some(Node::Text("Intro".to_string()))]);
+    assert_eq!(block_from_node(&store, id), Ok(marked));
+}
+
+/// The text of a heading payload is literal (ADR-059 §6): `A *b*` means
+/// asterisks, not emphasis.
+#[test]
+fn heading_payload_text_is_literal() {
+    let tree = NodeTree::element("heading")
+        .with_attr("level", "2")
+        .with_child(NodeTree::text("A *b*"));
+    let el = tree_to_block(&tree).expect("decodes");
+    let ContentElement::Heading { content, .. } = &el else { panic!("{el:?}") };
+    assert_eq!(
+        content.as_slice(),
+        &[content::inline::Inline::Text("A *b*".to_string())],
+        "literal text, no emphasis"
+    );
+    // And a formatted payload is built from inline trees.
+    let tree = NodeTree::element("heading")
+        .with_attr("level", "2")
+        .with_child(NodeTree::text("A "))
+        .with_child(NodeTree::element("emph").with_child(NodeTree::text("b")));
+    assert_eq!(tree_to_block(&tree), Ok(h(2, "A *b*")));
+    // A payload with another attribute is still refused.
+    let tree = NodeTree::element("heading").with_attr("level", "2").with_attr("id", "x");
+    assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedAttribute { .. })));
+}
+
+#[test]
 fn heading_level_integer_decodes() {
     let mut store = NodeStore::new();
     let id = heading_node(&mut store, Some(Node::Integer(2)), Some("Hi"));

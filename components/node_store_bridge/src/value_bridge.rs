@@ -34,7 +34,14 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                 // not as Records. This matches what build_article_graph does for the DataGraph pipeline.
                 let element_name = store.resolve_name(*name);
                 match element_name {
-                    "heading" | "paragraph" => {
+                    // A heading's value is its plain text (ADR-059 §8).
+                    "heading" => {
+                        if let Some(text) = content_store::heading_plain_text(store, id) {
+                            return template::Value::Text(text);
+                        }
+                        // Does not decode — fall through to Record
+                    }
+                    "paragraph" => {
                         let text = store.children(id).into_iter().find_map(|c| {
                             if let Some(Node::Text(s)) = store.get(c) {
                                 Some(s.clone())
@@ -43,14 +50,6 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                             }
                         });
                         if let Some(t) = text {
-                            // A heading stores its markdown source; its value
-                            // is the plain text (ADR-063).
-                            if element_name == "heading" {
-                                use content::AsPlainText;
-                                return template::Value::Text(
-                                    content::MarkdownText::from(t).plain_text(),
-                                );
-                            }
                             return template::Value::Text(t);
                         }
                         // No text child — fall through to Record
@@ -389,15 +388,15 @@ mod tests {
         assert!(matches!(val, template::Value::Text(s) if s == "My Title"));
     }
 
-    /// A heading stores its markdown source; its value is the plain text
-    /// (ADR-063).
+    /// A heading holds inline nodes; its value is the plain text (ADR-059 §8).
     #[test]
     fn node_to_value_heading_is_plain_text() {
         let mut store = NodeStore::new();
-        let heading_name = store.intern("heading");
-        let heading = store.add_node(Node::Element(heading_name));
-        let text_node = store.add_node(Node::Text("The `<div>` element".to_string()));
-        store.add_edge(heading, Edge::Child(text_node));
+        let el = content::ContentElement::heading_from_markdown(
+            schema::HeadingLevel::new(2).unwrap(),
+            "The `<div>` element",
+        );
+        let heading = content_store::block_to_store(&el, &mut store);
 
         let val = node_to_value(&store, heading);
         assert!(matches!(&val, template::Value::Text(s) if s == "The <div> element"), "{val:?}");
@@ -416,14 +415,15 @@ mod tests {
     }
 
     #[test]
-    fn heading_element_without_text_child_returns_record() {
+    fn heading_element_without_children_is_empty_text() {
         let mut store = NodeStore::new();
         let heading_name = store.intern("heading");
         let heading = store.add_node(Node::Element(heading_name));
-        // No text child — should fall through to Record
+        // No inline nodes: an empty heading, whose plain text is empty (as it
+        // was when it stored an empty source).
 
         let val = node_to_value(&store, heading);
-        assert!(matches!(val, template::Value::Record(_)));
+        assert!(matches!(&val, template::Value::Text(s) if s.is_empty()), "{val:?}");
     }
 
     #[test]

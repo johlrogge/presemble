@@ -20,11 +20,58 @@ pub use access::{
     find_attr_bool, find_attr_int, find_attr_text, find_child_by_name,
 };
 pub use block::{
-    BLOCK_KINDS, BlockDecodeError, PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS, add_trivia,
+    BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS,
+    add_trivia,
     block_from_node, block_to_store, block_to_tree, content_element_to_store, decode_trivia,
     link_target_from_node, tree_to_block,
 };
 pub use inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store, inlines_to_tree};
+
+/// The inline content of the heading node `id`, or `None` when it does not
+/// decode (not a heading, or malformed).
+///
+/// A text-reading helper: it reads only the content, so it accepts a heading
+/// that has no `level` attribute. That leniency is acceptable only because
+/// nothing here builds a block from the result. The strict decoder,
+/// [`block_from_node`], still refuses a heading without a level.
+pub fn heading_inlines(
+    store: &node_store::NodeStore,
+    id: node_store::NodeId,
+) -> Option<content::inline::Inlines> {
+    // Only the content is read, so a heading without a `level` still has text.
+    (element_name_of(store, id).as_deref() == Some("heading"))
+        .then(|| inlines_from_store(store, id, content::inline::InlineContext::Heading).ok())
+        .flatten()
+}
+
+/// The plain text of the heading node `id` (ADR-059 §8): what readers that
+/// need text (addresses, link text, `input.title`) see.
+pub fn heading_plain_text(
+    store: &node_store::NodeStore,
+    id: node_store::NodeId,
+) -> Option<String> {
+    use content::AsPlainText;
+    heading_inlines(store, id).map(|content| content.plain_text())
+}
+
+/// The markdown of the heading node `id`'s content: canonical inlines plus
+/// ` {#marker}`. Temporary adapter for the readers that still work from
+/// markdown (stage 4d/4e move them onto the nodes).
+pub fn heading_markdown_source(
+    store: &node_store::NodeStore,
+    id: node_store::NodeId,
+) -> Option<String> {
+    let content = heading_inlines(store, id)?;
+    // The marker is an attribute of the heading node.
+    let marker = find_attr_text(store, id, "marker").and_then(|m| content::SlotMarker::new(&m));
+    let element = content::ContentElement::Heading {
+        level: schema::HeadingLevel::new(1)?,
+        content,
+        marker,
+    };
+    #[allow(deprecated)]
+    element.heading_source()
+}
 
 #[cfg(test)]
 mod tests {
