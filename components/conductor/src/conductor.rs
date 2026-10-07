@@ -8485,6 +8485,40 @@ mod block_edit_tests {
         assert!(!listing.contains("First Post"), "{listing}");
     }
 
+    /// EDN is the whole block, so a different level on a slot title is a
+    /// Replace and the file shows it, even though the slot's level rule is
+    /// broken: invalid content is saved and reported, never refused. (In
+    /// markdown the level belongs to the schema, and the same change is
+    /// NoChange.)
+    #[test]
+    fn edn_level_change_on_a_slot_heading_is_replace() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let mut req = request(FILE, TITLE_HEADING, "", "", BlockEditIntent::Apply);
+        req.base = BlockText::Edn("[:heading {:level \"1\"} \"First Post\"]".to_string());
+        req.proposed = BlockText::Edn("[:heading {:level \"2\"} \"First Post\"]".to_string());
+
+        let result = conductor.handle_command(Command::BlockEdit(req));
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+        let file = saved_file(&tmp, &conductor);
+        assert!(file.starts_with("## First Post\n"), "{file}");
+
+        // Suggest, then accept, writes the same file.
+        let tmp_s = build_site();
+        let suggester = make_conductor(&tmp_s);
+        let mut req = request(FILE, TITLE_HEADING, "", "", BlockEditIntent::Suggest);
+        req.base = BlockText::Edn("[:heading {:level \"1\"} \"First Post\"]".to_string());
+        req.proposed = BlockText::Edn("[:heading {:level \"2\"} \"First Post\"]".to_string());
+        let id = created_id(&suggester.handle_command(Command::BlockEdit(req)));
+        let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
+        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+        assert_eq!(saved_file(&tmp_s, &suggester), file);
+    }
+
     /// When the references of a page cannot be rebuilt after a structural
     /// edit, the page has a build error and is reported in `BuildFailed`; it
     /// is not left silently stale.

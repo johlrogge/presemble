@@ -212,6 +212,20 @@ pub fn check_base(
     }
 }
 
+/// Whether `block` already is exactly the one block `trees` hold: the whole
+/// decoded block, level and marker included. A `Replace` is in place when this
+/// holds. Markdown cannot say it for a slot heading, whose level belongs to
+/// the schema and is not part of the Content projection.
+pub fn block_reads_as_trees(store: &NodeStore, block: NodeId, trees: &[ned::NodeTree]) -> bool {
+    let Ok(el) = block_from_node(store, block) else {
+        return false;
+    };
+    match trees {
+        [tree] => tree_to_block(tree).is_ok_and(|proposed| proposed == el),
+        _ => false,
+    }
+}
+
 /// Lower a block edit to one mutation, for both intents.
 ///
 /// `block` is the single resolved target block and `block_selection` the
@@ -715,6 +729,33 @@ mod tests {
 
     fn edn(s: &str) -> BlockText {
         BlockText::Edn(s.to_string())
+    }
+
+    /// EDN is the whole block: a different level on a slot heading is a
+    /// Replace, as for a body heading, even though the slot's level rule
+    /// (which belongs to the schema) would be broken. In markdown the same
+    /// change is NoChange, because the Content projection has no level.
+    #[test]
+    fn edn_level_change_on_a_slot_heading_is_replace() {
+        let (store, block) = store_with("slot", &title("First Post"));
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &edn("[:heading {:level \"1\"} \"First Post\"]"),
+            &edn("[:heading {:level \"2\"} \"First Post\"]"),
+        ));
+        assert_eq!(l.selection, SEL);
+        let NedMutation::Replace(trees) = &l.mutation else { panic!("{:?}", l.mutation) };
+        assert_eq!(trees.len(), 1);
+        let proposed = ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "First Post");
+        assert_eq!(trees[0], crate::content_bridge::block_to_tree(&proposed).unwrap());
+
+        // The same level change in markdown reads as the block itself.
+        assert_eq!(
+            lower(&store, block, SEL, &md("First Post"), &md("First Post")),
+            Ok(Lowering::NoChange)
+        );
     }
 
     #[test]

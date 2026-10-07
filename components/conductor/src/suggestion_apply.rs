@@ -86,6 +86,12 @@ pub(crate) fn already_in_place(
         | Target::Block { block, .. } => *block,
         Target::Container { .. } => return false,
     };
+    // A replacement is compared as the whole block, not as its markdown: the
+    // projection of a slot heading has no level, so markdown cannot tell that
+    // the level changed.
+    if let NedMutation::Replace(trees) = mutation {
+        return node_store_bridge::block_edit::block_reads_as_trees(store, block, trees);
+    }
     let proposed = editorial_types::BlockText::Markdown(preview.proposed.markdown.clone());
     node_store_bridge::block_edit::check_base(store, block, &proposed).is_ok()
 }
