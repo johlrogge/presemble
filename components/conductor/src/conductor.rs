@@ -3352,6 +3352,13 @@ impl Conductor {
                     .build();
                 match content_editor::create_content(&self.site_dir, &fresh_repo, &stem, &slug) {
                     Ok((path, url)) => {
+                        // ADR-043: the new file is our own write, so the
+                        // watcher's event for it must not look external.
+                        // (`create_content` also creates `content/<stem>/` if
+                        // needed; the tracker follows files, not directories.)
+                        if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                            self.self_write_tracker.record(path.clone(), mtime);
+                        }
                         // Link-expression results before the repopulate, to
                         // find the pages the new document changes.
                         let results_before = self.snapshot_query_results();
@@ -6915,6 +6922,30 @@ mod suggestion_accept_tests {
             other => panic!("expected DirtyBuffers, got {other:?}"),
         };
         assert_eq!(dirty, vec![FILE.to_string()]);
+    }
+
+    /// ADR-043: every conductor write to a source file is recorded as a
+    /// self-write, so the watcher's event for it is not an external change.
+    #[test]
+    fn create_content_write_is_recorded_as_self_write() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+
+        let result = conductor
+            .handle_command(Command::CreateContent { stem: "post".into(), slug: "new".into() });
+        assert!(!matches!(result.response, Response::Error(_)), "{:?}", result.response);
+
+        let abs = tmp.path().join("content/post/new.md");
+        let mtime = std::fs::metadata(&abs).unwrap().modified().unwrap();
+        assert!(
+            conductor.self_write_tracker.should_ignore(&abs, mtime),
+            "the new file's write is a self-write"
+        );
+        // So the watcher's event for it changes nothing.
+        let event = conductor.handle_command(Command::FileChanged {
+            paths: vec!["content/post/new.md".to_string()],
+        });
+        assert!(matches!(event.response, Response::Ok) && event.events.is_empty());
     }
 
     /// Creating content repopulates the store too: unsaved edits in the other
