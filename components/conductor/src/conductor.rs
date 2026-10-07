@@ -56,6 +56,15 @@ pub struct ProgramOutcome {
     pub skipped: usize,
 }
 
+/// What applying one NED mutation did (see `Conductor::apply_ned_mutation`).
+enum MutationOutcome {
+    /// The document changed: its pages were re-rendered.
+    Changed { pages: Vec<String>, failed: Vec<String> },
+    /// The content already reads as the mutation wants it: nothing was
+    /// written, marked dirty or rebuilt.
+    AlreadyInPlace,
+}
+
 /// The result of handling a command: a response to send back, plus
 /// zero or more events to broadcast to all subscribers.
 pub struct CommandResult {
@@ -2540,61 +2549,63 @@ impl Conductor {
         self.rebuild_pages_for_modified_nodes(paths)
     }
 
-    /// Resolve `sel`, validate `mutation` against the target and apply it.
+    /// Evaluate `selection`, then, under one store write lock, resolve it,
+    /// check the file, check whether the change is already in place, check
+    /// drift, and run `mutation` as a one-step plan (`edit::execute`). Then
+    /// mark the document dirty and re-render its page. The one path both
+    /// suggestion accept and a block edit's Apply use.
     ///
-    /// The caller holds the store write lock for the whole call, so the
-    /// target cannot change between resolution and application. Returns the
-    /// `file` attribute of the affected document, read before mutating.
+    /// `origin` names the caller in plan errors ("accept", "block-edit").
     ///
-    /// The target must lie in `expected_file` (the suggestion's file); a
-    /// selection that now resolves into another document is `Unresolved`.
-    ///
-    /// A `preview` is checked for drift before validating (see
-    /// [`suggestion_apply::check_drift`]).
-    fn resolve_validate_apply(
-        store: &mut node_store::NodeStore,
-        sel: &ned::Selection,
-        mutation: &editorial_types::NedMutation,
-        expected_file: &Path,
-        preview: Option<&editorial_types::SuggestionPreview>,
-    ) -> Result<PathBuf, editorial_types::StaleCause> {
-        let target = edit::resolve(store, sel, mutation.target_kind())?;
-        if let Some(preview) = preview {
-            suggestion_apply::check_drift(store, &target, mutation, preview)?;
-        }
-        let prepared = edit::prepare(store, &target, mutation)?;
-        let path = PathBuf::from(
-            node_store_bridge::content_bridge::find_attr_text(store, prepared.document(), "file")
-                .unwrap_or_default(),
-        );
-        if path != expected_file {
-            return Err(editorial_types::StaleCause::Unresolved);
-        }
-        edit::commit(store, vec![prepared]);
-        Ok(path)
-    }
-
-    /// Evaluate `selection`, then resolve, check drift, validate and apply
-    /// `mutation` under one store write lock, mark the document dirty and
-    /// re-render its page. The one path both suggestion accept and a block
-    /// edit's Apply use.
-    ///
-    /// Returns `(rebuilt_urls, failed_urls)`, or why the mutation cannot be
-    /// applied. Must be called without holding a store lock.
+    /// The target must lie in `file` (the suggestion's file); a selection
+    /// that now resolves into another document is `Unresolved`. A `preview`
+    /// is checked first for "already in place" (see
+    /// [`suggestion_apply::already_in_place`]) and then for drift (see
+    /// [`suggestion_apply::check_drift`]). A change that would alter nothing is
+    /// [`MutationOutcome::AlreadyInPlace`]: nothing is marked dirty or
+    /// rebuilt. Must be called without holding a store lock.
     fn apply_ned_mutation(
         &self,
         selection: &str,
         mutation: &editorial_types::NedMutation,
         file: &Path,
         preview: Option<&editorial_types::SuggestionPreview>,
-    ) -> Result<(Vec<String>, Vec<String>), editorial_types::StaleCause> {
+        origin: &'static str,
+    ) -> Result<MutationOutcome, editorial_types::StaleCause> {
         let sel = self.eval_selection(selection)?;
         let path = {
             let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
-            Self::resolve_validate_apply(&mut store, &sel, mutation, file, preview)?
+            let target = edit::resolve(&store, &sel, mutation.target_kind())?;
+            // The file check comes first: a block in another document is
+            // never "in place" and never drift.
+            let document_file = PathBuf::from(
+                node_store_bridge::content_bridge::find_attr_text(&store, target.document(), "file")
+                    .unwrap_or_default(),
+            );
+            if document_file != file {
+                return Err(editorial_types::StaleCause::Unresolved);
+            }
+            if let Some(preview) = preview {
+                if suggestion_apply::already_in_place(&store, &target, mutation, preview) {
+                    return Ok(MutationOutcome::AlreadyInPlace);
+                }
+                suggestion_apply::check_drift(&store, &target, mutation, preview)?;
+            }
+            let plan: edit::Plan = [edit::PlannedMutation {
+                targets: sel,
+                mutation: mutation.clone(),
+                origin,
+            }]
+            .into_iter()
+            .collect();
+            let executed = edit::execute(&mut store, plan)?;
+            if !executed.skipped.is_empty() {
+                return Ok(MutationOutcome::AlreadyInPlace);
+            }
+            document_file
         };
-        // `path` equals `file` (checked in `resolve_validate_apply`).
-        Ok(self.mark_dirty_and_rebuild(&[path]))
+        let (pages, failed) = self.mark_dirty_and_rebuild(&[path]);
+        Ok(MutationOutcome::Changed { pages, failed })
     }
 
     /// Validate and store a pending NED suggestion (ADR-056): the selection
@@ -2774,8 +2785,12 @@ impl Conductor {
                     &lowered.mutation,
                     file,
                     Some(&lowered.preview),
+                    "block-edit",
                 ) {
-                    Ok((pages, failed)) => {
+                    Ok(MutationOutcome::AlreadyInPlace) => {
+                        respond(BlockEditResponse::Done(BlockEditOutcome::NoChange), vec![])
+                    }
+                    Ok(MutationOutcome::Changed { pages, failed }) => {
                         let mut events = Vec::new();
                         if !pages.is_empty() {
                             events.push(ConductorEvent::PagesRebuilt {
@@ -3635,16 +3650,20 @@ impl Conductor {
                     ])
                 };
 
-                // 2-4. Evaluate, resolve, check drift, validate and apply under
-                // one store write lock (ADR-056), then mark the document dirty
-                // and re-render its page.
+                // 2-4. Evaluate, resolve, check drift, validate and apply as
+                // a one-step plan under one store write lock (ADR-056), then
+                // mark the document dirty and re-render its page. A change
+                // that is already in place counts as applied: nothing is
+                // written, marked dirty or rebuilt.
                 let (pages, failed) = match self.apply_ned_mutation(
                     &sug.selection,
                     &sug.mutation,
                     Path::new(sug.file.as_str()),
                     sug.preview.as_ref(),
+                    "accept",
                 ) {
-                    Ok(done) => done,
+                    Ok(MutationOutcome::Changed { pages, failed }) => (pages, failed),
+                    Ok(MutationOutcome::AlreadyInPlace) => (Vec::new(), Vec::new()),
                     Err(cause) => return mark_stale(self, sug, cause),
                 };
 
@@ -6615,6 +6634,127 @@ mod suggestion_accept_tests {
         assert!(pages.contains(&"/post/first".to_string()), "pages: {pages:?}");
     }
 
+    #[test]
+    fn accept_of_a_set_text_suggestion_already_in_place_is_accepted() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Renamed Post".into()));
+
+        // The title becomes "Renamed Post" another way (no preview, so the
+        // only way to know is that the edit would change nothing).
+        {
+            let root = live_root(&conductor);
+            let mut store = conductor.node_store.write().unwrap();
+            let preamble =
+                node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                    .unwrap();
+            let slot = store.children(preamble)[0];
+            let heading = store.children(slot)[0];
+            let text = store.children(heading)[0];
+            store.replace_node(text, node_store::Node::Text("Renamed Post".into()));
+        }
+
+        let result = accept(&conductor, &id);
+
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert!(accepted_pages(&result).is_empty(), "nothing is rebuilt");
+        assert!(!is_dirty(&conductor), "nothing changed, so nothing is dirty");
+        assert_eq!(title(&conductor), "Renamed Post");
+    }
+
+    /// A selection that resolves into another file never counts as in place,
+    /// even when that block happens to read as the proposal: the file check
+    /// comes first.
+    #[test]
+    fn accept_never_counts_a_block_in_another_file_as_in_place() {
+        use content::{ContentElement, Document, DocumentSlot};
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+        use schema::{HeadingLevel, SlotName, Span, Spanned};
+        const OTHER: &str = "content/post/second.md";
+
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        // B: a second live document whose title reads "Same".
+        {
+            let doc = Document {
+                preamble: im::vector![DocumentSlot {
+                    name: SlotName::new("title"),
+                    elements: im::vector![Spanned {
+                        node: ContentElement::Heading {
+                            level: HeadingLevel::new(1).unwrap(),
+                            source: "Same".into(),
+                        },
+                        span: Span { start: 0, end: 0 },
+                    }],
+                }],
+                body: im::vector![],
+                has_separator: false,
+                separator_span: None,
+                unassigned: Default::default(),
+                comments: Default::default(),
+            };
+            let meta = DocumentMeta {
+                url: "/post/second".to_string(),
+                stem: "post".to_string(),
+                file: OTHER.to_string(),
+                page_kind: "item".to_string(),
+            };
+            let mut store = conductor.node_store.write().unwrap();
+            document_to_store(&doc, &mut store, Some(&meta));
+        }
+        // A suggestion for FILE whose selection addresses B's title.
+        let id = SuggestionId::new();
+        let sug = editorial_types::NedSuggestion {
+            id: id.clone(),
+            author: editorial_types::Author::Claude,
+            file: editorial_types::ContentPath::new(FILE),
+            selection: format!(
+                r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{OTHER}") "title")))"#
+            ),
+            mutation: NedMutation::SetText("Same".into()),
+            workspace_hash: "abc".to_string(),
+            reason: "test".to_string(),
+            status: NedSuggestionStatus::Pending,
+            created_at: "2026-10-07T00:00:00Z".to_string(),
+            preview: Some(editorial_types::SuggestionPreview {
+                base: editorial_types::PreviewText::new("Same"),
+                proposed: editorial_types::PreviewText::new("Same"),
+            }),
+        };
+        conductor.ned_suggestions.write().unwrap().insert(id.clone(), sug);
+
+        let result = accept(&conductor, &id);
+
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(
+                status(&conductor, &id),
+                NedSuggestionStatus::Stale { cause: StaleCause::Unresolved, .. }
+            ),
+            "{:?}",
+            status(&conductor, &id)
+        );
+        assert!(!is_dirty(&conductor));
+    }
+
+    /// Guard: an accept is a one-step plan; it changes the document, marks it
+    /// dirty and re-renders its page.
+    #[test]
+    fn accept_runs_through_execute_and_marks_dirty() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Renamed Post".into()));
+
+        let result = accept(&conductor, &id);
+
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
+        assert_eq!(title(&conductor), "Renamed Post");
+        assert!(is_dirty(&conductor));
+        assert!(accepted_pages(&result).contains(&"/post/first".to_string()));
+    }
+
     /// The entry the nREPL uses: a root of the caller's making and its own
     /// recorder. Marks the changed document dirty and re-renders its page.
     #[test]
@@ -7345,6 +7485,84 @@ mod block_edit_tests {
         assert_eq!(response(&same), BlockEditResponse::Done(BlockEditOutcome::NoChange));
         let empty = edit(&conductor, FIRST_PARAGRAPH, "Alpha para.", "  ", BlockEditIntent::Suggest);
         assert_eq!(refused_cause(&empty), BlockEditCause::Invalid);
+    }
+
+    // ── already in place (2e-2a) ────────────────────────────────────────────
+
+    fn dirty_buffers(conductor: &Conductor) -> Vec<String> {
+        match conductor.handle_command(Command::GetDirtyBuffers).response {
+            Response::DirtyBuffers(paths) => paths,
+            other => panic!("expected DirtyBuffers, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_of_a_block_edit_suggestion_already_in_place_is_accepted_without_rebuild() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = created_id(&edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha paragraph.",
+            BlockEditIntent::Suggest,
+        ));
+        // The same change lands another way, and is saved: nothing is dirty.
+        let applied = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha paragraph.",
+            BlockEditIntent::Apply,
+        );
+        assert!(
+            matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&applied)
+        );
+        let saved = conductor.handle_command(Command::SaveBuffer { path: FILE.to_string() });
+        assert!(matches!(saved.response, Response::Ok), "{:?}", saved.response);
+        assert!(dirty_buffers(&conductor).is_empty());
+
+        let result = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
+
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert_eq!(suggestion(&conductor, &id).status, NedSuggestionStatus::Accepted);
+        assert!(
+            result.events.iter().any(|e| matches!(
+                e,
+                ConductorEvent::NedSuggestionAccepted { pages, .. } if pages.is_empty()
+            )),
+            "events: {:?}",
+            result.events
+        );
+        assert!(
+            !result.events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
+            "nothing is rebuilt: {:?}",
+            result.events
+        );
+        assert!(dirty_buffers(&conductor).is_empty(), "nothing is dirty");
+        assert_eq!(body_texts(&conductor)[0], "Alpha paragraph.");
+    }
+
+    #[test]
+    fn block_edit_whose_proposal_is_already_in_place_is_no_change() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        for intent in [BlockEditIntent::Apply, BlockEditIntent::Suggest] {
+            // The block already reads as the proposal; the client's base is
+            // stale. Nothing to do, so nothing to refuse.
+            let result = edit(&conductor, FIRST_PARAGRAPH, "Old text.", "Alpha para.", intent);
+            assert_eq!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::NoChange),
+                "{intent:?}"
+            );
+            assert!(result.events.is_empty(), "{intent:?}: {:?}", result.events);
+        }
+        assert_eq!(pending_count(&conductor), 0);
+        assert!(dirty_buffers(&conductor).is_empty());
+        assert_eq!(body_texts(&conductor)[0], "Alpha para.");
     }
 
     // ── 16 ──────────────────────────────────────────────────────────────────

@@ -221,6 +221,8 @@ pub fn check_base(
 /// projection (the tree is always the whole block). The preview is markdown
 /// either way.
 ///
+/// - The block already reads as the proposal (one block): `NoChange`, before
+///   the base is checked.
 /// - Only the text of the block changes: a minimal unique text edit,
 ///   addressed with `(ned/text-in <block_selection>)`.
 /// - Anything else (another kind or heading level, several blocks): a
@@ -233,15 +235,24 @@ pub fn lower(
     base: &BlockText,
     proposed: &BlockText,
 ) -> Result<Lowering, BlockEditError> {
-    check_base(store, block, base)?;
     let now = Current::load(store, block)?;
     let (projection, current_el) = (now.projection, &now.el);
 
+    // A proposal of exactly one block that the block already reads as changes
+    // nothing, whatever the client's base was: it is not drift, there is
+    // simply nothing to do. Same for every intent.
+    let in_place = match proposed {
+        BlockText::Markdown(md) => now.reads_as(md),
+        BlockText::Edn(edn) => decode_edn(edn)
+            .is_ok_and(|elements| elements.as_slice() == std::slice::from_ref(current_el)),
+    };
+    if in_place {
+        return Ok(Lowering::NoChange);
+    }
+    check_base(store, block, base)?;
+
     let elements = match proposed {
         BlockText::Markdown(md) => {
-            if now.reads_as(md) {
-                return Ok(Lowering::NoChange);
-            }
             if md.trim().is_empty() {
                 return Err(refuse(BlockEditCause::Invalid, "use delete"));
             }
@@ -250,9 +261,6 @@ pub fn lower(
         }
         BlockText::Edn(edn) => {
             let elements = decode_edn(edn)?;
-            if elements.as_slice() == std::slice::from_ref(current_el) {
-                return Ok(Lowering::NoChange);
-            }
             if elements.is_empty() {
                 return Err(refuse(BlockEditCause::Invalid, "use delete"));
             }
@@ -665,6 +673,28 @@ mod tests {
         assert_eq!(invalid("[:separator]").cause, BlockEditCause::Invalid);
         assert_eq!(invalid("[:paragraph").cause, BlockEditCause::Invalid);
         assert_eq!(invalid("[:heading {:level 2} \"T\"]").cause, BlockEditCause::Invalid);
+    }
+
+    #[test]
+    fn lower_proposal_already_in_place_is_no_change_whatever_the_base() {
+        let el = paragraph("The quick brown fox.");
+        let (store, block) = store_with("body", &el);
+        // A stale base is not drift when the block already reads as the
+        // proposal, in either representation.
+        for (base, proposed) in [
+            (md("Something else."), md("The quick brown fox.")),
+            (md("Something else."), edn("[:paragraph \"The quick brown fox.\"]")),
+            (edn("[:paragraph \"Something else.\"]"), md("The quick brown fox.")),
+        ] {
+            assert_eq!(lower(&store, block, SEL, &base, &proposed), Ok(Lowering::NoChange));
+        }
+        // A proposal that is not in place still checks the base.
+        assert_eq!(
+            lower(&store, block, SEL, &md("Something else."), &md("New."))
+                .unwrap_err()
+                .cause,
+            BlockEditCause::Drifted
+        );
     }
 
     #[test]

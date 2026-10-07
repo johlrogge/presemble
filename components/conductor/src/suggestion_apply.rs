@@ -44,6 +44,42 @@ pub(crate) fn check_drift(
     }
 }
 
+// ── Already in place ────────────────────────────────────────────────────────
+
+/// Whether the block a block-edit suggestion was made against already reads
+/// as its `preview.proposed`: the change has landed another way, so there is
+/// nothing left to apply.
+///
+/// Only mutations that rewrite the addressed block (`SetText`,
+/// `SearchReplace`, `Replace`) can be in place this way. An insert next to a
+/// block that happens to read as the proposal has not been applied, so it is
+/// never "in place".
+///
+/// The comparison is `block_edit::check_base` against the proposal, the same
+/// definition of "reads as" that drift uses. It covers single-block proposals
+/// only: a proposal of several blocks never reads as one block, so it is not
+/// recognised here and falls through to the drift check. A structural
+/// suggestion that is already in place therefore goes Stale with `Drifted`.
+pub(crate) fn already_in_place(
+    store: &NodeStore,
+    target: &Target,
+    mutation: &NedMutation,
+    preview: &SuggestionPreview,
+) -> bool {
+    if !matches!(
+        mutation,
+        NedMutation::SetText(_) | NedMutation::SearchReplace { .. } | NedMutation::Replace(_)
+    ) {
+        return false;
+    }
+    let block = match target {
+        Target::Text { block, .. } | Target::Block { block, .. } => *block,
+        Target::Container { .. } => return false,
+    };
+    let proposed = editorial_types::BlockText::Markdown(preview.proposed.markdown.clone());
+    node_store_bridge::block_edit::check_base(store, block, &proposed).is_ok()
+}
+
 // ── Creation hints ──────────────────────────────────────────────────────────
 
 /// A short, actionable hint for a suggestion rejected at creation time.
@@ -78,6 +114,59 @@ pub(crate) fn creation_hint(cause: &StaleCause, kind: TargetKind) -> Option<&'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_next_to_a_block_that_reads_as_the_proposal_is_not_in_place() {
+        use content::{Document, ContentElement};
+        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store, find_child_by_name};
+        use schema::{Span, Spanned};
+
+        let doc = Document {
+            preamble: im::vector![],
+            body: im::vector![Spanned {
+                node: ContentElement::Paragraph { text: "X".to_string() },
+                span: Span { start: 0, end: 0 },
+            }],
+            has_separator: true,
+            separator_span: None,
+            unassigned: Default::default(),
+            comments: Default::default(),
+        };
+        let meta = DocumentMeta {
+            url: "/post/x".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/x.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, Some(&meta));
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let block = store.children(body)[0];
+        let target = content_store::edit::resolve(
+            &store,
+            &ned::Selection::single(block),
+            TargetKind::Block,
+        )
+        .unwrap();
+        let preview = SuggestionPreview {
+            base: editorial_types::PreviewText::new("X"),
+            proposed: editorial_types::PreviewText::new("X"),
+        };
+        let paragraph = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text("X"));
+
+        // The anchor reads as the proposal, but the inserted block is not there.
+        let insert = NedMutation::InsertAfter(vec![paragraph]);
+        assert!(!already_in_place(&store, &target, &insert, &preview));
+        // The same block under a rewriting mutation is in place.
+        let replace = NedMutation::SetText("X".to_string());
+        let text_target = content_store::edit::resolve(
+            &store,
+            &ned::Selection::single(store.children(block)[0]),
+            TargetKind::Text,
+        )
+        .unwrap();
+        assert!(already_in_place(&store, &text_target, &replace, &preview));
+    }
 
     #[test]
     fn hints_match_causes() {
