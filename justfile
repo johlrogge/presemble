@@ -109,7 +109,9 @@ snapshot-ref ref:
     echo "$out" >&2
     echo "$out" | sed -n 's/^Snapshot: //p' | tail -n 1 | sed 's/^/Snapshot: /'
 
-# mode=exact: `diff -r`. mode=ws: report files present on one side only, and
+# mode=exact: quiet and 0 when the trees are equal; otherwise `diff -rq` of
+# the two trees, then unified diffs of up to the first three differing files,
+# on stderr, and exit 1. mode=ws: report files present on one side only, and
 # files whose contents differ once all whitespace is removed (formatting
 # newlines between tags count as equal; check suspicious files in exact mode).
 # Exits 0 when equal, 1 when different, 2 on usage errors.
@@ -121,7 +123,21 @@ output-diff a b mode="exact":
     test -d "{{ b }}" || { echo "missing {{ b }}" >&2; exit 2; }
     case "{{ mode }}" in
       exact)
-        diff -r "{{ a }}" "{{ b }}"
+        # Quiet and 0 when equal. Otherwise name what differs (to stderr, so a
+        # runner that drops stdout on failure still shows it) and show the
+        # first three differing files as unified diffs.
+        names="$(diff -rq "{{ a }}" "{{ b }}")" && exit 0
+        {
+          echo "$names"
+          echo "$names" \
+            | sed -n 's/^Files \(.*\) and \(.*\) differ$/\1\t\2/p' \
+            | head -n 3 \
+            | while IFS=$'\t' read -r fa fb; do
+                echo
+                diff -u "$fa" "$fb"
+              done
+        } >&2
+        exit 1
         ;;
       ws)
         tmp="$(mktemp -d)"
