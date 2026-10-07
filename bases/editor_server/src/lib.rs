@@ -192,7 +192,10 @@ impl nrepl::NreplHandler for PresembleNreplHandler {
             &recorder,
         );
         evaluator::load_ned_prelude(&root).map_err(|e| format!("ned prelude failed: {e}"))?;
-        let (value, outcome) = self.conductor.run_ned_program(&root, &recorder, code)?;
+        let (value, outcome) = self
+            .conductor
+            .run_ned_program(&root, &recorder, code)
+            .map_err(|e| e.to_string())?;
         let edn_str = edn::value_to_edn(&value);
         let applied = applied_message(&outcome);
         // Multi-line text (e.g. from doc) is sent as nREPL "out" so the

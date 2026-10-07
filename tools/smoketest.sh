@@ -521,6 +521,15 @@ assert_curl "apply nth-child edit to 2nd paragraph" "/_presemble/apply" POST "$A
 assert_curl "nth-child edit: 2nd paragraph updated" "/post/hello-world" GET "" "NTHCHILD ONLY SECOND"
 assert_curl "nth-child edit: 1st paragraph unchanged" "/post/hello-world" GET "" "Welcome to your new blog"
 
+# A program that addresses several nodes is refused as a whole, and the refusal
+# is structured: the step, the builtin and the cause, next to the message.
+NED_AMBIGUOUS='(ned/set-text (-> (ned/slot (ned/doc-by-path "content/post/hello-world.md") "summary") ned/descendants ned/texts) "SHOULD NOT APPLY")'
+AMBIGUOUS_BODY='{"program":"'"$(echo "$NED_AMBIGUOUS" | sed 's/"/\\"/g')"'"}'
+assert_curl "ambiguous apply is refused" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"ok":false'
+assert_curl "ambiguous apply names the step" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"step":1'
+assert_curl "ambiguous apply names the builtin" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"origin":"ned/set-text"'
+assert_curl "ambiguous apply carries the cause" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"cause"'
+
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
 log "Testing suggestions..."

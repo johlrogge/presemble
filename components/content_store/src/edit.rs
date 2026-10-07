@@ -10,7 +10,7 @@
 use std::fmt;
 
 use content::{ContentElement, RoundTripError, check_block_round_trip};
-use editorial_types::StaleCause;
+use editorial_types::{PlanFailure, StaleCause};
 pub use editorial_types::{NedMutation, TargetKind};
 use ned::{NodeTree, Selection};
 use node_store::{Node, NodeId, NodeStore};
@@ -661,11 +661,25 @@ impl std::error::Error for PlanError {}
 
 impl From<PlanError> for StaleCause {
     fn from(e: PlanError) -> Self {
-        let detail = e.to_string();
         match e.cause {
             PlanCause::Address(a) => a.into(),
             PlanCause::Edit(edit) => edit.into(),
-            PlanCause::Overlap { .. } => StaleCause::InvalidValue { detail },
+            // Steps are 1-based for people.
+            PlanCause::Overlap { with, .. } => StaleCause::Overlap { with_step: with + 1 },
+        }
+    }
+}
+
+/// The structured refusal every surface can render: the step (1-based), the
+/// builtin, the cause, and the whole refusal as a sentence.
+impl From<PlanError> for PlanFailure {
+    fn from(e: PlanError) -> Self {
+        let message = e.to_string();
+        PlanFailure {
+            step: e.entry + 1,
+            origin: e.origin.to_string(),
+            cause: e.into(),
+            message,
         }
     }
 }

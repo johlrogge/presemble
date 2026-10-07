@@ -1017,11 +1017,15 @@ fn plan_error_names_entry_and_origin() {
         "step 2 (ned/set-text) changes what step 1 (ned/replace) changes"
     );
     // Both map onto the suggestion surface.
+    assert_eq!(StaleCause::from(err.clone()), StaleCause::Overlap { with_step: 1 });
+    // And onto the structured refusal: 1-based step, origin, cause, message.
+    let failure = editorial_types::PlanFailure::from(err);
+    assert_eq!(failure.step, 2);
+    assert_eq!(failure.origin, "ned/set-text");
+    assert_eq!(failure.cause, StaleCause::Overlap { with_step: 1 });
     assert_eq!(
-        StaleCause::from(err),
-        StaleCause::InvalidValue {
-            detail: "step 2 (ned/set-text) changes what step 1 (ned/replace) changes".to_string()
-        }
+        failure.message,
+        "step 2 (ned/set-text) changes what step 1 (ned/replace) changes"
     );
     let ambiguous = PlanError {
         entry: 0,

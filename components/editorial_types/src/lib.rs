@@ -190,6 +190,24 @@ pub enum StaleCause {
     /// The addressed block no longer reads as it did when the suggestion was
     /// made (its projection differs from the suggestion's preview base).
     Drifted,
+    /// A step of a plan changes what an earlier step changes (`with_step` is
+    /// 1-based). Only plans of several steps (programs) can produce it, so a
+    /// persisted suggestion never carries it.
+    Overlap { with_step: usize },
+}
+
+/// Why one step of a plan (a NED program) was refused: the one structured
+/// answer every surface renders its own way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct PlanFailure {
+    /// The refused step, 1-based.
+    pub step: usize,
+    /// The builtin that recorded the step, e.g. "ned/set-text".
+    pub origin: String,
+    pub cause: StaleCause,
+    /// The whole refusal as a sentence: `step 2 (ned/set-text): ...`.
+    pub message: String,
 }
 
 impl fmt::Display for StaleCause {
@@ -221,6 +239,9 @@ impl fmt::Display for StaleCause {
             }
             StaleCause::Drifted => {
                 f.write_str("the block has changed since the suggestion was made")
+            }
+            StaleCause::Overlap { with_step } => {
+                write!(f, "it changes what step {with_step} changes")
             }
         }
     }
@@ -712,6 +733,7 @@ mod tests {
                 detail: "boom".to_string(),
             },
             StaleCause::Drifted,
+            StaleCause::Overlap { with_step: 1 },
         ];
         for cause in causes {
             let json = serde_json::to_string(&cause).expect("serialize");

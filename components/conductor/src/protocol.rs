@@ -170,6 +170,8 @@ pub enum Response {
     /// The content already reads as the suggestion wants it: nothing was
     /// created, and nothing is wrong.
     AlreadyInPlace,
+    /// A NED program was refused: which step, which builtin, and why.
+    PlanRefused(editorial_types::PlanFailure),
     /// Content file created successfully. Returns the URL path.
     ContentCreated(String),
     /// List of dirty (unsaved) buffer paths.

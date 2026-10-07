@@ -562,25 +562,55 @@ struct EditResponse {
     rebuilt_pages: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failed_pages: Option<Vec<String>>,
+    /// A refused NED program: the step (1-based), the builtin and the cause
+    /// next to `error`, which keeps the whole sentence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<editorial_types::StaleCause>,
 }
 
 impl EditResponse {
     fn ok_simple() -> Self {
-        Self { ok: true, error: None, dirty_paths: None, rebuilt_pages: None, failed_pages: None }
+        Self::base(true)
+    }
+
+    fn base(ok: bool) -> Self {
+        Self {
+            ok,
+            error: None,
+            dirty_paths: None,
+            rebuilt_pages: None,
+            failed_pages: None,
+            step: None,
+            origin: None,
+            cause: None,
+        }
     }
 
     fn ok_applied(dirty_paths: usize, rebuilt_pages: Vec<String>, failed_pages: Vec<String>) -> Self {
         Self {
-            ok: true,
-            error: None,
             dirty_paths: Some(dirty_paths),
             rebuilt_pages: Some(rebuilt_pages),
             failed_pages: Some(failed_pages),
+            ..Self::base(true)
         }
     }
 
     fn err(msg: String) -> Self {
-        Self { ok: false, error: Some(msg), dirty_paths: None, rebuilt_pages: None, failed_pages: None }
+        Self { error: Some(msg), ..Self::base(false) }
+    }
+
+    fn plan_refused(failure: editorial_types::PlanFailure) -> Self {
+        Self {
+            error: Some(failure.message),
+            step: Some(failure.step),
+            origin: Some(failure.origin),
+            cause: Some(failure.cause),
+            ..Self::base(false)
+        }
     }
 }
 
@@ -594,6 +624,9 @@ fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum:
         }
         Ok(conductor::Response::Applied { rebuilt_pages, failed_pages, dirty_paths }) => {
             axum::Json(EditResponse::ok_applied(dirty_paths, rebuilt_pages, failed_pages))
+        }
+        Ok(conductor::Response::PlanRefused(failure)) => {
+            axum::Json(EditResponse::plan_refused(failure))
         }
         Ok(conductor::Response::Error(e)) => {
             axum::Json(EditResponse::err(e))
@@ -3457,6 +3490,7 @@ mod tests {
             session_store,
         };
         Router::new()
+            .route("/_presemble/apply", post(apply_handler))
             .route("/_presemble/block-edit", post(block_edit_handler))
             .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
             .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
@@ -3664,6 +3698,39 @@ mod tests {
         let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val, serde_json::json!({"ok": true, "alreadyInPlace": true}), "{val}");
+    }
+
+    #[tokio::test]
+    async fn apply_refusal_is_structured() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let app = test_app(client);
+
+        // Two statements: the second addresses nothing (an empty selection).
+        let program = r#"(do (ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))) "x") (ned/delete (ned/doc-by-path "content/test/missing.md")))"#;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/apply")
+            .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&serde_json::json!({ "program": program })).unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["ok"], false, "{val}");
+        assert_eq!(val["step"], 2, "{val}");
+        assert_eq!(val["origin"], "ned/delete", "{val}");
+        assert_eq!(val["cause"], "Unresolved", "{val}");
+        assert_eq!(
+            val["error"],
+            "step 2 (ned/delete): the address matches no node in a live document",
+            "{val}"
+        );
     }
 
     #[tokio::test]

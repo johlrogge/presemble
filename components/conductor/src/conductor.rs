@@ -56,6 +56,27 @@ pub struct ProgramOutcome {
     pub skipped: usize,
 }
 
+/// Why a NED program did not run (see [`Conductor::run_ned_program`]). Nothing
+/// was applied in either case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramError {
+    /// The program could not be evaluated.
+    Eval(String),
+    /// The program evaluated, but its plan was refused at one step.
+    Plan(editorial_types::PlanFailure),
+}
+
+impl std::fmt::Display for ProgramError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProgramError::Eval(e) => write!(f, "eval error: {e}"),
+            ProgramError::Plan(failure) => f.write_str(&failure.message),
+        }
+    }
+}
+
+impl std::error::Error for ProgramError {}
+
 /// What applying one NED mutation did (see `Conductor::apply_ned_mutation`).
 enum MutationOutcome {
     /// The document changed: its pages were re-rendered.
@@ -2867,18 +2888,18 @@ impl Conductor {
     /// `content_store::edit::execute`: all of it, or nothing. The changed
     /// documents are marked dirty and their pages re-rendered.
     ///
-    /// Returns the program's value and what changed. An evaluation error
-    /// (nothing is applied) is `eval error: ...`; a refused step is the
-    /// `PlanError` text, e.g. `step 2 (ned/set-text): ...`.
+    /// Returns the program's value and what changed. Why it did not run
+    /// (nothing is applied) is a [`ProgramError`]: an evaluation error, or the
+    /// structured refusal of one step. Its `Display` is `eval error: ...` or
+    /// the step's sentence, e.g. `step 2 (ned/set-text): ...`.
     pub fn run_ned_program(
         &self,
         root: &evaluator::RootEnv,
         recorder: &evaluator::ned_primitives::PlanRecorder,
         code: &str,
-    ) -> Result<(template::Value, ProgramOutcome), String> {
+    ) -> Result<(template::Value, ProgramOutcome), ProgramError> {
         // The primitives take their own read locks: hold none here.
-        let value = evaluator::eval_str_with_root(code, root)
-            .map_err(|e| format!("eval error: {e}"))?;
+        let value = evaluator::eval_str_with_root(code, root).map_err(ProgramError::Eval)?;
 
         let plan = recorder.take();
         if plan.is_empty() {
@@ -2888,7 +2909,8 @@ impl Conductor {
 
         let (dirty_paths, skipped) = {
             let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
-            let executed = edit::execute(&mut store, plan).map_err(|e| e.to_string())?;
+            let executed = edit::execute(&mut store, plan)
+                .map_err(|e| ProgramError::Plan(editorial_types::PlanFailure::from(e)))?;
             // Documents without a file (synthetic roots) have nothing to save.
             let paths: Vec<PathBuf> = executed
                 .documents
@@ -2927,7 +2949,10 @@ impl Conductor {
         };
         let outcome = match self.run_ned_program(&root, &recorder, program) {
             Ok((_value, outcome)) => outcome,
-            Err(e) => return CommandResult::error(e),
+            Err(ProgramError::Plan(failure)) => {
+                return CommandResult::with_response(Response::PlanRefused(failure));
+            }
+            Err(e @ ProgramError::Eval(_)) => return CommandResult::error(e.to_string()),
         };
 
         let ProgramOutcome { dirty_paths, rebuilt_pages: rebuilt_urls, failed_pages: failed_urls, .. } =
@@ -7973,10 +7998,12 @@ mod ned_program_plan_tests {
         }
     }
 
+    /// The refusal as a sentence: a plain error, or a refused plan's message.
     fn refused(result: CommandResult) -> String {
         match result.response {
             Response::Error(e) => e,
-            other => panic!("expected Response::Error, got: {other:?}"),
+            Response::PlanRefused(failure) => failure.message,
+            other => panic!("expected a refusal, got: {other:?}"),
         }
     }
 
@@ -8029,6 +8056,53 @@ mod ned_program_plan_tests {
         assert!(e.starts_with("step 1 (ned/search-replace):"), "{e}");
         assert!(e.contains("2 times"), "{e}");
         unchanged(&conductor);
+    }
+
+    fn plan_refused(result: CommandResult) -> editorial_types::PlanFailure {
+        match result.response {
+            Response::PlanRefused(failure) => failure,
+            other => panic!("expected Response::PlanRefused, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_refusal_names_step_origin_and_cause() {
+        let (conductor, _tmp) = make_conductor();
+        let program = format!(
+            r#"(do (ned/set-text {TITLE_TEXT} "x") (ned/set-text (-> {SUMMARY} ned/descendants ned/texts) "Y"))"#
+        );
+        let failure = plan_refused(conductor.apply_ned_program(&program));
+        assert_eq!(failure.step, 2);
+        assert_eq!(failure.origin, "ned/set-text");
+        assert_eq!(failure.cause, editorial_types::StaleCause::Ambiguous { matches: 2 });
+        assert_eq!(
+            failure.message,
+            "step 2 (ned/set-text): the address matches 2 nodes; it must match exactly one"
+        );
+        unchanged(&conductor);
+    }
+
+    #[test]
+    fn apply_overlap_refusal_names_the_earlier_step() {
+        let (conductor, _tmp) = make_conductor();
+        let program =
+            format!(r#"(do (ned/set-text {TITLE_TEXT} "a") (ned/set-text {TITLE_TEXT} "b"))"#);
+        let failure = plan_refused(conductor.apply_ned_program(&program));
+        assert_eq!((failure.step, failure.origin.as_str()), (2, "ned/set-text"));
+        assert_eq!(failure.cause, editorial_types::StaleCause::Overlap { with_step: 1 });
+        assert_eq!(
+            failure.message,
+            "step 2 (ned/set-text) changes what step 1 (ned/set-text) changes"
+        );
+        unchanged(&conductor);
+    }
+
+    /// An evaluation error is not a plan refusal: it stays a plain error.
+    #[test]
+    fn apply_eval_errors_stay_plain_errors() {
+        let (conductor, _tmp) = make_conductor();
+        let e = refused(conductor.apply_ned_program("(undefined-fn)"));
+        assert!(e.starts_with("eval error:"), "{e}");
     }
 
     #[test]

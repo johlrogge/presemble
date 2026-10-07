@@ -820,9 +820,10 @@ fn stale_hint(cause: &editorial_types::StaleCause) -> Option<&'static str> {
         StaleCause::SearchNotUnique { .. } => {
             Some("text now occurs more than once; review manually")
         }
-        StaleCause::Unresolved | StaleCause::InvalidValue { .. } | StaleCause::EvalError { .. } => {
-            None
-        }
+        StaleCause::Unresolved
+        | StaleCause::InvalidValue { .. }
+        | StaleCause::EvalError { .. }
+        | StaleCause::Overlap { .. } => None,
     }
 }
 
