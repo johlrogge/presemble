@@ -8427,6 +8427,51 @@ mod block_edit_tests {
         }
     }
 
+    /// A site whose first body paragraph is `See ![c](c.png) *here*.`.
+    fn formatted_paragraph_site() -> tempfile::TempDir {
+        let tmp = build_site();
+        std::fs::write(
+            tmp.path().join(FILE),
+            "# First Post\n\n----\n\nSee ![c](c.png) *here*.\n\nBeta para.\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    /// BlockEdit Apply, and Suggest then accept, on a paragraph with an inline
+    /// image and emphasis write the same bytes to disk, for a text change, a
+    /// formatting change and both. The image and the formatting survive: the
+    /// text is never rewritten as markdown source.
+    #[test]
+    fn paragraph_block_edit_apply_equals_suggest_then_accept_on_disk() {
+        const BASE: &str = "See ![c](c.png) *here*.";
+        let cases = [
+            ("See ![c](c.png) *there*.", "# First Post\n\n----\n\nSee ![c](c.png) *there*.\n\nBeta para.\n"),
+            ("See ![c](c.png) **here**.", "# First Post\n\n----\n\nSee ![c](c.png) **here**.\n\nBeta para.\n"),
+            ("Look ![c](c.png) **there**!", "# First Post\n\n----\n\nLook ![c](c.png) **there**!\n\nBeta para.\n"),
+        ];
+        for (proposed, expected) in cases {
+            let tmp_a = formatted_paragraph_site();
+            let applier = make_conductor(&tmp_a);
+            let applied = edit(&applier, FIRST_PARAGRAPH, BASE, proposed, BlockEditIntent::Apply);
+            assert!(
+                matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+                "{proposed:?}: {:?}",
+                response(&applied)
+            );
+
+            let tmp_s = formatted_paragraph_site();
+            let suggester = make_conductor(&tmp_s);
+            let id = created_id(&edit(&suggester, FIRST_PARAGRAPH, BASE, proposed, BlockEditIntent::Suggest));
+            let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
+            assert!(matches!(accepted.response, Response::Ok), "{proposed:?}: {:?}", accepted.response);
+
+            let (a, s) = (saved_file(&tmp_a, &applier), saved_file(&tmp_s, &suggester));
+            assert_eq!(a, expected, "apply {proposed:?}");
+            assert_eq!(s, a, "suggest then accept {proposed:?}");
+        }
+    }
+
     /// A level change replaces the title block. The page's references follow
     /// it (ADR-059 §6: references are recomputed when an affected document is
     /// rebuilt): the semantic title and link resolve, and the page renders the

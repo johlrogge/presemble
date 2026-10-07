@@ -81,6 +81,27 @@ impl Inlines {
         self.0.is_empty()
     }
 
+    /// The destinations of the links in the run, as written, in document
+    /// order and at any depth (a link inside emphasis counts). Images are
+    /// not links.
+    pub fn link_destinations(&self) -> Vec<&str> {
+        fn collect<'a>(items: &'a [Inline], out: &mut Vec<&'a str>) {
+            for item in items {
+                match item {
+                    Inline::Link { destination, text, .. } => {
+                        out.push(destination.as_str());
+                        collect(text.as_slice(), out);
+                    }
+                    Inline::Emph(inner) | Inline::Strong(inner) => collect(inner.as_slice(), out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        collect(&self.0, &mut out);
+        out
+    }
+
     /// Whether the tree reads back as itself when written in `ctx`:
     /// `parse(serialize(t)) == t` (ADR-059 §7). Some normal-form trees cannot
     /// be written, because of CommonMark's flanking rules (`a` + emph(`.b`) +

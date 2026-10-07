@@ -33,8 +33,8 @@ pub use link_expression::{
     LinkExpressionError,
 };
 pub use parser::{
-    byte_to_position, paragraph_link_destinations, parse_and_assign, parse_document,
-    parse_link_target, parse_link_text, MARKDOWN_OPTIONS,
+    byte_to_position, parse_and_assign, parse_document, parse_link_target, parse_link_text,
+    MARKDOWN_OPTIONS,
 };
 pub use serializer::serialize_document;
 pub use slot_assignment::{assign_slots, unassigned_reason, UnassignedReason};

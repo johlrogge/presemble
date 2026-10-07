@@ -939,6 +939,10 @@ mod tests {
                     assert!(record.resolve(&[attr]).is_none(), "{attr}")
                 }
                 template::Value::Text(t) => assert!(!t.contains("<!--"), "{t}"),
+                v @ template::Value::Inlines(_) => {
+                    let t = v.display_text().unwrap_or_default();
+                    assert!(!t.contains("<!--"), "{t}");
+                }
                 other => panic!("{other:?}"),
             }
         }

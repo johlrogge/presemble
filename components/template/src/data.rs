@@ -332,11 +332,10 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                 let paragraphs: Vec<Value> = elements
                     .iter()
                     .filter_map(|s| {
-                        if let ContentElement::Paragraph { .. } = &s.node {
-                            // stage 5.4: paragraph slots become inline content.
-                            #[allow(deprecated)]
-                            let source = s.node.paragraph_source().unwrap_or_default();
-                            Some(Value::Text(source))
+                        if let ContentElement::Paragraph { content, .. } = &s.node {
+                            // A paragraph slot is its inline nodes; in a string
+                            // context they read as their plain text.
+                            Some(Value::Inlines(crate::inline_nodes::inline_nodes(content).into()))
                         } else {
                             None
                         }
@@ -909,6 +908,18 @@ mod tests {
         );
     }
 
+    /// A body paragraph renders its inline nodes, so touching emphasis is in
+    /// normal form (ADR-059 N9): `_a_*b*` is one `<em>`.
+    #[test]
+    fn body_paragraph_renders_its_inline_nodes_in_normal_form() {
+        let elements: im::Vector<_> =
+            vec![spanned(ContentElement::paragraph_from_markdown("_a_*b* and **c**"))]
+                .into_iter()
+                .collect();
+        let html = body_html(&elements, false);
+        assert!(html.contains("<em>ab</em> and <strong>c</strong></p>"), "{html}");
+    }
+
     #[test]
     fn body_nodes_elements_have_data_presemble_slot_body() {
         let elements: im::Vector<_> = vec![
@@ -1059,17 +1070,21 @@ mod tests {
         let doc = parse_and_assign(content_src, &grammar).expect("content parses");
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
-        // tagline should be exactly one text value
+        // tagline should be exactly one inline value (a paragraph is its
+        // inline nodes; in a string context, its plain text)
         match graph.resolve(&["tagline"]) {
-            Some(Value::Text(t)) => assert_eq!(t, "My tagline."),
-            other => panic!("expected tagline as Text, got: {other:?}"),
+            Some(v @ Value::Inlines(_)) => assert_eq!(v.display_text().as_deref(), Some("My tagline.")),
+            other => panic!("expected tagline as Inlines, got: {other:?}"),
         }
 
         // description should be a list with the second paragraph
         match graph.resolve(&["description"]) {
             Some(Value::List(items)) => {
                 assert_eq!(items.len(), 1);
-                assert!(matches!(&items[0], Value::Text(t) if t.contains("description")));
+                assert!(
+                    matches!(&items[0], v @ Value::Inlines(_)
+                        if v.display_text().is_some_and(|t| t.contains("description")))
+                );
             }
             other => panic!("expected description as List, got: {other:?}"),
         }

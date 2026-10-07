@@ -34,25 +34,6 @@ impl ContentElement {
         ContentElement::Paragraph { content, marker }
     }
 
-    /// The markdown source of a paragraph: canonical inlines plus
-    /// ` {#marker}`, the string a paragraph used to store. `None` for other
-    /// kinds.
-    ///
-    /// Temporary adapter (ADR-059 stage 5): readers outside `content` use it
-    /// until stage 5.4 moves them onto the inline nodes. A non-breaking space
-    /// is the character itself, not the `&nbsp;` the file writer uses (C8): the
-    /// readers show this text, and the character is what paragraphs held.
-    #[deprecated(note = "stage 5.4: read the paragraph's inline nodes instead")]
-    pub fn paragraph_source(&self) -> Option<String> {
-        match self {
-            ContentElement::Paragraph { content, marker } => Some(
-                crate::inline::paragraph_source_text(content, marker.as_ref())
-                    .replace("&nbsp;", "\u{a0}"),
-            ),
-            _ => None,
-        }
-    }
-
     /// The text of a single-text block, or `None` for kinds that do not carry
     /// exactly one editable text value (Image, Table, Separator,
     /// LinkExpression, and HtmlBlock, which cannot be text-edited: ADR-062 D4).

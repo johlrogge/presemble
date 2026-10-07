@@ -207,8 +207,8 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
                         if elem_name == "heading" {
                             content_store::heading_plain_text(store, id).unwrap_or_default()
                         } else if elem_name == "paragraph" {
-                            // stage 5.4: read the nodes, not the source.
-                            content_store::paragraph_source(store, id).unwrap_or_default()
+                            // Plain text of the nodes, as for a heading.
+                            content_store::paragraph_plain_text(store, id).unwrap_or_default()
                         } else {
                             String::new()
                         }
@@ -898,16 +898,15 @@ fn render_insert_native(
 
                 // Heading or paragraph — extract first text child
                 if element_name == "heading" || element_name == "paragraph" {
-                    // A heading shows its inline nodes (ADR-064); a paragraph
-                    // its text.
-                    let shown: Option<Vec<Node>> = if element_name == "heading" {
+                    // A heading and a paragraph show their inline nodes
+                    // (ADR-064).
+                    let content = if element_name == "heading" {
                         content_store::heading_inlines(store, id)
-                            .map(|content| crate::inline_nodes::inline_nodes(&content))
                     } else {
-                        // stage 5.4: render the nodes, not the source.
-                        content_store::paragraph_source(store, id)
-                            .map(|source| vec![Node::Text(source)])
+                        content_store::paragraph_inlines(store, id)
                     };
+                    let shown: Option<Vec<Node>> =
+                        content.map(|content| crate::inline_nodes::inline_nodes(&content));
                     if let Some(shown) = shown {
                         let tag = as_tag.unwrap_or("span").to_string();
                         let mut elem_attrs = vec![
@@ -2844,6 +2843,87 @@ mod tests {
             assert!(html.contains(">Use &lt;div&gt;"), "{html}");
             assert!(!html.contains(">Use \\"), "no backslash in the text: {html}");
         }
+    }
+
+    // ── Paragraph slots are inline nodes; strings read their plain text ────
+
+    /// The page as a template sees it: `input` is the article's graph, whose
+    /// `summary` is the paragraph `summary_src`.
+    fn paragraph_graph(summary_src: &str, output: crate::data::OutputMode) -> DataGraph {
+        let grammar = schema::parse_schema(STORED_TEXT_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign(&format!("# Title\n\n{summary_src}\n"), &grammar)
+            .expect("content parses");
+        let mut graph = DataGraph::new();
+        graph.insert(
+            "input",
+            Value::Record(crate::data::build_article_graph(&doc, &grammar, output)),
+        );
+        graph
+    }
+
+    /// A store page whose `summary` is a paragraph holding `source`.
+    fn paragraph_store(source: &str) -> NodeStoreGraphView {
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        // The paragraph as the store holds it: inline nodes (ADR-059 §6).
+        let paragraph = content_store::block_to_store(
+            &content::ContentElement::paragraph_from_markdown(source),
+            &mut store,
+        );
+        let summary_name = store.intern("summary");
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: paragraph });
+        NodeStoreGraphView { store, root }
+    }
+
+    /// A paragraph slot in content position shows its formatting, on the
+    /// legacy and the native render path alike. (It used to show the raw
+    /// markdown, `*summary*` with its asterisks.)
+    #[test]
+    fn paragraph_slot_renders_inline_nodes() {
+        use crate::data::OutputMode::Published;
+        let source = "A *summary* with ![c](c.png) and [a link](/a).";
+        let legacy = render_for(
+            &paragraph_graph(source, Published),
+            r#"<presemble:insert data="input.summary" as="p" />"#,
+            Published,
+        );
+        let native = render_for(
+            &paragraph_store(source),
+            r#"<presemble:insert data="summary" as="p" />"#,
+            Published,
+        );
+        for html in [legacy, native] {
+            assert!(html.contains("A <em>summary</em> with <img "), "{html}");
+            assert!(html.contains(r#"<a href="/a">a link</a>"#), "{html}");
+            assert!(!html.contains('*'), "no raw markdown: {html}");
+        }
+    }
+
+    /// Guard: a plain-text summary in a string context is that text.
+    #[test]
+    fn input_summary_is_plain_text_in_string_context() {
+        use crate::data::OutputMode::Editorial;
+        let legacy = paragraph_graph("A summary.", Editorial);
+        let native = paragraph_store("A summary.");
+        let expr = crate::ast::Expr::Lookup(vec!["input".to_string(), "summary".to_string()]);
+        assert_eq!(eval_expr_to_string(&expr, &legacy), "A summary.");
+        let expr = crate::ast::Expr::Lookup(vec!["summary".to_string()]);
+        assert_eq!(eval_expr_to_string(&expr, &native), "A summary.");
+    }
+
+    /// A summary with markup in a string context is its plain text, never
+    /// markup: no asterisks, no backslash, no comment.
+    #[test]
+    fn paragraph_slot_in_a_string_context_is_its_plain_text() {
+        use crate::data::OutputMode::Editorial;
+        let source = "A *summary* of \\<div> <!-- note -->";
+        let legacy = paragraph_graph(source, Editorial);
+        let native = paragraph_store(source);
+        let expr = crate::ast::Expr::Lookup(vec!["input".to_string(), "summary".to_string()]);
+        assert_eq!(eval_expr_to_string(&expr, &legacy), "A summary of <div>");
+        let expr = crate::ast::Expr::Lookup(vec!["summary".to_string()]);
+        assert_eq!(eval_expr_to_string(&expr, &native), "A summary of <div>");
     }
 
     #[test]

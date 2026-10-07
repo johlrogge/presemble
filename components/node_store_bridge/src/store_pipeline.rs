@@ -92,9 +92,9 @@ impl expressions::ThreadItem for SemItem<'_> {
             Node::Element(name) if store.resolve_name(*name) == "heading" => {
                 content_store::heading_plain_text(store, target)
             }
-            // A paragraph reads as its canonical markdown source.
+            // A paragraph reads as its plain text, as a heading does.
             Node::Element(name) if store.resolve_name(*name) == "paragraph" => {
-                content_store::paragraph_source(store, target)
+                content_store::paragraph_plain_text(store, target)
             }
             Node::Element(name) if store.resolve_name(*name) == "link" => {
                 store.children(target).into_iter().find_map(|c| match store.get(c) {
@@ -135,11 +135,14 @@ pub fn declared_references(store: &NodeStore, doc_root: NodeId) -> Vec<String> {
                 }
                 Some(SlotElementTarget::Thread { .. }) => {}
                 None if unassigned && element_name(store, el).as_deref() == Some("paragraph") => {
-                    if let Some(text) = content_store::paragraph_source(store, el) {
+                    // Computed from the nodes: a link in emphasis counts, an
+                    // image never does.
+                    if let Some(content) = content_store::paragraph_inlines(store, el) {
                         out.extend(
-                            content::paragraph_link_destinations(&text)
-                                .iter()
-                                .filter_map(|d| expressions::page_reference(d)),
+                            content
+                                .link_destinations()
+                                .into_iter()
+                                .filter_map(expressions::page_reference),
                         );
                     }
                 }
@@ -1210,6 +1213,26 @@ mod tests {
         assert!(sources("/author/x").is_empty());
         // Thread expressions are not references.
         assert!(sources("/post/one").is_empty());
+    }
+
+    /// References are computed from the paragraph's nodes: an unassigned
+    /// paragraph with an image, formatting and several links counts every
+    /// link, in text or in emphasis, and never the image.
+    #[test]
+    fn unassigned_paragraph_with_image_counts_its_links() {
+        let mut site = site();
+        let post = schema::parse_schema(POST).unwrap();
+        add_doc(
+            &mut site,
+            "/post/three",
+            "post",
+            "# Three\n\n1\n\n[a](/author/a)\n\nSee ![c](/author/c) and [d](author/d) *or [e](/author/e)* **here**.\n\n----\n\nBody.\n",
+            &post,
+        );
+        let root = site.url_to_root["/post/three"];
+        let mut got = declared_references(&site.store, root);
+        got.sort();
+        assert_eq!(got, vec!["/author/a", "/author/d", "/author/e"]);
     }
 
     #[test]

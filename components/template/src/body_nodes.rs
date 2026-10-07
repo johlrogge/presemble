@@ -58,11 +58,9 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             slot_attrs(ctx),
             crate::inline_nodes::inline_nodes(content),
         )],
-        ContentElement::Paragraph { .. } => {
-            // stage 5.4: render the paragraph's inline nodes, not its source.
-            #[allow(deprecated)]
-            let source = element.paragraph_source().unwrap_or_default();
-            vec![el("p", slot_attrs(ctx), inline_children(&source))]
+        // The paragraph's inline nodes, as for a heading.
+        ContentElement::Paragraph { content, .. } => {
+            vec![el("p", slot_attrs(ctx), crate::inline_nodes::inline_nodes(content))]
         }
         ContentElement::Image { path, alt } => {
             let mut attrs = slot_attrs(ctx);

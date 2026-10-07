@@ -703,6 +703,87 @@ mod tests {
         assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
     }
 
+    /// Only the text differs in a formatted paragraph: a search over its whole
+    /// text across the formatting and the image, addressed by the block
+    /// selection (as 5.2's `lower_text_change_in_a_paragraph_...`, with
+    /// emphasis and an image around the change).
+    #[test]
+    fn text_change_in_formatted_paragraph_lowers_to_container_search_replace() {
+        let el = paragraph("See ![c](c.png) *here*, not *there*.");
+        let l = expect_lowered(lowered(
+            "body",
+            &el,
+            "See ![c](c.png) *here*, not *there*.",
+            "See ![c](c.png) *here*, never *there*.",
+        ));
+        assert_eq!(l.selection, SEL);
+        assert_eq!(
+            l.mutation,
+            NedMutation::SearchReplace { search: "ot".to_string(), replace: "ever".to_string() }
+        );
+    }
+
+    /// 5.2's `lower_formatting_change_in_a_paragraph_sets_inlines` with an
+    /// image in the paragraph: the atom stays, the content is set as nodes.
+    #[test]
+    fn formatting_change_in_paragraph_lowers_to_set_inlines() {
+        let l = expect_lowered(lowered(
+            "body",
+            &paragraph("See ![c](c.png) *here*."),
+            "See ![c](c.png) *here*.",
+            "See ![c](c.png) **here**.",
+        ));
+        assert_eq!(l.selection, SEL);
+        let ContentElement::Paragraph { content, .. } = paragraph("See ![c](c.png) **here**.")
+        else {
+            unreachable!()
+        };
+        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+    }
+
+    /// Guard (until stage 5b): a sole link is still a `Link` block, so adding
+    /// text after it turns it into a paragraph: a Replace, never an edit of
+    /// the link's text.
+    #[test]
+    fn adding_text_after_a_link_block_is_replace_until_5b() {
+        let link = ContentElement::Link { text: "a".to_string(), href: "/x".to_string() };
+        let l = expect_lowered(lowered("body", &link, "[a](/x)", "[a](/x) and more"));
+        assert_eq!(l.selection, SEL);
+        let NedMutation::Replace(trees) = &l.mutation else { panic!("{:?}", l.mutation) };
+        assert_eq!(trees.len(), 1);
+        assert!(matches!(
+            tree_to_block(&trees[0]),
+            Ok(ContentElement::Paragraph { .. })
+        ));
+    }
+
+    /// A slot paragraph that carries a marker is edited with the marker in
+    /// place: the markdown shows it, and an edit that keeps it changes the
+    /// content only (never a Replace, which would move the paragraph).
+    #[test]
+    fn markdown_slot_paragraph_edit_keeps_its_marker() {
+        let el = paragraph("Old summary. {#summary}");
+        let (store, block) = store_with("slot", &el);
+        let l = expect_lowered(lower(
+            &store,
+            block,
+            SEL,
+            &md("Old summary. {#summary}"),
+            &md("New summary. {#summary}"),
+        ));
+        assert_eq!(l.selection, SEL);
+        assert!(
+            matches!(l.mutation, NedMutation::SearchReplace { .. } | NedMutation::SetInlines(_)),
+            "{:?}",
+            l.mutation
+        );
+        // The block still carries its marker.
+        assert!(matches!(
+            block_from_node(&store, block),
+            Ok(ContentElement::Paragraph { marker: Some(_), .. })
+        ));
+    }
+
     /// A paragraph that changes its marker is a different block: a Replace.
     #[test]
     fn lower_marker_change_on_a_paragraph_is_replace() {

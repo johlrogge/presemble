@@ -27,8 +27,8 @@ pub fn node_text(store: &NodeStore, id: NodeId) -> Option<String> {
             let element_name = store.resolve_name(*name);
             match element_name {
                 "heading" => content_store::heading_plain_text(store, id),
-                // stage 5.4: a paragraph's text is its plain text.
-                "paragraph" => content_store::paragraph_source(store, id),
+                // A paragraph's text is its plain text (ADR-059 §8).
+                "paragraph" => content_store::paragraph_plain_text(store, id),
                 _ => None,
             }
         }
@@ -182,6 +182,15 @@ mod tests {
         let (store, root) = make_test_store();
         let title = node_part(&store, root, "title").unwrap();
         assert_eq!(node_text(&store, title), Some("My Title".to_string()));
+    }
+
+    /// A paragraph's text is its plain text: markup is not text (ADR-059 §8).
+    #[test]
+    fn node_text_from_paragraph_is_plain_text() {
+        let mut store = NodeStore::new();
+        let el = content::ContentElement::paragraph_from_markdown("A *b* \\<c> `d`");
+        let para = content_store::block_to_store(&el, &mut store);
+        assert_eq!(node_text(&store, para), Some("A b <c> d".to_string()));
     }
 
     #[test]

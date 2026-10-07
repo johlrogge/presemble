@@ -229,20 +229,6 @@ fn read_pulldown_link_expression(expr: &str) -> Option<(LinkText, LinkTarget)> {
     Some((parse_link_text(&text), target))
 }
 
-/// The inline link destinations in a paragraph source, in order.
-///
-/// The paragraph is scanned with pulldown-cmark; every link's destination is
-/// returned as written. Image destinations are left out. Used to count the
-/// references in paragraphs that fill no slot (ADR-058 §8).
-pub fn paragraph_link_destinations(source: &str) -> Vec<String> {
-    Parser::new_ext(source, MARKDOWN_OPTIONS)
-        .filter_map(|event| match event {
-            Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.to_string()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Parse a markdown content document and return a `FlatDocument` with source byte spans.
 ///
 /// Each element in `doc.elements` is a `Spanned<ContentElement>` carrying both
@@ -2634,36 +2620,43 @@ headings
         );
     }
 
-    // ── paragraph_link_destinations ─────────────────────────────────────────
+    // ── Inlines::link_destinations ──────────────────────────────────────────
 
-    #[test]
-    fn paragraph_link_destinations_marker_shaped() {
-        assert_eq!(paragraph_link_destinations("[A](/author/a) {#nope}"), vec!["/author/a"]);
+    /// The link destinations of the paragraph whose markdown is `source`,
+    /// read from its inline nodes.
+    fn link_destinations(source: &str) -> Vec<String> {
+        let ContentElement::Paragraph { content, .. } = ContentElement::paragraph_from_markdown(source)
+        else {
+            panic!("a paragraph");
+        };
+        content.link_destinations().into_iter().map(str::to_string).collect()
     }
 
     #[test]
-    fn paragraph_link_destinations_running_text() {
-        assert_eq!(
-            paragraph_link_destinations("Some text [A](/author/a) more"),
-            vec!["/author/a"]
-        );
+    fn link_destinations_marker_shaped() {
+        assert_eq!(link_destinations("[A](/author/a) {#nope}"), vec!["/author/a"]);
     }
 
     #[test]
-    fn paragraph_link_destinations_in_order() {
+    fn link_destinations_running_text() {
+        assert_eq!(link_destinations("Some text [A](/author/a) more"), vec!["/author/a"]);
+    }
+
+    #[test]
+    fn link_destinations_in_order() {
         assert_eq!(
-            paragraph_link_destinations("[B](/author/b) and [A](/author/a)"),
+            link_destinations("[B](/author/b) and [A](/author/a)"),
             vec!["/author/b", "/author/a"]
         );
     }
 
     #[test]
-    fn paragraph_link_destinations_image_alone_is_empty() {
-        assert!(paragraph_link_destinations("![alt](/images/a.png)").is_empty());
+    fn link_destinations_image_alone_is_empty() {
+        assert!(link_destinations("![alt](/images/a.png)").is_empty());
     }
 
     #[test]
-    fn paragraph_link_destinations_plain_text_is_empty() {
-        assert!(paragraph_link_destinations("Just some plain text.").is_empty());
+    fn link_destinations_plain_text_is_empty() {
+        assert!(link_destinations("Just some plain text.").is_empty());
     }
 }

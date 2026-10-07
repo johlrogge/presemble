@@ -453,6 +453,16 @@ All addressing stays exact (ADR-056).
   this ran, so suggestions made later are never discarded. Accepted, Rejected
   and Stale records stay. A build never writes to `.presemble`: only the
   conductor's `new` and `with_repo` migrate.
+- The migration is an ordered list of steps, and `MODEL` holds the name of the
+  last step applied:
+  1. `heading-inlines` (stage 4): discards pending suggestions that touch a
+     heading.
+  2. `paragraph-inlines` (stage 5): discards every pending suggestion that
+     touches a paragraph, whether or not its text has markup. A running
+     conductor applies every step after the recorded one, in order, then
+     writes the last step's name. An absent `MODEL` means no step has run. A
+     name the conductor does not know was written by a newer one: nothing
+     runs. A discarded suggestion is deleted, not quarantined.
 
 ## Implementation plan
 
@@ -658,8 +668,11 @@ Every stage leaves the tree green and shippable.
 - `template` stops parsing markdown.
 - Files are rewritten canonically on their first save (§0). That is intended
   behaviour, not a limit.
-- The store holds more nodes, typically 1–6 per paragraph. This is measured in
-  stage 5.
+- The store holds more nodes, typically 1–6 per paragraph. Stage 5 measured it
+  with the `full_build` bench (`just perf`, `just perf-ref <rev>`; medians):
+  moving paragraphs into the store (5.2, against 5.1) cost +12 to 13% at 1K
+  pages (296 to 335 ms) and +8 to 9% at 10K (3.94 to 4.29 s); the rendering
+  stage (5.4, against 5.2) cost +1.9% at 1K and +0.1% at 10K, within noise.
 
 ### Limits resolved
 
@@ -688,6 +701,10 @@ Every stage leaves the tree green and shippable.
   silently changed.
 - L22 (new): emptying a paragraph is refused; delete it instead.
 - L21 is not assigned. Canonicalisation is intended behaviour (§0).
+- L25 (new): a paragraph whose text is a link-expression lookalike
+  (`[x](->> :post)`, with the brackets escaped) is diagnosed like the
+  unescaped one, because the checks read what an author would have typed.
+  Write it as a code span to show it literally.
 - Unused link reference definitions are not written (C3).
 
 ## Amendments
@@ -756,6 +773,34 @@ Every stage leaves the tree green and shippable.
   `Text` node in document order, in `slot_editor` and, through the same
   transform, in the LSP code action. There is no fix when a code span or
   inline HTML comes before the first letter; comments are skipped.
+
+### Stage 5 amendments (paragraphs)
+
+- **§5, markers:** a trailing `{#name}` of a paragraph is the structural
+  `marker`, and the content excludes it. A literal `{#x}` in text is written
+  escaped. Marker misuse is diagnosed from the model, and the paragraph still
+  goes to `unassigned`. Link expressions are recognised before a paragraph is
+  read as inlines.
+- **§6, store encoding:** a paragraph is its optional `marker` attribute and its
+  inline nodes. A payload `paragraph` takes the `marker` attribute and literal
+  text.
+- **§9, refusals:** emptying a paragraph is refused (L22), and so is a blank
+  line in any text edit of a paragraph, because paragraph text never holds
+  `\n\n`. Both are `InvalidValue`.
+- **§10, block edits:** a paragraph lowers like a heading: with the same marker,
+  a container search-replace on the block selection when the diff touches no
+  atom and reproduces the proposal, otherwise `SetInlines`; a marker change, a
+  change of kind or several blocks is a `Replace`. A sole link or image is still
+  a `Link` or `Image` block until stage 5b, so adding text after a link is a
+  `Replace`.
+- **§11, references:** references of an unassigned paragraph are computed from
+  its nodes: a link in emphasis counts, an image never does.
+- **§12, rendering:** body paragraphs render through `inline_nodes`. Paragraph
+  slots are `Value::Inlines`, so a template that inserts one shows its
+  formatting (it used to show the raw markdown) and in a string context it
+  reads its plain text. `ContentElement::paragraph_source()` is removed;
+  `inline_children` remains for blockquotes and lists (stages 8 and 9).
+- **§15, migration:** see the step list there.
 
 ## Related
 

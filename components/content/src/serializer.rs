@@ -1341,9 +1341,16 @@ headings
         let saved = serialize_elements(&flat.elements);
         assert_eq!(saved, "See [a](/x).\n\nText.");
         // The paragraph links to /x before the save and after it.
-        assert_eq!(crate::parser::paragraph_link_destinations(src), vec!["/x".to_string()]);
+        let first_paragraph_links = |text: &str| -> Vec<String> {
+            let doc = crate::parser::parse_document(text).expect("parses");
+            let ContentElement::Paragraph { content, .. } = &doc.elements[0].node else {
+                panic!("a paragraph first");
+            };
+            content.link_destinations().into_iter().map(str::to_string).collect()
+        };
+        assert_eq!(first_paragraph_links(src), vec!["/x".to_string()]);
         assert_eq!(
-            crate::parser::paragraph_link_destinations(&saved),
+            first_paragraph_links(&saved),
             vec!["/x".to_string()],
             "the used definition's link survives a save: {saved:?}"
         );

@@ -45,9 +45,12 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                         // Does not decode — fall through to Record
                     }
                     "paragraph" => {
-                        // stage 5.4: a paragraph's value is its inline nodes.
-                        if let Some(t) = content_store::paragraph_source(store, id) {
-                            return template::Value::Text(t);
+                        // A paragraph's value is its inline nodes, as a
+                        // heading's is (ADR-064).
+                        if let Some(content) = content_store::paragraph_inlines(store, id) {
+                            return template::Value::Inlines(
+                                template::inline_nodes(&content).into(),
+                            );
                         }
                         // Does not decode — fall through to Record
                     }
@@ -406,16 +409,21 @@ mod tests {
         assert_eq!(val.display_text().as_deref(), Some("The <div> element"));
     }
 
+    /// A paragraph holds inline nodes; its value is those nodes, and in a
+    /// string context their plain text (ADR-064), as for a heading.
     #[test]
-    fn paragraph_element_with_text_child_returns_text_value() {
+    fn node_to_value_paragraph_is_its_inlines() {
         let mut store = NodeStore::new();
-        let para_name = store.intern("paragraph");
-        let para = store.add_node(Node::Element(para_name));
-        let text_node = store.add_node(Node::Text("Body text.".to_string()));
-        store.add_edge(para, Edge::Child(text_node));
+        let el = content::ContentElement::paragraph_from_markdown(
+            "Body *text* with `<div>` and ![c](c.png).",
+        );
+        let para = content_store::block_to_store(&el, &mut store);
 
         let val = node_to_value(&store, para);
-        assert!(matches!(val, template::Value::Text(s) if s == "Body text."));
+        let template::Value::Inlines(nodes) = &val else { panic!("{val:?}") };
+        let html = template::serialize_nodes(nodes);
+        assert!(html.starts_with("Body <em>text</em> with <code>&lt;div&gt;</code> and <img "), "{html}");
+        assert_eq!(val.display_text().as_deref(), Some("Body text with <div> and ."));
     }
 
     #[test]

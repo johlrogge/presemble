@@ -54,22 +54,26 @@ pub fn heading_plain_text(
     heading_inlines(store, id).map(|content| content.plain_text())
 }
 
-/// The canonical markdown source of the paragraph node `id`, or `None` when
-/// it does not decode (not a paragraph, or malformed).
-///
-/// What the store held before paragraphs stored inline nodes (ADR-059 stage
-/// 5.2): readers that still render or scan a paragraph as markdown read it
-/// through here.
-// stage 5.4: renderers read the nodes and this goes.
-#[allow(deprecated)]
-pub fn paragraph_source(
+/// The inline content of the paragraph node `id`, or `None` when it does not
+/// decode (not a paragraph, or malformed). Like [`heading_inlines`], it reads
+/// only the content: the marker is not part of it.
+pub fn paragraph_inlines(
+    store: &node_store::NodeStore,
+    id: node_store::NodeId,
+) -> Option<content::inline::Inlines> {
+    (element_name_of(store, id).as_deref() == Some("paragraph"))
+        .then(|| inlines_from_store(store, id, content::inline::InlineContext::Paragraph).ok())
+        .flatten()
+}
+
+/// The plain text of the paragraph node `id` (ADR-059 §8): what readers that
+/// need text (field text, search) see.
+pub fn paragraph_plain_text(
     store: &node_store::NodeStore,
     id: node_store::NodeId,
 ) -> Option<String> {
-    (element_name_of(store, id).as_deref() == Some("paragraph"))
-        .then(|| block_from_node(store, id).ok())
-        .flatten()
-        .and_then(|el| el.paragraph_source())
+    use content::AsPlainText;
+    paragraph_inlines(store, id).map(|content| content.plain_text())
 }
 
 #[cfg(test)]
