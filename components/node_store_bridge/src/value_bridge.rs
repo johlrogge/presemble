@@ -34,10 +34,13 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                 // not as Records. This matches what build_article_graph does for the DataGraph pipeline.
                 let element_name = store.resolve_name(*name);
                 match element_name {
-                    // A heading's value is its plain text (ADR-059 §8).
+                    // A heading's value is its inline content (ADR-064); in
+                    // a string context it reads as its plain text.
                     "heading" => {
-                        if let Some(text) = content_store::heading_plain_text(store, id) {
-                            return template::Value::Text(text);
+                        if let Some(content) = content_store::heading_inlines(store, id) {
+                            return template::Value::Inlines(
+                                template::inline_nodes(&content).into(),
+                            );
                         }
                         // Does not decode — fall through to Record
                     }
@@ -221,7 +224,7 @@ pub fn value_to_node(store: &mut NodeStore, value: &template::Value) -> NodeId {
             }
             element
         }
-        template::Value::Nodes(nodes) => {
+        template::Value::Nodes(nodes) | template::Value::Inlines(nodes) => {
             // A tree of nodes: one element tree per top-level node, in a collection.
             let collection = store.add_node(Node::Collection);
             for node in nodes.iter() {
@@ -377,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn heading_element_with_text_child_returns_text_value() {
+    fn heading_element_with_text_child_returns_inlines_value() {
         let mut store = NodeStore::new();
         let heading_name = store.intern("heading");
         let heading = store.add_node(Node::Element(heading_name));
@@ -385,21 +388,28 @@ mod tests {
         store.add_edge(heading, Edge::Child(text_node));
 
         let val = node_to_value(&store, heading);
-        assert!(matches!(val, template::Value::Text(s) if s == "My Title"));
+        assert!(matches!(&val, template::Value::Inlines(_)), "{val:?}");
+        assert_eq!(val.display_text().as_deref(), Some("My Title"));
     }
 
-    /// A heading holds inline nodes; its value is the plain text (ADR-059 §8).
+    /// A heading holds inline nodes; its value is those nodes, and in a
+    /// string context their plain text (ADR-064).
     #[test]
-    fn node_to_value_heading_is_plain_text() {
+    fn node_to_value_heading_is_its_inlines() {
         let mut store = NodeStore::new();
         let el = content::ContentElement::heading_from_markdown(
             schema::HeadingLevel::new(2).unwrap(),
-            "The `<div>` element",
+            "The `<div>` *element*",
         );
         let heading = content_store::block_to_store(&el, &mut store);
 
         let val = node_to_value(&store, heading);
-        assert!(matches!(&val, template::Value::Text(s) if s == "The <div> element"), "{val:?}");
+        let template::Value::Inlines(nodes) = &val else { panic!("{val:?}") };
+        assert_eq!(
+            template::serialize_nodes(nodes),
+            "The <code>&lt;div&gt;</code> <em>element</em>"
+        );
+        assert_eq!(val.display_text().as_deref(), Some("The <div> element"));
     }
 
     #[test]
@@ -415,15 +425,15 @@ mod tests {
     }
 
     #[test]
-    fn heading_element_without_children_is_empty_text() {
+    fn heading_element_without_children_is_empty_inlines() {
         let mut store = NodeStore::new();
         let heading_name = store.intern("heading");
         let heading = store.add_node(Node::Element(heading_name));
-        // No inline nodes: an empty heading, whose plain text is empty (as it
-        // was when it stored an empty source).
+        // No inline nodes: an empty heading, whose plain text is empty.
 
         let val = node_to_value(&store, heading);
-        assert!(matches!(&val, template::Value::Text(s) if s.is_empty()), "{val:?}");
+        assert!(matches!(&val, template::Value::Inlines(n) if n.is_empty()), "{val:?}");
+        assert_eq!(val.display_text().as_deref(), Some(""));
     }
 
     #[test]

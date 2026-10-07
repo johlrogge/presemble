@@ -758,6 +758,29 @@ mod tests {
         );
     }
 
+    /// Guard: the level of a slot heading belongs to the schema, so a markdown
+    /// edit cannot change it. The same text is NoChange; different text keeps
+    /// the heading where it is (an in-place text edit, never a Replace), even
+    /// when the text looks like a heading marker.
+    #[test]
+    fn markdown_slot_heading_edit_cannot_change_level() {
+        let slot_heading = ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "First");
+        let (store, block) = store_with("slot", &slot_heading);
+        assert_eq!(
+            lower(&store, block, SEL, &md("First"), &md("First")),
+            Ok(Lowering::NoChange)
+        );
+        for proposed in ["Second", "# Second", "### Second"] {
+            let l = expect_lowered(lower(&store, block, SEL, &md("First"), &md(proposed)));
+            assert!(
+                !matches!(l.mutation, NedMutation::Replace(_)),
+                "{proposed:?} replaced the block: {:?}",
+                l.mutation
+            );
+            assert_eq!(l.selection, SEL, "{proposed:?}");
+        }
+    }
+
     #[test]
     fn lower_accepts_edn_proposed() {
         let el = paragraph("The quick brown fox.");

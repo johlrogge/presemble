@@ -500,7 +500,7 @@ mod tests {
         // Verify each item has a title field
         for (url, data) in &items {
             assert!(
-                matches!(data.resolve(&["title"]), Some(template::Value::Text(_))),
+                matches!(data.resolve(&["title"]), Some(template::Value::Inlines(_))),
                 "item {url} should have a title in its DataGraph"
             );
         }

@@ -172,19 +172,15 @@ pub fn build_graph(
             data.insert(KEY_PRESEMBLE_FILE, template::Value::Text(presemble_file));
             let url_path = site_index::url_for_stem_slug(schema_stem_str, &slug);
             data.insert("url", template::Value::Text(url_path.clone()));
+            // A title is its text in a string context, whatever it is made of.
             let title = match data.resolve(&["title"]) {
-                Some(template::Value::Text(t)) => t.clone(),
+                Some(v @ (template::Value::Text(_) | template::Value::Inlines(_))) => {
+                    v.display_text().unwrap_or_default()
+                }
                 _ => slug.clone(),
             };
-            let source_text = template::stored_text(&data, "title");
-            data.insert(
-                "link",
-                template::Value::Record(template::synthesize_link(
-                    &title,
-                    &url_path,
-                    source_text.as_deref(),
-                )),
-            );
+            let link = template::synthesize_link(&title, &url_path, template::title_editor(&data));
+            data.insert("link", template::Value::Record(link));
 
             // Compute output path
             let output_path =
@@ -298,18 +294,13 @@ pub fn build_graph(
         };
         data.insert("url", template::Value::Text(url_path_str.clone()));
         let title = match data.resolve(&["title"]) {
-            Some(template::Value::Text(t)) => t.clone(),
+            Some(v @ (template::Value::Text(_) | template::Value::Inlines(_))) => {
+                v.display_text().unwrap_or_default()
+            }
             _ => schema_stem_str.to_string(),
         };
-        let source_text = template::stored_text(&data, "title");
-        data.insert(
-            "link",
-            template::Value::Record(template::synthesize_link(
-                &title,
-                &url_path_str,
-                source_text.as_deref(),
-            )),
-        );
+        let link = template::synthesize_link(&title, &url_path_str, template::title_editor(&data));
+        data.insert("link", template::Value::Record(link));
 
         let collection_content_path = repo.collection_content_path(stem);
         let collection_schema_path = repo.collection_schema_path(stem);
@@ -495,12 +486,13 @@ mod tests {
     }
 
     #[test]
-    fn published_build_has_no_stored_text_attribute() {
+    fn published_build_has_no_editor_attributes() {
         let html = render_item(SourceAttachment::Omit);
         assert!(html.contains("Hello World"), "title should render: {html}");
         assert!(
-            !html.contains("data-presemble-text"),
-            "published output must not carry stored text: {html}"
+            !html.contains(template::constants::ATTR_MD)
+                && !html.contains(template::constants::ATTR_ADDRESS),
+            "published output must not carry editor attributes: {html}"
         );
     }
 
@@ -517,21 +509,21 @@ mod tests {
     }
 
     #[test]
-    fn editorial_build_has_no_stored_text_attribute() {
-        // The browser edits `data-presemble-md` (ADR-059 section 10); the
-        // stored-text attribute is gone.
+    fn editorial_build_title_and_link_carry_the_titles_address() {
+        // The browser edits `data-presemble-md` and addresses by
+        // `data-presemble-address` (ADR-059 section 10); the title link takes
+        // both from the title heading.
         let html = render_item(SourceAttachment::Attach);
         assert!(html.contains("Hello World"), "title should render: {html}");
-        assert!(
-            !html.contains("data-presemble-text"),
-            "editorial output must not carry stored text: {html}"
-        );
+        let address = template::constants::ATTR_ADDRESS;
+        assert_eq!(html.matches(address).count(), 2, "{html}");
+        assert!(!html.contains("data-presemble-text"), "{html}");
     }
 
     /// Guard (ADR-063): the synthesized link reads the title's plain text
-    /// and carries its source.
+    /// and carries the title heading's editor record.
     #[test]
-    fn synthesized_link_text_is_plain_and_source_is_stored() {
+    fn synthesized_link_text_is_plain_and_carries_the_title_editor_record() {
         let repo = site_repository::SiteRepository::builder()
             .schema("post", "# Post title {#title}\noccurs\n: exactly once\n")
             .content("post", "hello", "# *Hello* \\<World>\n")
@@ -546,7 +538,7 @@ mod tests {
         };
         assert!(matches!(link.resolve(&["text"]), Some(template::Value::Text(t)) if t == "Hello <World>"));
         assert!(matches!(
-            link.resolve(&[template::constants::KEY_SOURCE_TEXT]),
+            link.resolve(&[template::constants::KEY_EDITOR_MD]),
             Some(template::Value::Text(t)) if t == "*Hello* \\<World>"
         ));
     }

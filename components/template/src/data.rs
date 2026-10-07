@@ -1,4 +1,4 @@
-use content::{AsPlainText, ContentElement, Document};
+use content::{ContentElement, Document};
 use schema::{Element, Grammar, Spanned};
 use std::sync::Arc;
 
@@ -30,6 +30,10 @@ pub enum Value {
     /// A node tree (body content built from markdown). Templates get nodes,
     /// never HTML (ADR-064).
     Nodes(Arc<[crate::dom::Node]>),
+    /// The inline content of one element (a heading slot): text, emphasis,
+    /// links. An insert wraps it in the element the template asks for, always,
+    /// even when it is empty. In a string context it is its plain text.
+    Inlines(Arc<[crate::dom::Node]>),
     /// A structured record with named sub-fields (e.g., author, cover)
     Record(DataGraph),
     /// A list of values (multi-occurrence slots like summary)
@@ -69,6 +73,7 @@ impl std::fmt::Debug for Value {
         match self {
             Value::Text(s) => write!(f, "Text({s:?})"),
             Value::Nodes(n) => write!(f, "Nodes({} nodes)", n.len()),
+            Value::Inlines(n) => write!(f, "Inlines({} nodes)", n.len()),
             Value::Record(g) => write!(f, "Record({g:?})"),
             Value::List(items) => write!(f, "List({items:?})"),
             Value::Absent => write!(f, "Absent"),
@@ -97,7 +102,7 @@ impl Value {
                 graph.resolve(&["text"])
                     .and_then(|v| v.display_text())
             }
-            Value::Nodes(nodes) => Some(content::inline::normalize_plain_text(
+            Value::Nodes(nodes) | Value::Inlines(nodes) => Some(content::inline::normalize_plain_text(
                 &crate::markdown_nodes::text_content(nodes),
             )),
             Value::List(items) => {
@@ -203,30 +208,32 @@ pub enum OutputMode {
 
 /// Create a synthesized link record for a content item.
 /// The `_source_slot` field tells the browser editor which grammar slot
-/// to write back to when the link text is edited. `source_text` is the
-/// title's stored source, from which the title link's editor markdown is
-/// derived.
-pub fn synthesize_link(title: &str, url_path: &str, source_text: Option<&str>) -> DataGraph {
+/// to write back to when the link text is edited. `title_editor` is the title
+/// heading's editor record (its address and its `Content` projection as
+/// markdown, [`title_editor`]); the link carries both, so the browser editor
+/// edits the title through the link as it does through the heading.
+pub fn synthesize_link(title: &str, url_path: &str, title_editor: Option<&DataGraph>) -> DataGraph {
     let mut link = DataGraph::new();
     link.insert("href", Value::Text(url_path.to_string()));
     link.insert("text", Value::Text(title.to_string()));
     link.insert(crate::constants::KEY_SOURCE_SLOT, Value::Text("title".to_string()));
-    if let Some(source_text) = source_text {
-        link.insert(crate::constants::KEY_SOURCE_TEXT, Value::Text(source_text.to_string()));
+    if let Some(editor) = title_editor {
+        for key in [crate::constants::KEY_EDITOR_ADDRESS, crate::constants::KEY_EDITOR_MD] {
+            if let Some(value @ Value::Text(_)) = editor.resolve(&[key]) {
+                link.insert(key, value.clone());
+            }
+        }
     }
     link
 }
 
-/// The stored text of heading slot `slot`, as inserted by
-/// `build_article_graph` under `KEY_STORED_TEXT_PREFIX` + slot name.
-///
-/// This, `KEY_STORED_TEXT_PREFIX` and `KEY_SOURCE_TEXT` go in ADR-059 stage 4,
-/// when the title link takes its md and address from the title heading's
-/// projection.
-pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
-    let key = format!("{}{slot}", crate::constants::KEY_STORED_TEXT_PREFIX);
+/// The editor record of the `title` slot of `graph`, as `build_article_graph`
+/// puts it there in editorial output (`None` in published output, or when the
+/// slot has no heading).
+pub fn title_editor(graph: &DataGraph) -> Option<&DataGraph> {
+    let key = format!("{}title", crate::constants::KEY_EDITOR_PREFIX);
     match graph.resolve(&[key.as_str()]) {
-        Some(Value::Text(t)) => Some(t.clone()),
+        Some(Value::Record(record)) => Some(record),
         _ => None,
     }
 }
@@ -237,9 +244,8 @@ pub fn stored_text(graph: &DataGraph, slot: &str) -> Option<String> {
 
 /// Build a DataGraph from a Document and its Grammar.
 /// Slot names become top-level keys. Body content is rendered as HTML.
-/// Editorial output also carries each heading slot's stored source (ADR-063),
-/// the input of a synthesized title link's markdown; published output carries
-/// no editor-only data.
+/// A heading slot's value is its inline nodes (ADR-064). Published output
+/// carries no editor-only data.
 /// Editorial output also carries the editor attributes of each body block and
 /// slot element: its canonical markdown and its address (ADR-059 section 10).
 pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode) -> DataGraph {
@@ -312,18 +318,12 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                     && let ContentElement::Heading { content, .. } = &spanned.node
                 {
                     insert_editor(&mut graph, &slot_key, elements, vec![0], true);
-                    // The stored source, which the browser editor edits (ADR-063).
-                    if editorial {
-                        let stored_key =
-                            format!("{}{slot_key}", crate::constants::KEY_STORED_TEXT_PREFIX);
-                        // stage 4d removes the stored-text keys.
-                        #[allow(deprecated)]
-                        let source = spanned.node.heading_source().unwrap_or_default();
-                        graph.insert(stored_key, Value::Text(source));
-                    }
-                    // Templates get the plain text until heading slots render
-                    // inline nodes (ADR-064).
-                    graph.insert(slot_key, Value::Text(content.plain_text()));
+                    // A heading slot is its inline nodes (ADR-064); in a string
+                    // context they read as their plain text (`display_text`).
+                    graph.insert(
+                        slot_key,
+                        Value::Inlines(crate::inline_nodes::inline_nodes(content).into()),
+                    );
                 }
             }
 
@@ -572,35 +572,34 @@ mod tests {
     use schema::{parse_schema, Span as SchemaSpan, Spanned};
 
     #[test]
-    fn published_graph_has_no_stored_text_keys() {
+    fn published_graph_has_no_editor_record() {
         let grammar = parse_schema(
             "# Post title {#title}\noccurs\n: exactly once\n\n\
              Summary text. {#summary}\noccurs\n: exactly once\n",
         )
         .expect("schema parses");
         let doc = parse_and_assign("# Title\n\nA summary.\n", &grammar).expect("content parses");
-        let key = format!("{}title", crate::constants::KEY_STORED_TEXT_PREFIX);
 
         let published = build_article_graph(&doc, &grammar, OutputMode::Published);
-        assert!(
-            published.resolve(&[key.as_str()]).is_none(),
-            "published graph must not carry {key}"
-        );
+        assert!(title_editor(&published).is_none(), "published graph carries no editor record");
 
+        // The editorial graph's title editor record holds the heading's
+        // `Content` projection; a title link made from it carries both keys.
         let editorial = build_article_graph(&doc, &grammar, OutputMode::Editorial);
-        match editorial.resolve(&[key.as_str()]) {
+        let record = title_editor(&editorial).expect("the editorial graph has one");
+        let link = synthesize_link("Title", "/x", Some(record));
+        match link.resolve(&[crate::constants::KEY_EDITOR_MD]) {
             Some(Value::Text(t)) => assert_eq!(t, "Title"),
-            other => panic!("editorial graph should carry {key}, got {other:?}"),
+            other => panic!("the title link should carry the heading's md, got {other:?}"),
         }
+        assert!(link.resolve(&[crate::constants::KEY_EDITOR_ADDRESS]).is_some());
     }
 
     #[test]
-    fn synthesize_link_without_source_text_has_no_source_text_key() {
+    fn synthesize_link_without_a_title_editor_has_no_editor_keys() {
         let link = synthesize_link("T", "/x", None);
-        assert!(
-            link.resolve(&[crate::constants::KEY_SOURCE_TEXT]).is_none(),
-            "a link without source text must not carry _source_text"
-        );
+        assert!(link.resolve(&[crate::constants::KEY_EDITOR_MD]).is_none());
+        assert!(link.resolve(&[crate::constants::KEY_EDITOR_ADDRESS]).is_none());
     }
 
     /// The body as serialized HTML, for asserting on rendered output.
@@ -854,11 +853,11 @@ mod tests {
         let grammar = article_grammar();
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         match graph.resolve(&["title"]) {
-            Some(Value::Text(t)) => assert_eq!(
-                t,
-                "Hello, World: Getting Started With Presemble"
+            Some(v @ Value::Inlines(_)) => assert_eq!(
+                v.display_text().as_deref(),
+                Some("Hello, World: Getting Started With Presemble")
             ),
-            other => panic!("expected title text, got {other:?}"),
+            other => panic!("expected the title as inlines, got {other:?}"),
         }
     }
 
@@ -1273,8 +1272,8 @@ mod tests {
 
         // title should be real
         match graph.resolve(&["title"]) {
-            Some(Value::Text(_)) => {}
-            other => panic!("expected real Text for title, got {other:?}"),
+            Some(Value::Inlines(_)) => {}
+            other => panic!("expected real Inlines for title, got {other:?}"),
         }
 
         // summary should be real (single paragraph, stored as List)

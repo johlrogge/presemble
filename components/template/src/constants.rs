@@ -31,11 +31,6 @@ pub const MSG_HTML_REMOVED: &str = "Raw HTML is not published. Remove it to publ
 /// The value is a `Value::Record` where each entry maps a constraint suffix to its string value.
 pub const KEY_SCHEMA_CONSTRAINTS_PREFIX: &str = "_presemble_schema_constraints_";
 
-/// DataGraph key prefix for a heading slot's stored text (ADR-063).
-/// The full key for slot "title" is `"_presemble_text_title"`.
-/// The value is a `Value::Text` holding the text as stored in the document.
-pub const KEY_STORED_TEXT_PREFIX: &str = "_presemble_text_";
-
 /// DataGraph key prefix for a slot's editor attributes (ADR-059 section 10).
 /// The full key for slot "title" is `"_presemble_editor_title"`. The value is
 /// a `Record` (a single-value slot) or a `List` of records, one per rendered
@@ -48,13 +43,11 @@ pub const KEY_EDITOR_PREFIX: &str = "_presemble_editor_";
 /// document root. The underscore keeps it out of slot names, and graph views
 /// never read `Derived` edges, so it is not a template path.
 pub const KEY_DOCUMENT_EDGE: &str = "_document";
-/// Key of the address inside an editor record.
+/// Key of the address inside an editor record. A synthesized title link
+/// carries the same two keys, copied from the title heading's editor record.
 pub const KEY_EDITOR_ADDRESS: &str = "address";
 /// Key of the canonical markdown inside an editor record.
 pub const KEY_EDITOR_MD: &str = "md";
-/// DataGraph key on a synthesized link record holding the stored text of the
-/// slot named by `_source_slot`.
-pub const KEY_SOURCE_TEXT: &str = "_source_text";
 
 /// HTML attribute names for schema-instance count data (emitted on the document root element
 /// during schema-mode rendering so the browser badge overlay can display them).

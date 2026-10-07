@@ -3,7 +3,7 @@ pub fn value_to_edn(value: &template::Value) -> String {
     match value {
         template::Value::Text(s) => format!("\"{}\"", escape_edn_string(s)),
         // Nodes are written as hiccup: a vector of one form per top-level node.
-        template::Value::Nodes(nodes) => {
+        template::Value::Nodes(nodes) | template::Value::Inlines(nodes) => {
             let forms: Vec<String> = nodes
                 .iter()
                 .map(|n| template::serialize_to_hiccup(std::slice::from_ref(n)))

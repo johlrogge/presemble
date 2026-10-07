@@ -1458,14 +1458,13 @@ impl Conductor {
 
         // Synthesize link record
         let title = match data.resolve(&["title"]) {
-            Some(template::Value::Text(t)) => t.clone(),
+            Some(v @ (template::Value::Text(_) | template::Value::Inlines(_))) => {
+                v.display_text().unwrap_or_default()
+            }
             _ => url.split('/').next_back().unwrap_or("").to_string(),
         };
-        let source_text = template::stored_text(&data, "title");
-        data.insert(
-            "link",
-            template::Value::Record(template::synthesize_link(&title, &url, source_text.as_deref())),
-        );
+        let link = template::synthesize_link(&title, &url, template::title_editor(&data));
+        data.insert("link", template::Value::Record(link));
 
         Some(data)
     }
@@ -5025,11 +5024,12 @@ mod node_store_index_tests {
             .expect("datagraph_for_document should succeed");
 
         match data.resolve(&["title"]) {
-            Some(template::Value::Text(t)) => assert_eq!(
-                t, "Hello World",
-                "title should be 'Hello World', got {t:?}"
+            Some(v @ template::Value::Inlines(_)) => assert_eq!(
+                v.display_text().as_deref(),
+                Some("Hello World"),
+                "title should be 'Hello World', got {v:?}"
             ),
-            other => panic!("expected title Text value, got {other:?}"),
+            other => panic!("expected the title as inlines, got {other:?}"),
         }
     }
 
@@ -5350,11 +5350,12 @@ mod update_document_in_store_tests {
             .expect("datagraph_for_document should succeed on new root");
 
         match data.resolve(&["title"]) {
-            Some(template::Value::Text(t)) => assert_eq!(
-                t, "Updated Title",
-                "title should reflect updated content, got {t:?}"
+            Some(v @ template::Value::Inlines(_)) => assert_eq!(
+                v.display_text().as_deref(),
+                Some("Updated Title"),
+                "title should reflect updated content, got {v:?}"
             ),
-            other => panic!("expected title Text value, got {other:?}"),
+            other => panic!("expected the title as inlines, got {other:?}"),
         }
     }
 
@@ -10253,6 +10254,64 @@ mod link_expression_pipeline_tests {
         assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
         assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
         assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2"]));
+    }
+
+    /// Guard: a thread sorts by a title's plain text, not by its markdown
+    /// source: `*Zebra*` sorts as `Zebra`, after `Apple` and `Mango`.
+    #[test]
+    fn sorting_by_a_formatted_title_uses_its_plain_text() {
+        let tmp = build_site();
+        let root = tmp.path();
+        for (slug, title) in [("p1", "*Zebra*"), ("p2", "Apple"), ("p3", "Mango")] {
+            std::fs::write(
+                root.join(format!("content/post/{slug}.md")),
+                post(title, "a", "2026-01-10", "notes"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("content/page/home.md"),
+            "# Home\n\n[By title](->> :post (sort-by :title)) {#latest}\n\n----\n\nWelcome.\n",
+        )
+        .unwrap();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p2", "/post/p3", "/post/p1"])
+        );
+    }
+
+    /// A collection page that lists posts through a thread slot shows each
+    /// post's title with its formatting: `Hello *World*` is `Hello <em>World</em>`.
+    #[test]
+    fn collection_listing_shows_a_formatted_title_with_its_formatting() {
+        let tmp = build_site();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("content/post/p3.md"),
+            post("Hello *World*", "a", "2026-03-10", "news"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("content/page/home.md"),
+            "# Home\n\n[Latest post](->> :post (sort-by :published :desc) (take 1)) {#latest}\n\n----\n\nWelcome.\n",
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("templates/page/item.hiccup")).unwrap();
+        std::fs::write(
+            root.join("templates/page/item.html"),
+            r#"<ul><template data-each="input.latest"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#,
+        )
+        .unwrap();
+        let conductor = make_conductor(&tmp);
+        conductor.render_url("/page/home").expect("renders");
+        let html = std::fs::read_to_string(site_index::output_path_for_stem_slug(
+            &conductor.output_dir,
+            "page",
+            "home",
+        ))
+        .expect("the page is rendered");
+        assert!(html.contains("Hello <em>World</em></h3>"), "{html}");
     }
 
     fn apply_edn_block_edit(

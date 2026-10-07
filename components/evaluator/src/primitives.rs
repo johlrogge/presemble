@@ -460,6 +460,7 @@ pub fn register_builtins(root: &RootEnv) {
             Value::Fn(_) => "fn",
             Value::Absent => "nil",
             Value::Nodes(_) => "nodes",
+            Value::Inlines(_) => "inlines",
             Value::Suggestion { .. } => "nil",
             Value::LinkExpression { .. } => "nil",
             Value::Opaque(_) => "opaque",

@@ -17,7 +17,7 @@ pub mod transformer;
 
 pub use ast::{Expr, Transform};
 pub use constraints::{constraint_attr_name, extract_slot_constraint_attrs, CONSTRAINT_ATTR_PREFIX};
-pub use data::{build_article_graph,build_schema_included_by_json, inject_schema_included_by, stored_text, synthesize_link, Callable, DataGraph, OutputMode, SuggestionKind, Value};
+pub use data::{build_article_graph,build_schema_included_by_json, inject_schema_included_by, synthesize_link, title_editor, Callable, DataGraph, OutputMode, SuggestionKind, Value};
 pub use graph_view::{DataRef, GraphView, ResolvedNode};
 pub use error::TemplateError;
 pub use inline_nodes::inline_nodes;

@@ -227,7 +227,7 @@ pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
                 Some(Value::Text(t)) => t.clone(),
                 Some(Value::Absent) | None => String::new(),
                 // Nodes in a string context are their text, never markup (ADR-064).
-                Some(v @ Value::Nodes(_)) => v.display_text().unwrap_or_default(),
+                Some(v @ (Value::Nodes(_) | Value::Inlines(_))) => v.display_text().unwrap_or_default(),
                 Some(Value::List(items)) => items
                     .first()
                     .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
@@ -552,6 +552,23 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
             Ok(vec![Node::Element(element)])
         }
 
+        // Inline content (a heading slot) is the content of the element the
+        // template asks for, like text is: always wrapped, even when empty.
+        Some(Value::Inlines(nodes)) => {
+            let tag = as_tag.unwrap_or("span").to_string();
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class)),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+            ];
+            if editorial {
+                attrs.extend(resolve_editor_attrs(data_path, graph, &presemble_file));
+            }
+            attrs.extend(constraint_attrs.iter().cloned());
+            Ok(vec![Node::Element(Element { name: tag, attrs, children: nodes.to_vec() })])
+        }
+
+        // Block nodes (the body) are slot elements already.
         Some(Value::Nodes(nodes)) => {
             let mut nodes = nodes.to_vec();
             crate::body_nodes::stamp_file(&mut nodes, &presemble_file);
@@ -886,20 +903,21 @@ fn render_insert_native(
 
                 // Heading or paragraph — extract first text child
                 if element_name == "heading" || element_name == "paragraph" {
-                    // A heading shows its plain text until heading slots
-                    // render inline nodes (stage 4d).
-                    let text = if element_name == "heading" {
-                        content_store::heading_plain_text(store, id)
+                    // A heading shows its inline nodes (ADR-064); a paragraph
+                    // its text.
+                    let shown: Option<Vec<Node>> = if element_name == "heading" {
+                        content_store::heading_inlines(store, id)
+                            .map(|content| crate::inline_nodes::inline_nodes(&content))
                     } else {
                         store.children(id).into_iter().find_map(|c| {
                             if let Some(node_store::Node::Text(s)) = store.get(c) {
-                                Some(s.clone())
+                                Some(vec![Node::Text(s.clone())])
                             } else {
                                 None
                             }
                         })
                     };
-                    if let Some(shown) = text {
+                    if let Some(shown) = shown {
                         let tag = as_tag.unwrap_or("span").to_string();
                         let mut elem_attrs = vec![
                             ("class".to_string(), Form::Str(class.to_string())),
@@ -911,7 +929,7 @@ fn render_insert_native(
                         let element = Element {
                             name: tag,
                             attrs: elem_attrs,
-                            children: vec![Node::Text(shown)],
+                            children: shown,
                         };
                         return Ok(Some(vec![Node::Element(element)]));
                     }
@@ -978,16 +996,15 @@ fn render_insert_native(
                     let mut source_attrs: Vec<(String, Form)> = Vec::new();
                     let mut link_editor: Vec<(String, Form)> = Vec::new();
                     if let Some(source) = source_slot {
-                        // A synthesized title link derives its editor markdown from the title's stored source (ADR-063).
-                        let source_text = (editorial && source == "title")
-                            .then(|| node_attr_str(store, id, crate::constants::KEY_SOURCE_TEXT))
-                            .flatten();
+                        // A synthesized title link carries the title heading's
+                        // editor record: its address and its markdown.
+                        if editorial && source == "title" {
+                            let address = node_attr_str(store, id, crate::constants::KEY_EDITOR_ADDRESS)
+                                .and_then(|a| content::address::with_file(&a, presemble_file));
+                            let md = node_attr_str(store, id, crate::constants::KEY_EDITOR_MD);
+                            link_editor.extend(editor_attrs(address, md));
+                        }
                         source_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
-                        link_editor.extend(
-                            source_text
-                                .into_iter()
-                                .flat_map(|t| title_text_attrs(t, presemble_file)),
-                        );
                     } else if parent_slot(store, id).is_some() {
                         link_editor.extend(editor_here());
                     } else if let EditorAttrs::Computed { page: Some(page) } = editor
@@ -1002,10 +1019,8 @@ fn render_insert_native(
                         let heading = page_document(store, page)
                             .and_then(|document| document_slot_blocks(store, document, "title").into_iter().next());
                         if let Some(heading) = heading {
-                            // stage 4d: the heading's editor record, not its markdown.
-                            let source = content_store::heading_markdown_source(store, heading)
-                                .unwrap_or_default();
-                            link_editor.extend(title_text_attrs(source, presemble_file));
+                            // The heading's own editor record.
+                            link_editor.extend(native_block_bundle(store, heading).unwrap_or_default());
                         }
                     }
 
@@ -1429,38 +1444,14 @@ fn record_attrs(
 }
 
 /// A synthesized title link carries the editor attributes of the title heading
-/// it stands for, derived from the title's stored source (ADR-063). Callers
-/// emit it only in editorial output: the render mode alone decides, whatever
-/// the record was built for.
+/// it stands for: the address and markdown of the heading's editor record,
+/// copied into the link (`synthesize_link`). Callers emit it only in editorial
+/// output: the render mode alone decides, whatever the record was built for.
 fn source_text_attrs(source_slot: &str, sub_graph: &DataGraph, file: &str) -> Vec<(String, Form)> {
     if source_slot != "title" {
         return Vec::new();
     }
-    match sub_graph.resolve(&[crate::constants::KEY_SOURCE_TEXT]) {
-        Some(Value::Text(text)) => title_text_attrs(text.clone(), file),
-        _ => Vec::new(),
-    }
-}
-
-/// The editor attributes of the title heading a synthesized title link stands
-/// for, built from the title's stored source `stored`. Its markdown is the
-/// `Content` projection of the heading and its address that of the first
-/// heading of the `title` slot of `file`.
-fn title_text_attrs(stored: String, file: &str) -> Vec<(String, Form)> {
-    let heading = schema::HeadingLevel::new(1)
-        .map(|level| content::ContentElement::heading_from_markdown(level, &stored));
-    let md = heading
-        .as_ref()
-        .and_then(|h| content::project_markdown(h, content::Projection::Content));
-    let address = heading.as_ref().and_then(|h| {
-        let addresses = content::block_addresses(
-            file,
-            content::AddressContainer::Slot("title"),
-            std::slice::from_ref(h),
-        );
-        addresses.into_iter().next().flatten().filter(|_| !file.is_empty())
-    });
-    editor_attrs(address, md)
+    editor_record_attrs(sub_graph, file)
 }
 
 /// The editor attributes of one element: `data-presemble-md` and
@@ -1639,6 +1630,21 @@ fn render_list_item(
             let mut nodes = nodes.to_vec();
             crate::body_nodes::stamp_file(&mut nodes, file);
             Ok(nodes)
+        }
+
+        // The inline content of one element, in a list: wrapped in the tag.
+        Value::Inlines(nodes) => {
+            let mut attrs = vec![
+                ("class".to_string(), Form::Str(class.to_string())),
+                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+                (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+            ];
+            attrs.extend(editor.iter().cloned());
+            Ok(vec![Node::Element(Element {
+                name: tag.to_string(),
+                attrs,
+                children: nodes.to_vec(),
+            })])
         }
 
         Value::Record(sub_graph) => {
@@ -2626,8 +2632,11 @@ mod tests {
         const OLD_ATTR: &str = "data-presemble-text";
         let title_link =
             |graph: &mut DataGraph| {
-                let link =
-                    crate::data::synthesize_link("Hello src", "/article/hello", Some("Hello *src*"));
+                let link = crate::data::synthesize_link(
+                    "Hello src",
+                    "/article/hello",
+                    Some(&title_editor_record("Hello *src*")),
+                );
                 graph.insert("link", Value::Record(link));
             };
         let mut link_graph = DataGraph::new();
@@ -2642,7 +2651,7 @@ mod tests {
             ("href", "/article/hello"),
             ("text", "Hello src"),
             (crate::constants::KEY_SOURCE_SLOT, "title"),
-            (crate::constants::KEY_SOURCE_TEXT, "Hello *src*"),
+            (crate::constants::KEY_EDITOR_MD, "Hello *src*"),
         ] {
             let name = native_link_store.intern(key);
             let val = native_link_store.add_node(node_store::Node::Text(value.into()));
@@ -2685,10 +2694,21 @@ mod tests {
         assert!(html.contains("data-presemble-md=\"Hello *src*\""), "{html}");
     }
 
+    /// The editor record of a title heading whose `Content` projection is `md`.
+    fn title_editor_record(md: &str) -> DataGraph {
+        let mut record = DataGraph::new();
+        record.insert(crate::constants::KEY_EDITOR_MD, Value::Text(md.to_string()));
+        record
+    }
+
     #[test]
     fn apply_text_on_synthesized_link_carries_title_md() {
         let mut graph = DataGraph::new();
-        let link = crate::data::synthesize_link("Hello src", "/article/hello", Some("Hello *src*"));
+        let link = crate::data::synthesize_link(
+            "Hello src",
+            "/article/hello",
+            Some(&title_editor_record("Hello *src*")),
+        );
         graph.insert("link", Value::Record(link));
 
         let html = render_with(&graph, r#"<presemble:insert data="link" as="h3" apply="text" />"#);
@@ -2699,9 +2719,13 @@ mod tests {
     }
 
     #[test]
-    fn published_render_of_editorial_record_has_no_stored_text() {
+    fn published_render_of_editorial_record_has_no_editor_attributes() {
         let mut graph = DataGraph::new();
-        let link = crate::data::synthesize_link("Hello src", "/article/hello", Some("src"));
+        let link = crate::data::synthesize_link(
+            "Hello src",
+            "/article/hello",
+            Some(&title_editor_record("src")),
+        );
         graph.insert("link", Value::Record(link));
 
         let nodes = parse_template_xml(r#"<presemble:insert data="link" />"#).unwrap();
@@ -2710,13 +2734,13 @@ mod tests {
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
         assert!(html.contains("Hello src"), "link should render: {html}");
         assert!(
-            !html.contains("data-presemble-text"),
-            "published output must not carry stored text: {html}"
+            !html.contains("data-presemble-md") && !html.contains("data-presemble-address"),
+            "published output must not carry editor attributes: {html}"
         );
     }
 
     #[test]
-    fn native_heading_slot_has_no_stored_text_when_published() {
+    fn native_heading_slot_has_no_editor_attributes_when_published() {
         let mut store = node_store::NodeStore::new();
         let root_name = store.intern("page");
         let root = store.add_node(node_store::Node::Element(root_name));
@@ -2734,26 +2758,24 @@ mod tests {
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
         assert!(html.contains("My Heading"), "heading should render: {html}");
         assert!(
-            !html.contains("data-presemble-text"),
-            "published output must not carry stored text: {html}"
+            !html.contains("data-presemble-md") && !html.contains("data-presemble-address"),
+            "published output must not carry editor attributes: {html}"
         );
     }
 
-    // ── Headings store markdown source; slots show plain text (ADR-063) ────
+    // ── Heading slots are inline nodes; strings read their plain text ──────
 
     fn heading_graph(content_src: &str, output: crate::data::OutputMode) -> DataGraph {
         let grammar = schema::parse_schema(STORED_TEXT_SCHEMA).expect("schema parses");
         let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
         let mut input = crate::data::build_article_graph(&doc, &grammar, output);
         let title = match input.resolve(&["title"]) {
-            Some(Value::Text(t)) => t.clone(),
-            other => panic!("title should be text, got {other:?}"),
+            Some(v @ Value::Inlines(_)) => v.display_text().unwrap_or_default(),
+            other => panic!("title should be inlines, got {other:?}"),
         };
-        let source_text = crate::data::stored_text(&input, "title");
-        input.insert(
-            "link",
-            Value::Record(crate::data::synthesize_link(&title, "/post/x", source_text.as_deref())),
-        );
+        let link =
+            crate::data::synthesize_link(&title, "/post/x", crate::data::title_editor(&input));
+        input.insert("link", Value::Record(link));
         let mut graph = DataGraph::new();
         graph.insert("input", Value::Record(input));
         graph
@@ -2792,7 +2814,30 @@ mod tests {
     const TITLE_SOURCE: &str = "Use \\<div> <!-- note -->";
 
     #[test]
-    fn input_title_is_plain_text() {
+    fn input_title_is_plain_text_in_string_context() {
+        use crate::data::OutputMode::Editorial;
+        // Guard: a title in a string context is its plain text, never markup:
+        // no backslash, no comment, no trailing space.
+        let legacy = heading_graph(SOURCE_TITLE, Editorial);
+        let native = heading_store(TITLE_SOURCE);
+        let applied = render_for(
+            &legacy,
+            r#"<presemble:insert data="input.title" as="h1" apply="text" />"#,
+            Editorial,
+        );
+        assert!(applied.contains(">Use &lt;div&gt;</h1>"), "{applied}");
+        // (`:apply` on a native heading is pinned in `node_store_bridge`,
+        // whose graph view resolves it.)
+        let expr = crate::ast::Expr::Lookup(vec!["input".to_string(), "title".to_string()]);
+        assert_eq!(eval_expr_to_string(&expr, &legacy), "Use <div>");
+        let expr = crate::ast::Expr::Lookup(vec!["title".to_string()]);
+        assert_eq!(eval_expr_to_string(&expr, &native), "Use <div>");
+    }
+
+    /// In content position a heading slot is its inline nodes, on both render
+    /// paths: the same element, the same children.
+    #[test]
+    fn input_title_in_content_position_is_its_inline_nodes() {
         use crate::data::OutputMode::Editorial;
         let legacy = render_for(
             &heading_graph(SOURCE_TITLE, Editorial),
@@ -2805,16 +2850,9 @@ mod tests {
             Editorial,
         );
         for html in [legacy, native] {
-            assert!(html.contains(">Use &lt;div&gt;</span>"), "{html}");
+            assert!(html.contains(">Use &lt;div&gt;"), "{html}");
             assert!(!html.contains(">Use \\"), "no backslash in the text: {html}");
         }
-        // `:apply text` reads the same plain text.
-        let applied = render_for(
-            &heading_graph(SOURCE_TITLE, Editorial),
-            r#"<presemble:insert data="input.title" as="h1" apply="text" />"#,
-            Editorial,
-        );
-        assert!(applied.contains(">Use &lt;div&gt;</h1>"), "{applied}");
     }
 
     #[test]
@@ -2832,7 +2870,7 @@ mod tests {
             Editorial,
         );
         for html in [legacy, native] {
-            assert!(html.contains(">Use &lt;div&gt;</h1>"), "{html}");
+            assert!(html.contains(">Use &lt;div&gt;"), "{html}");
             assert!(html.contains(attr), "{html}");
         }
     }
@@ -2866,8 +2904,8 @@ mod tests {
             Published,
         );
         for html in [legacy, native] {
-            assert!(html.contains(">Use &lt;div&gt;</h1>"), "{html}");
-            assert!(!html.contains("data-presemble-text"), "{html}");
+            assert!(html.contains(">Use &lt;div&gt;"), "{html}");
+            assert!(!html.contains("data-presemble-md"), "{html}");
         }
     }
 
@@ -4222,6 +4260,133 @@ mod tests {
         assert!(link.contains(&want), "{link}");
     }
 
+    /// A heading slot in content position shows its formatting (H5, ADR-064),
+    /// on the legacy and the native render path alike.
+    #[test]
+    fn heading_slot_renders_inline_nodes_in_content_position() {
+        use crate::data::OutputMode::Published;
+        // The page as a template sees it: `input` is the article's graph. Its
+        // title is whatever `build_article_graph` makes of the heading; the
+        // test looks only at the rendered HTML.
+        let grammar = schema::parse_schema(STORED_TEXT_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign("# Hello *World*\n\nA summary.\n", &grammar)
+            .expect("content parses");
+        let mut page = DataGraph::new();
+        page.insert(
+            "input",
+            Value::Record(crate::data::build_article_graph(&doc, &grammar, Published)),
+        );
+        let legacy = render_for(
+            &page,
+            r#"<presemble:insert data="input.title" as="h1" />"#,
+            Published,
+        );
+        let native = render_for(
+            &heading_store("Hello *World*"),
+            r#"<presemble:insert data="title" as="h1" />"#,
+            Published,
+        );
+        for html in [legacy, native] {
+            assert!(html.contains(">Hello <em>World</em></h1>"), "{html}");
+        }
+    }
+
+    /// An empty heading slot is still the element the template asks for, on
+    /// the legacy and the native path alike.
+    #[test]
+    fn empty_heading_slot_renders_an_empty_element_on_both_paths() {
+        use crate::data::OutputMode::Published;
+        let grammar = schema::parse_schema(STORED_TEXT_SCHEMA).expect("schema parses");
+        let doc =
+            content::parse_and_assign("# \n\nA summary.\n", &grammar).expect("content parses");
+        let mut page = DataGraph::new();
+        page.insert(
+            "input",
+            Value::Record(crate::data::build_article_graph(&doc, &grammar, Published)),
+        );
+        let legacy = render_for(
+            &page,
+            r#"<presemble:insert data="input.title" as="h1" />"#,
+            Published,
+        );
+        let native = render_for(
+            &heading_store(""),
+            r#"<presemble:insert data="title" as="h1" />"#,
+            Published,
+        );
+        for html in [legacy, native] {
+            assert!(html.starts_with("<h1 ") && html.ends_with("></h1>"), "{html}");
+        }
+    }
+
+    /// A heading whose text looks like block syntax is text: nothing is
+    /// parsed again (the ADR-059 Context bug).
+    #[test]
+    fn heading_with_block_syntax_renders_as_text() {
+        let el = heading_el(2, "1. Intro");
+        let spanned: im::Vector<_> = std::iter::once(schema::Spanned {
+            node: el.clone(),
+            span: schema::Span { start: 0, end: 0 },
+        })
+        .collect();
+        let legacy = legacy_body_html(&spanned);
+        let native = native_body_html(&[el]);
+        for html in [legacy, native] {
+            assert!(html.contains(">1. Intro</h2>"), "{html}");
+            assert!(!html.contains("<ol") && !html.contains("<li"), "no list: {html}");
+        }
+    }
+
+    /// Guard, green on arrival: the title link carries the title heading's
+    /// own editor record, its `Content` projection (canonical form, `_x_` is
+    /// `*x*`), whichever way the title was written. 4a's canonicalisation of
+    /// the heading source already made this true; 4d only changes where the
+    /// record comes from.
+    #[test]
+    fn title_link_editor_md_is_the_heading_projection() {
+        use crate::data::OutputMode::Editorial;
+        let want = md_attr("*x*");
+        // Legacy: the link of a graph built from `# _x_`.
+        let legacy = render_for(
+            &heading_graph("# _x_\n\nA summary.\n", Editorial),
+            r#"<presemble:insert data="input.link" />"#,
+            Editorial,
+        );
+        assert!(legacy.contains(&want), "legacy: {legacy}");
+        // Native: the page link stands for the title heading of its document.
+        let mut store = node_store::NodeStore::new();
+        let root_name = store.intern("page");
+        let root = store.add_node(node_store::Node::Element(root_name));
+        let file_name = store.intern("file");
+        let file_val = store.add_node(node_store::Node::Text(ADDRESS_FILE.into()));
+        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        let preamble_name = store.intern("preamble");
+        let preamble = store.add_node(node_store::Node::Element(preamble_name));
+        store.add_edge(root, node_store::Edge::Child(preamble));
+        let slot_name = store.intern("slot");
+        let slot = store.add_node(node_store::Node::Element(slot_name));
+        let name_key = store.intern("name");
+        let name_val = store.add_node(node_store::Node::Text("title".into()));
+        store.add_edge(slot, node_store::Edge::Attribute { name: name_key, value: name_val });
+        store.add_edge(preamble, node_store::Edge::Child(slot));
+        let heading = content_store::block_to_store(&heading_el(1, "_x_"), &mut store);
+        store.add_edge(slot, node_store::Edge::Child(heading));
+        let link_name = store.intern("link");
+        let link = store.add_node(node_store::Node::Element(link_name));
+        for (key, value) in [("href", "/x"), ("text", "x")] {
+            let name = store.intern(key);
+            let val = store.add_node(node_store::Node::Text(value.into()));
+            store.add_edge(link, node_store::Edge::Attribute { name, value: val });
+        }
+        store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: link });
+        let native = render_for(
+            &NodeStoreGraphView { store, root },
+            r#"<presemble:insert data="link" />"#,
+            Editorial,
+        );
+        assert!(native.contains(&want), "native: {native}");
+    }
+
     // ── Server-emitted addresses (ADR-059 section 10) ───────────────────────
 
     /// The values of attribute `name`, in document order, HTML-unescaped.
@@ -4366,11 +4531,8 @@ mod tests {
             let mut item =
                 crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial);
             item.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(file.to_string()));
-            let stored = crate::data::stored_text(&item, "title");
-            item.insert(
-                "link",
-                Value::Record(crate::data::synthesize_link(title, "/x", stored.as_deref())),
-            );
+            let link = crate::data::synthesize_link(title, "/x", crate::data::title_editor(&item));
+            item.insert("link", Value::Record(link));
             items.push(Value::Record(item));
         }
         let mut graph = DataGraph::new();
@@ -4558,9 +4720,31 @@ mod tests {
         // Legacy: the link record beside the document's slots.
         let mut graph = DataGraph::new();
         graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        // The title heading's editor record: its address, built without a
+        // file, and its `Content` projection.
+        let heading = heading_el(1, "Plain *em* title");
+        let mut editor = DataGraph::new();
+        editor.insert(
+            crate::constants::KEY_EDITOR_ADDRESS,
+            Value::Text(
+                content::block_addresses(
+                    "",
+                    content::AddressContainer::Slot("title"),
+                    std::slice::from_ref(&heading),
+                )
+                .remove(0)
+                .expect("the title has an address"),
+            ),
+        );
+        editor.insert(
+            crate::constants::KEY_EDITOR_MD,
+            Value::Text(
+                content::project_markdown(&heading, content::Projection::Content).unwrap(),
+            ),
+        );
         graph.insert(
             "link",
-            Value::Record(crate::data::synthesize_link("Plain em title", "/x", Some("Plain *em* title"))),
+            Value::Record(crate::data::synthesize_link("Plain em title", "/x", Some(&editor))),
         );
         let legacy = render_for(&graph, r#"<presemble:insert data="link" />"#, Editorial);
         assert_eq!(attr_values(&legacy, "data-presemble-address"), vec![title_address(ADDRESS_FILE)], "{legacy}");
