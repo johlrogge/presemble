@@ -211,6 +211,10 @@ pub struct Conductor {
     cached_node_stem_index: RwLock<node_store_bridge::store_pipeline::NodeStemIndex>,
     // NED edit path: tracks which content files have unsaved NodeStore mutations (Phase B)
     dirty_docs: RwLock<crate::dirty::DirtyDocs>,
+    // What each content file looked like when we last read or wrote it, for the
+    // save-time check that catches a change the watcher has not reported yet
+    // (ADR-065). Not the self-write tracker: that one forgets after a second.
+    disk_stamps: RwLock<crate::dirty::DiskStamps>,
     // Map from content file path (relative to site_dir, matching `file` attribute on doc root)
     // to the NodeId of the document root. Populated alongside url_to_root.
     path_to_doc_root: RwLock<HashMap<PathBuf, node_store::NodeId>>,
@@ -345,6 +349,7 @@ impl Conductor {
             cached_node_url_index: RwLock::new(HashMap::new()),
             cached_node_stem_index: RwLock::new(HashMap::new()),
             dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
+            disk_stamps: RwLock::new(crate::dirty::DiskStamps::new()),
             path_to_doc_root: RwLock::new(HashMap::new()),
             ned_suggestions: RwLock::new(HashMap::new()),
             self_write_tracker: crate::self_write_tracker::SelfWriteTracker::new(
@@ -411,6 +416,37 @@ impl Conductor {
     /// `path` (absolute, or already site-relative) as a site-relative path.
     fn site_relative(&self, path: &Path) -> PathBuf {
         path.strip_prefix(&self.site_dir).map(Path::to_path_buf).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Remember what the file at site-relative `rel` looks like now, as the
+    /// version our copy is based on. Call it before reading the file (a
+    /// change in between then shows as a change, never as a missed one), and
+    /// after writing it.
+    fn stamp_disk(&self, rel: &Path) {
+        let stamp = crate::dirty::DiskStamp::of(&self.site_dir.join(rel));
+        self.disk_stamps.write().unwrap_or_else(|e| e.into_inner()).record(rel, stamp);
+    }
+
+    /// Write a document's text and remember the resulting file as the base of
+    /// our copy. `abs` is the absolute path.
+    fn write_document(&self, abs: &Path, text: &[u8]) -> std::io::Result<()> {
+        crate::self_write_tracker::write_source_file(abs, text, &self.self_write_tracker)?;
+        self.stamp_disk(&self.site_relative(abs));
+        Ok(())
+    }
+
+    /// Before a save: if the file of the dirty document at `rel` is not as we
+    /// last saw it, something wrote it since, even if the watcher has not
+    /// reported that yet. Records the conflict (ADR-065) and returns the event
+    /// to announce when it is new.
+    fn detect_unreported_change(&self, rel: &Path) -> Option<ConductorEvent> {
+        let current = crate::dirty::DiskStamp::of(&self.site_dir.join(rel));
+        let changed = self
+            .disk_stamps
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .changed(rel, current);
+        if changed { self.record_disk_conflict(rel) } else { None }
     }
 
     /// If the document at site-relative `rel` has unsaved edits, record that
@@ -607,7 +643,11 @@ impl Conductor {
 
             // Item content
             for slug in repo.content_slugs(&stem) {
-                let kept = keep.get(&relative(repo.content_path(&stem, &slug))).cloned();
+                let rel = relative(repo.content_path(&stem, &slug));
+                let kept = keep.get(&rel).cloned();
+                if kept.is_none() {
+                    self.stamp_disk(&rel);
+                }
                 if let Some(src) = kept.or_else(|| repo.content_source(&stem, &slug)) {
                     let grammar_key = format!("{stem_str}/item");
                     let grammar = grammars
@@ -639,7 +679,11 @@ impl Conductor {
             }
 
             // Collection content
-            let kept = keep.get(&relative(repo.collection_content_path(&stem))).cloned();
+            let rel = relative(repo.collection_content_path(&stem));
+            let kept = keep.get(&rel).cloned();
+            if kept.is_none() {
+                self.stamp_disk(&rel);
+            }
             if let Some(src) = kept.or_else(|| repo.collection_content_source(&stem)) {
                 let grammar_key = site_index::schema_cache_key(stem_str, "index");
                 let file = relative(repo.collection_content_path(&stem));
@@ -3482,12 +3526,19 @@ impl Conductor {
                 let rel_path = PathBuf::from(&path);
                 let abs_path = self.site_dir.join(&rel_path);
 
+                // The watcher may not have reported a change to the file yet:
+                // look at the file ourselves first (ADR-065).
+                let detected = self.detect_unreported_change(&rel_path);
+
                 // A save never overwrites a conflict without consent that
                 // names the file (ADR-065). Nothing is written.
                 if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).is_conflicted(&rel_path)
                     && !consent.covers(&path)
                 {
-                    return CommandResult::with_response(Response::ConflictsNeedConfirmation(vec![path]));
+                    return CommandResult {
+                        response: Response::ConflictsNeedConfirmation(vec![path]),
+                        events: detected.into_iter().collect(),
+                    };
                 }
 
                 // Try NED path first: serialize from NodeStore and write.
@@ -3506,11 +3557,7 @@ impl Conductor {
                         }
                         None => return CommandResult::error(format!("document not in store: {path}")),
                     };
-                    if let Err(e) = crate::self_write_tracker::write_source_file(
-                        &abs_path,
-                        text.as_bytes(),
-                        &self.self_write_tracker,
-                    ) {
+                    if let Err(e) = self.write_document(&abs_path, text.as_bytes()) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
                     self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(&rel_path);
@@ -3522,11 +3569,7 @@ impl Conductor {
                 if let Some(text) = sources.get(&abs_path) {
                     let text = text.clone();
                     drop(sources);
-                    if let Err(e) = crate::self_write_tracker::write_source_file(
-                        &abs_path,
-                        text.as_bytes(),
-                        &self.self_write_tracker,
-                    ) {
+                    if let Err(e) = self.write_document(&abs_path, text.as_bytes()) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
                     self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&abs_path);
@@ -3539,6 +3582,20 @@ impl Conductor {
                 // The check comes first (ADR-065): if any document we would
                 // write is in conflict with the file on disk and the consent
                 // does not name it, write nothing and say which.
+                //
+                // The watcher may not have reported every change yet, so look
+                // at each dirty document's file first.
+                let dirty_paths: Vec<PathBuf> = self
+                    .dirty_docs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(Path::to_path_buf)
+                    .collect();
+                let detected: Vec<ConductorEvent> = dirty_paths
+                    .iter()
+                    .filter_map(|rel| self.detect_unreported_change(rel))
+                    .collect();
                 let uncovered: Vec<String> = {
                     let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
                     let mut files: Vec<String> = dirty
@@ -3550,7 +3607,10 @@ impl Conductor {
                     files
                 };
                 if !uncovered.is_empty() {
-                    return CommandResult::with_response(Response::ConflictsNeedConfirmation(uncovered));
+                    return CommandResult {
+                        response: Response::ConflictsNeedConfirmation(uncovered),
+                        events: detected,
+                    };
                 }
 
                 // Save NED-dirty documents (NodeStore → disk)
@@ -3591,11 +3651,7 @@ impl Conductor {
                             continue;
                         }
                     };
-                    if let Err(e) = crate::self_write_tracker::write_source_file(
-                        &abs_path,
-                        text.as_bytes(),
-                        &self.self_write_tracker,
-                    ) {
+                    if let Err(e) = self.write_document(&abs_path, text.as_bytes()) {
                         keep_dirty(&self.dirty_docs);
                         failures.push(format!("write error for {}: {e}", abs_path.display()));
                         continue;
@@ -3610,11 +3666,7 @@ impl Conductor {
                 drop(sources);
                 let mut written: Vec<PathBuf> = Vec::new();
                 for (path, text) in buffers {
-                    match crate::self_write_tracker::write_source_file(
-                        &path,
-                        text.as_bytes(),
-                        &self.self_write_tracker,
-                    ) {
+                    match self.write_document(&path, text.as_bytes()) {
                         Ok(_) => written.push(path),
                         Err(e) => {
                             failures.push(format!("write error for {}: {e}", path.display()));
@@ -7239,6 +7291,109 @@ mod suggestion_accept_tests {
         assert!(matches!(saved, Response::Ok), "{saved:?}");
         assert!(disk(&tmp, FILE).contains("Edited A"));
         assert!(conflicts(&conductor).is_empty());
+    }
+
+    // ── The save checks the file first (ADR-065: save-time mtime check) ─────
+    // The watcher debounces for 150 ms, so a change can be on disk without the
+    // conductor having been told. These tests never send `FileChanged`.
+
+    #[test]
+    fn save_over_an_unreported_disk_change_needs_confirmation() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
+
+        let refused = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
+
+        assert!(
+            matches!(&refused.response, Response::ConflictsNeedConfirmation(files) if files == &vec![FILE.to_string()]),
+            "{:?}",
+            refused.response
+        );
+        assert!(
+            refused.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
+            "the conflict is announced: {:?}",
+            refused.events
+        );
+        assert_eq!(disk(&tmp, FILE), SHELL_A, "the disk text is intact");
+        assert_eq!(conflicts(&conductor), vec![FILE.to_string()], "the conflict is recorded");
+        assert_eq!(title(&conductor), "Edited A", "the edit is kept");
+
+        // With consent that names the file, the save goes through.
+        let saved = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: consent(&[FILE]) })
+            .response;
+        assert!(matches!(saved, Response::Ok), "{saved:?}");
+        assert!(disk(&tmp, FILE).contains("Edited A"));
+        assert!(conflicts(&conductor).is_empty());
+    }
+
+    #[test]
+    fn save_all_over_an_unreported_disk_change_needs_confirmation() {
+        let tmp = build_site();
+        std::fs::write(tmp.path().join(OTHER_FILE), "# Second Post\n\n----\n\nGamma.\n").unwrap();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        edit_title(&conductor, OTHER_FILE, "Edited B");
+        std::fs::write(tmp.path().join(OTHER_FILE), SHELL_B).unwrap();
+
+        let refused = conductor
+            .handle_command(Command::SaveAllBuffers { consent: Default::default() });
+
+        assert!(
+            matches!(&refused.response, Response::ConflictsNeedConfirmation(files) if files == &vec![OTHER_FILE.to_string()]),
+            "{:?}",
+            refused.response
+        );
+        assert!(
+            refused.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == OTHER_FILE)),
+            "{:?}",
+            refused.events
+        );
+        assert_eq!(disk(&tmp, OTHER_FILE), SHELL_B, "the changed file is intact");
+        assert_eq!(disk(&tmp, FILE), CONTENT, "nothing is written, not even the clean file");
+        assert_eq!(conflicts(&conductor), vec![OTHER_FILE.to_string()]);
+    }
+
+    #[test]
+    fn our_own_save_is_not_a_conflict_the_next_time() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        let first = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .response;
+        assert!(matches!(first, Response::Ok), "{first:?}");
+
+        edit_title(&conductor, FILE, "Edited again");
+        let second = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .response;
+        assert!(matches!(second, Response::Ok), "{second:?}");
+        assert!(disk(&tmp, FILE).contains("Edited again"));
+        assert!(conflicts(&conductor).is_empty());
+    }
+
+    #[test]
+    fn saving_a_document_whose_file_was_deleted_needs_confirmation() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        std::fs::remove_file(tmp.path().join(FILE)).unwrap();
+
+        let refused = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .response;
+        assert!(matches!(refused, Response::ConflictsNeedConfirmation(_)), "{refused:?}");
+        assert!(!tmp.path().join(FILE).exists(), "nothing was written");
+
+        let saved = conductor
+            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: consent(&[FILE]) })
+            .response;
+        assert!(matches!(saved, Response::Ok), "{saved:?}");
+        assert!(disk(&tmp, FILE).contains("Edited A"), "the file is recreated on consent");
     }
 
     #[test]

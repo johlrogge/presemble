@@ -15,6 +15,65 @@ pub enum Unsaved {
     ConflictsWithDisk { disk_mtime: SystemTime },
 }
 
+/// What a file on disk looked like when the conductor last read or wrote it:
+/// its modification time and its length. The length catches a change that lands
+/// in the same mtime tick as the one we recorded (coarse timestamps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskStamp {
+    mtime: SystemTime,
+    len: u64,
+}
+
+impl DiskStamp {
+    /// The stamp of the file at `path` now; `None` when it does not exist (or
+    /// cannot be read).
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self { mtime: meta.modified().ok()?, len: meta.len() })
+    }
+}
+
+/// The [`DiskStamp`] of each content file (relative to site root) at the
+/// moment the conductor's copy of it was read from disk or written to it.
+///
+/// A save compares the file's current stamp with this one: a difference means
+/// something else wrote the file since, whether or not the watcher has said so
+/// yet (it debounces for 150 ms). A path with no entry has no baseline and is
+/// never reported as changed.
+#[derive(Debug, Default)]
+pub struct DiskStamps {
+    stamps: HashMap<PathBuf, DiskStamp>,
+}
+
+impl DiskStamps {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Remember the stamp of the file as we last saw it. `None` (the file is
+    /// missing) forgets the path: there is nothing to compare against.
+    pub fn record(&mut self, rel: impl Into<PathBuf>, stamp: Option<DiskStamp>) {
+        let rel = rel.into();
+        match stamp {
+            Some(stamp) => {
+                self.stamps.insert(rel, stamp);
+            }
+            None => {
+                self.stamps.remove(&rel);
+            }
+        }
+    }
+
+    /// Whether the file at `rel` differs from what we last saw. A file that
+    /// was there and is now gone counts as changed.
+    pub fn changed(&self, rel: &Path, current: Option<DiskStamp>) -> bool {
+        match self.stamps.get(rel) {
+            Some(recorded) => current != Some(*recorded),
+            None => false,
+        }
+    }
+}
+
 /// Content file paths (relative to site root, e.g. `"content/post/hello.md"`)
 /// whose NodeStore subtree has been mutated since the last save, each with its
 /// [`Unsaved`] state.

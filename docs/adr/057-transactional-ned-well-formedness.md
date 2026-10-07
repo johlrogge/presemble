@@ -113,7 +113,7 @@ Each has the work that closes it:
 - **Gap 8** (LSP buffer edits bypass NED, so buffers held only by the editor, the LSP mirror `doc_sources`, are not tracked as conflicts) and **gap 9:** the auto-save ADR. The editor owns those buffers and resolves its own conflicts until then (ADR-065).
 - **Gap 10:** plans as the suggestion payload. Until then the drift check stays in the conductor.
 - **The nREPL publish path:** SW-2.
-- **An external write not yet reported by the watcher** (150 ms debounce) can be overwritten by a save. It closes by checking the file's mtime before writing (follow-up S1).
+- **An external write not yet reported by the watcher** (150 ms debounce) could be overwritten by a save. Closed by follow-up S1 (`fix(conductor): a save checks the file on disk before overwriting it`): a save compares the file's stamp with the one recorded when the conductor last read or wrote it, and a difference is a conflict (ADR-065, save-time mtime check).
 
 ## Closed in stage 2e
 

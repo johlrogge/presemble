@@ -27,6 +27,21 @@ Proposed
    taken from disk. `DocumentSaved` over a dirty document is a conflict in the
    same way. A conflicted document is dirty by construction, so everything that
    handles dirty documents (save-all, dirty-buffer lists) keeps working.
+
+   A third way, the **save-time mtime check**, covers a change the watcher has
+   not reported yet (it debounces for 150 ms). The conductor keeps, next to the
+   dirty documents, a stamp (modification time and length) of each content file
+   as it last read it from disk (populate, reload) or wrote it (a save). Before
+   a save writes a document with unsaved edits, it compares the file's current
+   stamp with that one. A difference, or a file that was there and is gone,
+   records the conflict right away (and announces it as above); the consent rule
+   of decision 3 then applies, so nothing is written without consent that names
+   the file. A path with no recorded stamp is not checked. The length is part
+   of the stamp so that a write in the same mtime tick as the recorded one is
+   still seen when it changes the size; a same-size rewrite within one tick of
+   a coarse-timestamp file system can still go unseen. The stamps are not part
+   of the self-write tracker (ADR-043), which only remembers the conductor's own
+   writes for a second.
 2. **The conflict is announced once**, when first recorded:
    `ConductorEvent::DiskConflict { file }`. It reaches the editorial socket as
    `{"type":"conflict","file":...}` and never the public socket. The current
