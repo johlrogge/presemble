@@ -584,6 +584,62 @@ fn delete_moves_leading_comments_to_the_next_sibling() {
     assert_eq!(leading_comments(&f.store, b), vec!["<!-- note -->"]);
 }
 
+// Comment trivia on delete (ADR-062 D5), moved from `ned::mutation`: these run
+// through `commit`.
+
+const BEFORE: &str = ned::trivia::ATTR_TRIVIA_BEFORE;
+const END: &str = ned::trivia::ATTR_TRIVIA_END;
+
+#[test]
+fn deleted_blocks_comments_go_before_the_next_siblings_own() {
+    let mut f = fixture();
+    let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
+    add_trivia(&mut f.store, a, BEFORE, &["a1"]);
+    add_trivia(&mut f.store, b, BEFORE, &["b1"]);
+    f.run(a, &NedMutation::Delete);
+    assert_eq!(f.body_blocks(), vec![b]);
+    assert_eq!(leading_comments(&f.store, b), vec!["a1", "b1"]);
+}
+
+#[test]
+fn delete_of_the_last_block_moves_comments_to_the_container_end() {
+    let mut f = fixture();
+    let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
+    let body = f.body();
+    add_trivia(&mut f.store, body, END, &["e0"]);
+    add_trivia(&mut f.store, b, BEFORE, &["b1"]);
+    f.run(b, &NedMutation::Delete);
+    assert_eq!(f.body_blocks(), vec![a]);
+    let end: Vec<_> = ned::trivia::trivia_texts(&f.store, body, END)
+        .into_iter()
+        .map(|t| match f.store.get(t) {
+            Some(Node::Text(s)) => s.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(end, vec!["e0", "b1"]);
+}
+
+#[test]
+fn deleting_adjacent_blocks_in_one_plan_keeps_comment_order() {
+    let mut f = fixture();
+    let body = f.body();
+    let c = add_block(&mut f.store, body, &para("c"));
+    let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
+    add_trivia(&mut f.store, a, BEFORE, &["a1"]);
+    add_trivia(&mut f.store, b, BEFORE, &["b1"]);
+    add_trivia(&mut f.store, c, BEFORE, &["c1"]);
+    let plan: Plan = [
+        step(&[a], NedMutation::Delete, "ned/delete"),
+        step(&[b], NedMutation::Delete, "ned/delete"),
+    ]
+    .into_iter()
+    .collect();
+    execute(&mut f.store, plan).unwrap();
+    assert_eq!(f.body_blocks(), vec![c]);
+    assert_eq!(leading_comments(&f.store, c), vec!["a1", "b1", "c1"]);
+}
+
 #[test]
 fn set_text_changes_only_the_target() {
     let mut f = fixture();

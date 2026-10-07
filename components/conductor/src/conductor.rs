@@ -6560,6 +6560,20 @@ mod suggestion_accept_tests {
         conductor.dirty_docs().read().unwrap().contains(Path::new(FILE))
     }
 
+    /// Delete the document's first body block behind the suggestion's back,
+    /// through the same typed operations an accepted suggestion uses.
+    fn delete_first_body_block(conductor: &Conductor) {
+        let root = live_root(conductor);
+        let mut store = conductor.node_store.write().unwrap();
+        let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+        let first = store.children(body)[0];
+        let target = edit::resolve(&store, &ned::Selection::single(first), edit::TargetKind::Block)
+            .expect("the block resolves");
+        let prepared =
+            edit::prepare(&store, &target, &edit::NedMutation::Delete).expect("delete prepares");
+        edit::commit(&mut store, vec![prepared]);
+    }
+
     fn accepted_pages(result: &CommandResult) -> Vec<String> {
         result
             .events
@@ -6742,13 +6756,7 @@ mod suggestion_accept_tests {
         let conductor = make_conductor(&tmp);
         let id = create(&conductor, ALPHA_TEXT, NedMutation::SetText("Changed.".into()));
 
-        {
-            let root = live_root(&conductor);
-            let mut store = conductor.node_store.write().unwrap();
-            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
-            let first = store.children(body)[0];
-            ned::mutation::delete(&mut store, &ned::Selection::single(first));
-        }
+        delete_first_body_block(&conductor);
 
         let result = accept(&conductor, &id);
         assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
@@ -6825,13 +6833,7 @@ mod suggestion_accept_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         let id = create(&conductor, ALPHA_TEXT, NedMutation::SetText("Changed.".into()));
-        {
-            let root = live_root(&conductor);
-            let mut store = conductor.node_store.write().unwrap();
-            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
-            let first = store.children(body)[0];
-            ned::mutation::delete(&mut store, &ned::Selection::single(first));
-        }
+        delete_first_body_block(&conductor);
         accept(&conductor, &id);
         assert!(matches!(status(&conductor, &id), NedSuggestionStatus::Stale { .. }));
 

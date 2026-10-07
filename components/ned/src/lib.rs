@@ -1,4 +1,5 @@
-pub mod mutation;
+#[cfg(test)]
+pub(crate) mod mutation;
 pub mod selection;
 pub mod tree;
 pub mod trivia;

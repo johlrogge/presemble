@@ -448,12 +448,13 @@ pub fn commit(store: &mut NodeStore, edits: Vec<PreparedEdit>) -> Committed {
 fn write(store: &mut NodeStore, change: Change) {
     match change {
         Change::SetText { text, value } => {
-            let written = ned::mutation::set_text(store, &Selection::single(text), &value);
-            assert_eq!(written.len(), 1, "the prepared text node is a live Text node");
+            assert!(
+                set_text(store, text, &value),
+                "the prepared text node is a live Text node"
+            );
         }
         Change::Delete { block } => {
-            let removed = ned::mutation::delete(store, &Selection::single(block));
-            assert!(removed > 0, "the prepared block is a live node");
+            assert!(delete(store, block) > 0, "the prepared block is a live node");
         }
         Change::InsertBefore { anchor, container, blocks } => {
             let at = anchor_index(store, container, anchor);
@@ -483,9 +484,77 @@ fn write(store: &mut NodeStore, change: Change) {
                 ned::trivia::Placement::At(0),
             );
             store.remove_child_edge(container, block);
-            ned::mutation::delete(store, &Selection::single(block));
+            delete(store, block);
         }
     }
+}
+
+/// Replace the text of `text`. `false` when it is not a live Text node.
+fn set_text(store: &mut NodeStore, text: NodeId, value: &str) -> bool {
+    if matches!(store.get(text), Some(Node::Text(_))) {
+        store.replace_node(text, Node::Text(value.to_string()));
+        true
+    } else {
+        false
+    }
+}
+
+/// The element parent of `id` (structural, not a semantic `Collection`).
+fn element_parent(store: &NodeStore, id: NodeId) -> Option<NodeId> {
+    store
+        .parents(id)
+        .into_iter()
+        .find(|p| matches!(store.get(*p), Some(Node::Element(_))))
+}
+
+/// Keep the leading comments of `block`, about to be removed with everything
+/// in `to_delete` (ADR-062 D5).
+///
+/// The comments move to the `_trivia-before` of the next element sibling that
+/// survives, after any comments already there; with no such sibling they are
+/// appended to the parent's `_trivia-end`. A block whose parent is removed too
+/// loses its comments with it.
+fn relocate_leading_trivia(store: &mut NodeStore, block: NodeId, to_delete: &Selection) {
+    use ned::trivia::{ATTR_TRIVIA_BEFORE, ATTR_TRIVIA_END, Placement, move_trivia, trivia_texts};
+    if trivia_texts(store, block, ATTR_TRIVIA_BEFORE).is_empty() {
+        return;
+    }
+    let Some(parent) = element_parent(store, block) else { return };
+    if to_delete.contains(parent) {
+        return;
+    }
+    let Some(pos) = store.children(parent).iter().position(|&c| c == block) else {
+        return;
+    };
+    let next = store
+        .children(parent)
+        .into_iter()
+        .skip(pos + 1)
+        .find(|c| !to_delete.contains(*c) && matches!(store.get(*c), Some(Node::Element(_))));
+    match next {
+        Some(next) => {
+            move_trivia(store, block, ATTR_TRIVIA_BEFORE, next, ATTR_TRIVIA_BEFORE, Placement::At(0));
+        }
+        None => {
+            move_trivia(store, block, ATTR_TRIVIA_BEFORE, parent, ATTR_TRIVIA_END, Placement::End);
+        }
+    }
+}
+
+/// Delete `node` and all its descendants. Returns the number of nodes
+/// removed. Leading comments of the node move to the next surviving sibling,
+/// or to the parent's `_trivia-end` (ADR-062 D5).
+fn delete(store: &mut NodeStore, node: NodeId) -> usize {
+    let sel = Selection::single(node);
+    let to_delete = sel.union(&sel.descendants(store));
+    relocate_leading_trivia(store, node, &to_delete);
+
+    let count_before = store.node_count();
+    // store.remove_node handles edge cleanup, so order doesn't matter
+    for id in to_delete.iter() {
+        store.remove_node(id);
+    }
+    count_before - store.node_count()
 }
 
 /// Encode `blocks` and insert them, in order, as children of `container`
