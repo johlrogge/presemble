@@ -61,9 +61,12 @@ After this ADR:
   Acceptable: the three components ship as one release artefact.
 - `body_element_anchor_at_line` returns
   `Option<StructuralAnchor>`.
-- `EditBodyElement` handler computes the structural anchor from the
+- The structural anchor after a body edit is computed from the
   post-mutation document; this requires re-parsing the document text
-  and loading the grammar (microsecond cost).
+  and loading the grammar (microsecond cost). Since stage 2e-2 it is
+  computed by BlockEdit Apply (`PagesRebuilt` carries the anchor of the
+  edited body block); `EditBodyElement`, which computed it before, is
+  removed.
 - `inject.js`'s `_suggestFindStructural` is hoisted out of the
   mode-management IIFE and renamed `_findByStructuralAnchor` so the
   scroll handler and the post-reload IIFE share one resolver.

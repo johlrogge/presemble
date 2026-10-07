@@ -19,10 +19,14 @@ the new code. No migration. The 9 Pending legacy suggestions in the
 working set are casualties; the user must re-create any they still
 want.
 
-`Command::EditSlot` and `Command::EditBodyElement` survive Phase C —
+`Command::EditSlot` and `Command::EditBodyElement` survived Phase C —
 they are not suggestion paths, and the link picker still routes through
 `EditSlot`. Their retirement is gated on NED gaining link/image
 mutations and is tracked separately.
+
+Update (stage 2e-2): `EditBodyElement` was retired in stage 2e-2.
+`EditSlot` survives for the escape hatch and the link picker until
+stage 5b.
 
 ## Why
 

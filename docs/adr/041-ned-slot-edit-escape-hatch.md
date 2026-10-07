@@ -4,6 +4,8 @@
 
 Accepted
 
+Partly superseded (stage 2e-2): the TextOneChild fast path is a BlockEdit Apply (ADR-059 §10), not a composed `ned/set-text` program. The escape hatch remains until stage 5b closes the link-picker gap.
+
 ## Decision
 
 `apply_slot_edit` dispatches on a `SlotShape` discriminator:
