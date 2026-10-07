@@ -3,8 +3,9 @@
 use crate::access::{add_child_text, add_text_attr, find_attr_text, make_element};
 use crate::block::{
     BlockDecodeError, block_from_node, block_to_store, link_op_from_node, link_op_to_store,
-    link_target_from_node, try_child_by_name,
+    link_target_from_node, tree_to_block, try_child_by_name,
 };
+use ned::NodeTree;
 use content::{
     ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection,
 };
@@ -142,6 +143,85 @@ fn missing_text_child_is_error() {
             kind: "paragraph".to_string()
         })
     );
+}
+
+#[test]
+fn tree_to_block_refuses_image_with_children() {
+    let tree = NodeTree::element("image")
+        .with_attr("path", "p.jpg")
+        .with_child(NodeTree::text("oops"));
+    assert_eq!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedChild {
+            kind: "image".to_string(),
+            child: "text".to_string()
+        })
+    );
+}
+
+fn table() -> NodeTree {
+    NodeTree::element("table")
+        .with_child(NodeTree::element("headers").with_child(NodeTree::text("h")))
+        .with_child(
+            NodeTree::element("rows")
+                .with_child(NodeTree::element("row").with_child(NodeTree::text("a"))),
+        )
+}
+
+#[test]
+fn tree_to_block_refuses_table_with_extra_child() {
+    let tree = table().with_child(NodeTree::text("oops"));
+    assert!(matches!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedChild { .. })
+    ));
+}
+
+#[test]
+fn tree_to_block_refuses_table_rows_that_are_not_rows() {
+    let tree = NodeTree::element("table")
+        .with_child(NodeTree::element("headers"))
+        .with_child(NodeTree::element("rows").with_child(NodeTree::element("wibble")));
+    assert!(matches!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedChild { .. })
+    ));
+}
+
+#[test]
+fn tree_to_block_refuses_attributes_the_kind_does_not_take() {
+    for tree in [
+        NodeTree::element("paragraph").with_attr("level", "2").with_child(NodeTree::text("a")),
+        NodeTree::element("image").with_attr("path", "p.jpg").with_attr("href", "/x"),
+        NodeTree::element("link")
+            .with_attr("href", "/x")
+            .with_attr("alt", "a")
+            .with_child(NodeTree::text("t")),
+        NodeTree::element("code-block")
+            .with_attr("path", "x")
+            .with_child(NodeTree::text("c")),
+        table().with_attr("path", "x"),
+    ] {
+        assert!(
+            matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedAttribute { .. })),
+            "{tree:?}"
+        );
+    }
+}
+
+#[test]
+fn tree_to_block_still_accepts_the_canonical_shapes() {
+    assert!(tree_to_block(&table()).is_ok());
+    assert!(tree_to_block(
+        &NodeTree::element("image").with_attr("path", "p").with_attr("alt", "a")
+    )
+    .is_ok());
+    assert!(tree_to_block(
+        &NodeTree::element("code-block")
+            .with_attr("language", "rust")
+            .with_child(NodeTree::text("c"))
+    )
+    .is_ok());
 }
 
 #[test]

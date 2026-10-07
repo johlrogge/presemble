@@ -278,6 +278,11 @@ pub enum BlockDecodeError {
     NotPayloadKind(String),
     /// A single-text tree payload does not have exactly one `Text` child.
     TextChildCount { kind: String, found: usize },
+    /// A tree payload has a child its kind does not take (a third child of a
+    /// table, a row-less element among the rows).
+    UnexpectedChild { kind: String, child: String },
+    /// A tree payload has an attribute its kind does not take.
+    UnexpectedAttribute { kind: String, attr: String },
     /// Comment trivia (ADR-062) holding something that is not a comment.
     InvalidComment(String),
     /// An inline container holds an element that is not an inline kind.
@@ -330,6 +335,12 @@ impl std::fmt::Display for BlockDecodeError {
                 f,
                 "{kind} must have exactly one Text child, found {found} child(ren)"
             ),
+            BlockDecodeError::UnexpectedChild { kind, child } => {
+                write!(f, "{kind} does not take a '{child}' child")
+            }
+            BlockDecodeError::UnexpectedAttribute { kind, attr } => {
+                write!(f, "{kind} does not take a '{attr}' attribute")
+            }
             BlockDecodeError::InvalidComment(text) => {
                 write!(f, "comment trivia holds something that is not an HTML comment: {text}")
             }
@@ -568,13 +579,15 @@ pub(crate) fn tree_contains_existing(tree: &ned::NodeTree) -> bool {
 ///
 /// Rejects `NodeTree::Existing` anywhere in the tree, roots that are not
 /// [`PAYLOAD_BLOCK_KINDS`], and single-text kinds without exactly one `Text`
-/// child. The tree is materialised into a scratch store and decoded with
+/// child. Children or attributes the decoder would ignore (an image's
+/// children, a table's extra children, an attribute the kind does not take)
+/// are refused, not dropped. The tree is materialised into a scratch store and decoded with
 /// [`block_from_node`].
 pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecodeError> {
     if tree_contains_existing(tree) {
         return Err(BlockDecodeError::ExistingNode);
     }
-    let ned::NodeTree::Element { name, children, .. } = tree else {
+    let ned::NodeTree::Element { name, attrs, children } = tree else {
         return Err(BlockDecodeError::NotAnElement);
     };
     if !PAYLOAD_BLOCK_KINDS.contains(&name.as_str()) {
@@ -588,9 +601,89 @@ pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecode
             found: children.len(),
         });
     }
+    // Nothing in the payload may be dropped by the decoder.
+    if let Some((attr, _)) = attrs
+        .iter()
+        .find(|(attr, _)| !payload_attributes(name).contains(&attr.as_str()))
+    {
+        return Err(BlockDecodeError::UnexpectedAttribute {
+            kind: name.clone(),
+            attr: attr.clone(),
+        });
+    }
+    match name.as_str() {
+        "image" => {
+            if let Some(child) = children.first() {
+                return Err(unexpected_child("image", child));
+            }
+        }
+        "table" => check_table_children(children)?,
+        _ => {}
+    }
     let mut scratch = NodeStore::new();
     let root = tree.clone().materialize(&mut scratch);
     block_from_node(&scratch, root)
+}
+
+/// The attributes a payload block of `kind` takes; the decoder reads these and
+/// no others.
+fn payload_attributes(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "heading" => &["level"],
+        "link" => &["href"],
+        "code-block" => &["language"],
+        "image" => &["path", "alt"],
+        _ => &[],
+    }
+}
+
+/// `child` is a child `kind` does not take: named by its element name, or
+/// "text" for a text node.
+fn unexpected_child(kind: &str, child: &ned::NodeTree) -> BlockDecodeError {
+    BlockDecodeError::UnexpectedChild {
+        kind: kind.to_string(),
+        child: match child {
+            ned::NodeTree::Element { name, .. } => name.clone(),
+            _ => "text".to_string(),
+        },
+    }
+}
+
+/// A table payload is exactly `headers` then `rows`, and `rows` holds only
+/// `row` elements: the decoder reads nothing else.
+fn check_table_children(children: &[ned::NodeTree]) -> Result<(), BlockDecodeError> {
+    let unexpected = |child: &ned::NodeTree| unexpected_child("table", child);
+    let mut seen_headers = false;
+    let mut seen_rows = false;
+    for child in children {
+        match child {
+            ned::NodeTree::Element { name, children: inner, .. }
+                if name == "headers" && !seen_headers =>
+            {
+                seen_headers = true;
+                if let Some(bad) = inner.iter().find(|c| !matches!(c, ned::NodeTree::Text(_))) {
+                    return Err(unexpected(bad));
+                }
+            }
+            ned::NodeTree::Element { name, children: rows, .. } if name == "rows" && !seen_rows => {
+                seen_rows = true;
+                for row in rows {
+                    match row {
+                        ned::NodeTree::Element { name, children: cells, .. } if name == "row" => {
+                            if let Some(bad) =
+                                cells.iter().find(|c| !matches!(c, ned::NodeTree::Text(_)))
+                            {
+                                return Err(unexpected(bad));
+                            }
+                        }
+                        other => return Err(unexpected(other)),
+                    }
+                }
+            }
+            other => return Err(unexpected(other)),
+        }
+    }
+    Ok(())
 }
 
 fn link_text_from_node(store: &NodeStore, node: NodeId) -> Result<LinkText, BlockDecodeError> {

@@ -668,6 +668,21 @@ mod tests {
     }
 
     #[test]
+    fn lower_refuses_edn_image_with_children() {
+        let el = paragraph("The quick brown fox.");
+        let (store, block) = store_with("body", &el);
+        let err = lower(
+            &store,
+            block,
+            SEL,
+            &md("The quick brown fox."),
+            &edn("[:image {:path \"p.jpg\"} \"oops\"]"),
+        )
+        .unwrap_err();
+        assert_eq!(err.cause, BlockEditCause::Invalid);
+    }
+
+    #[test]
     fn lower_accepts_edn_base() {
         let el = paragraph("The quick brown fox.");
         let (store, block) = store_with("body", &el);

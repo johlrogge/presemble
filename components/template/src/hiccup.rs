@@ -253,14 +253,24 @@ fn keyword_to_attr_name(namespace: &Option<String>, name: &str) -> String {
 // Parser
 // ---------------------------------------------------------------------------
 
+/// What the reader does with a `nil` in node position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NilChildren {
+    /// Templates: `nil` is an absent child, as in `(when ...)` style hiccup.
+    Skip,
+    /// Content: `nil` is input that would be dropped silently, so it is refused.
+    Refuse,
+}
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    nil: NilChildren,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+    fn new(tokens: Vec<Token>, nil: NilChildren) -> Self {
+        Parser { tokens, pos: 0, nil }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -284,10 +294,15 @@ impl Parser {
         match self.peek() {
             None | Some(Token::RBracket) | Some(Token::RBrace) => Ok(None),
 
-            Some(Token::Nil) => {
-                self.next(); // consume
-                Ok(None)     // nil → skip
-            }
+            Some(Token::Nil) => match self.nil {
+                NilChildren::Skip => {
+                    self.next(); // consume
+                    Ok(None)     // nil → skip
+                }
+                NilChildren::Refuse => Err(TemplateError::ParseError(
+                    "nil is not a node here: it would be dropped".into(),
+                )),
+            },
 
             Some(Token::StringLit(_)) => {
                 if let Some(Token::StringLit(s)) = self.next() {
@@ -700,9 +715,19 @@ fn apply_symbol_to_node(sym: &str) -> Node {
 // ---------------------------------------------------------------------------
 
 /// Parse a sequence of top-level Hiccup/EDN nodes into a `Vec<Node>`.
+///
+/// `nil` children are skipped (templates).
 pub fn parse_template_hiccup(src: &str) -> Result<Vec<Node>, TemplateError> {
+    parse_hiccup_with(src, NilChildren::Skip)
+}
+
+/// [`parse_template_hiccup`] with an explicit policy for `nil` nodes.
+pub(crate) fn parse_hiccup_with(
+    src: &str,
+    nil: NilChildren,
+) -> Result<Vec<Node>, TemplateError> {
     let tokens = tokenize(src)?;
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, nil);
     let mut nodes = Vec::new();
 
     loop {
@@ -723,7 +748,7 @@ pub fn parse_template_hiccup(src: &str) -> Result<Vec<Node>, TemplateError> {
 /// Used by the transformer to re-parse HTML attribute strings as structured forms.
 pub fn parse_edn_form(src: &str) -> Result<Form, TemplateError> {
     let tokens = tokenize(src)?;
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, NilChildren::Skip);
     parser.parse_form()
 }
 

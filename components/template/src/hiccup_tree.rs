@@ -9,7 +9,7 @@ use ned::NodeTree;
 
 use crate::dom::{Element, Form, Node};
 use crate::error::TemplateError;
-use crate::hiccup::parse_template_hiccup;
+use crate::hiccup::{NilChildren, parse_hiccup_with};
 use crate::hiccup_serializer::serialize_to_hiccup;
 
 /// Write `trees` as hiccup, top-level nodes separated by a blank line.
@@ -21,9 +21,10 @@ pub fn tree_to_hiccup(trees: &[NodeTree]) -> Result<String, TemplateError> {
     Ok(serialize_to_hiccup(&nodes))
 }
 
-/// Read hiccup as trees. Attribute values must be strings.
+/// Read hiccup as trees. Attribute values must be strings, and `nil` is
+/// refused (a template would skip it; content must not drop input silently).
 pub fn hiccup_to_trees(src: &str) -> Result<Vec<NodeTree>, TemplateError> {
-    parse_template_hiccup(src)?.into_iter().map(node_to_tree).collect()
+    parse_hiccup_with(src, NilChildren::Refuse)?.into_iter().map(node_to_tree).collect()
 }
 
 fn tree_to_node(tree: &NodeTree) -> Result<Node, TemplateError> {
@@ -137,6 +138,14 @@ mod tests {
         assert!(tree_to_hiccup(&bare).is_err());
         let nested = [NodeTree::element("paragraph").with_child(NodeTree::Existing(NodeId(1)))];
         assert!(tree_to_hiccup(&nested).is_err());
+    }
+
+    #[test]
+    fn hiccup_to_trees_refuses_nil() {
+        // Templates skip nil children; content must not drop input silently.
+        assert!(hiccup_to_trees("[:paragraph \"a\" nil]").is_err());
+        assert!(hiccup_to_trees("nil").is_err());
+        assert!(hiccup_to_trees("[:paragraph \"a\"]\n\nnil").is_err());
     }
 
     #[test]

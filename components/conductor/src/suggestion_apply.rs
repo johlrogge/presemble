@@ -333,14 +333,6 @@ fn decode_payload(trees: &[NodeTree]) -> Result<Vec<ContentElement>, MutationErr
     trees
         .iter()
         .map(|tree| {
-            if let NodeTree::Element { name, children, .. } = tree
-                && name == "image"
-                && !children.is_empty()
-            {
-                return Err(MutationError::InvalidValue(
-                    "an image payload must not have children".to_string(),
-                ));
-            }
             let block =
                 tree_to_block(tree).map_err(|e| MutationError::InvalidValue(e.to_string()))?;
             content::check_block_round_trip(&block)
