@@ -512,9 +512,9 @@ assert_curl "edit post title" "/_presemble/edit" POST '{"file":"content/post/fir
 # ── Test: nth-child scopes edit to one paragraph, leaves others intact ────
 
 log "Testing nth-child slot edit scoping..."
-# Deliberately a raw /apply program (ned/set-text over descendants), NOT the
-# browser's (ned/text-in ...) shape — it exercises the generic NED apply path.
-NED_PROGRAM='(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path "content/post/hello-world.md") "summary") 1) ned/descendants ned/texts) "NTHCHILD ONLY SECOND")'
+# A raw /apply program addressing one text exactly: (ned/text-in ...) over the
+# second child of the summary slot.
+NED_PROGRAM='(ned/set-text (ned/text-in (ned/nth-child (ned/slot (ned/doc-by-path "content/post/hello-world.md") "summary") 1)) "NTHCHILD ONLY SECOND")'
 # Build JSON by escaping the double quotes inside the program string
 APPLY_BODY='{"program":"'"$(echo "$NED_PROGRAM" | sed 's/"/\\"/g')"'"}'
 assert_curl "apply nth-child edit to 2nd paragraph" "/_presemble/apply" POST "$APPLY_BODY" '"dirtyPaths":1'
@@ -781,8 +781,9 @@ assert_curl_not_contains "legacy title not applied" "/post/hello-world" "Legacy 
 
 # ── Test: WebSocket broadcasts (tools/ws-smoke.ts) ────────────────────────
 # Runs after E: ws-smoke.ts targets the "Smoke body edit via bsave." paragraph
-# written in D, and finally replaces body element 3 of hello-world.md via
-# /_presemble/edit-body. It opens the public /_presemble/ws anonymously and
+# written in D, and finally replaces body element 3 of hello-world.md with a
+# block-edit apply built from the editorial page by inject.js's own
+# buildBlockEditRequest. It opens the public /_presemble/ws anonymously and
 # /_presemble/editorial-ws with the session cookie, and checks no editorial
 # message leaks onto the public socket. It prints PASS/FAIL lines and a final
 # DONE on stdout.
@@ -794,7 +795,7 @@ C=$(awk '$6=="presemble_session"{print $7}' "$COOKIE_JAR")
 WS_ERR=$(mktemp /tmp/presemble-smoke-wserr-XXXXXX)
 WS_RC=0
 # The conflict step rewrites hello-world.md from outside, like an editor would.
-WS_OUT=$(PRESEMBLE_SMOKE_BASE="http://127.0.0.1:$PORT" PRESEMBLE_SMOKE_COOKIE="$C" PRESEMBLE_SMOKE_SITE="$SITE_DIR" deno run --no-prompt --allow-net=127.0.0.1:$PORT --allow-env=PRESEMBLE_SMOKE_BASE,PRESEMBLE_SMOKE_COOKIE,PRESEMBLE_SMOKE_SITE --allow-read="$SITE_DIR/content/post" --allow-write="$SITE_DIR/content/post" tools/ws-smoke.ts 2>"$WS_ERR") || WS_RC=$?
+WS_OUT=$(PRESEMBLE_SMOKE_BASE="http://127.0.0.1:$PORT" PRESEMBLE_SMOKE_COOKIE="$C" PRESEMBLE_SMOKE_SITE="$SITE_DIR" deno run --no-prompt --allow-net=127.0.0.1:$PORT --allow-env=PRESEMBLE_SMOKE_BASE,PRESEMBLE_SMOKE_COOKIE,PRESEMBLE_SMOKE_SITE --allow-read="$SITE_DIR/content/post",resources/serve/inject.js --allow-write="$SITE_DIR/content/post" tools/ws-smoke.ts 2>"$WS_ERR") || WS_RC=$?
 WS_DONE=0
 WS_FAILS=0
 while IFS= read -r line; do

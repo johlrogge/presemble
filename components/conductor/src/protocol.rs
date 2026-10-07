@@ -64,19 +64,6 @@ pub enum Command {
     Shutdown,
     /// Editor cursor moved to a new position.
     CursorMoved { path: String, line: u32 },
-    /// Browser edit: replace a body element's content. Routes through
-    /// `apply_body_element_edit`, which mutates the NodeStore via NED and
-    /// marks the document dirty (saved on explicit `SaveBuffer` /
-    /// `SaveAllBuffers`). Emits a `PagesRebuilt` event whose `anchor` field
-    /// carries the post-edit `StructuralAnchor` so the browser can scroll
-    /// back to the changed paragraph after reload. Retained alongside
-    /// `ApplyNedProgram` for compatibility with older clients during the
-    /// NED migration.
-    EditBodyElement {
-        file: String,
-        body_idx: usize,
-        content: String,
-    },
     /// Apply a NED program string (Clojure source) to the conductor's NodeStore.
     /// The program is evaluated in a NED-enabled root environment and may
     /// mutate the store. Return: `Response::Ok` on success, `Response::Error(msg)`

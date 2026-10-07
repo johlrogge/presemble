@@ -27,7 +27,6 @@ The command vocabulary lives in `protocol.rs`:
 | `DocumentChanged { path, text }` | Editor updated a buffer (does not write to disk) |
 | `DocumentSaved { path }` | Editor saved; conductor writes dirty buffer and rebuilds |
 | `EditSlot { file, slot, value }` | Browser edit: modify a slot and write to disk |
-| `EditBodyElement { file, body_idx, content }` | Browser edit: replace a body element |
 | `CreateContent { stem, slug }` | Scaffold a new content file |
 | `ScaffoldSite { ... }` | Browser wizard: scaffold a new site from a starter template |
 | `Classify { path }` | Classify a file path by its role in the site |

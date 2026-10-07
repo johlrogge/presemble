@@ -523,7 +523,6 @@ fn app_router(state: AppState) -> Router {
         .route("/_presemble/session", get(session_handler))
         .route("/_presemble/lsp", get(lsp_ws_handler))
         .route("/_presemble/edit", post(edit_handler))
-        .route("/_presemble/edit-body", post(edit_body_handler))
         .route("/_presemble/apply", post(apply_handler))
         .route("/_presemble/render", get(render_handler))
         .route("/_presemble/grammar", get(grammar_handler))
@@ -687,25 +686,6 @@ async fn edit_handler(
         file: req.file,
         slot: req.slot,
         value: req.value,
-    }))
-}
-
-#[derive(serde::Deserialize)]
-struct EditBodyRequest {
-    file: String,      // content file, e.g. "content/post/building-presemble.md"
-    body_idx: usize,   // zero-based index of the body element to replace
-    content: String,   // new markdown content for the element
-}
-
-async fn edit_body_handler(
-    _session: Session,
-    State(state): State<AppState>,
-    axum::Json(req): axum::Json<EditBodyRequest>,
-) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::EditBodyElement {
-        file: req.file,
-        body_idx: req.body_idx,
-        content: req.content,
     }))
 }
 

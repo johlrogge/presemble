@@ -36,11 +36,6 @@ fn stem_root_lists(stem_roots: &StemRoots) -> HashMap<String, Vec<node_store::No
 // Clojure string literal escaping
 // ---------------------------------------------------------------------------
 
-// A Rust string as a Clojure string literal (with surrounding quotes): `\` and
-// `"` escaped, CR and NUL stripped. One definition, shared with the addresses
-// the server emits.
-pub(crate) use content::clj_str;
-
 /// What running a NED program changed (see [`Conductor::run_ned_program`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProgramOutcome {
@@ -1895,7 +1890,7 @@ impl Conductor {
     }
 
     /// Rebuild pages for a batch of content file paths (relative to site root)
-    /// whose nodes were mutated in place (NED, `EditSlot`, `EditBodyElement`,
+    /// whose nodes were mutated in place (NED, `EditSlot`,
     /// suggestion accept).
     ///
     /// Each path's document is a change for `propagate_document_changes`
@@ -2382,7 +2377,7 @@ impl Conductor {
             .ok_or_else(|| format!("no document in store for {file}"))?;
 
         // ── Inspect current slot shape to decide NED vs escape-hatch path ────
-        let shape = {
+        let (shape, slot_node) = {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
 
             let preamble = node_store_bridge::content_bridge::find_child_by_name(
@@ -2408,41 +2403,65 @@ impl Conductor {
                 // also acquires it.
                 drop(store);
                 match slot_id_opt {
-                    None => SlotShape::Missing,
-                    Some(slot_id) => self.slot_shape_for_node(slot_id),
+                    None => (SlotShape::Missing, None),
+                    Some(slot_id) => (self.slot_shape_for_node(slot_id), Some(slot_id)),
                 }
             } else {
-                SlotShape::Missing
+                (SlotShape::Missing, None)
             }
         };
 
         match shape {
             SlotShape::SingleText => {
-                // ── NED fast path (text-only 1-child) ────────────────────────
-                // ned/slot returns the slot Element node; we must descend to the Text leaf.
-                let program = format!(
-                    "(ned/set-text (-> (ned/slot (ned/doc-by-path {}) {}) ned/descendants ned/texts) {})",
-                    clj_str(file),
-                    clj_str(slot),
-                    clj_str(value),
-                );
-                let result = self.apply_ned_program(&program);
+                // ── Fast path (text-only 1-child): a BlockEdit Apply ─────────
+                // The same edit the browser sends for a block: addressed like
+                // the renderer addresses it, based on the block as it reads now.
+                let slot_node = slot_node.ok_or_else(|| format!("slot not found: {slot}"))?;
+                let element = {
+                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                    let block = store
+                        .children(slot_node)
+                        .first()
+                        .copied()
+                        .ok_or_else(|| format!("slot {slot} has no block"))?;
+                    node_store_bridge::content_bridge::block_from_node(&store, block)
+                        .map_err(|e| format!("cannot read slot {slot}: {e:?}"))?
+                };
+                let base = content::project_markdown(&element, content::Projection::Content)
+                    .ok_or_else(|| format!("slot {slot} is not text"))?;
+                let selection = content::block_addresses(
+                    file,
+                    content::AddressContainer::Slot(slot),
+                    std::slice::from_ref(&element),
+                )
+                .into_iter()
+                .next()
+                .flatten()
+                .ok_or_else(|| format!("slot {slot} has no address"))?;
+                let request = editorial_types::BlockEditRequest {
+                    file: editorial_types::ContentPath::new(file),
+                    selection,
+                    base: editorial_types::BlockText::Markdown(base),
+                    proposed: editorial_types::BlockText::Markdown(value.to_string()),
+                    intent: editorial_types::BlockEditIntent::Apply,
+                    reason: None,
+                };
+                let result = self.block_edit(&request);
                 match result.response {
-                    Response::Ok | Response::Applied { .. } => {
-                        let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
-                            ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
-                            _ => vec![],
-                        }).collect();
-                        Ok(urls)
+                    Response::BlockEdited(editorial_types::BlockEditResponse::Done(
+                        editorial_types::BlockEditOutcome::Applied { pages },
+                    )) => Ok(pages),
+                    Response::BlockEdited(editorial_types::BlockEditResponse::Done(_)) => Ok(vec![]),
+                    Response::BlockEdited(editorial_types::BlockEditResponse::Refused(e)) => {
+                        Err(e.message)
                     }
-                    Response::Error(e) => Err(e),
-                    _ => Ok(vec![]),
+                    other => Err(format!("unexpected conductor response: {other:?}")),
                 }
             }
             // Escape hatch: empty, multi-element, Link, Image, List, and missing-slot
             // cases route through modify_slot_in_store (grammar-aware Rust path).
-            // Text-only 1-child cases stay on NED. Phase C: widen NED coverage
-            // and reduce this list. See ADR-041.
+            // Single-text slots go through BlockEdit Apply (above). Phase C: widen
+            // NED coverage and reduce this list. See ADR-041.
             SlotShape::Empty | SlotShape::Multi | SlotShape::NonText | SlotShape::Missing => {
                 // Load grammar so we can build the correct element type.
                 let grammar = self.load_grammar_for_file(file)?;
@@ -2484,82 +2503,6 @@ impl Conductor {
             .schema_source(&schema_key)
             .ok_or_else(|| format!("slot not in grammar: no schema found for {schema_key}"))?;
         schema::parse_schema(&schema_src).map_err(|e| format!("schema parse error: {e:?}"))
-    }
-
-    /// Apply a browser body element edit via NED program.
-    ///
-    /// Lowers to:
-    ///
-    /// ```text
-    /// (let [g (ned/parse-grammar "<SCHEMA_SRC>")]
-    ///   (ned/replace (ned/body-at (ned/doc-by-path "<FILE>") <IDX>)
-    ///                (ned/parse-body "<CONTENT>" g)))
-    /// ```
-    ///
-    /// Pre-flight validation (out-of-range, empty body) is performed against the
-    /// NodeStore before building the program.
-    fn apply_body_element_edit(&self, file: &str, body_idx: usize, new_content: &str) -> Result<Vec<String>, String> {
-        // Derive schema stem from path: content/{stem}/file.md or content/file.md (root)
-        let bpath = std::path::Path::new(file);
-        let bcomponents: Vec<_> = bpath.components().collect();
-        let stem = if bcomponents.len() == 2 {
-            String::new()
-        } else {
-            bcomponents.get(1)
-                .and_then(|c| c.as_os_str().to_str())
-                .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?
-                .to_string()
-        };
-
-        // Load grammar source from cache
-        let bslug = bpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let schema_key = site_index::schema_cache_key(&stem, bslug);
-        let schema_src = self.schema_source(&schema_key)
-            .ok_or_else(|| format!("no schema for: {schema_key}"))?;
-
-        // Pre-flight: look up the document in the NodeStore and validate the body index.
-        let doc_root = self.doc_root_for_path(bpath)
-            .ok_or_else(|| format!("document not found in store: {file}"))?;
-
-        let body_child_count = {
-            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-            let body_node = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body");
-            body_node.map(|b| store.children(b).len()).unwrap_or(0)
-        };
-
-        let program = if body_child_count == 0 {
-            // Empty body: insert the new content as the first body child.
-            // Program: `(let [g ...] (ned/insert-child (-> (ned/doc-by-path f) (ned/children) (ned/filter :kind "body")) (first (ned/parse-body c g))))`
-            format!(
-                "(let [g (ned/parse-grammar {schema_src_lit})]\n  (ned/insert-child\n    (-> (ned/doc-by-path {file_lit}) (ned/children) (ned/filter :kind \"body\"))\n    (first (ned/parse-body {content_lit} g))))",
-                schema_src_lit = clj_str(&schema_src),
-                file_lit = clj_str(file),
-                content_lit = clj_str(new_content),
-            )
-        } else if body_idx >= body_child_count {
-            return Err(format!("body index {body_idx} out of range (have {body_child_count} elements)"));
-        } else {
-            format!(
-                "(let [g (ned/parse-grammar {schema_src_lit})]\n  (ned/replace\n    (ned/body-at (ned/doc-by-path {file_lit}) {idx})\n    (ned/parse-body {content_lit} g)))",
-                schema_src_lit = clj_str(&schema_src),
-                file_lit = clj_str(file),
-                idx = body_idx,
-                content_lit = clj_str(new_content),
-            )
-        };
-
-        let result = self.apply_ned_program(&program);
-        match result.response {
-            Response::Ok | Response::Applied { .. } => {
-                let urls: Vec<String> = result.events.iter().flat_map(|ev| match ev {
-                    ConductorEvent::PagesRebuilt { pages, .. } => pages.clone(),
-                    _ => vec![],
-                }).collect();
-                Ok(urls)
-            }
-            Response::Error(e) => Err(e),
-            _ => Ok(vec![]),
-        }
     }
 
     /// Update build errors and create events from render results.
@@ -2812,7 +2755,10 @@ impl Conductor {
     fn lower_block_edit(
         &self,
         req: &editorial_types::BlockEditRequest,
-    ) -> Result<node_store_bridge::block_edit::Lowering, editorial_types::BlockEditError> {
+    ) -> Result<
+        (node_store_bridge::block_edit::Lowering, Option<usize>),
+        editorial_types::BlockEditError,
+    > {
         use editorial_types::{BlockEditCause, BlockEditError, TargetKind};
         let refuse = |cause, message: String| BlockEditError { cause, message };
         let sel = self
@@ -2821,7 +2767,7 @@ impl Conductor {
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
         let target = edit::resolve(&store, &sel, TargetKind::Block)
             .map_err(|e| refuse(BlockEditCause::Unaddressable, e.to_string()))?;
-        let edit::Target::Block { block, document, .. } = target else {
+        let edit::Target::Block { block, container, document } = target else {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
                 "the selection does not address a block".to_string(),
@@ -2836,6 +2782,13 @@ impl Conductor {
                 format!("the selection resolves into {doc_file}, not {}", req.file),
             ));
         }
+        // The block's index in `body`, for the scroll anchor (ADR-046).
+        let body_idx = match store.get(container) {
+            Some(node_store::Node::Element(name)) if store.resolve_name(*name) == edit::BODY_KIND => {
+                store.children(container).iter().position(|c| *c == block)
+            }
+            _ => None,
+        };
         node_store_bridge::block_edit::lower(
             &store,
             block,
@@ -2843,6 +2796,7 @@ impl Conductor {
             &req.base,
             &req.proposed,
         )
+        .map(|lowering| (lowering, body_idx))
     }
 
     /// Handle [`Command::BlockEdit`]: lower, then apply now or store a
@@ -2850,13 +2804,14 @@ impl Conductor {
     fn block_edit(&self, req: &editorial_types::BlockEditRequest) -> CommandResult {
         use editorial_types::{BlockEditOutcome, BlockEditResponse};
         match self.lower_block_edit(req) {
-            Ok(node_store_bridge::block_edit::Lowering::Lowered(lowered)) => self.run_lowered(
+            Ok((node_store_bridge::block_edit::Lowering::Lowered(lowered), body_idx)) => self.run_lowered(
                 req.intent,
                 Path::new(req.file.as_str()),
                 lowered,
+                body_idx,
                 req.reason.clone(),
             ),
-            Ok(node_store_bridge::block_edit::Lowering::NoChange) => CommandResult {
+            Ok((node_store_bridge::block_edit::Lowering::NoChange, _)) => CommandResult {
                 response: Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::NoChange)),
                 events: vec![],
             },
@@ -2895,6 +2850,7 @@ impl Conductor {
         intent: editorial_types::BlockEditIntent,
         file: &Path,
         lowered: node_store_bridge::block_edit::Lowered,
+        body_idx: Option<usize>,
         reason: Option<String>,
     ) -> CommandResult {
         use editorial_types::{
@@ -2925,7 +2881,10 @@ impl Conductor {
                         if !pages.is_empty() {
                             events.push(ConductorEvent::PagesRebuilt {
                                 pages: pages.clone(),
-                                anchor: None,
+                                // After the rebuild: the anchor reads the new body.
+                                anchor: body_idx.and_then(|idx| {
+                                    self.compute_body_anchor(&file.to_string_lossy(), idx)
+                                }),
                             });
                         }
                         if !failed.is_empty() {
@@ -3385,27 +3344,6 @@ impl Conductor {
                     Ok(pages) => CommandResult::ok_with_events(vec![
                         ConductorEvent::PagesRebuilt { pages, anchor: None },
                     ]),
-                    Err(e) => CommandResult::error(e),
-                }
-            }
-            Command::EditBodyElement { file, body_idx, content } => {
-                // Apply the body edit via NED, then post-process to attach the anchor.
-                // `apply_body_element_edit` returns rebuilt URLs; we wrap them in
-                // PagesRebuilt with the body anchor here, in the caller.
-                match self.apply_body_element_edit(&file, body_idx, &content) {
-                    Ok(pages) => {
-                        if pages.is_empty() {
-                            CommandResult::ok()
-                        } else {
-                            let anchor = self.compute_body_anchor(&file, body_idx);
-                            CommandResult::ok_with_events(vec![
-                                ConductorEvent::PagesRebuilt {
-                                    pages,
-                                    anchor,
-                                },
-                            ])
-                        }
-                    }
                     Err(e) => CommandResult::error(e),
                 }
             }
@@ -7899,6 +7837,7 @@ mod block_edit_tests {
             let lowered = match lowering_conductor
                 .lower_block_edit(&request(FILE, selection, base, proposed, BlockEditIntent::Apply))
                 .expect("lowers")
+                .0
             {
                 Lowering::Lowered(l) => l,
                 Lowering::NoChange => panic!("{proposed:?} should change {base:?}"),
@@ -8003,6 +7942,99 @@ mod block_edit_tests {
             result.events
         );
         assert_eq!(pending_count(&conductor), 0, "apply creates no suggestion");
+    }
+
+    /// ADR-046: a body edit scrolls the browser to the edited block. The
+    /// anchor names the block's slot, kind and offset among its kind.
+    #[test]
+    fn block_edit_apply_on_a_body_block_broadcasts_its_anchor() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let second_paragraph = FIRST_PARAGRAPH.replace("\"paragraph\" 0", "\"paragraph\" 1");
+        let result = edit(
+            &conductor,
+            &second_paragraph,
+            "Beta para.",
+            "Beta paragraph.",
+            BlockEditIntent::Apply,
+        );
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+        let anchors: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                ConductorEvent::PagesRebuilt { anchor, .. } => Some(anchor.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(anchors.len(), 1, "events: {:?}", result.events);
+        let anchor = anchors[0].as_ref().expect("a body block edit carries an anchor");
+        assert_eq!(anchor.slot, "body");
+        assert_eq!(anchor.node_kind, "paragraph");
+        assert_eq!(anchor.offset, 1, "the second paragraph");
+    }
+
+    /// A slot block has no body index, so there is no anchor for it.
+    #[test]
+    fn block_edit_apply_on_a_slot_block_has_no_anchor() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let result = edit(
+            &conductor,
+            TITLE_HEADING,
+            "First Post",
+            "Second Post",
+            BlockEditIntent::Apply,
+        );
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::PagesRebuilt { anchor: None, .. })),
+            "events: {:?}",
+            result.events
+        );
+    }
+
+    /// ADR-062 D5: replacing a block keeps the comment above it.
+    #[test]
+    fn block_edit_apply_keeps_the_comment_above_the_replaced_paragraph() {
+        let tmp = build_site();
+        std::fs::write(
+            tmp.path().join(FILE),
+            "# First Post\n\n----\n\n<!-- keep me -->\n\nAlpha para.\n\nBeta para.\n",
+        )
+        .unwrap();
+        let conductor = make_conductor(&tmp);
+        let result = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "New body paragraph.",
+            BlockEditIntent::Apply,
+        );
+        assert!(
+            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            "{:?}",
+            response(&result)
+        );
+        let doc_root = conductor.doc_root_for_path(Path::new(FILE)).expect("document in store");
+        let store_arc = conductor.node_store();
+        let store = store_arc.read().unwrap();
+        let saved = node_store_bridge::serialize_from_store(&store, doc_root).expect("saves");
+        assert_eq!(
+            saved,
+            "# First Post\n\n----\n\n<!-- keep me -->\n\nNew body paragraph.\n\nBeta para.\n"
+        );
     }
 
     // ── 13 ──────────────────────────────────────────────────────────────────
@@ -8276,7 +8308,7 @@ mod block_edit_tests {
         let conductor = make_conductor(&tmp);
         for proposed in ["Alpha paragraph.", "Alpha one.\n\nAlpha two."] {
             let req = request(FILE, FIRST_PARAGRAPH, "Alpha para.", proposed, BlockEditIntent::Apply);
-            let lowered = match conductor.lower_block_edit(&req).expect("lowers") {
+            let lowered = match conductor.lower_block_edit(&req).expect("lowers").0 {
                 Lowering::Lowered(l) => l,
                 Lowering::NoChange => panic!("should change"),
             };
@@ -8288,6 +8320,7 @@ mod block_edit_tests {
                 BlockEditIntent::Apply,
                 Path::new(FILE),
                 lowered,
+                None,
                 None,
             );
             assert_eq!(refused_cause(&result), BlockEditCause::Drifted, "{proposed:?}");

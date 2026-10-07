@@ -433,6 +433,65 @@ async function createSuggestion(
   return id;
 }
 
+// ── The browser's block-edit builder ────────────────────────────────────────
+
+/** The protocol builders in inject.js, sliced out and evaluated as the browser would. */
+interface BlockEditBuilders {
+  buildBlockEditRequest(
+    file: string,
+    selection: string,
+    baseMarkdown: string,
+    proposedMarkdown: string,
+    intent: string,
+  ): unknown;
+  editTarget(address: string | null, md: string | null): { address: string; md: string } | null;
+}
+
+function loadBuilders(): BlockEditBuilders {
+  const source = Deno.readTextFileSync(new URL("../resources/serve/inject.js", import.meta.url));
+  const start = source.indexOf("// BEGIN protocol-builders");
+  const end = source.indexOf("// END protocol-builders");
+  if (start < 0 || end < start) {
+    throw new StepFailure("ws: inject.js builders", "no protocol-builders region");
+  }
+  const factory = new Function(
+    `${source.slice(start, end)}\nreturn { buildBlockEditRequest: buildBlockEditRequest, editTarget: editTarget };`,
+  );
+  return factory() as BlockEditBuilders;
+}
+
+function unescapeAttr(s: string): string {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&#x27;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+/**
+ * The `index`-th editable block (zero-based) of `file`'s `body` on an
+ * editorial page: its emitted `data-presemble-address` and
+ * `data-presemble-md`, read through inject.js's `editTarget` as the browser does.
+ */
+function bodyBlockOnPage(
+  html: string,
+  file: string,
+  index: number,
+): { address: string; md: string } | null {
+  const attr = (tag: string, name: string): string | null => {
+    const m = new RegExp(`\\s${name}="([^"]*)"`).exec(tag);
+    return m === null ? null : unescapeAttr(m[1]);
+  };
+  const { editTarget } = loadBuilders();
+  const tags = html.match(/<[a-zA-Z][a-zA-Z0-9]*\s[^>]*data-presemble-address="[^"]*"[^>]*>/g) ?? [];
+  const blocks = tags
+    .filter((t) => attr(t, "data-presemble-file") === file && attr(t, "data-presemble-slot") === "body")
+    .map((t) => editTarget(attr(t, "data-presemble-address"), attr(t, "data-presemble-md")))
+    .filter((t): t is { address: string; md: string } => t !== null);
+  return blocks[index] ?? null;
+}
+
 // ── Scenario ────────────────────────────────────────────────────────────────
 
 const FILE = "content/post/hello-world.md";
@@ -506,8 +565,8 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
     // 3. /apply → reload of the post page.
     {
       const program =
-        `(ned/set-text (-> (ned/nth-child (ned/slot (ned/doc-by-path "${FILE}") "summary") 1) ` +
-        `ned/descendants ned/texts) "WS APPLY SECOND")`;
+        `(ned/set-text (ned/text-in (ned/nth-child (ned/slot (ned/doc-by-path "${FILE}") "summary") 1)) ` +
+        `"WS APPLY SECOND")`;
       const r = await http.post("/_presemble/apply", { program });
       expectOk("ws: /apply returns ok", r);
       const dirty = isRecord(r.json) ? r.json.dirtyPaths : undefined;
@@ -662,7 +721,8 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
       );
     }
 
-    // 7. /edit-body → anchored editorial reload + plain public reload.
+    // 7. A BlockEdit Apply on body element 3 → anchored editorial reload +
+    //    plain public reload (ADR-046: the anchor comes from BlockEdit Apply).
     //    Last on purpose: it replaces a body element, which must not disturb
     //    the selections the steps above rely on.
     //    Body of the scaffolded hello-world.md (example-sites/blog), after the
@@ -671,26 +731,43 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
     //      2 "## What to Edit"      3 paragraph (bsave'd by smoketest.sh D,
     //                                  rewritten by T in step 6 above)
     //    None of the earlier edits change the body's structure, so index 3 is
-    //    still a paragraph.
+    //    still a paragraph. The request is built as the browser builds it: from
+    //    the editorial page's emitted data-presemble-address and
+    //    data-presemble-md, by inject.js's own buildBlockEditRequest.
     {
-      const r = await http.post("/_presemble/edit-body", {
-        file: FILE,
-        body_idx: EDIT_BODY_IDX,
-        content: "WS edit-body paragraph.",
-      });
-      expectOk("ws: /edit-body returns ok", r);
+      const page = await http.get(PAGE);
+      const target = bodyBlockOnPage(page.text, FILE, EDIT_BODY_IDX);
+      check(
+        "ws: body element 3 is an editable paragraph on the editorial page",
+        target !== null && !target.md.startsWith("#"),
+        `target=${JSON.stringify(target)}`,
+      );
+      if (target === null) throw new StepFailure("ws: body element 3", "not found");
+      const request = loadBuilders().buildBlockEditRequest(
+        FILE,
+        target.address,
+        target.md,
+        "WS block-edit paragraph.",
+        "apply",
+      );
+      const r = await http.post("/_presemble/block-edit", request);
+      check(
+        "ws: block-edit apply on a body block is applied",
+        r.status === 200 && r.text.includes('"applied"'),
+        r.text,
+      );
       const m = await editorialInbox.expect(
-        `ws: /edit-body broadcasts anchored editorial reload including ${PAGE}`,
+        `ws: block-edit broadcasts anchored editorial reload including ${PAGE}`,
         anchoredReloadIncluding(PAGE),
       );
       const nodeKind = m.anchor === null ? undefined : m.anchor["node-kind"];
       check(
-        "ws: /edit-body anchor targets a paragraph",
+        "ws: block-edit anchor targets a paragraph",
         nodeKind === "paragraph",
         `anchor=${JSON.stringify(m.anchor)}`,
       );
       await publicInbox.expect(
-        `ws: /edit-body broadcasts public reload including ${PAGE}`,
+        `ws: block-edit broadcasts public reload including ${PAGE}`,
         reloadIncluding(PAGE),
       );
     }
