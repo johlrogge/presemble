@@ -161,6 +161,30 @@ output-diff a b mode="exact":
         ;;
     esac
 
+# Runs the criterion bench `full_build` (publisher_cli/benches/build_bench.rs)
+# at the 1K and 10K page corpora, optimised (cargo's bench profile) with the
+# dev polylith profile. Each result prints `time: [low median high]`; compare
+# the middle value. Slow: about 30 seconds of measurement per size.
+# Benchmark a full site build at 1K and 10K pages.
+perf:
+    cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$'
+
+# Runs the same bench as `perf` in a throwaway worktree at git <rev>, like snapshot-ref: the
+# worktree is removed afterwards, and it has its own target dir (a full build),
+# so the numbers are the rev's and the working tree's build is left alone.
+# Compare with `just perf` on the working tree.
+# Benchmark a full site build at 1K and 10K pages at a git rev.
+perf-ref rev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    wt="$(mktemp -d -t presemble-perf.XXXXXX)"
+    cleanup() { git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"; git worktree prune; }
+    trap cleanup EXIT
+    git worktree add --detach "$wt" "{{ rev }}" >&2
+    # The command is repeated, not `just perf`: the rev's own justfile may
+    # predate this recipe.
+    (cd "$wt" && cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$')
+
 # Run the smoketest (tools/smoketest.sh) against the given polylith profile.
 smoketest profile="dev":
     ./tools/smoketest.sh {{ profile }}
