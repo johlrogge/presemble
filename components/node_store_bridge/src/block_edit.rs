@@ -741,20 +741,20 @@ mod tests {
         assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
     }
 
-    /// Guard (until stage 5b): a sole link is still a `Link` block, so adding
-    /// text after it turns it into a paragraph: a Replace, never an edit of
-    /// the link's text.
+    /// A lone link is a paragraph, so adding text after it changes the content
+    /// of the same block (ADR-059 stage 5b): an edit in place, not a Replace
+    /// that changes the block's kind. The block is read from markdown, as a
+    /// file would give it.
     #[test]
-    fn adding_text_after_a_link_block_is_replace_until_5b() {
-        let link = ContentElement::Link { text: "a".to_string(), href: "/x".to_string() };
+    fn block_edit_adding_text_to_a_link_is_accepted() {
+        let link = content::parse_document("[a](/x)\n").unwrap().elements[0].node.clone();
         let l = expect_lowered(lowered("body", &link, "[a](/x)", "[a](/x) and more"));
         assert_eq!(l.selection, SEL);
-        let NedMutation::Replace(trees) = &l.mutation else { panic!("{:?}", l.mutation) };
-        assert_eq!(trees.len(), 1);
-        assert!(matches!(
-            tree_to_block(&trees[0]),
-            Ok(ContentElement::Paragraph { .. })
-        ));
+        assert!(
+            matches!(l.mutation, NedMutation::SearchReplace { .. } | NedMutation::SetInlines(_)),
+            "{:?}",
+            l.mutation
+        );
     }
 
     /// A slot paragraph that carries a marker is edited with the marker in

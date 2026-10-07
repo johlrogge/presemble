@@ -221,6 +221,38 @@ mod tests {
         ContentElement::paragraph_from_markdown(text)
     }
 
+    /// A paragraph that holds one link with this text and destination.
+    fn lone_link(text: &str, href: &str) -> ContentElement {
+        use crate::inline::{Inline, InlineContext, Inlines, LinkDestination};
+        ContentElement::Paragraph {
+            content: Inlines::new(
+                vec![Inline::Link {
+                    destination: LinkDestination::new(href),
+                    title: None,
+                    text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+                }],
+                InlineContext::Paragraph,
+            ),
+            marker: None,
+        }
+    }
+
+    /// A paragraph that holds one image with this alt text and source.
+    fn lone_image(alt: &str, src: &str) -> ContentElement {
+        use crate::inline::{AssetRef, Inline, InlineContext, Inlines};
+        ContentElement::Paragraph {
+            content: Inlines::new(
+                vec![Inline::Image {
+                    source: AssetRef::new(src),
+                    title: None,
+                    alt: Inlines::new(vec![Inline::Text(alt.to_string())], InlineContext::Alt),
+                }],
+                InlineContext::Paragraph,
+            ),
+            marker: None,
+        }
+    }
+
     // ── projections ─────────────────────────────────────────────────────────
 
     #[test]
@@ -443,7 +475,7 @@ mod tests {
     #[test]
     fn round_trip_link() {
         let el = parse_one("[Visit Rust](https://rust-lang.org)");
-        assert!(matches!(el, ContentElement::Link { .. }));
+        assert!(el.sole_link().is_some(), "{el:?}");
         assert_eq!(check_block_round_trip(&el), Ok(()));
     }
 
@@ -539,10 +571,14 @@ mod tests {
         }
     }
 
+    /// A lone link is a paragraph (ADR-059 §12): text edited into `[a](b)`
+    /// stays the same kind of block and reads back as itself. (It used to
+    /// change the block into a `Link`, which the round trip rejected.)
     #[test]
-    fn rejects_standalone_link_syntax_in_paragraph() {
-        let err = check_block_round_trip(&paragraph("[a](b)")).unwrap_err();
-        assert!(matches!(err, RoundTripError::Changed { .. }), "{err:?}");
+    fn standalone_link_syntax_in_paragraph_round_trips() {
+        let p = paragraph("[a](b)");
+        assert!(p.sole_link().is_some());
+        assert_eq!(check_block_round_trip(&p), Ok(()));
     }
 
     #[test]
@@ -567,10 +603,7 @@ mod tests {
             ContentElement::Blockquote {
                 text: "[a]: /not-a-definition".to_string(),
             },
-            ContentElement::Link {
-                text: "t".to_string(),
-                href: "/a&amp;b\\*c".to_string(),
-            },
+            lone_link("t", "/a&amp;b\\*c"),
             ContentElement::CodeBlock {
                 language: Some("a&b&amp;c\\d\\*".to_string()),
                 code: "x".to_string(),
@@ -579,14 +612,8 @@ mod tests {
                 language: Some("a`b".to_string()),
                 code: "```\n~~~".to_string(),
             },
-            ContentElement::Link {
-                text: "t".to_string(),
-                href: "/a b (c)".to_string(),
-            },
-            ContentElement::Image {
-                alt: Some("a".to_string()),
-                path: "my img.png".to_string(),
-            },
+            lone_link("t", "/a b (c)"),
+            lone_image("a", "my img.png"),
         ];
         for el in cases {
             assert_eq!(check_block_round_trip(&el), Ok(()), "{el:?}");

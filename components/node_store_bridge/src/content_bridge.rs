@@ -167,9 +167,36 @@ fn is_link_expression(store: &NodeStore, node: NodeId) -> bool {
     matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link-expression")
 }
 
-/// Check if a node is a resolved link element (ContentElement::Link stored as Element("link")).
+/// The destination of the lone link a `paragraph` node holds (ADR-059 §12):
+/// its shape is `SoleLink` and it has no marker. `None` for any other node.
+pub(crate) fn sole_link_paragraph_href(store: &NodeStore, node: NodeId) -> Option<String> {
+    if !matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "paragraph")
+        || find_attr_text(store, node, "marker").is_some()
+    {
+        return None;
+    }
+    // Structural: the destination is the `href` of the one `inline-link`; no
+    // decoding (this runs for every link slot on every pass).
+    match content_store::sole_inline(store, node)? {
+        (content_store::StoredShape::SoleLink, link) => find_attr_text(store, link, "href"),
+        _ => None,
+    }
+}
+
+/// The href of a plain link element: a lone-link paragraph, or (until stage
+/// 5b.2) a `link` block.
+fn plain_link_href(store: &NodeStore, node: NodeId) -> Option<String> {
+    if matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link") {
+        return find_attr_text(store, node, "href");
+    }
+    sole_link_paragraph_href(store, node)
+}
+
+/// Check if a node is a plain link element: a lone-link paragraph, or a
+/// `link` block (stored as Element("link"), until stage 5b.2).
 fn is_resolved_link(store: &NodeStore, node: NodeId) -> bool {
     matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link")
+        || sole_link_paragraph_href(store, node).is_some()
 }
 
 /// What a link element in a preamble slot points at.
@@ -187,7 +214,7 @@ pub(crate) enum SlotElementTarget {
 /// any other node. URLs are normalised (`store_pipeline::normalise_url`).
 pub(crate) fn slot_element_target(store: &NodeStore, el: NodeId) -> Option<SlotElementTarget> {
     if is_resolved_link(store, el) {
-        let href = find_attr_text(store, el, "href")?;
+        let href = plain_link_href(store, el)?;
         return Some(SlotElementTarget::Url {
             url: crate::store_pipeline::normalise_url(&href),
             raw: href,
@@ -1447,6 +1474,42 @@ mod tests {
             if let Some(Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
         });
         assert_eq!(text, Some("A short summary.".to_string()));
+    }
+
+    /// Guard (stage 5b.1, user requirement 1): on the store path an image slot
+    /// has the record fields `src` and `alt` whichever way the store holds the
+    /// image, and a template reading them gets the same text.
+    #[test]
+    fn native_image_slot_record_is_src_and_alt() {
+        use template::graph_view::GraphView;
+        let grammar = schema::parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\n\
+             ![cover image](images/*.jpg) {#cover}\noccurs\n: exactly once\n",
+        )
+        .expect("schema parses");
+        let doc = content::parse_and_assign("# T\n\n![A cat](images/cat.jpg)\n", &grammar)
+            .expect("doc parses");
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: "/post/p".to_string(),
+            stem: "post".to_string(),
+            file: "content/post/p.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let no_stems = std::collections::HashMap::new();
+        let no_urls = std::collections::HashMap::new();
+        let sem =
+            create_semantic_content(&mut store, doc_root, &grammar, &meta, &no_stems, &no_urls, None);
+
+        let view = crate::graph_view_impl::NodeStoreView::new(&store, sem);
+        let text = |path: &[&str]| match view.resolve(path).map(|r| r.as_value().clone()) {
+            Some(template::Value::Text(t)) => Some(t),
+            other => other.map(|v| format!("{v:?}")),
+        };
+        assert_eq!(text(&["cover", "src"]).as_deref(), Some("images/cat.jpg"));
+        assert_eq!(text(&["cover", "alt"]).as_deref(), Some("A cat"));
+        assert_eq!(text(&["cover", "path"]), None);
     }
 
     #[test]

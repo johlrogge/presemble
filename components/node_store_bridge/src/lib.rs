@@ -1,3 +1,8 @@
+// 5b.2: `ContentElement::Link` and `Image` are deprecated and removed in 5b.2;
+// until then this crate still reads their `link` and `image` store kinds.
+// 5b.2: remove this allow
+#![allow(deprecated)]
+
 pub mod node_helpers;
 pub mod schema_bridge;
 pub mod schema_document;

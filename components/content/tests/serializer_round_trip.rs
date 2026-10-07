@@ -246,6 +246,39 @@ fn gen_multiline_paragraph(rng: &mut Rng) -> ContentElement {
 
 /// A paragraph whose content is exactly the literal text `text` (ADR-059
 /// stage 5): its markup characters are text, and the serializer escapes them.
+/// A paragraph that holds one link (ADR-059 §12).
+fn lone_link(text: &str, href: &str) -> ContentElement {
+    ContentElement::Paragraph {
+        content: Inlines::new(
+            vec![Inline::Link {
+                destination: content::inline::LinkDestination::new(href),
+                title: None,
+                text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+            }],
+            InlineContext::Paragraph,
+        ),
+        marker: None,
+    }
+}
+
+/// A paragraph that holds one image (ADR-059 §12).
+fn lone_image(alt: &str, src: &str) -> ContentElement {
+    ContentElement::Paragraph {
+        content: Inlines::new(
+            vec![Inline::Image {
+                source: content::inline::AssetRef::new(src),
+                title: None,
+                alt: Inlines::new(
+                    if alt.is_empty() { vec![] } else { vec![Inline::Text(alt.to_string())] },
+                    InlineContext::Alt,
+                ),
+            }],
+            InlineContext::Paragraph,
+        ),
+        marker: None,
+    }
+}
+
 fn literal_paragraph(text: &str) -> ContentElement {
     ContentElement::Paragraph {
         content: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::Paragraph),
@@ -406,14 +439,11 @@ fn gen_block(rng: &mut Rng, previous_list: Option<bool>) -> ContentElement {
             text: gen_opener_text(rng, false).trim_start().to_string(),
         },
         3 => gen_code(rng),
-        4 => ContentElement::Link {
-            text: gen_words(rng, 1, 3),
-            href: rng.pick(DOMAIN.hrefs).to_string(),
-        },
-        5 => ContentElement::Image {
-            alt: if rng.chance(30) { None } else { Some(gen_words(rng, 1, 3)) },
-            path: rng.pick(DOMAIN.hrefs).to_string(),
-        },
+        4 => lone_link(&gen_words(rng, 1, 3), rng.pick(DOMAIN.hrefs)),
+        5 => lone_image(
+            &if rng.chance(30) { String::new() } else { gen_words(rng, 1, 3) },
+            rng.pick(DOMAIN.hrefs),
+        ),
         8 => gen_link_expression(rng),
         _ => ContentElement::Separator,
     }
@@ -589,7 +619,17 @@ fn generator_exercises_every_block_kind_and_opener() {
             kinds.insert(std::mem::discriminant(&block));
         }
     }
-    assert_eq!(kinds.len(), 9, "expected 9 block kinds in the generated domain");
+    // Heading, paragraph, blockquote, code block, list, link expression and
+    // separator: a lone link or image is a paragraph.
+    assert_eq!(kinds.len(), 7, "expected 7 block kinds in the generated domain");
+    let (mut links, mut images) = (0, 0);
+    for seed in SEEDS {
+        for block in flatten(&gen_document(seed)) {
+            links += usize::from(block.sole_link().is_some());
+            images += usize::from(block.sole_image().is_some());
+        }
+    }
+    assert!(links > 100 && images > 100, "lone links {links}, lone images {images}");
     assert!(escaped_paragraphs > 50, "too few paragraphs needed escaping: {escaped_paragraphs}");
     assert!(multiline > 100, "too few multi-line paragraphs: {multiline}");
     assert!(escaped_later_lines > 30, "too few later lines escaped: {escaped_later_lines}");

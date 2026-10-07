@@ -13,6 +13,7 @@ use template::graph_view::{DataRef, GraphView, ResolvedNode};
 use template::DataGraph;
 
 use crate::content_bridge::presemble_file_for_root;
+use crate::node_helpers::FieldRef;
 use crate::value_bridge::node_to_value;
 
 // ---------------------------------------------------------------------------
@@ -90,16 +91,15 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
 
             // 3. Fall back to Attribute edges
-            let attr_target = crate::node_helpers::data_attribute(self.store, current, segment);
-
-            match attr_target {
-                Some(id) if is_last => {
+            match crate::node_helpers::record_field(self.store, current, segment) {
+                Some(FieldRef::Node(id)) if is_last => {
                     return Some(DataRef::Owned(node_to_value(self.store, id)));
                 }
-                Some(id) => {
+                Some(FieldRef::Node(id)) => {
                     current = id;
                 }
-                None => return None,
+                Some(FieldRef::Value(value)) if is_last => return Some(DataRef::Owned(value)),
+                Some(FieldRef::Value(_)) | None => return None,
             }
         }
         // Empty path — nothing to resolve
@@ -142,7 +142,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
                 continue;
             }
             // Then Attribute
-            if let Some(id) = crate::node_helpers::data_attribute(self.store, current, segment) {
+            if let Some(id) = crate::node_helpers::record_field_node(self.store, current, segment) {
                 current = id;
                 continue;
             }
@@ -181,7 +181,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
 
             // Try Attribute edges
-            if let Some(id) = crate::node_helpers::data_attribute(self.store, current, segment) {
+            if let Some(id) = crate::node_helpers::record_field_node(self.store, current, segment) {
                 if is_last {
                     return Some(ResolvedNode { id, store: self.store });
                 }
@@ -421,7 +421,7 @@ fn walk_store(store: &NodeStore, root: NodeId, path: &[&str]) -> Option<NodeId> 
             continue;
         }
         // Attribute edges
-        if let Some(id) = crate::node_helpers::data_attribute(store, current, segment) {
+        if let Some(id) = crate::node_helpers::record_field_node(store, current, segment) {
             current = id;
             continue;
         }
@@ -638,6 +638,58 @@ mod tests {
         };
         assert!(record.resolve(&["src"]).is_some());
         assert!(record.resolve(&["path"]).is_none());
+    }
+
+    /// A paragraph that holds one link is the record `{href, text}`, and one
+    /// that holds one image the record `{src, alt}` (ADR-059 §12), on the store
+    /// path, whatever the formatting of the text.
+    #[test]
+    fn lone_link_and_image_paragraphs_are_records() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+        let mut add = |name: &str, md: &str| {
+            let block = content_store::block_to_store(
+                &content::ContentElement::paragraph_from_markdown(md),
+                &mut store,
+            );
+            let name = store.intern(name);
+            store.add_edge(root, Edge::ConsistsOf { name, part: block });
+        };
+        add("plain", "[Jo](/author/jo)");
+        add("fancy", "[**Jo** H](/author/jo)");
+        add("cover", "![A cat](images/cat.jpg)");
+        add("bare", "![](images/bare.jpg)");
+        add("prose", "See [Jo](/author/jo).");
+
+        let view = NodeStoreView::new(&store, root);
+        let text = |path: &[&str]| match view.resolve(path).map(|r| r.as_value().clone()) {
+            Some(Value::Text(t)) => Some(t),
+            Some(v @ Value::Inlines(_)) => v.display_text(),
+            _ => None,
+        };
+        assert_eq!(text(&["plain", "href"]).as_deref(), Some("/author/jo"));
+        assert_eq!(text(&["plain", "text"]).as_deref(), Some("Jo"));
+        assert_eq!(text(&["fancy", "text"]).as_deref(), Some("Jo H"));
+        assert!(
+            matches!(view.resolve(&["fancy", "text"]).map(|r| r.as_value().clone()),
+                Some(Value::Inlines(nodes)) if template::serialize_nodes(&nodes) == "<strong>Jo</strong> H"),
+            "formatted text keeps its formatting"
+        );
+        assert_eq!(text(&["cover", "src"]).as_deref(), Some("images/cat.jpg"));
+        assert_eq!(text(&["cover", "alt"]).as_deref(), Some("A cat"));
+        assert_eq!(text(&["bare", "src"]).as_deref(), Some("images/bare.jpg"));
+        assert_eq!(text(&["bare", "alt"]), None, "an empty alt is absent");
+        assert!(view.resolve(&["prose", "href"]).is_none(), "text is not a link record");
+        // The whole paragraph, materialised, is that record.
+        for (name, field) in [("plain", "href"), ("cover", "src")] {
+            let part = store.consists_of(root).into_iter().find(|(n, _)| store.resolve_name(*n) == name);
+            let Value::Record(record) = crate::value_bridge::node_to_value(&store, part.unwrap().1)
+            else {
+                panic!("{name} is a record")
+            };
+            assert!(record.resolve(&[field]).is_some(), "{name}.{field}");
+        }
     }
 
     #[test]

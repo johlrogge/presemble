@@ -383,16 +383,20 @@ fn push_empty_slot(preamble: &mut im::Vector<DocumentSlot>, slot: &Slot) {
     });
 }
 
+/// Whether a slot of kind `slot_element` takes `element`. A paragraph is taken
+/// by what it is for, its shape (ADR-059 §12): a lone link by a link slot, a
+/// lone image by an image slot, any other text by a paragraph slot.
 pub(crate) fn element_matches_slot(element: &ContentElement, slot_element: &Element) -> bool {
-    matches!(
-        (element, slot_element),
-        (ContentElement::Heading { .. }, Element::Heading { .. })
-            | (ContentElement::Paragraph { .. }, Element::Paragraph)
-            | (ContentElement::Link { .. }, Element::Link { .. })
-            | (ContentElement::LinkExpression { .. }, Element::Link { .. })
-            | (ContentElement::Image { .. }, Element::Image { .. })
-            | (ContentElement::List { .. }, Element::List)
-    )
+    match slot_element {
+        Element::Heading { .. } => matches!(element, ContentElement::Heading { .. }),
+        Element::Paragraph => element.is_text_paragraph(),
+        Element::Link { .. } => {
+            element.sole_link().is_some()
+                || matches!(element, ContentElement::LinkExpression { .. })
+        }
+        Element::Image { .. } => element.sole_image().is_some(),
+        Element::List => matches!(element, ContentElement::List { .. }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -842,8 +846,10 @@ headings
                 ContentElement::LinkExpression { text: LinkText::Label(b), .. } => b.clone(),
                 ContentElement::LinkExpression { text: LinkText::Static(s), .. } => s.clone(),
                 ContentElement::LinkExpression { text: LinkText::Empty, .. } => String::new(),
-                ContentElement::Link { text, .. } => text.clone(),
-                other => format!("{other:?}"),
+                other => match other.sole_link() {
+                    Some(link) => link.text.plain_text(),
+                    None => format!("{other:?}"),
+                },
             })
             .collect()
     }
@@ -989,7 +995,7 @@ headings
                     schema::HeadingLevel::new(2).unwrap(),
                     "Aside"
                 ),
-                ContentElement::Link { text: "a".to_string(), href: "/post/a".to_string() },
+                ContentElement::paragraph_from_markdown("[a](/post/a)"),
             ]
         );
         assert_eq!(

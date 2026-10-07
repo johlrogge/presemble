@@ -35,6 +35,105 @@ pub fn data_attribute(store: &NodeStore, id: NodeId, key: &str) -> Option<NodeId
         .map(|(_, value)| value)
 }
 
+/// A field of a record, found in the store: a node that holds it, or a value
+/// that has no node of its own.
+pub(crate) enum FieldRef {
+    Node(NodeId),
+    Value(template::Value),
+}
+
+/// The inline element (`inline-link` or `inline-image`) a lone-link or
+/// lone-image paragraph is made of, with its shape; `None` for any other node.
+/// A paragraph with a marker is not a lone link or image (ADR-060 P1).
+fn lone_inline(
+    store: &NodeStore,
+    paragraph: NodeId,
+) -> Option<(content_store::StoredShape, NodeId)> {
+    if !node_is_element(store, paragraph, "paragraph")
+        || node_attr_text(store, paragraph, "marker").is_some()
+    {
+        return None;
+    }
+    // Structural: nothing is decoded here. This runs for every field resolved.
+    content_store::sole_inline(store, paragraph)
+}
+
+/// The single `Text` child of `id`, when that is all it has.
+fn only_text_child(store: &NodeStore, id: NodeId) -> Option<NodeId> {
+    match store.children(id).as_slice() {
+        [only] if matches!(store.get(*only), Some(Node::Text(_))) => Some(*only),
+        _ => None,
+    }
+}
+
+/// The field `key` of the record that `id` gives a template (ADR-059 §12).
+///
+/// - A lone-link paragraph is the record `{href, text}`, a lone-image
+///   paragraph `{src, alt}`; `alt` is absent when it is empty.
+/// - Any other node has its data attributes as fields (see [`data_key`]).
+pub(crate) fn record_field(store: &NodeStore, id: NodeId, key: &str) -> Option<FieldRef> {
+    use content::AsPlainText;
+    use content_store::StoredShape;
+    if let Some((shape, element)) = lone_inline(store, id) {
+        // The content is decoded only for a field that is not a plain text
+        // node of its own: formatted link text, or an alt with formatting.
+        let decode = || content_store::paragraph_inlines(store, id);
+        return match (shape, key) {
+            (StoredShape::SoleLink, "href") | (StoredShape::SoleImage, "src") => {
+                let attr = if key == "href" { "href" } else { "src" };
+                data_attributes(store, element)
+                    .into_iter()
+                    .find(|(name, _)| store.resolve_name(*name) == attr)
+                    .map(|(_, value)| FieldRef::Node(value))
+            }
+            (StoredShape::SoleLink, "text") => Some(match only_text_child(store, element) {
+                Some(text) => FieldRef::Node(text),
+                None => {
+                    let content = decode()?;
+                    let content::BlockShape::SoleLink(parts) = content::BlockShape::of(&content)
+                    else {
+                        return None;
+                    };
+                    FieldRef::Value(template::Value::Inlines(
+                        template::inline_nodes(parts.text).into(),
+                    ))
+                }
+            }),
+            (StoredShape::SoleImage, "alt") => {
+                // An empty alt is absent.
+                if store.children(element).is_empty() {
+                    return None;
+                }
+                match only_text_child(store, element) {
+                    Some(text) if matches!(store.get(text), Some(Node::Text(t)) if !t.is_empty()) => {
+                        Some(FieldRef::Node(text))
+                    }
+                    _ => {
+                        let content = decode()?;
+                        let content::BlockShape::SoleImage(parts) = content::BlockShape::of(&content)
+                        else {
+                            return None;
+                        };
+                        let plain = parts.alt.plain_text();
+                        (!plain.is_empty()).then(|| FieldRef::Value(template::Value::Text(plain)))
+                    }
+                }
+            }
+            _ => None,
+        };
+    }
+    data_attribute(store, id, key).map(FieldRef::Node)
+}
+
+/// The node that holds field `key` of `id`'s record ([`record_field`]); `None`
+/// when the field has no node of its own.
+pub(crate) fn record_field_node(store: &NodeStore, id: NodeId, key: &str) -> Option<NodeId> {
+    match record_field(store, id, key)? {
+        FieldRef::Node(node) => Some(node),
+        FieldRef::Value(_) => None,
+    }
+}
+
 /// Get the text content of a node.
 /// - For `Node::Text(s)`, returns the text directly.
 /// - For a heading, returns its plain text (ADR-059 §8).

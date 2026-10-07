@@ -427,9 +427,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::End(TagEnd::Image) => {
                 if let State::Image { alt, path, image_range } = state {
-                    let alt_opt = if alt.is_empty() { None } else { Some(alt) };
                     elements.push_back(Spanned {
-                        node: ContentElement::Image { alt: alt_opt, path },
+                        node: image_element(alt, path),
                         span: Span::from(image_range),
                     });
                     state = State::Idle;
@@ -731,27 +730,52 @@ pub fn parse_link_target(href: &str) -> Result<LinkTarget, ContentError> {
 
 /// The element for a link that is a whole paragraph. Legacy spellings that
 /// pulldown reads as a link (`:path`, `%20`-encoded and escaped angle-bracket
-/// destinations) are link expressions.
+/// destinations) are link expressions; any other link is a paragraph that
+/// holds the one link (ADR-059 §12), whose shape makes it a link.
 fn link_element(text: String, href: String) -> ContentElement {
+    use crate::inline::{Inline, InlineContext, Inlines, LinkDestination};
     if is_link_expression(&href) {
         let link_text = parse_link_text(&text);
         // `%20` is decoded only here, for the legacy spelling.
         let decoded = href.replace("%20", " ");
-        match parse_link_target(&decoded) {
+        if let Ok(target) = parse_link_target(&decoded) {
             // Legacy spellings never carry a slot marker.
-            Ok(target) => ContentElement::LinkExpression { text: link_text, target, slot: None },
-            Err(_) => ContentElement::Link { text, href },
+            return ContentElement::LinkExpression { text: link_text, target, slot: None };
         }
-    } else {
-        ContentElement::Link { text, href }
     }
+    let content = Inlines::new(
+        vec![Inline::Link {
+            destination: LinkDestination::new(href),
+            title: None,
+            text: Inlines::new(vec![Inline::Text(text)], InlineContext::LinkText),
+        }],
+        InlineContext::Paragraph,
+    );
+    ContentElement::Paragraph { content, marker: None }
+}
+
+/// The paragraph that holds one image (ADR-059 §12).
+fn image_element(alt: String, path: String) -> ContentElement {
+    use crate::inline::{AssetRef, Inline, InlineContext, Inlines};
+    let content = Inlines::new(
+        vec![Inline::Image {
+            source: AssetRef::new(path),
+            title: None,
+            alt: Inlines::new(vec![Inline::Text(alt)], InlineContext::Alt),
+        }],
+        InlineContext::Paragraph,
+    );
+    ContentElement::Paragraph { content, marker: None }
 }
 
 type ParagraphEvents = Vec<(Event<'static>, std::ops::Range<usize>)>;
 
-/// A paragraph that is exactly one link or one image, ignoring comments and
-/// whitespace: still a `Link` or an `Image` block (until stage 5b).
-fn sole_link_or_image(events: &ParagraphEvents) -> Option<Spanned<ContentElement>> {
+/// A paragraph that is exactly one link, ignoring comments and whitespace,
+/// whose destination is a link expression in a legacy spelling that pulldown
+/// reads as a plain link (`[x](:path)`, `%20`, escaped angle brackets): a link
+/// expression (ADR-058). `None` for every other paragraph, which is read as
+/// inlines.
+fn sole_legacy_link_expression(events: &ParagraphEvents) -> Option<Spanned<ContentElement>> {
     let is_trivia = |event: &Event<'_>| match event {
         Event::Text(t) => t.trim().is_empty(),
         Event::SoftBreak | Event::HardBreak => true,
@@ -784,20 +808,9 @@ fn sole_link_or_image(events: &ParagraphEvents) -> Option<Spanned<ContentElement
     };
     match (&events[first].0, &events[last].0) {
         (Event::Start(Tag::Link { dest_url, .. }), Event::End(TagEnd::Link)) if !has(nested) => {
-            Some(Spanned {
-                node: link_element(inner_text(), dest_url.to_string()),
-                span: Span::from(events[first].1.clone()),
-            })
-        }
-        (Event::Start(Tag::Image { dest_url, .. }), Event::End(TagEnd::Image)) if !has(nested) => {
-            let alt = inner_text();
-            Some(Spanned {
-                node: ContentElement::Image {
-                    alt: (!alt.is_empty()).then_some(alt),
-                    path: dest_url.to_string(),
-                },
-                span: Span::from(events[first].1.clone()),
-            })
+            let node = link_element(inner_text(), dest_url.to_string());
+            matches!(node, ContentElement::LinkExpression { .. })
+                .then(|| Spanned { node, span: Span::from(events[first].1.clone()) })
         }
         _ => None,
     }
@@ -832,9 +845,11 @@ fn without_marker(events: ParagraphEvents, cut: usize, literal: &str) -> Option<
     Some(out)
 }
 
-/// A finished top-level paragraph: a `Link` or `Image` block when it is
-/// exactly one of them, else a paragraph of all its inline content and its
-/// trailing marker (ADR-059 §5). Nothing is dropped.
+/// A finished top-level paragraph: a paragraph of all its inline content and
+/// its trailing marker (ADR-059 §5), or a link expression when it is exactly
+/// one link written in a legacy spelling. Nothing is dropped. A paragraph that
+/// holds only a link or only an image is a paragraph like any other; its shape
+/// decides what it is for (ADR-059 §12).
 fn finish_paragraph(
     input: &str,
     events: ParagraphEvents,
@@ -849,7 +864,7 @@ fn finish_paragraph(
     }
     let found = paragraph_marker(trimmed);
     if found.is_none()
-        && let Some(block) = sole_link_or_image(&events)
+        && let Some(block) = sole_legacy_link_expression(&events)
     {
         elements.push_back(block);
         return;
@@ -960,7 +975,7 @@ fn convert_heading_level(
 mod tests {
     use super::*;
     use crate::document::ContentElement;
-    use crate::inline::Inline;
+    use crate::inline::{AsPlainText, Inline};
 
     // Helper: assert document has exactly the given number of elements.
     fn assert_element_count(doc: &FlatDocument, n: usize) {
@@ -1207,26 +1222,22 @@ mod tests {
         assert_eq!(crate::serializer::serialize_elements(&doc.elements), src);
     }
 
-    /// Limit L15 (until stage 5b): inline HTML in link text and image alt
-    /// text of a sole link or image block is dropped on load. A paragraph
-    /// that carries an image keeps its HTML (it is reported by the validator).
+    /// Limit L15, resolved by stage 5b: inline HTML in the text of a lone link
+    /// and in the alt text of a lone image is kept (it is reported by the
+    /// validator), like the HTML of any other paragraph.
     #[test]
-    fn inline_html_in_links_and_alt_text_is_dropped_l15() {
+    fn inline_html_in_links_and_alt_text_is_kept() {
         let nodes = |md: &str| -> Vec<ContentElement> {
             parse_document(md).unwrap().elements.iter().map(|e| e.node.clone()).collect()
         };
-        assert_eq!(
-            nodes("[a <b>x</b>](/p)\n"),
-            vec![ContentElement::Link { text: "a x".to_string(), href: "/p".to_string() }]
-        );
-        assert_eq!(
-            nodes("![a <b>x</b>](i.png)\n"),
-            vec![ContentElement::Image { alt: Some("a x".to_string()), path: "i.png".to_string() }]
-        );
-        assert_eq!(
-            nodes("t <b>x</b> ![i](i.png)\n"),
-            vec![ContentElement::paragraph_from_markdown("t <b>x</b> ![i](i.png)")]
-        );
+        for md in ["[a <b>x</b>](/p)", "![a <b>x</b>](i.png)", "t <b>x</b> ![i](i.png)"] {
+            let parsed = nodes(&format!("{md}\n"));
+            assert_eq!(parsed, vec![ContentElement::paragraph_from_markdown(md)], "{md:?}");
+            assert!(
+                crate::serializer::serialize_element(&parsed[0]).contains("<b>"),
+                "the HTML is kept: {md:?}"
+            );
+        }
     }
 
     // ── Headings ────────────────────────────────────────────────────────────
@@ -1354,73 +1365,60 @@ mod tests {
     // ── Images ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn image_with_alt_produces_image_element() {
+    fn image_with_alt_produces_a_paragraph_of_shape_sole_image() {
         let doc = parse_document("![A photo of a cat](images/cat.jpg)").unwrap();
-        // Paragraph wraps image in markdown; image is extracted as standalone.
-        let image = doc
-            .elements
-            .iter()
-            .find(|e| matches!(e.node, ContentElement::Image { .. }))
-            .expect("expected an Image element");
-        match &image.node {
-            ContentElement::Image { alt, path } => {
-                assert_eq!(alt.as_deref(), Some("A photo of a cat"));
-                assert_eq!(path, "images/cat.jpg");
-            }
-            _ => unreachable!(),
-        }
+        assert_element_count(&doc, 1);
+        let image = doc.elements[0].node.sole_image().expect("a lone image");
+        assert_eq!(image.alt.plain_text(), "A photo of a cat");
+        assert_eq!(image.source, "images/cat.jpg");
     }
 
     #[test]
-    fn image_without_alt_produces_none_alt() {
+    fn image_without_alt_has_empty_alt() {
         let doc = parse_document("![](images/no-alt.png)").unwrap();
-        let image = doc
-            .elements
-            .iter()
-            .find(|e| matches!(e.node, ContentElement::Image { .. }))
-            .expect("expected an Image element");
-        match &image.node {
-            ContentElement::Image { alt, path } => {
-                assert!(alt.is_none(), "alt should be None when alt text is empty");
-                assert_eq!(path, "images/no-alt.png");
-            }
-            _ => unreachable!(),
-        }
+        assert_element_count(&doc, 1);
+        let image = doc.elements[0].node.sole_image().expect("a lone image");
+        assert!(image.alt.is_empty(), "alt should be empty when the alt text is empty");
+        assert_eq!(image.source, "images/no-alt.png");
+    }
+
+    /// L6, resolved by stage 5b: an image's alt text keeps its formatting, and
+    /// its title is kept.
+    #[test]
+    fn image_alt_formatting_and_title_are_kept() {
+        let doc = parse_document("![*a* cat](c.png \"t\")").unwrap();
+        let image = doc.elements[0].node.sole_image().expect("a lone image");
+        assert!(matches!(image.alt.as_slice()[0], Inline::Emph(_)), "{:?}", image.alt);
+        assert_eq!(image.title.as_deref(), Some("t"));
     }
 
     // ── Links ────────────────────────────────────────────────────────────────
 
     #[test]
-    fn link_produces_link_element() {
+    fn link_produces_a_paragraph_of_shape_sole_link() {
         let doc = parse_document("[Visit Rust](https://rust-lang.org)").unwrap();
-        let link = doc
-            .elements
-            .iter()
-            .find(|e| matches!(e.node, ContentElement::Link { .. }))
-            .expect("expected a Link element");
-        match &link.node {
-            ContentElement::Link { text, href } => {
-                assert_eq!(text, "Visit Rust");
-                assert_eq!(href, "https://rust-lang.org");
-            }
-            _ => unreachable!(),
-        }
+        assert_element_count(&doc, 1);
+        assert!(matches!(doc.elements[0].node, ContentElement::Paragraph { .. }));
+        let link = doc.elements[0].node.sole_link().expect("a lone link");
+        assert_eq!(link.text.plain_text(), "Visit Rust");
+        assert_eq!(link.destination, "https://rust-lang.org");
     }
 
     #[test]
     fn link_text_is_captured() {
         let doc = parse_document("[Author Name](/authors/name)").unwrap();
-        let link = doc
-            .elements
-            .iter()
-            .find(|e| matches!(e.node, ContentElement::Link { .. }))
-            .expect("expected a Link element");
-        match &link.node {
-            ContentElement::Link { text, .. } => {
-                assert_eq!(text, "Author Name", "link text should match anchor text");
-            }
-            _ => unreachable!(),
-        }
+        let link = doc.elements[0].node.sole_link().expect("a lone link");
+        assert_eq!(link.text.plain_text(), "Author Name", "link text should match anchor text");
+    }
+
+    /// L6, resolved by stage 5b: a link's text keeps its formatting, and its
+    /// title is kept.
+    #[test]
+    fn link_text_formatting_and_title_are_kept() {
+        let doc = parse_document("[**a** b](/x \"t\")").unwrap();
+        let link = doc.elements[0].node.sole_link().expect("a lone link");
+        assert!(matches!(link.text.as_slice()[0], Inline::Strong(_)), "{:?}", link.text);
+        assert_eq!(link.title.as_deref(), Some("t"));
     }
 
     // ── Separator ────────────────────────────────────────────────────────────
@@ -1930,20 +1928,11 @@ headings
 
     #[test]
     fn plain_link_unchanged() {
-        // [text](/some/path) -> regular Link, not LinkExpression
+        // [text](/some/path) -> a lone link, not LinkExpression
         let doc = parse_document("[text](/some/path)").unwrap();
-        let link = doc
-            .elements
-            .iter()
-            .find(|e| matches!(e.node, ContentElement::Link { .. }))
-            .expect("expected a plain Link element");
-        match &link.node {
-            ContentElement::Link { text, href } => {
-                assert_eq!(text, "text");
-                assert_eq!(href, "/some/path");
-            }
-            _ => unreachable!(),
-        }
+        let link = doc.elements[0].node.sole_link().expect("expected a lone link");
+        assert_eq!(link.text.plain_text(), "text");
+        assert_eq!(link.destination, "/some/path");
         assert!(
             !doc.elements.iter().any(|e| matches!(e.node, ContentElement::LinkExpression { .. })),
             "plain link should not produce a LinkExpression"
@@ -2112,10 +2101,12 @@ headings
             vec![thread_expr(label("x"), "post", vec![LinkOp::Take(4)])]
         );
         assert_eq!(nodes("[x]((->> :post))"), vec![thread_expr(label("x"), "post", vec![])]);
-        // Malformed: not a link expression; pulldown's bare link remains.
+        // Malformed: not a link expression; pulldown's bare link remains, as
+        // a paragraph that holds the one link.
+        assert_eq!(nodes("[x](->>)"), vec![ContentElement::paragraph_from_markdown("[x](->>)")]);
         assert_eq!(
-            nodes("[x](->>)"),
-            vec![ContentElement::Link { text: "x".to_string(), href: "->>".to_string() }]
+            nodes("[x](->>)")[0].sole_link().map(|l| l.destination),
+            Some("->>".to_string())
         );
     }
 
@@ -2388,21 +2379,25 @@ headings
         assert_eq!(nodes(&saved), nodes("[a](/x) trailing"));
     }
 
-    /// Guard until stage 5b: a paragraph that is exactly one link (comments
-    /// and whitespace aside) is still a `Link` block.
+    /// Stage 5b: a paragraph that is exactly one link (comments and
+    /// whitespace aside) is a paragraph, and its shape makes it a link.
     #[test]
-    fn a_sole_link_paragraph_is_still_a_link_block() {
-        let link = ContentElement::Link { text: "a".to_string(), href: "/x".to_string() };
+    fn a_sole_link_paragraph_is_a_paragraph_of_shape_sole_link() {
+        let link = ContentElement::paragraph_from_markdown("[a](/x)");
+        assert!(matches!(link, ContentElement::Paragraph { .. }));
         assert_eq!(nodes("[a](/x)"), vec![link.clone()]);
-        assert_eq!(nodes("  [a](/x)  "), vec![link]);
+        assert_eq!(nodes("  [a](/x)  "), vec![link.clone()]);
+        assert!(link.sole_link().is_some());
+        assert!(nodes("[a](/x) <!-- c -->")[0].sole_link().is_some(), "a comment does not count");
     }
 
-    /// Guard until stage 5b.
+    /// Stage 5b.
     #[test]
-    fn a_sole_image_paragraph_is_still_an_image_block() {
-        let image =
-            ContentElement::Image { alt: Some("c".to_string()), path: "c.png".to_string() };
-        assert_eq!(nodes("![c](c.png)"), vec![image]);
+    fn a_sole_image_paragraph_is_a_paragraph_of_shape_sole_image() {
+        let image = ContentElement::paragraph_from_markdown("![c](c.png)");
+        assert!(matches!(image, ContentElement::Paragraph { .. }));
+        assert_eq!(nodes("![c](c.png)"), vec![image.clone()]);
+        assert!(image.sole_image().is_some());
     }
 
     /// Nothing is pulled out of a paragraph: an image between text stays an

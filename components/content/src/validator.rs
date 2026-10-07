@@ -385,6 +385,9 @@ fn describe_element(el: &ContentElement) -> String {
 fn kind_name(el: &ContentElement) -> &'static str {
     match el {
         ContentElement::Heading { .. } => "heading",
+        // A paragraph is named by its shape: a lone link is a link.
+        ContentElement::Paragraph { .. } if el.sole_link().is_some() => "link",
+        ContentElement::Paragraph { .. } if el.sole_image().is_some() => "image",
         ContentElement::Paragraph { .. } => "paragraph",
         ContentElement::Image { .. } => "image",
         ContentElement::Link { .. } => "link",
@@ -402,6 +405,8 @@ fn kind_name(el: &ContentElement) -> &'static str {
 fn kind_plural(el: &ContentElement) -> &'static str {
     match el {
         ContentElement::Heading { .. } => "headings",
+        ContentElement::Paragraph { .. } if el.sole_link().is_some() => "links",
+        ContentElement::Paragraph { .. } if el.sole_image().is_some() => "images",
         ContentElement::Paragraph { .. } => "paragraphs",
         ContentElement::Image { .. } => "images",
         ContentElement::Link { .. } | ContentElement::LinkExpression { .. } => "links",
@@ -642,16 +647,35 @@ fn validate_headings(
     count
 }
 
+/// The Error for a paragraph in a slot whose shape the slot does not take
+/// (ADR-059 §12): the paragraph stays where it is, editable and saveable, and
+/// is reassigned when the file is read again. `expected` is `a link`,
+/// `an image` or `a paragraph`.
+fn wrong_shape(slot: &Slot, expected: &str, diagnostics: &mut Vec<ValidationDiagnostic>) {
+    diagnostics.push(ValidationDiagnostic {
+        severity: Severity::Error,
+        message: format!("slot '{}': expected {expected}", slot.name),
+        slot: Some(slot.name.clone()),
+        span: None,
+    });
+}
+
 /// Validate paragraphs in a slot's elements. Returns count consumed.
 fn validate_paragraphs(
     elements: &im::Vector<Spanned<ContentElement>>,
-    _slot: &Slot,
-    _diagnostics: &mut Vec<ValidationDiagnostic>,
+    slot: &Slot,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
-    elements
-        .iter()
-        .filter(|s| matches!(s.node, ContentElement::Paragraph { .. }))
-        .count()
+    let mut count = 0usize;
+    for spanned in elements {
+        if spanned.node.is_text_paragraph() {
+            count += 1;
+        } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
+            // A lone link or image: text a paragraph slot does not take.
+            wrong_shape(slot, "a paragraph", diagnostics);
+        }
+    }
+    count
 }
 
 /// Check paragraph count bounds.
@@ -695,12 +719,16 @@ fn validate_links(
     slot: &Slot,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
-    let count = elements
-        .iter()
-        .filter(|s| {
-            matches!(s.node, ContentElement::Link { .. } | ContentElement::LinkExpression { .. })
-        })
-        .count();
+    let mut count = 0usize;
+    for spanned in elements {
+        if spanned.node.sole_link().is_some()
+            || matches!(spanned.node, ContentElement::LinkExpression { .. })
+        {
+            count += 1;
+        } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
+            wrong_shape(slot, "a link", diagnostics);
+        }
+    }
 
     if count == 0 && expected_count_for_slot(slot).min() > 0 {
         diagnostics.push(ValidationDiagnostic {
@@ -723,9 +751,12 @@ fn validate_images(
     let mut count = 0usize;
 
     for spanned in elements {
-        if let ContentElement::Image { alt, .. } = &spanned.node {
+        if let Some(image) = spanned.node.sole_image() {
             count += 1;
-            check_alt_constraints(alt.as_deref(), slot, diagnostics);
+            let alt = image.alt.plain_text();
+            check_alt_constraints((!alt.is_empty()).then_some(alt.as_str()), slot, diagnostics);
+        } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
+            wrong_shape(slot, "an image", diagnostics);
         }
     }
 
@@ -936,6 +967,56 @@ mod tests {
             "expected an error for the 'title' slot, got: {:#?}",
             result.diagnostics
         );
+    }
+
+    // ── Test: a paragraph of the wrong shape in a slot (ADR-059 §12) ──────
+
+    /// The hello-world document with the element of slot `name` replaced by
+    /// the paragraph `md`.
+    fn hello_world_with(name: &str, md: &str) -> (Document, Grammar) {
+        let grammar = article_grammar();
+        let src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let mut doc = parse_and_assign(src, &grammar).expect("hello-world.md should parse");
+        let slot = doc.preamble.iter_mut().find(|s| s.name.as_str() == name).expect("slot");
+        slot.elements.front_mut().expect("an element").node =
+            ContentElement::paragraph_from_markdown(md);
+        (doc, grammar)
+    }
+
+    fn errors(doc: &Document, grammar: &Grammar) -> Vec<String> {
+        validate(doc, grammar)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_paragraph_of_the_wrong_shape_in_a_slot_is_an_error_naming_the_shape() {
+        // Text in an image slot, a lone link in an image slot, a lone image in
+        // a link slot, and a lone link in a paragraph slot.
+        for (slot, md, expected) in [
+            ("cover", "Just text.", "expected an image"),
+            ("cover", "[Jo](/author/jo)", "expected an image"),
+            ("author", "![A cat](cat.jpg)", "expected a link"),
+            ("summary", "[Jo](/author/jo)", "expected a paragraph"),
+        ] {
+            let (doc, grammar) = hello_world_with(slot, md);
+            let errors = errors(&doc, &grammar);
+            assert!(
+                errors.iter().any(|m| m.contains(&format!("slot '{slot}'")) && m.contains(expected)),
+                "{slot} <- {md:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lone_link_or_image_of_the_right_shape_is_not_an_error() {
+        let grammar = article_grammar();
+        let src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let doc = parse_and_assign(src, &grammar).expect("parses");
+        assert!(errors(&doc, &grammar).is_empty(), "{:?}", errors(&doc, &grammar));
     }
 
     // ── Test: wrong heading level in body produces an error ──────────────

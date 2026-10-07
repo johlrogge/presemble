@@ -9,7 +9,7 @@
 use crate::constants::{ATTR_ADDRESS, ATTR_FILE, ATTR_MD, ATTR_SLOT, CLASS_HTML_REMOVED, MSG_HTML_REMOVED};
 use crate::dom::{Element, Form, Node};
 use crate::markdown_nodes::{inline_children, table_cell_nodes};
-use content::ContentElement;
+use content::{BlockShape, ContentElement};
 use schema::Spanned;
 
 /// Per-block rendering context.
@@ -58,10 +58,31 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             slot_attrs(ctx),
             crate::inline_nodes::inline_nodes(content),
         )],
-        // The paragraph's inline nodes, as for a heading.
-        ContentElement::Paragraph { content, .. } => {
-            vec![el("p", slot_attrs(ctx), crate::inline_nodes::inline_nodes(content))]
-        }
+        // A paragraph renders by its shape (ADR-059 §12): a lone link is an
+        // `<a>`, a lone image an `<img>`, never wrapped in a `<p>`; anything
+        // else is a `<p>` of its inline nodes. A paragraph with a marker is
+        // misuse and is text.
+        ContentElement::Paragraph { content, marker } => match BlockShape::of(content) {
+            BlockShape::SoleLink(parts) if marker.is_none() => {
+                let mut attrs = slot_attrs(ctx);
+                attrs.push(attr("href", parts.destination.as_str()));
+                if let Some(title) = parts.title.filter(|t| !t.is_empty()) {
+                    attrs.push(attr("title", title));
+                }
+                vec![el("a", attrs, crate::inline_nodes::inline_nodes(parts.text))]
+            }
+            BlockShape::SoleImage(parts) if marker.is_none() => {
+                use content::AsPlainText;
+                let mut attrs = slot_attrs(ctx);
+                attrs.push(attr("src", parts.source.as_str()));
+                attrs.push(attr("alt", parts.alt.plain_text()));
+                if let Some(title) = parts.title.filter(|t| !t.is_empty()) {
+                    attrs.push(attr("title", title));
+                }
+                vec![el("img", attrs, Vec::new())]
+            }
+            _ => vec![el("p", slot_attrs(ctx), crate::inline_nodes::inline_nodes(content))],
+        },
         ContentElement::Image { path, alt } => {
             let mut attrs = slot_attrs(ctx);
             attrs.push(attr("src", path.as_str()));

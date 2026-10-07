@@ -896,8 +896,13 @@ fn render_insert_native(
                     return Ok(Some(vec![Node::Element(element)]));
                 }
 
+                // A paragraph that holds one link or one image is that link or
+                // image (ADR-059 §12): it renders as the element a link or
+                // image slot always rendered.
+                let lone = if element_name == "paragraph" { lone_paragraph(store, id) } else { None };
+
                 // Heading or paragraph — extract first text child
-                if element_name == "heading" || element_name == "paragraph" {
+                if element_name == "heading" || (element_name == "paragraph" && lone.is_none()) {
                     // A heading and a paragraph show their inline nodes
                     // (ADR-064).
                     let content = if element_name == "heading" {
@@ -928,32 +933,10 @@ fn render_insert_native(
 
                 // Check for href attribute → render as link
                 let attrs = store.attributes(id);
-                let href = attrs.iter().find_map(|(n, v)| {
-                    if store.resolve_name(*n) == "href" {
-                        if let Some(node_store::Node::Text(t)) = store.get(*v) {
-                            Some(t.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                });
-                let path_val = attrs.iter().find_map(|(n, v)| {
-                    if store.resolve_name(*n) == "path" {
-                        if let Some(node_store::Node::Text(t)) = store.get(*v) {
-                            Some(t.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(href) = href {
-                    let text = attrs.iter().find_map(|(n, v)| {
-                        if store.resolve_name(*n) == "text" {
+                let href = match &lone {
+                    Some(Lone::Link { href, .. }) => Some(href.clone()),
+                    _ => attrs.iter().find_map(|(n, v)| {
+                        if store.resolve_name(*n) == "href" {
                             if let Some(node_store::Node::Text(t)) = store.get(*v) {
                                 Some(t.clone())
                             } else {
@@ -962,7 +945,43 @@ fn render_insert_native(
                         } else {
                             None
                         }
-                    }).unwrap_or_default();
+                    }),
+                };
+                let path_val = match &lone {
+                    Some(Lone::Image { src, .. }) => Some(src.clone()),
+                    _ => attrs.iter().find_map(|(n, v)| {
+                        if store.resolve_name(*n) == "path" {
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                Some(t.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }),
+                };
+
+                if let Some(href) = href {
+                    let text_nodes = match &lone {
+                        Some(Lone::Link { text, .. }) => text.clone(),
+                        _ => vec![Node::Text(
+                            attrs
+                                .iter()
+                                .find_map(|(n, v)| {
+                                    if store.resolve_name(*n) == "text" {
+                                        if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                            Some(t.clone())
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or_default(),
+                        )],
+                    };
                     let slot = slot_name_from_path(data_path);
                     let effective_tag = as_tag.unwrap_or("a");
 
@@ -1028,7 +1047,7 @@ fn render_insert_native(
                             Ok(Some(vec![Node::Element(Element {
                                 name: "a".to_string(),
                                 attrs: elem_attrs,
-                                children: vec![Node::Text(text)],
+                                children: text_nodes,
                             })]))
                         }
                         _ => {
@@ -1043,7 +1062,7 @@ fn render_insert_native(
                             let inner = Element {
                                 name: effective_tag.to_string(),
                                 attrs: inner_attrs,
-                                children: vec![Node::Text(text)],
+                                children: text_nodes,
                             };
                             Ok(Some(vec![Node::Element(Element {
                                 name: "a".to_string(),
@@ -1055,17 +1074,20 @@ fn render_insert_native(
                 }
 
                 if let Some(src) = path_val {
-                    let alt = attrs.iter().find_map(|(n, v)| {
-                        if store.resolve_name(*n) == "alt" {
-                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
-                                Some(t.clone())
+                    let alt = match &lone {
+                        Some(Lone::Image { alt, .. }) => alt.clone(),
+                        _ => attrs.iter().find_map(|(n, v)| {
+                            if store.resolve_name(*n) == "alt" {
+                                if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                    Some(t.clone())
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
-                        } else {
-                            None
-                        }
-                    }).unwrap_or_default();
+                        }).unwrap_or_default(),
+                    };
                     let tag = as_tag.unwrap_or("img").to_string();
                     let slot = slot_name_from_path(data_path);
                     let mut img_attrs = vec![
@@ -1529,13 +1551,12 @@ fn render_record(
     match effective_tag {
         "a" => {
             let href = extract_text(sub_graph, "href").unwrap_or_default();
-            let text = extract_text(sub_graph, "text").unwrap_or_default();
             let mut attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
             attrs.insert(0, ("href".to_string(), Form::Str(href)));
             let element = Element {
                 name: "a".to_string(),
                 attrs,
-                children: vec![Node::Text(text)],
+                children: link_text_nodes(sub_graph),
             };
             Ok(vec![Node::Element(element)])
         }
@@ -1558,12 +1579,11 @@ fn render_record(
         _ => {
             if has_href {
                 let href = extract_text(sub_graph, "href").unwrap_or_default();
-                let text = extract_text(sub_graph, "text").unwrap_or_default();
                 let attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
                 let inner = Element {
                     name: effective_tag.to_string(),
                     attrs,
-                    children: vec![Node::Text(text)],
+                    children: link_text_nodes(sub_graph),
                 };
                 let anchor = Element {
                     name: "a".to_string(),
@@ -1711,6 +1731,49 @@ fn render_list_item(
 }
 
 /// Extract a Text value from a sub-graph by key, returning None if missing or not Text.
+/// What a paragraph node that holds one link or one image renders as.
+enum Lone {
+    Link { href: String, text: Vec<Node> },
+    Image { src: String, alt: String },
+}
+
+/// The lone link or image a `paragraph` node holds (ADR-059 §12), or `None`
+/// for any other paragraph (and for one with a marker: that is misuse, and
+/// text).
+fn lone_paragraph(store: &node_store::NodeStore, id: node_store::NodeId) -> Option<Lone> {
+    use content::AsPlainText;
+    // Classify structurally; decode (once) only a lone link or image, whose
+    // text or alt the record needs.
+    if content_store::paragraph_shape(store, id) == content_store::StoredShape::Text
+        || node_attr_str(store, id, "marker").is_some()
+    {
+        return None;
+    }
+    let content = content_store::paragraph_inlines(store, id)?;
+    match content::BlockShape::of(&content) {
+        content::BlockShape::SoleLink(parts) => Some(Lone::Link {
+            href: parts.destination.as_str().to_string(),
+            text: crate::inline_nodes::inline_nodes(parts.text),
+        }),
+        content::BlockShape::SoleImage(parts) => Some(Lone::Image {
+            src: parts.source.as_str().to_string(),
+            alt: parts.alt.plain_text(),
+        }),
+        content::BlockShape::Text => None,
+    }
+}
+
+/// The children of a link record's element: its `text` as nodes. A link slot's
+/// text is inline content and keeps its formatting; a synthesized link's text
+/// is a string.
+fn link_text_nodes(graph: &DataGraph) -> Vec<Node> {
+    match graph.resolve(&["text"]) {
+        Some(Value::Inlines(nodes)) => nodes.to_vec(),
+        Some(Value::Text(text)) => vec![Node::Text(text.clone())],
+        _ => vec![Node::Text(String::new())],
+    }
+}
+
 fn extract_text(graph: &DataGraph, key: &str) -> Option<String> {
     match graph.resolve(&[key]) {
         Some(Value::Text(t)) => Some(t.clone()),
@@ -2975,6 +3038,64 @@ mod tests {
             Published,
         );
         assert!(html.contains("images/cat.jpg"), "{html}");
+    }
+
+    const RECORDS_SCHEMA: &str = "# Title {#title}\noccurs\n: exactly once\n\n\
+        [Author](/author/<name>) {#author}\noccurs\n: exactly once\n\n\
+        ![cover image description](images/*.jpg) {#cover}\noccurs\n: exactly once\n";
+
+    fn records_graph() -> DataGraph {
+        let grammar = schema::parse_schema(RECORDS_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign(
+            "# Title\n\n[Jo](/author/jo)\n\n![A cat](images/cat.jpg)\n",
+            &grammar,
+        )
+        .expect("content parses");
+        let mut graph = DataGraph::new();
+        graph.insert(
+            "input",
+            Value::Record(crate::data::build_article_graph(
+                &doc,
+                &grammar,
+                crate::data::OutputMode::Published,
+            )),
+        );
+        graph
+    }
+
+    /// Guard (stage 5b.1, user requirement 1): the records templates see are
+    /// a link's `{href, text}` and an image's `{src, alt}`, whichever way the
+    /// slot's content is held. Each field and each whole record renders as it
+    /// always did.
+    #[test]
+    fn template_records_unchanged() {
+        use crate::data::OutputMode::Published;
+        let graph = records_graph();
+        // A field alone, inserted as content, between two markers.
+        let field = |path: &str| {
+            render_for(&graph, &format!(r#"<p>[<presemble:insert data="{path}" as="b" />]</p>"#), Published)
+        };
+        let inside = |html: String| {
+            let start = html.find('>').and_then(|_| html.find("<b").map(|b| b + 2)).unwrap_or(0);
+            let open = html[start..].find('>').map(|i| start + i + 1).unwrap_or(0);
+            let close = html[open..].find("</b>").map(|i| open + i).unwrap_or(html.len());
+            html[open..close].to_string()
+        };
+        assert_eq!(inside(field("input.author.href")), "/author/jo");
+        assert_eq!(inside(field("input.author.text")), "Jo");
+        assert_eq!(inside(field("input.cover.src")), "images/cat.jpg");
+        assert_eq!(inside(field("input.cover.alt")), "A cat");
+        let whole = |path: &str| {
+            render_for(&graph, &format!(r#"<presemble:insert data="{path}" />"#), Published)
+        };
+        assert_eq!(
+            whole("input.cover"),
+            r#"<img src="images/cat.jpg" alt="A cat" class="input-cover" data-presemble-slot="cover" data-presemble-file="" />"#
+        );
+        assert_eq!(
+            whole("input.author"),
+            r#"<a href="/author/jo" class="input-author" data-presemble-slot="author" data-presemble-file="">Jo</a>"#
+        );
     }
 
     /// The two lines of the user guide's "Link and image records" section,
@@ -4769,10 +4890,12 @@ mod tests {
         let author_slot = slot(&mut store, "author");
         let mut targets = Vec::new();
         for (text, href) in links {
-            let block = element(&mut store, "link");
-            text_attr(&mut store, block, "href", href);
-            let block_text = store.add_node(node_store::Node::Text((*text).into()));
-            store.add_edge(block, node_store::Edge::Child(block_text));
+            // The slot's link as the store holds it: a paragraph with one link
+            // (ADR-059 §12).
+            let block = content_store::block_to_store(
+                &content::ContentElement::paragraph_from_markdown(&format!("[{text}]({href})")),
+                &mut store,
+            );
             store.add_edge(author_slot, node_store::Edge::Child(block));
             // The target page: the semantic content with its synthesized link.
             let target = element(&mut store, "semantic-content");
@@ -4800,7 +4923,7 @@ mod tests {
     fn single_link_slot_resolving_to_a_page_carries_its_link_block_address() {
         use crate::data::OutputMode::Editorial;
         let address = format!(
-            r#"(ned/nth-of-kind {} "link" 0)"#,
+            r#"(ned/nth-of-kind {} "paragraph" 0)"#,
             doc_slot("author")
         );
         let md = "[Joakim](/author/joakim)";
@@ -4845,7 +4968,7 @@ mod tests {
         let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
         assert_eq!(
             attr_values(&html, "data-presemble-address"),
-            vec![format!(r#"(ned/nth-of-kind {} "link" 0)"#, doc_slot("author"))],
+            vec![format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("author"))],
             "{html}"
         );
         assert_eq!(attr_values(&html, "data-presemble-md"), vec!["[Joakim](/author/joakim)".to_string()]);
@@ -4860,7 +4983,7 @@ mod tests {
         let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
         assert_eq!(
             attr_values(&html, "data-presemble-address"),
-            vec![format!(r#"(ned/nth-of-kind {} "link" 0)"#, doc_slot("author"))],
+            vec![format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("author"))],
             "{html}"
         );
     }
@@ -5345,7 +5468,8 @@ mod tests {
     fn native_link_with_apostrophe_in_url() {
         assert_renders_as(
             &render_native_body_block("paragraph", "[a](/it's)", None),
-            r#"<p data-presemble-slot="body"><a href="/it's">a</a></p>"#,
+            // A lone link is an `<a>`, never wrapped in a `<p>` (ADR-059 §12).
+            r#"<a data-presemble-slot="body" href="/it's">a</a>"#,
         );
     }
 
@@ -5353,7 +5477,8 @@ mod tests {
     fn native_link_with_apostrophe_in_title() {
         assert_renders_as(
             &render_native_body_block("paragraph", "[a](/x \"it's\")", None),
-            r#"<p data-presemble-slot="body"><a href="/x" title="it's">a</a></p>"#,
+            // A lone link is an `<a>` with its title, never wrapped in a `<p>`.
+            r#"<a data-presemble-slot="body" href="/x" title="it's">a</a>"#,
         );
     }
 

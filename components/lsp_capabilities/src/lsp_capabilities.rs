@@ -1,5 +1,5 @@
 use content::{
-    byte_to_position, parse_and_assign, parse_document, ContentElement,
+    byte_to_position, parse_and_assign, parse_document,
     Capitalize, InsertSlot, InsertSeparator, Transform,
 };
 use schema::{Element, Grammar};
@@ -551,10 +551,7 @@ pub fn definition_for_position(
         let end_line = byte_to_position(src, spanned.span.end).0;
         line >= start_line && line <= end_line
     })?;
-    let href = match &target.node {
-        ContentElement::Link { href, .. } => href.clone(),
-        _ => return None,
-    };
+    let href = target.node.sole_link()?.destination;
     // Map href like "/author/johlrogge" to site_dir/content/author/johlrogge.md
     let path = href.trim_start_matches('/');
     // Try direct .md file

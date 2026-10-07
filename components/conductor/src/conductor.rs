@@ -2641,7 +2641,12 @@ impl Conductor {
                 let child = children[0];
                 if let Some(node_store::Node::Element(name)) = store.get(child) {
                     let tag = store.resolve_name(*name).to_string();
-                    if tag == "heading" || tag == "paragraph" {
+                    // A paragraph that holds one link or one image is a link or
+                    // image slot's content, not text (ADR-059 §12).
+                    let is_link_or_image = tag == "paragraph"
+                        && node_store_bridge::content_bridge::block_from_node(&store, child)
+                            .is_ok_and(|el| el.sole_link().is_some() || el.sole_image().is_some());
+                    if (tag == "heading" || tag == "paragraph") && !is_link_or_image {
                         SlotShape::SingleText
                     } else {
                         SlotShape::NonText
@@ -6008,6 +6013,30 @@ mod slot_shape_tests {
             matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
             "expected NonText for a slot with a list child"
         );
+    }
+
+    /// A paragraph that holds one link or one image is a link or image slot's
+    /// content, not text: a slot edit takes the grammar-aware route, not the
+    /// text fast path (ADR-059 §12).
+    #[test]
+    fn slot_with_a_lone_link_or_image_paragraph_returns_non_text() {
+        for md in ["[Jo](/author/jo)", "![A cat](c.png)"] {
+            let conductor = make_bare_conductor();
+            let slot_id = {
+                let mut store = conductor.node_store.write().unwrap();
+                let slot = add_element(&mut store, "slot");
+                let block = node_store_bridge::content_bridge::block_to_store(
+                    &content::ContentElement::paragraph_from_markdown(md),
+                    &mut store,
+                );
+                append_child(&mut store, slot, block);
+                slot
+            };
+            assert!(
+                matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
+                "expected NonText for a slot holding {md:?}"
+            );
+        }
     }
 
     #[test]
@@ -10988,12 +11017,21 @@ mod link_expression_pipeline_tests {
             .unwrap();
         let block = store.children(slot_node)[0];
         let text = match attr {
-            Some(attr) => store
-                .attributes(block)
-                .into_iter()
-                .find(|(n, _)| store.resolve_name(*n) == attr)
-                .map(|(_, v)| v)
-                .unwrap(),
+            // A lone link is a paragraph: its `href` is on the `inline-link`
+            // it holds (ADR-059 §12).
+            Some(attr) => {
+                let holder = store
+                    .children(block)
+                    .into_iter()
+                    .find(|c| matches!(store.get(*c), Some(node_store::Node::Element(_))))
+                    .unwrap_or(block);
+                store
+                    .attributes(holder)
+                    .into_iter()
+                    .find(|(n, _)| store.resolve_name(*n) == attr)
+                    .map(|(_, v)| v)
+                    .unwrap()
+            }
             None => store.children(block)[0],
         };
         store.replace_node(text, node_store::Node::Text(value.to_string()));

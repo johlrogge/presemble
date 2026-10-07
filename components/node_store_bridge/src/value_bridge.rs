@@ -48,9 +48,27 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                         // A paragraph's value is its inline nodes, as a
                         // heading's is (ADR-064).
                         if let Some(content) = content_store::paragraph_inlines(store, id) {
-                            return template::Value::Inlines(
-                                template::inline_nodes(&content).into(),
-                            );
+                            // A lone link or image is the record a template
+                            // sees for it (ADR-059 §12), as on the other path.
+                            let marked = crate::node_helpers::node_attr_text(store, id, "marker")
+                                .is_some();
+                            return match content::BlockShape::of(&content) {
+                                content::BlockShape::SoleLink(parts) if !marked => {
+                                    template::Value::Record(template::data::link_record(
+                                        parts.destination.as_str(),
+                                        parts.text,
+                                    ))
+                                }
+                                content::BlockShape::SoleImage(parts) if !marked => {
+                                    template::Value::Record(template::data::image_record(
+                                        parts.source.as_str(),
+                                        parts.alt,
+                                    ))
+                                }
+                                _ => template::Value::Inlines(
+                                    template::inline_nodes(&content).into(),
+                                ),
+                            };
                         }
                         // Does not decode — fall through to Record
                     }

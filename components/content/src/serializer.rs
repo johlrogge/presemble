@@ -1178,7 +1178,29 @@ headings
         for (href, expected) in cases {
             let el = link(href);
             assert_eq!(serialize_element(&el), expected, "href {href:?}");
-            assert_eq!(reparse_one(expected), el, "href {href:?}");
+            assert_eq!(
+                reparse_one(expected).sole_link().map(|l| l.destination),
+                Some(href.to_string()),
+                "href {href:?}"
+            );
+            // A paragraph that holds the link writes the same bytes.
+            assert_eq!(serialize_element(&lone_link_paragraph("t", href)), expected, "href {href:?}");
+        }
+    }
+
+    /// A paragraph that holds one link with this text and destination.
+    fn lone_link_paragraph(text: &str, href: &str) -> ContentElement {
+        use crate::inline::{Inline, InlineContext, Inlines, LinkDestination};
+        ContentElement::Paragraph {
+            content: Inlines::new(
+                vec![Inline::Link {
+                    destination: LinkDestination::new(href),
+                    title: None,
+                    text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+                }],
+                InlineContext::Paragraph,
+            ),
+            marker: None,
         }
     }
 
@@ -1354,11 +1376,10 @@ headings
             vec!["/x".to_string()],
             "the used definition's link survives a save: {saved:?}"
         );
-        // A paragraph that is only `[a][r]` resolves to a Link block.
-        assert_eq!(
-            blocks("[a][r]\n\n[r]: /x\n"),
-            vec![ContentElement::Link { text: "a".to_string(), href: "/x".to_string() }]
-        );
+        // A paragraph that is only `[a][r]` resolves to a lone link.
+        let lone = blocks("[a][r]\n\n[r]: /x\n");
+        assert_eq!(lone.len(), 1);
+        assert_eq!(lone[0].sole_link().map(|l| l.destination), Some("/x".to_string()));
     }
 
     #[test]
@@ -1481,13 +1502,20 @@ headings
         for (href, expected) in cases {
             let el = link(href);
             assert_eq!(serialize_element(&el), expected, "href {href:?}");
-            assert_eq!(reparse_one(expected), el, "href {href:?}");
+            assert_eq!(
+                reparse_one(expected).sole_link().map(|l| l.destination),
+                Some(href.to_string()),
+                "href {href:?}"
+            );
+            assert_eq!(serialize_element(&lone_link_paragraph("t", href)), expected, "href {href:?}");
         }
 
         let img = ContentElement::Image { alt: Some("A cat".to_string()), path: "my (cat).png".to_string() };
         let out = serialize_element(&img);
         assert_eq!(out, "![A cat](<my (cat).png>)");
-        assert_eq!(reparse_one(&out), img);
+        let image = reparse_one(&out).sole_image().expect("a lone image");
+        assert_eq!((image.source.as_str(), crate::inline::AsPlainText::plain_text(&image.alt).as_str()),
+            ("my (cat).png", "A cat"));
     }
 
     // ── Link expressions (C1-link) ───────────────────────────────────────────
@@ -1727,8 +1755,8 @@ headings
 
         // L1 is gone: `->` is rejected, so it stays a plain link.
         assert_eq!(
-            reparse_one("[p](<(-\\> :post (take 1))>)"),
-            ContentElement::Link { text: "p".to_string(), href: "(-> :post (take 1))".to_string() }
+            reparse_one("[p](<(-\\> :post (take 1))>)").sole_link().map(|l| l.destination),
+            Some("(-> :post (take 1))".to_string())
         );
 
         // L2: legacy `%20` is decoded and written back as a literal space.

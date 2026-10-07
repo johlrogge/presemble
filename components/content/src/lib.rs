@@ -1,3 +1,8 @@
+// 5b.2: the `Link` and `Image` block kinds are deprecated, never produced by
+// the parser, and removed in 5b.2; until then this crate still matches them.
+// 5b.2: remove this allow
+#![allow(deprecated)]
+
 mod adapters;
 pub mod address;
 mod block;
@@ -9,6 +14,7 @@ pub mod inline;
 mod link_expression;
 mod parser;
 mod serializer;
+mod shape;
 mod slot_assignment;
 pub mod slot_editor;
 mod transform;
@@ -37,6 +43,7 @@ pub use parser::{
     MARKDOWN_OPTIONS,
 };
 pub use serializer::serialize_document;
+pub use shape::{BlockShape, ImageParts, LinkParts, SoleImage, SoleLink};
 pub use slot_assignment::{assign_slots, unassigned_reason, UnassignedReason};
 pub use transform::{
     Capitalize, CompositeTransform, InsertSeparator, InsertSlot, Transform, TransformError,

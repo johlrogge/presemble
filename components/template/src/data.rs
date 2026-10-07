@@ -206,6 +206,27 @@ pub enum OutputMode {
 // Synthesized records
 // ---------------------------------------------------------------------------
 
+/// The record a link slot gives a template: `{href, text}` (ADR-059 §12). `href`
+/// is the destination as written; `text` is the link's text as inline content,
+/// which reads as its plain text in a string context.
+pub fn link_record(href: &str, text: &content::inline::Inlines) -> DataGraph {
+    let mut record = DataGraph::new();
+    record.insert("href", Value::Text(href.to_string()));
+    record.insert("text", Value::Inlines(crate::inline_nodes::inline_nodes(text).into()));
+    record
+}
+
+/// The record an image slot gives a template: `{src, alt}` (ADR-059 §12). `alt`
+/// is the alt text's plain text, absent when there is none.
+pub fn image_record(src: &str, alt: &content::inline::Inlines) -> DataGraph {
+    use content::AsPlainText;
+    let mut record = DataGraph::new();
+    record.insert("src", Value::Text(src.to_string()));
+    let alt = alt.plain_text();
+    record.insert("alt", if alt.is_empty() { Value::Absent } else { Value::Text(alt) });
+    record
+}
+
 /// Create a synthesized link record for a content item.
 /// The `_source_slot` field tells the browser editor which grammar slot
 /// to write back to when the link text is edited. `title_editor` is the title
@@ -363,20 +384,19 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                 let max = slot.max_count();
                 let links: Vec<Value> = elements
                     .iter()
-                    .filter_map(|s| match &s.node {
-                        ContentElement::Link { text, href } => {
-                            let mut record = DataGraph::new();
-                            record.insert("text", Value::Text(text.clone()));
-                            record.insert("href", Value::Text(href.clone()));
-                            Some(Value::Record(record))
+                    .filter_map(|s| {
+                        if let Some(link) = s.node.sole_link() {
+                            return Some(Value::Record(link_record(&link.destination, &link.text)));
                         }
-                        ContentElement::LinkExpression { text, target, .. } => {
-                            Some(Value::LinkExpression {
-                                text: text.clone(),
-                                target: target.clone(),
-                            })
+                        match &s.node {
+                            ContentElement::LinkExpression { text, target, .. } => {
+                                Some(Value::LinkExpression {
+                                    text: text.clone(),
+                                    target: target.clone(),
+                                })
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     })
                     .take(max)
                     .collect();
@@ -384,7 +404,8 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                 let indices = positions(
                     elements,
                     &|el| {
-                        matches!(el, ContentElement::Link { .. } | ContentElement::LinkExpression { .. })
+                        el.sole_link().is_some()
+                            || matches!(el, ContentElement::LinkExpression { .. })
                     },
                     max,
                 );
@@ -399,15 +420,9 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
 
             Element::Image { .. } => {
                 if let Some(spanned) = elements.front()
-                    && let ContentElement::Image { path, alt } = &spanned.node
+                    && let Some(image) = spanned.node.sole_image()
                 {
-                    let mut record = DataGraph::new();
-                    record.insert("src", Value::Text(path.clone()));
-                    let alt_value = match alt {
-                        Some(s) => Value::Text(s.clone()),
-                        None => Value::Absent,
-                    };
-                    record.insert("alt", alt_value);
+                    let record = image_record(&image.source, &image.alt);
                     insert_editor(&mut graph, &slot_key, elements, vec![0], true);
                     graph.insert(slot_key, Value::Record(record));
                 }
@@ -905,6 +920,42 @@ mod tests {
         assert!(
             html.contains("some code"),
             "expected code content in output; got: {html}"
+        );
+    }
+
+    /// Guard (stage 5b.1, user requirement 2): a lone link or image in the body
+    /// renders as an `<a>` or an `<img>`, never wrapped in a `<p>`, with the
+    /// same attributes as before.
+    #[test]
+    fn lone_body_link_and_image_render_byte_identically() {
+        let body = |md: &str| {
+            let doc = content::parse_document(md).expect("parses");
+            let elements: im::Vector<_> = doc.elements.iter().cloned().collect();
+            body_html(&elements, false)
+        };
+        assert_eq!(body("[a](/x)\n"), r#"<a data-presemble-slot="body" href="/x">a</a>"#);
+        assert_eq!(
+            body("![c](c.png)\n"),
+            r#"<img data-presemble-slot="body" src="c.png" alt="c" />"#
+        );
+    }
+
+    /// A lone link keeps its formatting and its title (stage 5b, L6); the old
+    /// block dropped both.
+    #[test]
+    fn lone_body_link_and_image_keep_formatting_and_title() {
+        let body = |md: &str| {
+            let doc = content::parse_document(md).expect("parses");
+            let elements: im::Vector<_> = doc.elements.iter().cloned().collect();
+            body_html(&elements, false)
+        };
+        assert_eq!(
+            body("[**a** b](/x \"t\")\n"),
+            r#"<a data-presemble-slot="body" href="/x" title="t"><strong>a</strong> b</a>"#
+        );
+        assert_eq!(
+            body("![*a* cat](c.png \"t\")\n"),
+            r#"<img data-presemble-slot="body" src="c.png" alt="a cat" title="t" />"#
         );
     }
 
