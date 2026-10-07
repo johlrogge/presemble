@@ -24,11 +24,5 @@
     ["[l](/a) &amp; b", "l & b"],
     ["1. Intro", "1. Intro"],
     ["x\ny", "x y"]
-  ],
-  "capitalize_first": [
-    ["*hello*", "*Hello*"],
-    ["`code` x", null],
-    ["\\*x", null],
-    ["Ok", null]
   ]
 }

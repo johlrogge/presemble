@@ -323,7 +323,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 // Disk input must never take the server down, so release
                 // builds keep the whole source as literal text; debug and
                 // test builds fail loudly.
-                let (content, marker) = crate::inline::read_heading_source(source.as_str())
+                let (content, marker) = crate::inline::read_heading_source(&source)
                     .unwrap_or_else(|| {
                         let line = input[..byte_range.start].matches('\n').count() + 1;
                         debug_assert!(
@@ -331,8 +331,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                             "invariant: the source of a parsed heading reads back as one \
                              heading's content, but {source:?} (line {line}) did not"
                         );
-                        log_unreadable_heading(source.as_str(), line);
-                        crate::inline::literal_heading_content(source.as_str())
+                        log_unreadable_heading(&source, line);
+                        crate::inline::literal_heading_content(&source)
                     });
                 elements.push_back(Spanned {
                     node: ContentElement::Heading { level: *level, content, marker },
@@ -834,12 +834,12 @@ fn log_unreadable_heading(source: &str, line: usize) {
 /// - Setext: the lines before the underline, each trimmed, with one trailing
 ///   `\` (a hard break) stripped from every line but the last, joined with a
 ///   space. Limit L19: hard breaks in setext headings become spaces.
-fn heading_source(raw: &str) -> crate::inline::MarkdownText {
+fn heading_source(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
     if let [line] = lines.as_slice()
         && let Some(content) = crate::inline::atx_heading_content(line)
     {
-        return content.into();
+        return content.to_string();
     }
     let content = match lines.split_last() {
         Some((last, rest)) if is_setext_underline(last) => rest,
@@ -855,7 +855,6 @@ fn heading_source(raw: &str) -> crate::inline::MarkdownText {
         })
         .collect::<Vec<_>>()
         .join(" ")
-        .into()
 }
 
 /// A setext heading underline: up to three spaces, then a run of `=` or of

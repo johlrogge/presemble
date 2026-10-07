@@ -27,7 +27,7 @@ pub use document::{
     SortDirection,
 };
 pub use error::ContentError;
-pub use inline::{AsPlainText, MarkdownText};
+pub use inline::AsPlainText;
 pub use link_expression::{
     diagnose_paragraph, parse_thread, recognise_paragraph, Candidate, LinkExpressionDiagnostic,
     LinkExpressionError,

@@ -54,25 +54,6 @@ pub fn heading_plain_text(
     heading_inlines(store, id).map(|content| content.plain_text())
 }
 
-/// The markdown of the heading node `id`'s content: canonical inlines plus
-/// ` {#marker}`. Temporary adapter for the readers that still work from
-/// markdown (stage 4d/4e move them onto the nodes).
-pub fn heading_markdown_source(
-    store: &node_store::NodeStore,
-    id: node_store::NodeId,
-) -> Option<String> {
-    let content = heading_inlines(store, id)?;
-    // The marker is an attribute of the heading node.
-    let marker = find_attr_text(store, id, "marker").and_then(|m| content::SlotMarker::new(&m));
-    let element = content::ContentElement::Heading {
-        level: schema::HeadingLevel::new(1)?,
-        content,
-        marker,
-    };
-    #[allow(deprecated)]
-    element.heading_source()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

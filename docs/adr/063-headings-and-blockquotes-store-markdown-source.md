@@ -5,8 +5,16 @@
 Proposed
 
 Amended by ADR-059 (Proposed): package Q (blockquotes store source) is
-dropped; blockquotes become block containers (ADR-059 §13). Headings move to
+dropped; blockquotes become block containers (ADR-059 §13). Headings moved to
 inline nodes in ADR-059 stage 4.
+
+**Superseded in part by ADR-059 stage 4 (done):** §1 (the model), §2
+(`MarkdownText`) and §6 (the store shape) no longer hold. A heading holds
+inline nodes, and `MarkdownText`, `capitalize_first` and the markdown-source
+adapter are removed. §3, the plain-text rule and its contract, is kept, now
+over the nodes (`AsPlainText for Inlines`). §4 and §5 read as: heading slots
+are `Value::Inlines` (a string context reads their plain text), and
+`data-presemble-text` is gone.
 
 ## Context
 

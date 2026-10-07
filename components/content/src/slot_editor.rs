@@ -1,4 +1,5 @@
 use crate::document::{ContentElement, Document, DocumentSlot};
+use crate::inline::{Inline, InlineContext, InlinePath, Inlines};
 use schema::{Element, Grammar, HeadingLevel, Span, Spanned};
 
 /// A sentinel span used for newly-inserted elements that have no source position.
@@ -95,18 +96,18 @@ pub(crate) fn capitalize_slot(
         None => return Ok(false),
     };
 
-    // A heading: capitalize the first letter of its plain text in place, or
-    // leave it when that cannot be done in its markdown (stage 4e moves this
-    // onto the first Text node).
+    // A heading: a SetText on its first Text node (ADR-059 §8), or nothing
+    // when that cannot be done.
     if let Some(first) = doc_slot.elements.front_mut()
         && let ContentElement::Heading { level, content, marker } = &first.node
     {
-        let source = crate::inline::MarkdownText::from(
-            crate::inline::heading_source_text(content, marker.as_ref()),
-        );
-        return Ok(match crate::inline::capitalize_first(&source) {
+        return Ok(match capitalize_first_text(content) {
             Some(capitalized) => {
-                first.node = ContentElement::heading_from_markdown(*level, capitalized.as_str());
+                first.node = ContentElement::Heading {
+                    level: *level,
+                    content: capitalized,
+                    marker: marker.clone(),
+                };
                 true
             }
             None => false,
@@ -130,6 +131,72 @@ pub(crate) fn capitalize_slot(
     }
 
     Ok(false)
+}
+
+/// Where the first letter of a heading is, in document order.
+enum FirstText {
+    /// The `Text` node at this path (indices through emphasis, strong, links).
+    At(InlinePath),
+    /// A code span or inline HTML comes before any text: there is no `Text`
+    /// node to change.
+    Blocked,
+    /// Nothing yet (empty or whitespace-only text, a comment, an image, a line
+    /// break).
+    NotYet,
+}
+
+fn find_first_text(items: &[Inline], path: &mut Vec<usize>) -> FirstText {
+    for (i, item) in items.iter().enumerate() {
+        path.push(i);
+        let found = match item {
+            Inline::Text(s) if s.trim().is_empty() => FirstText::NotYet,
+            Inline::Text(_) => FirstText::At(InlinePath::new(path.clone())),
+            Inline::Emph(children) | Inline::Strong(children) => {
+                find_first_text(children.as_slice(), path)
+            }
+            Inline::Link { text, .. } => find_first_text(text.as_slice(), path),
+            Inline::Code(_) | Inline::Html(_) => FirstText::Blocked,
+            // Adds nothing to the plain text: skipped, as plain text skips it.
+            Inline::Comment(_) | Inline::Image { .. } | Inline::LineBreak => FirstText::NotYet,
+        };
+        path.pop();
+        if !matches!(found, FirstText::NotYet) {
+            return found;
+        }
+    }
+    FirstText::NotYet
+}
+
+fn text_at<'a>(items: &'a [Inline], path: &[usize]) -> Option<&'a str> {
+    let (&at, rest) = path.split_first()?;
+    match (items.get(at)?, rest.is_empty()) {
+        (Inline::Text(s), true) => Some(s),
+        (Inline::Emph(c) | Inline::Strong(c), false) => text_at(c.as_slice(), rest),
+        (Inline::Link { text, .. }, false) => text_at(text.as_slice(), rest),
+        _ => None,
+    }
+}
+
+/// `content` with the first letter of its first `Text` node uppercased (a
+/// SetText on that node), or `None` when there is nothing to change: the
+/// letter is already upper case or has no upper case form, there is no text,
+/// or a code span or inline HTML comes before any text (comments are skipped).
+fn capitalize_first_text(content: &Inlines) -> Option<Inlines> {
+    let FirstText::At(path) = find_first_text(content.as_slice(), &mut Vec::new()) else {
+        return None;
+    };
+    let text = text_at(content.as_slice(), path.as_slice())?;
+    let lead = text.len() - text.trim_start().len();
+    let first = text[lead..].chars().next()?;
+    let upper: String = first.to_uppercase().collect();
+    if upper.chars().eq(std::iter::once(first)) {
+        return None;
+    }
+    let mut value = String::with_capacity(text.len() + upper.len());
+    value.push_str(&text[..lead]);
+    value.push_str(&upper);
+    value.push_str(&text[lead + first.len_utf8()..]);
+    content.with_text_at(&path, &value, InlineContext::Heading)
 }
 
 // ---------------------------------------------------------------------------
@@ -182,8 +249,8 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
 // Helper functions
 // ---------------------------------------------------------------------------
 
-/// The literal text of a non-heading element. Headings store markdown source
-/// and are capitalized with [`crate::inline::capitalize_first`].
+/// The literal text of a non-heading element. A heading's text is its inline
+/// nodes (see `capitalize_first_text`).
 fn element_text_mut(element: &mut ContentElement) -> Option<&mut String> {
     match element {
         ContentElement::Paragraph { text } => Some(text),
@@ -361,6 +428,57 @@ headings
         let mut doc = parse_and_assign("# `x` y\n\n----\n", &grammar).unwrap();
         assert!(!capitalize_slot(&mut doc, "title", &grammar).unwrap());
         assert!(serialize_document(&doc).starts_with("# `x` y\n"));
+    }
+
+    /// The fix is a SetText on the first Text node in document order (ADR-059
+    /// §8), whatever formatting it sits in. Guard, green on arrival: the old
+    /// markdown-based fix gave the same result for these.
+    #[test]
+    fn capitalize_fix_sets_first_text_node() {
+        use crate::inline::{Inline, Inlines};
+        let grammar = post_grammar();
+        let title = |doc: &Document| match &doc.preamble[0].elements[0].node {
+            ContentElement::Heading { content, .. } => content.clone(),
+            other => panic!("{other:?}"),
+        };
+        let mut doc = parse_and_assign("# *hello* world\n\n----\n", &grammar).unwrap();
+        assert!(capitalize_slot(&mut doc, "title", &grammar).unwrap());
+        // The first Text node is inside the emphasis.
+        let content: Inlines = title(&doc);
+        let [Inline::Emph(inner), Inline::Text(rest)] = content.as_slice() else {
+            panic!("{content:?}")
+        };
+        assert_eq!(inner.as_slice(), &[Inline::Text("Hello".to_string())]);
+        assert_eq!(rest, " world");
+
+        // After an image, which has no text of its own to change.
+        let mut doc = parse_and_assign("# ![i](x.png) t\n\n----\n", &grammar).unwrap();
+        assert!(capitalize_slot(&mut doc, "title", &grammar).unwrap());
+        assert!(serialize_document(&doc).starts_with("# ![i](x.png) T\n"));
+    }
+
+    /// A comment adds nothing to the plain text, so it is skipped: the first
+    /// letter is the one after it.
+    #[test]
+    fn capitalize_skips_a_leading_comment() {
+        let grammar = post_grammar();
+        let mut doc = parse_and_assign("# <!-- note -->hello\n\n----\n", &grammar).unwrap();
+        assert!(capitalize_slot(&mut doc, "title", &grammar).unwrap());
+        assert!(serialize_document(&doc).starts_with("# <!-- note -->Hello\n"));
+    }
+
+    /// No fix when a code span or inline HTML comes before the first letter:
+    /// the first letter of the plain text is not in a Text node.
+    #[test]
+    fn capitalize_has_no_fix_when_code_comes_first() {
+        let grammar = post_grammar();
+        for source in ["# `x` y", "# <b>x</b> y"] {
+            let mut doc =
+                parse_and_assign(&format!("{source}\n\n----\n"), &grammar).unwrap();
+            let before = serialize_document(&doc);
+            assert!(!capitalize_slot(&mut doc, "title", &grammar).unwrap(), "{source}");
+            assert_eq!(serialize_document(&doc), before, "{source}");
+        }
     }
 
     #[test]

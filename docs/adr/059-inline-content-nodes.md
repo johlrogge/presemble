@@ -2,7 +2,12 @@
 
 ## Status
 
-Proposed
+Proposed (stays Proposed until stage 10).
+
+Progress: stage 4 (headings) is done. Headings hold inline nodes in the
+document model, the store and the renderer; heading edits are NED mutations
+over nodes; `MarkdownText`, `capitalize_first` and the markdown-source adapter
+are gone. See the stage 4 amendments below.
 
 ## Context
 
@@ -219,8 +224,8 @@ Readers that use plain text:
 - structural anchors (`heading_text`);
 - `ned/heading-with-text`;
 - the `capitalized` constraint. Its fix is a SetText on the first Text node in
-  document order, and there is no fix when a `code` or `inline-html` comes
-  first;
+  document order, and there is no fix when a code span or inline HTML comes
+  before the first letter; comments are skipped;
 - slugs, search, and `field_text` (sort and filter);
 - the image alt attribute and the image-slot alt constraints;
 - every string context of a node value (`display_text`, ADR-064 §6).
@@ -259,14 +264,15 @@ All addressing stays exact (ADR-056).
 - Atoms are never removed. A match that contains U+FFFC is refused with
   `StaleCause::SpansAtom`.
 
-**SetInlines { base, markdown }**
+**SetInlines(Vec<NodeTree>)**
 
 - Targets one inline container.
-- `markdown` is the canonical inline markdown of the new content. It is
-  parsed at creation (boundary input) and again at accept, and it must read
-  as inline content for the container's context.
-- `base` is the container's canonical markdown at creation. A different
-  canonical markdown at accept makes the suggestion `StaleCause::Drifted`.
+- The payload is the new content as inline trees (stage 4 amendment: it was
+  specified as `{ base, markdown }`). Trees are the N-form, the same shape EDN
+  uses and the same payload form as `Replace`; nothing is parsed from markdown
+  at accept. They must decode as inline content for the container's context.
+- The drift check is the suggestion preview's base: a block whose canonical
+  markdown differs at accept makes the suggestion `StaleCause::Drifted`.
 
 **Normalisation and refusals**
 
@@ -439,6 +445,14 @@ All addressing stays exact (ADR-056).
 - Files on disk keep markdown, written canonically from the first save on
   (§0).
 - Persisted suggestions that address converted kinds may be discarded.
+  Stage 4 does this for headings: pending suggestions made before headings
+  stored inline nodes, that touch a heading (a heading in the payload, or a
+  selection that resolves into one), are discarded once at conductor startup,
+  without an event or a Stale state. The marker file
+  `.presemble/suggestions/ned/MODEL` (content `heading-inlines`) records that
+  this ran, so suggestions made later are never discarded. Accepted, Rejected
+  and Stale records stay. A build never writes to `.presemble`: only the
+  conductor's `new` and `with_repo` migrate.
 
 ## Implementation plan
 
@@ -715,6 +729,33 @@ Every stage leaves the tree green and shippable.
     markdown.
   - §7: content inlines are a domain model that is mapped to `dom::Node`; it
     does not reuse those shapes.
+
+### Stage 4 amendments (headings)
+
+- **§9, SetInlines:** the payload is inline trees, `NedMutation::SetInlines(Vec<NodeTree>)`,
+  not markdown.
+- **§15, migration:** pending heading suggestions from before stage 4 are
+  discarded once at conductor startup, marked by
+  `.presemble/suggestions/ned/MODEL`. A build never writes to `.presemble`.
+- **§10, slot elements:** a block under a slot is edited under the `Content`
+  projection, so a markdown block edit cannot change a slot heading's level:
+  the level belongs to the schema, and the same text is `NoChange`. An EDN edit
+  is the whole block and can change the level (a `Replace`); content that then
+  breaks the slot's level rule is reported, never refused.
+- **§6/§11, rendering and references:**
+  - Heading slots are `Value::Inlines`, distinct from `Value::Nodes`, which is
+    block content (the body). An insert wraps `Inlines` in the element the
+    template asks for, even when empty; in a string context they read their
+    plain text.
+  - A structural edit (`Replace`, `Delete`, `Insert*`) refreshes the page's
+    semantic content in place: the semantic node keeps its id, its derived,
+    reference and consists-of edges are recomputed from the store, and the
+    pages that show it render again. Thread slots are re-resolved by the
+    propagation that follows.
+- **§8, capitalize fix:** the fix for `capitalized` is a SetText on the first
+  `Text` node in document order, in `slot_editor` and, through the same
+  transform, in the LSP code action. There is no fix when a code span or
+  inline HTML comes before the first letter; comments are skipped.
 
 ## Related
 

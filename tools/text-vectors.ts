@@ -11,7 +11,7 @@
 //               normalize_plain_text and ned's normalize_ws do. The browser
 //               uses it to match scroll anchors (ADR-046).
 //
-// The other groups in the file (atx, plain, capitalize_first) are Rust-only:
+// The other groups in the file (atx, plain) are Rust-only:
 // since the block-edit cutover (ADR-059 §10) the browser no longer derives
 // stored text from markdown.
 //

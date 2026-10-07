@@ -23,22 +23,6 @@ impl ContentElement {
         ContentElement::Heading { level, content, marker }
     }
 
-    /// The markdown source of a heading's content: canonical inlines plus
-    /// ` {#marker}`, the string a heading used to store. `None` for other
-    /// kinds.
-    ///
-    /// Temporary adapter (ADR-059 stage 4): readers outside `content` use it
-    /// until stage 4e moves them onto the inline nodes.
-    #[deprecated(note = "stage 4e: read the heading's inline nodes instead")]
-    pub fn heading_source(&self) -> Option<String> {
-        match self {
-            ContentElement::Heading { content, marker, .. } => {
-                Some(crate::inline::heading_source_text(content, marker.as_ref()))
-            }
-            _ => None,
-        }
-    }
-
     /// The text of a single-text block, or `None` for kinds that do not carry
     /// exactly one editable text value (Image, Table, Separator,
     /// LinkExpression, and HtmlBlock, which cannot be text-edited: ADR-062 D4).
@@ -138,7 +122,7 @@ pub fn parse_markdown_projection(
     let md = md.replace("\r\n", "\n");
     let source = match (p, like) {
         (Projection::Content, ContentElement::Heading { level, .. }) => {
-            crate::inline::heading_line_for_source(*level, &md.as_str().into())
+            crate::inline::heading_line_for_source(*level, &md)
         }
         _ => md,
     };

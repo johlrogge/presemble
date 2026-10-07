@@ -16,9 +16,9 @@ pub fn data_attributes(store: &NodeStore, id: NodeId) -> Vec<(Name, NodeId)> {
 }
 
 /// Get the text content of a node.
-/// Returns the stored text: for headings that is their markdown source (ADR-063).
 /// - For `Node::Text(s)`, returns the text directly.
-/// - For heading/paragraph elements, returns the first child's text.
+/// - For a heading, returns its plain text (ADR-059 §8).
+/// - For a paragraph element, returns the first child's text.
 /// - For other node types, returns None.
 pub fn node_text(store: &NodeStore, id: NodeId) -> Option<String> {
     match store.get(id)? {
@@ -26,7 +26,7 @@ pub fn node_text(store: &NodeStore, id: NodeId) -> Option<String> {
         Node::Element(name) => {
             let element_name = store.resolve_name(*name);
             match element_name {
-                "heading" => content_store::heading_markdown_source(store, id),
+                "heading" => content_store::heading_plain_text(store, id),
                 "paragraph" => {
                     // Extract text from first Text child
                     store.children(id).into_iter().find_map(|c| {

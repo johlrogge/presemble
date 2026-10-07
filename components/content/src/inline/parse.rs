@@ -5,7 +5,6 @@ use pulldown_cmark::{Event, LinkType, Parser, Tag, TagEnd};
 use super::model::{
     AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination,
 };
-use crate::inline::MarkdownText;
 use crate::parser::MARKDOWN_OPTIONS;
 use crate::Comment;
 
@@ -153,7 +152,7 @@ impl std::error::Error for NotInlineContent {}
 pub fn parse_inlines(source: &str, ctx: InlineContext) -> Result<Inlines, NotInlineContent> {
     let err = NotInlineContent { ctx };
     match ctx {
-        InlineContext::Heading => crate::inline::exact_heading_inline_events(&MarkdownText::from(source))
+        InlineContext::Heading => heading_content_events(source)
             .map(|events| inlines_from_events(events, ctx))
             .ok_or(err),
         InlineContext::Paragraph => {
@@ -190,6 +189,27 @@ pub fn parse_inlines(source: &str, ctx: InlineContext) -> Result<Inlines, NotInl
                 .map(|events| inlines_from_events(events, ctx))
                 .ok_or(err)
         }
+    }
+}
+
+/// The events of `source` written as the one H1 line: those strictly between
+/// the heading's start and end, or `None` when the line does not read as
+/// exactly one heading.
+fn heading_content_events(source: &str) -> Option<Vec<Event<'static>>> {
+    let line = crate::inline::heading_line_for_source(
+        schema::HeadingLevel::new(1).expect("1 is a heading level"),
+        source,
+    );
+    let events: Vec<Event<'_>> = Parser::new_ext(&line, MARKDOWN_OPTIONS).collect();
+    let is_boundary =
+        |e: &Event<'_>| matches!(e, Event::Start(Tag::Heading { .. }) | Event::End(TagEnd::Heading(_)));
+    match events.as_slice() {
+        [Event::Start(Tag::Heading { .. }), inner @ .., Event::End(TagEnd::Heading(_))]
+            if !inner.iter().any(is_boundary) =>
+        {
+            Some(inner.iter().cloned().map(Event::into_static).collect())
+        }
+        _ => None,
     }
 }
 
