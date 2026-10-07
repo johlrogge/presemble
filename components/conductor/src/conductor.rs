@@ -3302,6 +3302,39 @@ impl Conductor {
                     CommandResult::ok_with_events(events)
                 }
             }
+            Command::ReloadDocument { path } => {
+                // Throw away this document's unsaved edits (the NED copy and
+                // the LSP mirror) and load it from disk. Every other document
+                // keeps its unsaved edits (the repopulate rule).
+                let rel = PathBuf::from(&path);
+                let abs = self.site_dir.join(&rel);
+                let was_dirty = {
+                    let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
+                    let was = dirty.contains(&rel);
+                    dirty.clear(&rel);
+                    was
+                };
+                let had_mirror = {
+                    let mut sources = self.doc_sources.write().unwrap_or_else(|e| e.into_inner());
+                    let a = sources.remove(&abs).is_some();
+                    let b = sources.remove(&rel).is_some();
+                    a || b
+                };
+                self.populate_node_store(&[rel]);
+
+                // The store changed under every page: re-render, as after a
+                // file change.
+                let (rebuilt_pages, failed_pages, new_errors) =
+                    self.build_all_pages(template::OutputMode::Editorial);
+                let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, false);
+                CommandResult {
+                    response: Response::Reloaded {
+                        discarded: was_dirty,
+                        editor_buffer: had_mirror,
+                    },
+                    events,
+                }
+            }
             Command::CursorMoved { path, line } => {
                 let abs_path = self.site_dir.join(&path);
                 if let Some(src) = self.document_text(&abs_path)
@@ -6922,6 +6955,118 @@ mod suggestion_accept_tests {
             other => panic!("expected DirtyBuffers, got {other:?}"),
         };
         assert_eq!(dirty, vec![FILE.to_string()]);
+    }
+
+    fn title_of(conductor: &Conductor, file: &str) -> String {
+        let root = conductor.doc_root_for_path(Path::new(file)).expect("live root");
+        let store = conductor.node_store.read().unwrap();
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                .expect("preamble");
+        let slot = store.children(preamble)[0];
+        block_text(&store, store.children(slot)[0])
+    }
+
+    fn edit_title(conductor: &Conductor, file: &str, text: &str) {
+        let program = format!(
+            r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "{file}") "title"))) "{text}")"#
+        );
+        assert!(matches!(
+            conductor.apply_ned_program(&program).response,
+            Response::Applied { dirty_paths: 1, .. }
+        ));
+    }
+
+    fn reload(conductor: &Conductor, file: &str) -> CommandResult {
+        conductor.handle_command(Command::ReloadDocument { path: file.to_string() })
+    }
+
+    #[test]
+    fn reload_discards_unsaved_edits_and_says_so() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        assert!(is_dirty(&conductor));
+
+        let result = reload(&conductor, FILE);
+
+        assert!(
+            matches!(result.response, Response::Reloaded { discarded: true, editor_buffer: false }),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(title(&conductor), "First Post", "the disk text is back");
+        assert!(!is_dirty(&conductor), "no longer dirty");
+        assert!(
+            result.events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { pages, .. } if pages.contains(&"/post/first".to_string()))),
+            "{:?}",
+            result.events
+        );
+    }
+
+    #[test]
+    fn reload_of_a_clean_document_reports_nothing_discarded() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let result = reload(&conductor, FILE);
+        assert!(
+            matches!(result.response, Response::Reloaded { discarded: false, editor_buffer: false }),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(title(&conductor), "First Post");
+    }
+
+    /// An editor buffer belongs to the editor: reload drops the conductor's
+    /// copy (so pages show the disk text) but does not claim to have
+    /// discarded what the editor still holds.
+    #[test]
+    fn reload_with_only_an_editor_buffer_does_not_claim_to_discard_it() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let abs = tmp.path().join(FILE);
+        conductor.handle_command(Command::DocumentChanged {
+            path: abs.to_string_lossy().to_string(),
+            text: "# Buffer Title\n\n----\n\nBody.\n".to_string(),
+        });
+        assert!(!is_dirty(&conductor), "no store edit");
+
+        let result = reload(&conductor, FILE);
+
+        assert!(
+            matches!(result.response, Response::Reloaded { discarded: false, editor_buffer: true }),
+            "{:?}",
+            result.response
+        );
+        assert!(
+            conductor.doc_sources.read().unwrap().get(&abs).is_none(),
+            "the conductor's copy of the buffer is gone"
+        );
+    }
+
+    #[test]
+    fn reload_keeps_other_documents_unsaved_edits() {
+        const OTHER: &str = "content/post/second.md";
+        let tmp = build_site();
+        std::fs::write(tmp.path().join(OTHER), "# Second Post\n\n----\n\nGamma.\n").unwrap();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        edit_title(&conductor, OTHER, "Edited B");
+
+        let result = reload(&conductor, FILE);
+
+        assert!(
+            matches!(result.response, Response::Reloaded { discarded: true, editor_buffer: false }),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(title_of(&conductor, FILE), "First Post");
+        assert_eq!(title_of(&conductor, OTHER), "Edited B", "B's unsaved edit survives");
+        let dirty = match conductor.handle_command(Command::GetDirtyBuffers).response {
+            Response::DirtyBuffers(paths) => paths,
+            other => panic!("expected DirtyBuffers, got {other:?}"),
+        };
+        assert_eq!(dirty, vec![OTHER.to_string()]);
     }
 
     /// ADR-043: every conductor write to a source file is recorded as a

@@ -531,6 +531,16 @@ assert_curl "ambiguous apply names the builtin" "/_presemble/apply" POST "$AMBIG
 assert_curl "ambiguous apply carries the cause" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"cause"'
 assert_curl "ambiguous apply changed nothing" "/post/hello-world" GET "" "NTHCHILD ONLY SECOND"
 
+# ── Test: presemble reload throws away one document's unsaved edits ───────
+
+log "Testing presemble reload..."
+assert_curl "hello-world is dirty before the reload" "/_presemble/dirty-buffers" GET "" "content/post/hello-world.md"
+RELOAD_OUT=$(cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- reload "$SITE_DIR/" content/post/hello-world.md 2>&1)
+assert_contains "reload says it discarded unsaved edits" "$RELOAD_OUT" "discarded unsaved edits"
+assert_curl "reload shows the disk text" "/post/hello-world" GET "" "Presemble keeps your content well-structured"
+assert_curl_not_contains "reload dropped the edit" "/post/hello-world" "NTHCHILD ONLY SECOND"
+assert_curl_not_contains "reload clears the dirty buffer" "/_presemble/dirty-buffers" "content/post/hello-world.md"
+
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
 log "Testing suggestions..."

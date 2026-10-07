@@ -326,6 +326,14 @@ enum Command {
         /// Directory to create the site in (created if it does not exist)
         site_dir: String,
     },
+    /// Throw away a document's unsaved edits and load it from disk again.
+    /// Talks to the running conductor; never starts one.
+    Reload {
+        /// Path to the site directory
+        site_dir: String,
+        /// The content file, relative to the site directory (e.g. content/post/x.md)
+        file: String,
+    },
     /// Start the Presemble LSP server (reads JSON-RPC from stdin, writes to stdout)
     Lsp {
         /// Path to the site directory
@@ -393,6 +401,7 @@ pub fn run() -> Result<(), CliError> {
         Some(Command::Init { site_dir }) => {
             init_site(Path::new(&site_dir))
         }
+        Some(Command::Reload { site_dir, file }) => reload_document(Path::new(&site_dir), &file),
         Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
         Some(Command::Conductor { site_dir }) => {
             editor_server::run_daemon(Path::new(&site_dir)).map_err(CliError::Render)
@@ -430,6 +439,50 @@ pub fn run() -> Result<(), CliError> {
             build_for_publish(Path::new(&site_dir), &UrlConfig::default())?;
             Ok(())
         }
+    }
+}
+
+/// What `presemble reload` tells the user.
+///
+/// An editor buffer is the editor's, not the conductor's: it is never claimed
+/// as discarded, only pointed out.
+fn reload_message(file: &str, discarded: bool, editor_buffer: bool) -> String {
+    let mut message = if discarded {
+        format!("Reloaded {file} from disk; discarded unsaved edits.")
+    } else {
+        format!("Reloaded {file} from disk (it had no unsaved edits).")
+    };
+    if editor_buffer {
+        message.push_str(&format!(
+            "\nNote: {file} also has unsaved changes in your editor. They stay there; save or discard them in the editor."
+        ));
+    }
+    message
+}
+
+/// Ask the running conductor to reload one document from disk.
+///
+/// `ConductorClient::connect` only dials the socket; unlike
+/// `ensure_conductor` it never starts a conductor. With none running there is
+/// nothing to reload, which is not an error.
+fn reload_document(site_dir: &Path, file: &str) -> Result<(), CliError> {
+    let client = conductor::ConductorClient::connect(&conductor::socket_url(site_dir))
+        .ok()
+        .filter(|client| client.ping().is_ok());
+    let Some(client) = client else {
+        println!("No conductor is running for {}; nothing to reload.", site_dir.display());
+        return Ok(());
+    };
+    match client
+        .send(&conductor::Command::ReloadDocument { path: file.to_string() })
+        .map_err(CliError::Render)?
+    {
+        conductor::Response::Reloaded { discarded, editor_buffer } => {
+            println!("{}", reload_message(file, discarded, editor_buffer));
+            Ok(())
+        }
+        conductor::Response::Error(e) => Err(CliError::Render(e)),
+        other => Err(CliError::Render(format!("unexpected conductor response: {other:?}"))),
     }
 }
 
@@ -773,6 +826,38 @@ fn convert_template(input: &Path, to: &str, output: Option<&Path>) -> Result<(),
 mod tests {
     use super::*;
     use dep_graph::DependencyGraph;
+
+    #[test]
+    fn cli_parses_reload() {
+        let cli = Cli::try_parse_from(["presemble", "reload", "site/", "content/post/x.md"])
+            .expect("`presemble reload <site-dir> <file>` parses");
+        match cli.command {
+            Some(Command::Reload { site_dir, file }) => {
+                assert_eq!(site_dir, "site/");
+                assert_eq!(file, "content/post/x.md");
+            }
+            _ => panic!("expected the reload subcommand"),
+        }
+    }
+
+    #[test]
+    fn reload_messages_say_what_happened() {
+        assert_eq!(
+            reload_message("content/x.md", true, false),
+            "Reloaded content/x.md from disk; discarded unsaved edits."
+        );
+        assert_eq!(
+            reload_message("content/x.md", false, false),
+            "Reloaded content/x.md from disk (it had no unsaved edits)."
+        );
+        // An editor buffer is noted, never claimed as discarded.
+        assert_eq!(
+            reload_message("content/x.md", false, true),
+            "Reloaded content/x.md from disk (it had no unsaved edits).\n\
+             Note: content/x.md also has unsaved changes in your editor. They stay there; save or discard them in the editor."
+        );
+        assert!(reload_message("content/x.md", true, true).contains("discarded unsaved edits."));
+    }
     use site_index::{NodeRole, SiteGraph, SiteNode, UrlPath};
 
     #[test]

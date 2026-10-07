@@ -46,6 +46,10 @@ pub enum Command {
     DocumentSaved { path: String },
     /// Files changed on disk (from file watcher).
     FileChanged { paths: Vec<String> },
+    /// Throw away the unsaved edits of one document and load it from disk
+    /// (`presemble reload`). `path` is site-relative. Other documents keep
+    /// their unsaved edits.
+    ReloadDocument { path: String },
     /// Browser edit: modify a slot and write to disk.
     EditSlot { file: String, slot: String, value: String },
     /// Request a cached grammar for a schema stem.
@@ -170,6 +174,10 @@ pub enum Response {
     /// The content already reads as the suggestion wants it: nothing was
     /// created, and nothing is wrong.
     AlreadyInPlace,
+    /// A document was reloaded from disk. `discarded`: it had unsaved edits in
+    /// the conductor, now gone. `editor_buffer`: an editor also holds unsaved
+    /// text for it; that is the editor's, and stays there.
+    Reloaded { discarded: bool, editor_buffer: bool },
     /// A NED program was refused: which step, which builtin, and why.
     PlanRefused(editorial_types::PlanFailure),
     /// Content file created successfully. Returns the URL path.
