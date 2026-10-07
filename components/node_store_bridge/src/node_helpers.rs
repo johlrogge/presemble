@@ -15,6 +15,26 @@ pub fn data_attributes(store: &NodeStore, id: NodeId) -> Vec<(Name, NodeId)> {
         .collect()
 }
 
+/// The name templates see for the data attribute `stored` of `id`. An image
+/// block stores its source as `path`; a template reads it as `src`, like the
+/// `<img>` attribute (stage 5b.0). The store attribute is renamed in 5b.2.
+pub fn data_key<'a>(store: &NodeStore, id: NodeId, stored: &'a str) -> &'a str {
+    if stored == "path" && node_is_element(store, id, "image") {
+        "src"
+    } else {
+        stored
+    }
+}
+
+/// The value node of the data attribute that templates call `key` on `id`
+/// (see [`data_key`]). On an image `path` is not a field.
+pub fn data_attribute(store: &NodeStore, id: NodeId, key: &str) -> Option<NodeId> {
+    data_attributes(store, id)
+        .into_iter()
+        .find(|(name, _)| data_key(store, id, store.resolve_name(*name)) == key)
+        .map(|(_, value)| value)
+}
+
 /// Get the text content of a node.
 /// - For `Node::Text(s)`, returns the text directly.
 /// - For a heading, returns its plain text (ADR-059 §8).

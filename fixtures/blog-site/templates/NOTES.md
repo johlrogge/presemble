@@ -53,14 +53,14 @@ except the first" or "the last."
 
 ### Cover image context-dependence
 
-`article_cover.html` and `cover_thumbnail.html` both reference `article.cover.path` and
+`article_cover.html` and `cover_thumbnail.html` both reference `article.cover.src` and
 `article.cover.alt`. This means both fragment templates are implicitly scoped to an article
 context. If the same cover fragment were needed for a different content type (say, `event:cover`),
 you would need duplicate templates. The pipe model has no mechanism for abstracting over the
 source of a value — the path is always hardcoded into the fragment.
 
 A possible fix would be to pass the cover value itself as the context for the fragment, so the
-fragment could say `{{ cover.path }}` and `{{ cover.alt }}` rather than `{{ article.cover.path }}`.
+fragment could say `{{ cover.src }}` and `{{ cover.alt }}` rather than `{{ article.cover.src }}`.
 But ADR-004 does not specify how `maybe` establishes the context for the fragment it calls.
 
 This is a genuine underspecification: when `{{ article.cover | maybe(template:article_cover) }}`

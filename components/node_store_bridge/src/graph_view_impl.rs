@@ -90,11 +90,7 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
 
             // 3. Fall back to Attribute edges
-            let attrs = crate::node_helpers::data_attributes(self.store, current);
-            let attr_target = attrs
-                .iter()
-                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
-                .map(|(_, id)| *id);
+            let attr_target = crate::node_helpers::data_attribute(self.store, current, segment);
 
             match attr_target {
                 Some(id) if is_last => {
@@ -146,9 +142,8 @@ impl<'a> GraphView for NodeStoreView<'a> {
                 continue;
             }
             // Then Attribute
-            let attrs = crate::node_helpers::data_attributes(self.store, current);
-            if let Some((_, id)) = attrs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
-                current = *id;
+            if let Some(id) = crate::node_helpers::data_attribute(self.store, current, segment) {
+                current = id;
                 continue;
             }
             return None;
@@ -186,12 +181,11 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
 
             // Try Attribute edges
-            let attrs = crate::node_helpers::data_attributes(self.store, current);
-            if let Some((_, id)) = attrs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+            if let Some(id) = crate::node_helpers::data_attribute(self.store, current, segment) {
                 if is_last {
-                    return Some(ResolvedNode { id: *id, store: self.store });
+                    return Some(ResolvedNode { id, store: self.store });
                 }
-                current = *id;
+                current = id;
                 continue;
             }
 
@@ -427,9 +421,8 @@ fn walk_store(store: &NodeStore, root: NodeId, path: &[&str]) -> Option<NodeId> 
             continue;
         }
         // Attribute edges
-        let attrs = crate::node_helpers::data_attributes(store, current);
-        if let Some((_, id)) = attrs.iter().find(|(n, _)| store.resolve_name(*n) == *segment) {
-            current = *id;
+        if let Some(id) = crate::node_helpers::data_attribute(store, current, segment) {
+            current = id;
             continue;
         }
         return None;
@@ -609,6 +602,42 @@ mod tests {
         let view = NodeStoreView::new(&store, root);
         let result = view.resolve(&["author", "name"]).unwrap();
         assert!(matches!(result.as_value(), Value::Text(t) if t == "Alice"));
+    }
+
+    /// An image slot on the store path has the record fields `src` and `alt`
+    /// and no `path` (stage 5b.0), however the store names the attribute.
+    #[test]
+    fn image_record_exposes_src_and_alt() {
+        let mut store = NodeStore::new();
+        let page_name = store.intern("page");
+        let root = store.add_node(Node::Element(page_name));
+        let image = content_store::block_to_store(
+            &content::ContentElement::Image {
+                alt: Some("A cat".to_string()),
+                path: "images/cat.jpg".to_string(),
+            },
+            &mut store,
+        );
+        let cover = store.intern("cover");
+        store.add_edge(root, Edge::ConsistsOf { name: cover, part: image });
+
+        let view = NodeStoreView::new(&store, root);
+        let text = |path: &[&str]| match view.resolve(path).map(|r| r.as_value().clone()) {
+            Some(Value::Text(t)) => Some(t),
+            _ => None,
+        };
+        assert_eq!(text(&["cover", "src"]).as_deref(), Some("images/cat.jpg"));
+        assert_eq!(text(&["cover", "alt"]).as_deref(), Some("A cat"));
+        assert_eq!(text(&["cover", "path"]), None, "no `path` alias");
+        assert!(view.resolve_node(&["cover", "src"]).is_some());
+        assert!(view.resolve_node(&["cover", "path"]).is_none());
+
+        // The whole record, materialised, has the same fields.
+        let Value::Record(record) = crate::value_bridge::node_to_value(&store, image) else {
+            panic!("an image is a record");
+        };
+        assert!(record.resolve(&["src"]).is_some());
+        assert!(record.resolve(&["path"]).is_none());
     }
 
     #[test]

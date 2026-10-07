@@ -1509,7 +1509,7 @@ fn render_record(
     editor: &[(String, Form)],
 ) -> Result<Vec<Node>, RenderError> {
     let has_href = sub_graph.resolve(&["href"]).is_some();
-    let has_path = sub_graph.resolve(&["path"]).is_some();
+    let has_src = sub_graph.resolve(&["src"]).is_some();
 
     // Determine rendering mode from `as` or by inferring from record keys.
     let effective_tag = match as_tag {
@@ -1517,7 +1517,7 @@ fn render_record(
         None => {
             if has_href {
                 "a"
-            } else if has_path {
+            } else if has_src {
                 "img"
             } else {
                 // Unknown record type — render nothing.
@@ -1541,7 +1541,7 @@ fn render_record(
         }
 
         "img" => {
-            let src = extract_text(sub_graph, "path").unwrap_or_default();
+            let src = extract_text(sub_graph, "src").unwrap_or_default();
             let alt = extract_text(sub_graph, "alt").unwrap_or_default();
             let mut attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
             attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
@@ -1571,8 +1571,8 @@ fn render_record(
                     children: vec![Node::Element(inner)],
                 };
                 Ok(vec![Node::Element(anchor)])
-            } else if has_path {
-                let src = extract_text(sub_graph, "path").unwrap_or_default();
+            } else if has_src {
+                let src = extract_text(sub_graph, "src").unwrap_or_default();
                 let alt = extract_text(sub_graph, "alt").unwrap_or_default();
                 let mut attrs = record_attrs(class, slot, file, sub_graph, editorial, editor);
                 attrs.insert(0, ("alt".to_string(), Form::Str(alt)));
@@ -1908,7 +1908,7 @@ mod tests {
         let mut graph = DataGraph::new();
         let mut article = DataGraph::new();
         let mut cover = DataGraph::new();
-        cover.insert("path", Value::Text("img.jpg".to_string()));
+        cover.insert("src", Value::Text("img.jpg".to_string()));
         cover.insert("alt", Value::Text("A photo".to_string()));
         article.insert("cover", Value::Record(cover));
         graph.insert("article", Value::Record(article));
@@ -2073,7 +2073,7 @@ mod tests {
         let mut graph = DataGraph::new();
         let mut article = DataGraph::new();
         let mut cover = DataGraph::new();
-        cover.insert("path", Value::Text("img.jpg".to_string()));
+        cover.insert("src", Value::Text("img.jpg".to_string()));
         cover.insert("alt", Value::Text("Photo".to_string()));
         article.insert("cover", Value::Record(cover));
         graph.insert("article", Value::Record(article));
@@ -2924,6 +2924,66 @@ mod tests {
         assert_eq!(eval_expr_to_string(&expr, &legacy), "A summary of <div>");
         let expr = crate::ast::Expr::Lookup(vec!["summary".to_string()]);
         assert_eq!(eval_expr_to_string(&expr, &native), "A summary of <div>");
+    }
+
+    // ── Image records are {src, alt} (stage 5b.0) ──────────────────────────
+
+    const COVER_SCHEMA: &str = "# Title {#title}\noccurs\n: exactly once\n\n\
+        ![cover image description](images/*.jpg) {#cover}\noccurs\n: exactly once\n";
+
+    /// A page as a template sees it, with the cover image `![A cat](images/cat.jpg)`.
+    fn cover_graph() -> DataGraph {
+        let grammar = schema::parse_schema(COVER_SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign("# Title\n\n![A cat](images/cat.jpg)\n", &grammar)
+            .expect("content parses");
+        let mut graph = DataGraph::new();
+        graph.insert(
+            "input",
+            Value::Record(crate::data::build_article_graph(
+                &doc,
+                &grammar,
+                crate::data::OutputMode::Published,
+            )),
+        );
+        graph
+    }
+
+    /// The image record has the fields `src` and `alt`, and no `path`. (The
+    /// store path is pinned in `node_store_bridge`, whose graph view resolves
+    /// store attributes.)
+    #[test]
+    fn image_record_exposes_src_and_alt() {
+        let graph = cover_graph();
+        assert!(
+            matches!(graph.resolve(&["input", "cover", "src"]), Some(Value::Text(s)) if s == "images/cat.jpg"),
+            "{:?}",
+            graph.resolve(&["input", "cover", "src"])
+        );
+        assert!(
+            matches!(graph.resolve(&["input", "cover", "alt"]), Some(Value::Text(s)) if s == "A cat")
+        );
+        assert!(graph.resolve(&["input", "cover", "path"]).is_none(), "no `path` alias");
+    }
+
+    /// A template that reads the image's `src` renders it.
+    #[test]
+    fn template_reading_image_src_renders_it() {
+        use crate::data::OutputMode::Published;
+        let html = render_for(
+            &cover_graph(),
+            r#"<span><presemble:insert data="input.cover.src" /></span>"#,
+            Published,
+        );
+        assert!(html.contains("images/cat.jpg"), "{html}");
+    }
+
+    /// Guard: inserting the whole image record renders the `<img>` it always did.
+    #[test]
+    fn whole_image_record_insert_renders_unchanged() {
+        use crate::data::OutputMode::Published;
+        let html =
+            render_for(&cover_graph(), r#"<presemble:insert data="input.cover" />"#, Published);
+        assert!(html.contains(r#"<img src="images/cat.jpg" alt="A cat""#), "{html}");
     }
 
     #[test]

@@ -402,7 +402,7 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                     && let ContentElement::Image { path, alt } = &spanned.node
                 {
                     let mut record = DataGraph::new();
-                    record.insert("path", Value::Text(path.clone()));
+                    record.insert("src", Value::Text(path.clone()));
                     let alt_value = match alt {
                         Some(s) => Value::Text(s.clone()),
                         None => Value::Absent,
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn resolve_cover_alt_returns_text() {
         let mut cover = DataGraph::new();
-        cover.insert("path", Value::Text("images/cover.jpg".to_string()));
+        cover.insert("src", Value::Text("images/cover.jpg".to_string()));
         cover.insert("alt", Value::Text("A nice photo".to_string()));
         let mut graph = DataGraph::new();
         graph.insert("cover", Value::Record(cover));
