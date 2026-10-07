@@ -587,7 +587,9 @@ impl EditResponse {
 /// Convert a conductor command result into an EditResponse.
 fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum::Json<EditResponse> {
     match result {
-        Ok(conductor::Response::Ok) | Ok(conductor::Response::SuggestionCreated(_)) => {
+        Ok(conductor::Response::Ok)
+        | Ok(conductor::Response::SuggestionCreated(_))
+        | Ok(conductor::Response::AlreadyInPlace) => {
             axum::Json(EditResponse::ok_simple())
         }
         Ok(conductor::Response::Applied { rebuilt_pages, failed_pages, dirty_paths }) => {
@@ -825,6 +827,9 @@ struct NedSuggestionCreateResponse {
     id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// The content already reads as suggested: `ok` with no `id`.
+    #[serde(rename = "alreadyInPlace", skip_serializing_if = "Option::is_none")]
+    already_in_place: Option<bool>,
 }
 
 async fn ned_suggestions_create_handler(
@@ -832,12 +837,16 @@ async fn ned_suggestions_create_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<NedSuggestionCreateRequest>,
 ) -> axum::Json<NedSuggestionCreateResponse> {
-    if let Err(e) = editorial_types::validate_no_existing(&req.mutation) {
-        return axum::Json(NedSuggestionCreateResponse {
+    let failed = |error: String| {
+        axum::Json(NedSuggestionCreateResponse {
             ok: false,
             id: None,
-            error: Some(e),
-        });
+            error: Some(error),
+            already_in_place: None,
+        })
+    };
+    if let Err(e) = editorial_types::validate_no_existing(&req.mutation) {
+        return failed(e);
     }
     match state.conductor.send(&conductor::Command::CreateNedSuggestion {
         file: std::path::PathBuf::from(&req.file),
@@ -847,22 +856,22 @@ async fn ned_suggestions_create_handler(
         // TODO: carry session/user id when multiplayer suggestions land
         author: editorial_types::Author::Human("browser".to_string()),
     }) {
-        Ok(conductor::Response::SuggestionCreated(id)) => {
-            axum::Json(NedSuggestionCreateResponse { ok: true, id: Some(id.to_string()), error: None })
-        }
-        Ok(conductor::Response::Error(e)) => {
-            axum::Json(NedSuggestionCreateResponse { ok: false, id: None, error: Some(e) })
-        }
-        Err(e) => {
-            axum::Json(NedSuggestionCreateResponse { ok: false, id: None, error: Some(e) })
-        }
-        _ => {
-            axum::Json(NedSuggestionCreateResponse {
-                ok: false,
-                id: None,
-                error: Some("unexpected conductor response".to_string()),
-            })
-        }
+        Ok(conductor::Response::SuggestionCreated(id)) => axum::Json(NedSuggestionCreateResponse {
+            ok: true,
+            id: Some(id.to_string()),
+            error: None,
+            already_in_place: None,
+        }),
+        // The content already reads as suggested: ok, but nothing was created.
+        Ok(conductor::Response::AlreadyInPlace) => axum::Json(NedSuggestionCreateResponse {
+            ok: true,
+            id: None,
+            error: None,
+            already_in_place: Some(true),
+        }),
+        Ok(conductor::Response::Error(e)) => failed(e),
+        Err(e) => failed(e),
+        _ => failed("unexpected conductor response".to_string()),
     }
 }
 
@@ -3626,6 +3635,35 @@ mod tests {
         assert_eq!(val["ok"], true, "expected ok:true, got: {val}");
         assert!(val["id"].as_str().map_or(false, |s| s.starts_with("sug-")),
             "expected id starting with sug-, got: {}", val["id"]);
+    }
+
+    #[tokio::test]
+    async fn ned_suggestions_create_no_op_answers_already_in_place() {
+        use tower::ServiceExt;
+
+        let (client, _tmp) = start_test_conductor();
+        let app = test_app(client);
+
+        // The title already reads "Test Title".
+        let body = serde_json::json!({
+            "file": "content/test/doc.md",
+            "selection": r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#,
+            "mutation": {"SetText": "Test Title"},
+            "reason": "Test"
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/ned-suggestions")
+            .header("content-type", "application/json")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val, serde_json::json!({"ok": true, "alreadyInPlace": true}), "{val}");
     }
 
     #[tokio::test]

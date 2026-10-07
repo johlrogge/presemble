@@ -77,6 +77,20 @@ fn json_rpc_ok(id: Value, result: Value) -> JsonRpcResponse {
     }
 }
 
+/// The answer to a suggestion that the content already satisfies: not an
+/// error, and no suggestion was created.
+fn already_in_place(id: Value) -> JsonRpcResponse {
+    json_rpc_ok(
+        id,
+        serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": "Already in place: the content already reads as suggested, so no suggestion was created."
+            }]
+        }),
+    )
+}
+
 fn json_rpc_error(id: Value, code: i32, message: &str) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
@@ -498,6 +512,7 @@ fn handle_request(
                                 "content": [{"type": "text", "text": format!("Suggestion created: {id} (NED). It will appear in the editor.")}]
                             }),
                         ),
+                        Ok(conductor::Response::AlreadyInPlace) => already_in_place(req.id.clone()),
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
@@ -609,6 +624,7 @@ fn handle_request(
                                 "content": [{"type": "text", "text": format!("Body edit suggestion created: {id} (NED). It will appear in the editor.")}]
                             }),
                         ),
+                        Ok(conductor::Response::AlreadyInPlace) => already_in_place(req.id.clone()),
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
@@ -672,6 +688,7 @@ fn handle_request(
                                 "content": [{"type": "text", "text": format!("NED suggestion created: {id}. It will appear in the editor.")}]
                             }),
                         ),
+                        Ok(conductor::Response::AlreadyInPlace) => already_in_place(req.id.clone()),
                         Ok(conductor::Response::Error(e)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
@@ -1885,6 +1902,42 @@ mod tests {
         assert!(
             text2.contains("(sug-"),
             "get_suggestions should include suggestion id; got: {text2}"
+        );
+    }
+
+    #[test]
+    fn e2e_suggest_ned_no_op_is_not_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        let _server_url = start_conductor_server(tmp.path());
+
+        let file = "content/post/first-post.md";
+        let selection = format!(
+            r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{file}") "title")))"#
+        );
+        // The title already reads "First Post".
+        let req = make_request(
+            Value::from(1),
+            "tools/call",
+            serde_json::json!({
+                "name": "suggest_ned",
+                "arguments": {
+                    "file": file,
+                    "selection": selection,
+                    "mutation": { "SetText": "First Post" },
+                    "reason": "already there"
+                }
+            }),
+        );
+        let resp = handle_request(&req, tmp.path());
+        let result = resp.result.as_ref().expect("a result");
+        assert!(
+            result.get("isError").and_then(|v| v.as_bool()) != Some(true),
+            "an already-in-place suggestion is not an error: {result}"
+        );
+        assert_eq!(
+            extract_text(&resp),
+            "Already in place: the content already reads as suggested, so no suggestion was created."
         );
     }
 

@@ -2626,28 +2626,39 @@ impl Conductor {
             Ok(sel) => sel,
             Err(cause) => return Self::creation_error(&cause, kind),
         };
-        let checked: Result<String, editorial_types::StaleCause> = {
+        // `(file of the target's document, whether the mutation changes nothing)`.
+        let checked: Result<(String, bool), editorial_types::StaleCause> = {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
             edit::resolve(&store, &sel, kind)
                 .map_err(editorial_types::StaleCause::from)
                 .and_then(|target| {
-                    let prepared = edit::prepare(&store, &target, &mutation)?;
-                    Ok(node_store_bridge::content_bridge::find_attr_text(
-                        &store,
-                        prepared.document(),
-                        "file",
-                    )
-                    .unwrap_or_default())
+                    let no_change = match edit::prepare(&store, &target, &mutation) {
+                        Ok(_) => false,
+                        Err(edit::EditError::NoChange) => true,
+                        Err(e) => return Err(e.into()),
+                    };
+                    Ok((
+                        node_store_bridge::content_bridge::find_attr_text(
+                            &store,
+                            target.document(),
+                            "file",
+                        )
+                        .unwrap_or_default(),
+                        no_change,
+                    ))
                 })
         };
         match checked {
             Err(cause) => return Self::creation_error(&cause, kind),
-            Ok(doc_file) if Path::new(&doc_file) != file => {
+            Ok((doc_file, _)) if Path::new(&doc_file) != file => {
                 return CommandResult::error(format!(
                     "selection resolves into {doc_file}, not {}",
                     file.display()
                 ));
             }
+            // The content already reads as suggested: not an error, and
+            // nothing to store.
+            Ok((_, true)) => return CommandResult::with_response(Response::AlreadyInPlace),
             Ok(_) => {}
         }
 
@@ -2821,6 +2832,9 @@ impl Conductor {
                         BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated { id }),
                         created.events,
                     ),
+                    Response::AlreadyInPlace => {
+                        respond(BlockEditResponse::Done(BlockEditOutcome::NoChange), vec![])
+                    }
                     Response::Error(message) => refused(BlockEditCause::Invalid, message),
                     other => refused(
                         BlockEditCause::Invalid,
@@ -6736,6 +6750,25 @@ mod suggestion_accept_tests {
             status(&conductor, &id)
         );
         assert!(!is_dirty(&conductor));
+    }
+
+    #[test]
+    fn creating_a_no_op_suggestion_answers_already_in_place() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+
+        // The title already reads "First Post".
+        let result = conductor.handle_command(Command::CreateNedSuggestion {
+            file: PathBuf::from(FILE),
+            selection: TITLE_TEXT.to_string(),
+            mutation: NedMutation::SetText("First Post".into()),
+            reason: "test".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+
+        assert!(matches!(result.response, Response::AlreadyInPlace), "got {:?}", result.response);
+        assert!(result.events.is_empty(), "{:?}", result.events);
+        assert!(conductor.ned_suggestions.read().unwrap().is_empty(), "nothing is stored");
     }
 
     /// Guard: an accept is a one-step plan; it changes the document, marks it

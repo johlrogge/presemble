@@ -167,6 +167,9 @@ pub enum Response {
     Pong,
     /// A suggestion was created successfully.
     SuggestionCreated(editorial_types::SuggestionId),
+    /// The content already reads as the suggestion wants it: nothing was
+    /// created, and nothing is wrong.
+    AlreadyInPlace,
     /// Content file created successfully. Returns the URL path.
     ContentCreated(String),
     /// List of dirty (unsaved) buffer paths.
