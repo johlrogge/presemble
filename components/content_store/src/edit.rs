@@ -507,6 +507,166 @@ fn insert_blocks(
         .collect()
 }
 
+// ── Plans: select, then apply ───────────────────────────────────────────────
+
+/// One step of a plan: a mutation and the nodes it addresses.
+#[derive(Debug, Clone)]
+pub struct PlannedMutation {
+    /// Evaluated before the lock, against the pre-plan store.
+    pub targets: Selection,
+    pub mutation: NedMutation,
+    /// The builtin that recorded the step, e.g. "ned/set-text", for messages.
+    pub origin: &'static str,
+}
+
+/// The mutations of one program, in program order.
+#[derive(Debug, Clone, Default)]
+pub struct Plan(Vec<PlannedMutation>);
+
+impl Plan {
+    pub fn push(&mut self, m: PlannedMutation) {
+        self.0.push(m);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl FromIterator<PlannedMutation> for Plan {
+    fn from_iter<I: IntoIterator<Item = PlannedMutation>>(iter: I) -> Self {
+        Plan(iter.into_iter().collect())
+    }
+}
+
+/// What [`execute`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Executed {
+    /// Sorted, deduplicated: the documents the committed steps changed.
+    pub documents: Vec<NodeId>,
+    /// 0-based indices of steps that were valid but changed nothing, dropped
+    /// from the plan.
+    pub skipped: Vec<usize>,
+}
+
+/// Why a step of a plan was refused. [`execute`] never reports
+/// `Edit(NoChange)`: a step that changes nothing is skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanCause {
+    Address(AddressError),
+    Edit(EditError),
+    /// The step changes what an earlier step changes: the same node, or one
+    /// inside the other.
+    Overlap { with: usize, with_origin: &'static str },
+}
+
+/// The first step of a plan that cannot be applied. `entry` is 0-based.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanError {
+    pub entry: usize,
+    pub origin: &'static str,
+    pub cause: PlanCause,
+}
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let step = self.entry + 1;
+        match &self.cause {
+            PlanCause::Address(e) => write!(f, "step {step} ({}): {e}", self.origin),
+            PlanCause::Edit(e) => write!(f, "step {step} ({}): {e}", self.origin),
+            PlanCause::Overlap { with, with_origin } => write!(
+                f,
+                "step {step} ({}) changes what step {} ({with_origin}) changes",
+                self.origin,
+                with + 1
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlanError {}
+
+impl From<PlanError> for StaleCause {
+    fn from(e: PlanError) -> Self {
+        let detail = e.to_string();
+        match e.cause {
+            PlanCause::Address(a) => a.into(),
+            PlanCause::Edit(edit) => edit.into(),
+            PlanCause::Overlap { .. } => StaleCause::InvalidValue { detail },
+        }
+    }
+}
+
+/// Resolve every step, prepare every step against the unchanged store, check
+/// that no two footprints overlap, then commit all, in plan order. Any
+/// failure leaves the store untouched and reports the first failing step.
+///
+/// A step that would change nothing is dropped: it is reported in
+/// `skipped`, takes no part in the overlap check, and is not an error. A
+/// no-op must still resolve and pass its checks.
+pub fn execute(store: &mut NodeStore, plan: Plan) -> Result<Executed, PlanError> {
+    // Steps are resolved and prepared one after the other, all against the
+    // unchanged store, so the first failing step in plan order is the one
+    // reported.
+    // Each prepared edit keeps the index of its step in the plan.
+    let mut prepared: Vec<(usize, PreparedEdit, &'static str)> = Vec::with_capacity(plan.len());
+    let mut skipped = Vec::new();
+    for (entry, step) in plan.0.iter().enumerate() {
+        let fail = |cause| PlanError { entry, origin: step.origin, cause };
+        let target = resolve(store, &step.targets, step.mutation.target_kind())
+            .map_err(|e| fail(PlanCause::Address(e)))?;
+        let edit = match prepare(store, &target, &step.mutation) {
+            Ok(edit) => edit,
+            Err(EditError::NoChange) => {
+                skipped.push(entry);
+                continue;
+            }
+            Err(e) => return Err(fail(PlanCause::Edit(e))),
+        };
+        if let Some(&(with, _, with_origin)) = prepared
+            .iter()
+            .find(|(_, earlier, _)| footprints_overlap(store, earlier.footprint, edit.footprint))
+        {
+            return Err(fail(PlanCause::Overlap { with, with_origin }));
+        }
+        prepared.push((entry, edit, step.origin));
+    }
+    let Committed { documents } =
+        commit(store, prepared.into_iter().map(|(_, edit, _)| edit).collect());
+    Ok(Executed { documents, skipped })
+}
+
+/// Two footprints overlap when they are the same node, or one is an ancestor
+/// of the other.
+fn footprints_overlap(store: &NodeStore, a: NodeId, b: NodeId) -> bool {
+    a == b || is_ancestor(store, a, b) || is_ancestor(store, b, a)
+}
+
+/// Whether `ancestor` is a structural ancestor of `node`. Collection parents
+/// (semantic multi-valued slot lists) are not structure, as in `single_parent`.
+fn is_ancestor(store: &NodeStore, ancestor: NodeId, node: NodeId) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![node];
+    while let Some(current) = pending.pop() {
+        for parent in store.parents(current) {
+            if matches!(store.get(parent), Some(Node::Collection)) {
+                continue;
+            }
+            if parent == ancestor {
+                return true;
+            }
+            if seen.insert(parent) {
+                pending.push(parent);
+            }
+        }
+    }
+    false
+}
+
 fn anchor_index(store: &NodeStore, container: NodeId, anchor: NodeId) -> usize {
     store
         .children(container)

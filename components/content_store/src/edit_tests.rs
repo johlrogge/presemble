@@ -12,8 +12,8 @@ use schema::HeadingLevel;
 use crate::access::{add_child_element, add_text_attr, find_child_by_name, make_element};
 use crate::block::{BlockDecodeError, add_trivia, block_from_node, block_to_store};
 use crate::edit::{
-    AddressError, Committed, EditError, NedMutation, PreparedEdit, Target, TargetKind, commit,
-    prepare, resolve,
+    AddressError, Committed, EditError, Executed, NedMutation, Plan, PlanCause, PlanError, PlannedMutation,
+    PreparedEdit, Target, TargetKind, commit, execute, prepare, resolve,
 };
 
 fn heading(level: u8, text: &str) -> ContentElement {
@@ -641,6 +641,368 @@ fn commit_with_vanished_anchor_is_a_broken_invariant() {
     let body = f.body();
     f.store.remove_child_edge(body, a);
     commit(&mut f.store, vec![edit]);
+}
+
+// ── plans ───────────────────────────────────────────────────────────────────
+
+fn step(ids: &[NodeId], mutation: NedMutation, origin: &'static str) -> PlannedMutation {
+    PlannedMutation {
+        targets: Selection::from_ids(ids.iter().copied()),
+        mutation,
+        origin,
+    }
+}
+
+fn set_text(id: NodeId, value: &str) -> PlannedMutation {
+    step(&[id], NedMutation::SetText(value.to_string()), "ned/set-text")
+}
+
+fn overlap(entry: usize, origin: &'static str, with: usize, with_origin: &'static str) -> PlanError {
+    PlanError { entry, origin, cause: PlanCause::Overlap { with, with_origin } }
+}
+
+#[test]
+fn plan_with_unmatched_selection_applies_nothing() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        set_text(f.text_of(a), "changed"),
+        step(&[], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+    ]
+    .into_iter()
+    .collect();
+    let nodes = f.store.node_count();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(PlanError {
+            entry: 1,
+            origin: "ned/insert-after",
+            cause: PlanCause::Address(AddressError::Unresolved)
+        })
+    );
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+    assert_eq!(f.store.node_count(), nodes);
+}
+
+#[test]
+fn plan_with_ambiguous_selection_applies_nothing() {
+    let mut f = fixture();
+    let texts: Vec<NodeId> =
+        f.store.children(f.slot("summary")).into_iter().map(|b| f.text_of(b)).collect();
+    let plan: Plan =
+        [step(&texts, NedMutation::SetText("x".to_string()), "ned/set-text")].into_iter().collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(PlanError {
+            entry: 0,
+            origin: "ned/set-text",
+            cause: PlanCause::Address(AddressError::Ambiguous { matches: 2 })
+        })
+    );
+    let summary: Vec<_> = f.store.children(f.slot("summary"));
+    assert_eq!(summary.len(), 2);
+    assert!(matches!(f.store.get(f.text_of(summary[0])), Some(Node::Text(s)) if s == "One"));
+}
+
+#[test]
+fn two_edits_in_one_block_are_rejected() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [set_text(f.text_of(a), "x"), set_text(f.text_of(a), "y")].into_iter().collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/set-text", 0, "ned/set-text"))
+    );
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+}
+
+#[test]
+fn insert_after_a_deleted_block_is_rejected() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        step(&[a], NedMutation::Delete, "ned/delete"),
+        step(&[a], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/insert-after", 0, "ned/delete"))
+    );
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+}
+
+#[test]
+fn edit_inside_a_replaced_block_is_rejected() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        set_text(f.text_of(a), "y"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/set-text", 0, "ned/replace"))
+    );
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+}
+
+#[test]
+fn insert_child_and_edit_in_the_same_container_overlap() {
+    let mut f = fixture();
+    let body = f.body();
+    let a_text = f.text_of(f.body_blocks()[0]);
+    let append = || {
+        step(&[body], NedMutation::InsertChild(vec![para_tree("X")]), "ned/insert-child")
+    };
+    // The container is an ancestor of the block, whichever comes first.
+    let plan: Plan = [append(), set_text(a_text, "y")].into_iter().collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/set-text", 0, "ned/insert-child"))
+    );
+    let plan: Plan = [set_text(a_text, "y"), append()].into_iter().collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/insert-child", 0, "ned/set-text"))
+    );
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+}
+
+#[test]
+fn independent_edits_apply_together() {
+    let mut f = fixture();
+    let title = f.store.children(f.slot("title"))[0];
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        set_text(f.text_of(title), "New title"),
+        step(&[a], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Ok(Executed { documents: vec![f.doc], skipped: vec![] })
+    );
+    assert_eq!(f.body_texts(), vec!["a", "X", "b"]);
+    assert_eq!(block_from_node(&f.store, title), Ok(heading(1, "New title")));
+}
+
+#[test]
+fn invalid_second_entry_applies_nothing() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let body = f.body();
+    let wibble = NodeTree::element("wibble");
+    let plan: Plan = [
+        set_text(f.text_of(a), "changed"),
+        step(&[body], NedMutation::InsertChild(vec![wibble]), "ned/insert-child"),
+    ]
+    .into_iter()
+    .collect();
+    let nodes = f.store.node_count();
+    let blocks_before: Vec<_> =
+        f.body_blocks().into_iter().map(|b| block_from_node(&f.store, b)).collect();
+    let err = execute(&mut f.store, plan).unwrap_err();
+    assert_eq!((err.entry, err.origin), (1, "ned/insert-child"));
+    assert!(matches!(err.cause, PlanCause::Edit(EditError::Payload(_))), "{err:?}");
+    assert_eq!(f.store.node_count(), nodes);
+    let blocks_after: Vec<_> =
+        f.body_blocks().into_iter().map(|b| block_from_node(&f.store, b)).collect();
+    assert_eq!(blocks_after, blocks_before);
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+}
+
+fn all_texts(f: &Fixture) -> Vec<(NodeId, String)> {
+    (0..f.store.node_count() as u64 + 64)
+        .map(NodeId)
+        .filter_map(|id| match f.store.get(id) {
+            Some(Node::Text(s)) => Some((id, s.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn no_change_entry_is_skipped() {
+    let mut f = fixture();
+    let title = f.store.children(f.slot("title"))[0];
+    let a = f.body_blocks()[0];
+    // Step 1 sets the title to what it already is; step 2 changes "a".
+    let plan: Plan = [set_text(f.text_of(title), "Title"), set_text(f.text_of(a), "changed")]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Ok(Executed { documents: vec![f.doc], skipped: vec![0] })
+    );
+    assert_eq!(f.body_texts(), vec!["changed", "b"]);
+}
+
+#[test]
+fn all_no_op_plan_commits_nothing() {
+    let mut f = fixture();
+    let title = f.store.children(f.slot("title"))[0];
+    let a = f.body_blocks()[0];
+    let plan: Plan = [set_text(f.text_of(title), "Title"), set_text(f.text_of(a), "a")]
+        .into_iter()
+        .collect();
+    let (nodes, texts) = (f.store.node_count(), all_texts(&f));
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Ok(Executed { documents: vec![], skipped: vec![0, 1] })
+    );
+    assert_eq!(f.store.node_count(), nodes);
+    assert_eq!(all_texts(&f), texts);
+}
+
+#[test]
+fn skipped_entry_takes_no_part_in_overlap() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        set_text(f.text_of(a), "a"),
+        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Ok(Executed { documents: vec![f.doc], skipped: vec![0] })
+    );
+    assert_eq!(f.body_texts(), vec!["X", "b"]);
+}
+
+#[test]
+fn invalid_entry_after_a_no_op_still_refuses() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        set_text(f.text_of(a), "a"),
+        step(&[], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+    ]
+    .into_iter()
+    .collect();
+    let (nodes, texts) = (f.store.node_count(), all_texts(&f));
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(PlanError {
+            entry: 1,
+            origin: "ned/insert-after",
+            cause: PlanCause::Address(AddressError::Unresolved)
+        })
+    );
+    assert_eq!(f.store.node_count(), nodes);
+    assert_eq!(all_texts(&f), texts);
+}
+
+#[test]
+fn overlap_names_the_plan_entry_after_a_skipped_step() {
+    let mut f = fixture();
+    let title = f.store.children(f.slot("title"))[0];
+    let a = f.body_blocks()[0];
+    // Step 1 is a no-op and skipped, so "ned/set-text" on "a" is the only
+    // prepared edit, yet it is step 2 of the plan (index 1).
+    let plan: Plan = [
+        set_text(f.text_of(title), "Title"),
+        set_text(f.text_of(a), "changed"),
+        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(2, "ned/replace", 1, "ned/set-text"))
+    );
+}
+
+#[test]
+fn empty_plan_commits_nothing() {
+    let mut f = fixture();
+    let nodes = f.store.node_count();
+    assert!(Plan::default().is_empty());
+    assert_eq!(
+        execute(&mut f.store, Plan::default()),
+        Ok(Executed { documents: vec![], skipped: vec![] })
+    );
+    assert_eq!(f.store.node_count(), nodes);
+}
+
+#[test]
+fn plan_error_names_entry_and_origin() {
+    let mut f = fixture();
+    let texts: Vec<NodeId> =
+        f.store.children(f.slot("summary")).into_iter().map(|b| f.text_of(b)).collect();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        set_text(f.text_of(a), "x"),
+        step(&texts, NedMutation::SetText("y".to_string()), "ned/set-text"),
+    ]
+    .into_iter()
+    .collect();
+    let err = execute(&mut f.store, plan).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "step 2 (ned/set-text): the address matches 2 nodes; it must match exactly one"
+    );
+
+    let plan: Plan = [
+        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        set_text(f.text_of(a), "y"),
+    ]
+    .into_iter()
+    .collect();
+    let err = execute(&mut f.store, plan).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "step 2 (ned/set-text) changes what step 1 (ned/replace) changes"
+    );
+    // Both map onto the suggestion surface.
+    assert_eq!(
+        StaleCause::from(err),
+        StaleCause::InvalidValue {
+            detail: "step 2 (ned/set-text) changes what step 1 (ned/replace) changes".to_string()
+        }
+    );
+    let ambiguous = PlanError {
+        entry: 0,
+        origin: "ned/set-text",
+        cause: PlanCause::Address(AddressError::Ambiguous { matches: 2 }),
+    };
+    assert_eq!(StaleCause::from(ambiguous), StaleCause::Ambiguous { matches: 2 });
+    let no_change = PlanError {
+        entry: 0,
+        origin: "ned/set-text",
+        cause: PlanCause::Edit(EditError::NoChange),
+    };
+    assert_eq!(StaleCause::from(no_change), StaleCause::NoChange);
+}
+
+#[test]
+fn commit_order_is_plan_order() {
+    // Delete A, then InsertBefore B (A's next sibling): A's leading comment
+    // moves to B first, and the insert lands before B.
+    let mut f = fixture();
+    let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
+    add_trivia(&mut f.store, a, ned::trivia::ATTR_TRIVIA_BEFORE, &["<!-- note -->"]);
+    let plan: Plan = [
+        step(&[a], NedMutation::Delete, "ned/delete"),
+        step(&[b], NedMutation::InsertBefore(vec![para_tree("X")]), "ned/insert-before"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Ok(Executed { documents: vec![f.doc], skipped: vec![] })
+    );
+    assert_eq!(f.body_texts(), vec!["X", "b"]);
+    let blocks = f.body_blocks();
+    assert!(leading_comments(&f.store, blocks[0]).is_empty());
+    assert_eq!(blocks[1], b);
+    assert_eq!(leading_comments(&f.store, b), vec!["<!-- note -->"]);
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────
