@@ -204,6 +204,9 @@ pub struct Conductor {
     site_index: RwLock<site_index::SiteIndex>,
     repo: site_repository::SiteRepository,
     build_errors: RwLock<HashMap<String, Vec<String>>>,
+    /// `(page url, message)` for unsaved edits the last repopulation could not
+    /// keep; drained into `build_errors` by `flush_repopulate_failures`.
+    repopulate_failures: RwLock<Vec<(String, String)>>,
     node_store: Arc<RwLock<node_store::NodeStore>>,
     url_to_root: RwLock<HashMap<String, node_store::NodeId>>,
     url_to_semantic: RwLock<HashMap<String, node_store::NodeId>>,
@@ -339,6 +342,7 @@ impl Conductor {
             site_index: RwLock::new(site_index),
             repo,
             build_errors: RwLock::new(HashMap::new()),
+            repopulate_failures: RwLock::new(Vec::new()),
             node_store: Arc::new(RwLock::new(node_store::NodeStore::new())),
             url_to_root: RwLock::new(HashMap::new()),
             url_to_semantic: RwLock::new(HashMap::new()),
@@ -364,7 +368,7 @@ impl Conductor {
         *conductor.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()) = ned_suggestions;
 
         // Populate the node store from the site repository
-        conductor.populate_node_store();
+        conductor.populate_node_store(&[]);
 
         Ok(conductor)
     }
@@ -409,9 +413,71 @@ impl Conductor {
         &self.dirty_docs
     }
 
+    /// The text of every dirty document (by site-relative path) except those in
+    /// `disk_wins`, serialized from the store as it is now.
+    ///
+    /// A dirty document that cannot be serialized is left out, so its disk
+    /// version is loaded; that is recorded as a build error on its page (see
+    /// [`Conductor::flush_repopulate_failures`]) rather than dropped silently.
+    fn unsaved_documents(&self, disk_wins: &[PathBuf]) -> HashMap<PathBuf, String> {
+        let dirty: Vec<PathBuf> = self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(Path::to_path_buf)
+            .filter(|path| !disk_wins.contains(path))
+            .collect();
+        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+        let mut failures = self.repopulate_failures.write().unwrap_or_else(|e| e.into_inner());
+        dirty
+            .into_iter()
+            .filter_map(|path| {
+                let root = self.doc_root_for_path(&path)?;
+                match node_store_bridge::serialize_from_store(&store, root) {
+                    Ok(text) => Some((path, text)),
+                    Err(e) => {
+                        let url = node_store_bridge::content_bridge::find_attr_text(&store, root, "url")
+                            .unwrap_or_else(|| path.to_string_lossy().to_string());
+                        failures.push((
+                            url,
+                            format!("unsaved edits could not be kept: {e}; the file on disk was loaded"),
+                        ));
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Record the build errors left by the last repopulation (unsaved edits
+    /// that could not be kept) and return the pages they belong to, for the
+    /// `BuildFailed` event.
+    fn flush_repopulate_failures(&self) -> Vec<String> {
+        let failures = std::mem::take(
+            &mut *self.repopulate_failures.write().unwrap_or_else(|e| e.into_inner()),
+        );
+        let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
+        let mut pages = Vec::new();
+        for (url, message) in failures {
+            errors.entry(url.clone()).or_default().push(message);
+            if !pages.contains(&url) {
+                pages.push(url);
+            }
+        }
+        pages
+    }
+
     /// Populate the node store from the site repository.
     /// Walks schemas, content, and templates, converting them to nodes/edges.
-    fn populate_node_store(&self) {
+    ///
+    /// One rule for every repopulation: every dirty document is serialized from
+    /// the store before it is cleared and re-ingested from that text, so
+    /// unsaved edits survive. `disk_wins` lists the site-relative paths that
+    /// are the exception: their file on disk is loaded instead (a file that
+    /// changed on disk, or was just created).
+    fn populate_node_store(&self, disk_wins: &[PathBuf]) {
+        let keep = self.unsaved_documents(disk_wins);
         let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
         store.clear();
 
@@ -523,7 +589,8 @@ impl Conductor {
 
             // Item content
             for slug in repo.content_slugs(&stem) {
-                if let Some(src) = repo.content_source(&stem, &slug) {
+                let kept = keep.get(&relative(repo.content_path(&stem, &slug))).cloned();
+                if let Some(src) = kept.or_else(|| repo.content_source(&stem, &slug)) {
                     let grammar_key = format!("{stem_str}/item");
                     let grammar = grammars
                         .get(&grammar_key)
@@ -554,7 +621,8 @@ impl Conductor {
             }
 
             // Collection content
-            if let Some(src) = repo.collection_content_source(&stem) {
+            let kept = keep.get(&relative(repo.collection_content_path(&stem))).cloned();
+            if let Some(src) = kept.or_else(|| repo.collection_content_source(&stem)) {
                 let grammar_key = site_index::schema_cache_key(stem_str, "index");
                 let file = relative(repo.collection_content_path(&stem));
                 // A broken collection schema does not fall back to the item
@@ -2491,6 +2559,13 @@ impl Conductor {
                 errors.insert(url, msgs);
             }
         }
+        // Unsaved edits the repopulation could not keep are build errors too.
+        let mut failed_pages = failed_pages;
+        for page in self.flush_repopulate_failures() {
+            if !failed_pages.contains(&page) {
+                failed_pages.push(page);
+            }
+        }
 
         let mut events = Vec::new();
         if !rebuilt_pages.is_empty() || has_stylesheet_change {
@@ -3190,7 +3265,16 @@ impl Conductor {
                 // A full re-render (D9). The snapshot comparison CreateContent
                 // uses (`snapshot_query_results` before and after the
                 // repopulate) is the basis for a minimal FileChanged later.
-                self.populate_node_store();
+                // Unsaved edits are carried over, except in the documents
+                // whose own file changed: those take the disk version.
+                let disk_wins: Vec<PathBuf> = paths
+                    .iter()
+                    .map(|p| {
+                        let path = PathBuf::from(p);
+                        path.strip_prefix(&self.site_dir).map(Path::to_path_buf).unwrap_or(path)
+                    })
+                    .collect();
+                self.populate_node_store(&disk_wins);
 
                 // 5. Detect stylesheet changes (for reload signalling)
                 let has_stylesheet_change = {
@@ -3275,7 +3359,10 @@ impl Conductor {
                         // Refresh schema cache, site index, and the node store for the new content
                         self.refresh_schema_cache();
                         self.refresh_site_index();
-                        self.populate_node_store();
+                        // The new file is the one the disk wins for; unsaved
+                        // edits in every other document are kept.
+                        let created = path.strip_prefix(&self.site_dir).unwrap_or(&path).to_path_buf();
+                        self.populate_node_store(&[created]);
 
                         let mut rebuilt_pages: Vec<String> = vec![];
 
@@ -3331,14 +3418,15 @@ impl Conductor {
                             }
                         }
 
-                        CommandResult {
-                            response: Response::ContentCreated(url),
-                            events: if rebuilt_pages.is_empty() {
-                                vec![]
-                            } else {
-                                vec![ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None }]
-                            },
+                        let mut events = Vec::new();
+                        if !rebuilt_pages.is_empty() {
+                            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
                         }
+                        let failed = self.flush_repopulate_failures();
+                        if !failed.is_empty() {
+                            events.push(ConductorEvent::BuildFailed { error_pages: failed });
+                        }
+                        CommandResult { response: Response::ContentCreated(url), events }
                     }
                     Err(e) => CommandResult::error(e),
                 }
@@ -3538,7 +3626,7 @@ impl Conductor {
                                 self.refresh_schema_cache();
                                 self.refresh_site_index();
                                 // Repopulate the node store with the new content
-                                self.populate_node_store();
+                                self.populate_node_store(&[]);
 
                                 // Batch-render all pages using O(n) pipeline
                                 let (rebuilt, failed, errors) = self.build_all_pages(template::OutputMode::Editorial);
@@ -6794,6 +6882,61 @@ mod suggestion_accept_tests {
         assert!(matches!(result.response, Response::AlreadyInPlace), "got {:?}", result.response);
         assert!(result.events.is_empty(), "{:?}", result.events);
         assert!(conductor.ned_suggestions.read().unwrap().is_empty(), "nothing is stored");
+    }
+
+    /// An external change to one file repopulates the store, but must not
+    /// throw away unsaved edits in the other documents.
+    #[test]
+    fn external_change_to_another_file_keeps_unsaved_edits() {
+        const OTHER: &str = "content/post/second.md";
+        let tmp = build_site();
+        std::fs::write(tmp.path().join(OTHER), "# Second Post\n\n----\n\nGamma.\n").unwrap();
+        let conductor = make_conductor(&tmp);
+
+        // An unsaved edit to A.
+        let program = format!(r#"(ned/set-text {TITLE_TEXT} "Edited A")"#);
+        assert!(matches!(
+            conductor.apply_ned_program(&program).response,
+            Response::Applied { dirty_paths: 1, .. }
+        ));
+        assert_eq!(title(&conductor), "Edited A");
+        assert!(is_dirty(&conductor));
+
+        // B changes on disk, from outside.
+        std::fs::write(tmp.path().join(OTHER), "# Second Post\n\n----\n\nDelta.\n").unwrap();
+        let result =
+            conductor.handle_command(Command::FileChanged { paths: vec![OTHER.to_string()] });
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+
+        assert_eq!(title(&conductor), "Edited A", "A's unsaved edit survives");
+        assert!(is_dirty(&conductor), "A is still dirty");
+        let dirty = match conductor.handle_command(Command::GetDirtyBuffers).response {
+            Response::DirtyBuffers(paths) => paths,
+            other => panic!("expected DirtyBuffers, got {other:?}"),
+        };
+        assert_eq!(dirty, vec![FILE.to_string()]);
+    }
+
+    /// Creating content repopulates the store too: unsaved edits in the other
+    /// documents survive it.
+    #[test]
+    fn create_content_keeps_unsaved_edits_in_other_documents() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+
+        let program = format!(r#"(ned/set-text {TITLE_TEXT} "Edited A")"#);
+        assert!(matches!(
+            conductor.apply_ned_program(&program).response,
+            Response::Applied { dirty_paths: 1, .. }
+        ));
+
+        let result = conductor
+            .handle_command(Command::CreateContent { stem: "post".into(), slug: "new".into() });
+        assert!(!matches!(result.response, Response::Error(_)), "{:?}", result.response);
+        assert!(tmp.path().join("content/post/new.md").exists(), "the file is created");
+
+        assert_eq!(title(&conductor), "Edited A", "A's unsaved edit survives");
+        assert!(is_dirty(&conductor), "A is still dirty");
     }
 
     /// Guard: an accept is a one-step plan; it changes the document, marks it

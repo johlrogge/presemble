@@ -529,6 +529,7 @@ assert_curl "ambiguous apply is refused" "/_presemble/apply" POST "$AMBIGUOUS_BO
 assert_curl "ambiguous apply names the step" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"step":1'
 assert_curl "ambiguous apply names the builtin" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"origin":"ned/set-text"'
 assert_curl "ambiguous apply carries the cause" "/_presemble/apply" POST "$AMBIGUOUS_BODY" '"cause"'
+assert_curl "ambiguous apply changed nothing" "/post/hello-world" GET "" "NTHCHILD ONLY SECOND"
 
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
