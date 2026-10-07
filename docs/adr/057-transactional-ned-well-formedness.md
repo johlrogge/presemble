@@ -4,6 +4,8 @@
 
 Proposed
 
+Being rewritten as "typed operations plus select-then-apply" (stage 2d: `content_store::edit`, prepare and commit; stage 2e: the executor). §1 (clone and journal) and §4 (the gate) will not be implemented. The rewrite lands with stage 2e-2.
+
 ## Context
 
 ADR-056 made suggestion accept apply structured mutations under one write lock, but deferred checking that the resulting document conforms to "Wave 1's transactional validation". The node store has no notion of a transaction, and the set of documents an edit affects is computed ad hoc. Raw `/_presemble/apply` programs can leave arbitrary nodes behind.

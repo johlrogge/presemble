@@ -373,6 +373,7 @@ version = "0.35.0"
 dependencies = [
  "content",
  "content_editor",
+ "content_store",
  "dep_graph",
  "editorial_types",
  "evaluator",
@@ -436,6 +437,7 @@ name = "content_store"
 version = "0.35.0"
 dependencies = [
  "content",
+ "editorial_types",
  "ned",
  "node_store",
  "schema",

@@ -6,6 +6,7 @@ use rayon::prelude::*;
 
 use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, RenderMode, Response};
 use crate::suggestion_apply::{self, DOCUMENT_KIND};
+use content_store::edit;
 
 /// Element kind given to a document root that has been superseded by a
 /// re-ingest of the same file (ADR-056). See `Conductor::retire_document_root`.
@@ -2536,19 +2537,19 @@ impl Conductor {
         expected_file: &Path,
         preview: Option<&editorial_types::SuggestionPreview>,
     ) -> Result<PathBuf, editorial_types::StaleCause> {
-        let target = suggestion_apply::resolve_target(store, sel, mutation.target_kind())?;
+        let target = edit::resolve(store, sel, mutation.target_kind())?;
         if let Some(preview) = preview {
             suggestion_apply::check_drift(store, &target, mutation, preview)?;
         }
-        let plan = suggestion_apply::validate(store, &target, mutation)?;
+        let prepared = edit::prepare(store, &target, mutation)?;
         let path = PathBuf::from(
-            node_store_bridge::content_bridge::find_attr_text(store, target.document(), "file")
+            node_store_bridge::content_bridge::find_attr_text(store, prepared.document(), "file")
                 .unwrap_or_default(),
         );
         if path != expected_file {
             return Err(editorial_types::StaleCause::Unresolved);
         }
-        suggestion_apply::apply(store, plan)?;
+        edit::commit(store, vec![prepared]);
         Ok(path)
     }
 
@@ -2595,13 +2596,13 @@ impl Conductor {
         };
         let checked: Result<String, editorial_types::StaleCause> = {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-            suggestion_apply::resolve_target(&store, &sel, kind)
+            edit::resolve(&store, &sel, kind)
                 .map_err(editorial_types::StaleCause::from)
                 .and_then(|target| {
-                    suggestion_apply::validate(&store, &target, &mutation)?;
+                    let prepared = edit::prepare(&store, &target, &mutation)?;
                     Ok(node_store_bridge::content_bridge::find_attr_text(
                         &store,
-                        target.document(),
+                        prepared.document(),
                         "file",
                     )
                     .unwrap_or_default())
@@ -2656,9 +2657,9 @@ impl Conductor {
             .eval_selection(&req.selection)
             .map_err(|c| refuse(BlockEditCause::Unaddressable, c.to_string()))?;
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let target = suggestion_apply::resolve_target(&store, &sel, TargetKind::Block)
+        let target = edit::resolve(&store, &sel, TargetKind::Block)
             .map_err(|e| refuse(BlockEditCause::Unaddressable, e.to_string()))?;
-        let suggestion_apply::ResolvedTarget::Block { block, document, .. } = target else {
+        let edit::Target::Block { block, document, .. } = target else {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
                 "the selection does not address a block".to_string(),
@@ -6675,6 +6676,53 @@ mod suggestion_accept_tests {
             other => panic!("expected Stale, got {other:?}"),
         }
         assert_eq!(body_texts(&conductor)[0], "Alpha and Alpha.", "nothing applied");
+        assert!(!is_dirty(&conductor));
+    }
+
+    /// Guard: a suggestion whose postcondition fails at accept writes nothing.
+    /// `prepare` takes `&NodeStore`, so the type enforces it; this pins it at
+    /// the surface.
+    #[test]
+    fn failed_accept_leaves_store_unchanged() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let id = create(
+            &conductor,
+            ALPHA_TEXT,
+            NedMutation::SearchReplace { search: "para.".into(), replace: "x".into() },
+        );
+
+        // The text now splits into two paragraphs once "para." is replaced.
+        {
+            let root = live_root(&conductor);
+            let mut store = conductor.node_store.write().unwrap();
+            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+            let first = store.children(body)[0];
+            let text = store.children(first)[0];
+            store.replace_node(text, node_store::Node::Text("Alpha para.\n\nmore".into()));
+        }
+        let (before, nodes_before) = {
+            let root = live_root(&conductor);
+            let store = conductor.node_store.read().unwrap();
+            (
+                node_store_bridge::serialize_from_store(&store, root).expect("serialize"),
+                store.node_count(),
+            )
+        };
+
+        let result = accept(&conductor, &id);
+        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(matches!(
+            status(&conductor, &id),
+            NedSuggestionStatus::Stale { cause: StaleCause::InvalidValue { .. }, .. }
+        ));
+        let root = live_root(&conductor);
+        let store = conductor.node_store.read().unwrap();
+        assert_eq!(
+            node_store_bridge::serialize_from_store(&store, root).expect("serialize"),
+            before
+        );
+        assert_eq!(store.node_count(), nodes_before);
         assert!(!is_dirty(&conductor));
     }
 

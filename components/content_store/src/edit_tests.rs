@@ -1,0 +1,666 @@
+//! Tests for `edit`: resolve, prepare and commit.
+//!
+//! The fixture is built by hand, in the encoding `document_to_store` writes:
+//! `document > preamble > slot > block` and `document > body > block`.
+
+use content::{ContentElement, RoundTripError};
+use editorial_types::StaleCause;
+use ned::{NodeTree, Selection};
+use node_store::{Edge, Node, NodeId, NodeStore};
+use schema::HeadingLevel;
+
+use crate::access::{add_child_element, add_text_attr, find_child_by_name, make_element};
+use crate::block::{BlockDecodeError, block_from_node, block_to_store};
+use crate::edit::{
+    AddressError, Committed, EditError, NedMutation, PreparedEdit, Target, TargetKind, commit,
+    prepare, resolve,
+};
+
+fn heading(level: u8, text: &str) -> ContentElement {
+    ContentElement::Heading { level: HeadingLevel::new(level).unwrap(), source: text.into() }
+}
+
+fn para(text: &str) -> ContentElement {
+    ContentElement::Paragraph { text: text.to_string() }
+}
+
+fn para_tree(text: &str) -> NodeTree {
+    NodeTree::element("paragraph").with_child(NodeTree::text(text))
+}
+
+fn add_block(store: &mut NodeStore, parent: NodeId, el: &ContentElement) -> NodeId {
+    let id = block_to_store(el, store);
+    store.add_edge(parent, Edge::Child(id));
+    id
+}
+
+fn add_slot(store: &mut NodeStore, preamble: NodeId, name: &str, blocks: &[ContentElement]) {
+    let slot = add_child_element(store, preamble, "slot");
+    add_text_attr(store, slot, "name", name);
+    for block in blocks {
+        add_block(store, slot, block);
+    }
+}
+
+/// One live document:
+/// - slot "title": heading "Title"
+/// - slot "summary": two paragraphs "One", "Two"
+/// - body: paragraph "a", paragraph "b"
+fn build_document(store: &mut NodeStore) -> NodeId {
+    let doc = make_element(store, "document");
+    let preamble = add_child_element(store, doc, "preamble");
+    add_slot(store, preamble, "title", &[heading(1, "Title")]);
+    add_slot(store, preamble, "summary", &[para("One"), para("Two")]);
+    let body = add_child_element(store, doc, "body");
+    add_block(store, body, &para("a"));
+    add_block(store, body, &para("b"));
+    doc
+}
+
+struct Fixture {
+    store: NodeStore,
+    doc: NodeId,
+}
+
+fn fixture() -> Fixture {
+    let mut store = NodeStore::new();
+    let doc = build_document(&mut store);
+    Fixture { store, doc }
+}
+
+impl Fixture {
+    fn slot(&self, name: &str) -> NodeId {
+        let preamble = find_child_by_name(&self.store, self.doc, "preamble").unwrap();
+        self.store
+            .children(preamble)
+            .into_iter()
+            .find(|s| crate::access::find_attr_text(&self.store, *s, "name").as_deref() == Some(name))
+            .unwrap()
+    }
+    fn body(&self) -> NodeId {
+        find_child_by_name(&self.store, self.doc, "body").unwrap()
+    }
+    fn body_blocks(&self) -> Vec<NodeId> {
+        self.store.children(self.body())
+    }
+    fn text_of(&self, block: NodeId) -> NodeId {
+        self.store.children(block)[0]
+    }
+    fn body_texts(&self) -> Vec<String> {
+        self.body_blocks()
+            .into_iter()
+            .map(|b| match self.store.get(self.text_of(b)) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("expected text, got {other:?}"),
+            })
+            .collect()
+    }
+    fn resolve(&self, ids: &[NodeId], kind: TargetKind) -> Result<Target, AddressError> {
+        resolve(&self.store, &Selection::from_ids(ids.iter().copied()), kind)
+    }
+    fn prepare(&self, id: NodeId, m: &NedMutation) -> Result<PreparedEdit, EditError> {
+        let target = self.resolve(&[id], m.target_kind()).expect("resolves");
+        prepare(&self.store, &target, m)
+    }
+    fn run(&mut self, id: NodeId, m: &NedMutation) -> Committed {
+        let edit = self.prepare(id, m).expect("valid");
+        commit(&mut self.store, vec![edit])
+    }
+}
+
+// ── resolve ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn text_of_single_text_heading_resolves() {
+    let f = fixture();
+    let heading = f.store.children(f.slot("title"))[0];
+    let text = f.text_of(heading);
+    let got = f.resolve(&[text], TargetKind::Text).unwrap();
+    assert_eq!(got, Target::Text { text, block: heading, document: f.doc });
+}
+
+#[test]
+fn empty_selection_is_unresolved() {
+    let f = fixture();
+    assert_eq!(f.resolve(&[], TargetKind::Text), Err(AddressError::Unresolved));
+}
+
+#[test]
+fn two_nodes_are_ambiguous() {
+    let f = fixture();
+    let texts: Vec<NodeId> =
+        f.store.children(f.slot("summary")).into_iter().map(|b| f.text_of(b)).collect();
+    assert_eq!(f.resolve(&texts, TargetKind::Text), Err(AddressError::Ambiguous { matches: 2 }));
+}
+
+#[test]
+fn missing_node_is_unresolved() {
+    let f = fixture();
+    assert_eq!(f.resolve(&[NodeId(999_999)], TargetKind::Block), Err(AddressError::Unresolved));
+}
+
+#[test]
+fn block_where_text_expected_is_wrong_kind() {
+    let f = fixture();
+    let heading = f.store.children(f.slot("title"))[0];
+    assert_eq!(
+        f.resolve(&[heading], TargetKind::Text),
+        Err(AddressError::WrongKind { expected: TargetKind::Text, found: "heading".to_string() })
+    );
+}
+
+#[test]
+fn slot_where_block_expected_is_wrong_kind() {
+    let f = fixture();
+    assert_eq!(
+        f.resolve(&[f.slot("title")], TargetKind::Block),
+        Err(AddressError::WrongKind { expected: TargetKind::Block, found: "slot".to_string() })
+    );
+}
+
+#[test]
+fn body_and_slot_resolve_as_container_but_block_does_not() {
+    let f = fixture();
+    let body = f.body();
+    assert_eq!(
+        f.resolve(&[body], TargetKind::Container),
+        Ok(Target::Container { container: body, document: f.doc })
+    );
+    let slot = f.slot("summary");
+    assert_eq!(
+        f.resolve(&[slot], TargetKind::Container),
+        Ok(Target::Container { container: slot, document: f.doc })
+    );
+    let block = f.body_blocks()[0];
+    assert!(matches!(
+        f.resolve(&[block], TargetKind::Container),
+        Err(AddressError::WrongKind { expected: TargetKind::Container, .. })
+    ));
+}
+
+#[test]
+fn block_resolves_with_container_and_document() {
+    let f = fixture();
+    let block = f.body_blocks()[1];
+    assert_eq!(
+        f.resolve(&[block], TargetKind::Block),
+        Ok(Target::Block { block, container: f.body(), document: f.doc })
+    );
+}
+
+#[test]
+fn target_under_superseded_document_is_unresolved() {
+    let mut f = fixture();
+    let kind = f.store.intern("superseded-document");
+    f.store.replace_node(f.doc, Node::Element(kind));
+    let block = f.body_blocks()[0];
+    let text = f.text_of(block);
+    assert_eq!(f.resolve(&[text], TargetKind::Text), Err(AddressError::Unresolved));
+    assert_eq!(f.resolve(&[block], TargetKind::Block), Err(AddressError::Unresolved));
+    assert_eq!(f.resolve(&[f.body()], TargetKind::Container), Err(AddressError::Unresolved));
+}
+
+#[test]
+fn block_in_multi_valued_slot_with_collection_parent_still_resolves() {
+    // Semantic content links multi-valued slot blocks into a Collection with
+    // Child edges; that must not count as a second parent.
+    let mut f = fixture();
+    let summary = f.slot("summary");
+    let first = f.store.children(summary)[0];
+    let coll = f.store.add_node(Node::Collection);
+    f.store.add_edge(coll, Edge::Child(first));
+    assert_eq!(
+        f.resolve(&[first], TargetKind::Block),
+        Ok(Target::Block { block: first, container: summary, document: f.doc })
+    );
+}
+
+#[test]
+fn block_with_second_element_parent_is_wrong_kind() {
+    // Any non-Collection parent counts, so a block shared by two elements is
+    // not addressable.
+    let mut f = fixture();
+    let block = f.body_blocks()[0];
+    let kind = f.store.intern("blockquote");
+    let other = f.store.add_node(Node::Element(kind));
+    f.store.add_edge(other, Edge::Child(block));
+    assert!(matches!(
+        f.resolve(&[block], TargetKind::Block),
+        Err(AddressError::WrongKind { expected: TargetKind::Block, .. })
+    ));
+}
+
+#[test]
+fn set_text_on_html_block_text_is_rejected_and_store_unchanged() {
+    // HTML blocks cannot be text-edited (ADR-062 D4).
+    let mut f = fixture();
+    let body = f.body();
+    let html = add_block(
+        &mut f.store,
+        body,
+        &ContentElement::HtmlBlock { source: "<div>x</div>".to_string() },
+    );
+    let text = f.text_of(html);
+    let nodes_before = f.store.node_count();
+
+    let mutation = NedMutation::SetText("<b>y</b>".to_string());
+    assert!(matches!(
+        f.resolve(&[text], mutation.target_kind()),
+        Err(AddressError::WrongKind { expected: TargetKind::Text, .. })
+    ));
+    assert_eq!(f.store.node_count(), nodes_before);
+    assert!(matches!(f.store.get(text), Some(Node::Text(s)) if s == "<div>x</div>"));
+}
+
+/// Guard: a text node is not a container.
+#[test]
+fn insert_child_into_text_node_is_refused() {
+    let f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    assert!(matches!(
+        f.resolve(&[text], TargetKind::Container),
+        Err(AddressError::WrongKind { expected: TargetKind::Container, .. })
+    ));
+}
+
+/// Guard: frame nodes (body, slot) are not blocks, so they cannot be deleted.
+#[test]
+fn delete_refuses_frame_node() {
+    let f = fixture();
+    assert!(matches!(
+        f.resolve(&[f.body()], TargetKind::Block),
+        Err(AddressError::WrongKind { expected: TargetKind::Block, .. })
+    ));
+    assert!(matches!(
+        f.resolve(&[f.slot("summary")], TargetKind::Block),
+        Err(AddressError::WrongKind { expected: TargetKind::Block, .. })
+    ));
+}
+
+// ── prepare ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn set_text_with_same_value_is_no_change() {
+    let f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    assert_eq!(f.prepare(text, &NedMutation::SetText("a".to_string())), Err(EditError::NoChange));
+}
+
+#[test]
+fn newline_in_heading_is_invalid() {
+    let f = fixture();
+    let text = f.text_of(f.store.children(f.slot("title"))[0]);
+    assert!(matches!(
+        f.prepare(text, &NedMutation::SetText("Two\nlines".to_string())),
+        Err(EditError::Postcondition(_))
+    ));
+}
+
+/// Guard: a blank line would split a paragraph in two.
+#[test]
+fn set_text_with_blank_line_in_paragraph_is_refused() {
+    let f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    assert!(matches!(
+        f.prepare(text, &NedMutation::SetText("a\n\nb".to_string())),
+        Err(EditError::Postcondition(RoundTripError::BlockCount(2)))
+    ));
+}
+
+#[test]
+fn set_text_valid_value_is_prepared_on_the_owning_block() {
+    let f = fixture();
+    let heading = f.store.children(f.slot("title"))[0];
+    let text = f.text_of(heading);
+    let edit = f.prepare(text, &NedMutation::SetText("New".to_string())).unwrap();
+    assert_eq!(edit.footprint(), heading);
+    assert_eq!(edit.document(), f.doc);
+}
+
+fn sr(search: &str, replace: &str) -> NedMutation {
+    NedMutation::SearchReplace { search: search.to_string(), replace: replace.to_string() }
+}
+
+#[test]
+fn search_replace_zero_occurrences_is_not_found() {
+    let f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    assert_eq!(f.prepare(text, &sr("zzz", "y")), Err(EditError::SearchNotFound));
+}
+
+#[test]
+fn search_replace_two_occurrences_is_not_unique() {
+    let mut f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    f.store.replace_node(text, Node::Text("cat and cat".to_string()));
+    assert_eq!(
+        f.prepare(text, &sr("cat", "dog")),
+        Err(EditError::SearchNotUnique { occurrences: 2 })
+    );
+}
+
+#[test]
+fn search_replace_empty_search_is_refused() {
+    let f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    assert_eq!(f.prepare(text, &sr("", "y")), Err(EditError::EmptySearch));
+}
+
+#[test]
+fn search_replace_search_equal_replace_is_no_change() {
+    let f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    assert_eq!(f.prepare(text, &sr("a", "a")), Err(EditError::NoChange));
+}
+
+#[test]
+fn search_replace_unique_writes_the_replaced_text() {
+    let mut f = fixture();
+    let text = f.text_of(f.body_blocks()[0]);
+    f.store.replace_node(text, Node::Text("the cat sat".to_string()));
+    f.run(text, &sr("cat", "dog"));
+    assert_eq!(f.body_texts(), vec!["the dog sat", "b"]);
+}
+
+#[test]
+fn replace_with_empty_payload_is_refused() {
+    let f = fixture();
+    let block = f.body_blocks()[0];
+    assert_eq!(f.prepare(block, &NedMutation::Replace(vec![])), Err(EditError::EmptyPayload));
+}
+
+#[test]
+fn prepare_refuses_empty_payload() {
+    let f = fixture();
+    let block = f.body_blocks()[0];
+    for m in [
+        NedMutation::Replace(vec![]),
+        NedMutation::InsertBefore(vec![]),
+        NedMutation::InsertAfter(vec![]),
+    ] {
+        assert_eq!(f.prepare(block, &m), Err(EditError::EmptyPayload), "{m:?}");
+    }
+    assert_eq!(
+        f.prepare(f.body(), &NedMutation::InsertChild(vec![])),
+        Err(EditError::EmptyPayload)
+    );
+}
+
+#[test]
+fn prepare_refuses_existing_node_payload() {
+    let f = fixture();
+    let block = f.body_blocks()[0];
+    let bare = NodeTree::Existing(f.text_of(block));
+    let nested = NodeTree::element("paragraph").with_child(NodeTree::Existing(f.text_of(block)));
+    for tree in [bare, nested] {
+        assert_eq!(
+            f.prepare(block, &NedMutation::InsertAfter(vec![tree])),
+            Err(EditError::ExistingNode)
+        );
+    }
+}
+
+#[test]
+fn insert_after_html_block_payload_is_refused() {
+    // An HTML block can never be inserted through a payload (ADR-062 D4).
+    let f = fixture();
+    let block = f.body_blocks()[0];
+    let tree = NodeTree::element("html-block").with_child(NodeTree::text("<div>x</div>"));
+    assert_eq!(
+        f.prepare(block, &NedMutation::InsertAfter(vec![tree])),
+        Err(EditError::Payload(BlockDecodeError::NotPayloadKind("html-block".to_string())))
+    );
+}
+
+#[test]
+fn image_payload_with_children_is_refused() {
+    let f = fixture();
+    let block = f.body_blocks()[0];
+    let tree = NodeTree::element("image")
+        .with_attr("path", "x.png")
+        .with_child(NodeTree::text("oops"));
+    assert!(matches!(
+        f.prepare(block, &NedMutation::InsertAfter(vec![tree])),
+        Err(EditError::Payload(BlockDecodeError::UnexpectedChild { .. }))
+    ));
+}
+
+#[test]
+fn payload_that_does_not_round_trip_is_a_postcondition_failure() {
+    let f = fixture();
+    let block = f.body_blocks()[0];
+    let tree = para_tree("a\n\nb");
+    assert!(matches!(
+        f.prepare(block, &NedMutation::InsertAfter(vec![tree])),
+        Err(EditError::Postcondition(_))
+    ));
+}
+
+#[test]
+fn mutation_kind_mismatch_is_refused() {
+    let f = fixture();
+    let block = f.body_blocks()[0];
+    let target = f.resolve(&[block], TargetKind::Block).unwrap();
+    assert_eq!(
+        prepare(&f.store, &target, &NedMutation::SetText("x".to_string())),
+        Err(EditError::TargetMismatch { expected: TargetKind::Text, found: TargetKind::Block })
+    );
+}
+
+#[test]
+fn prepare_does_not_touch_the_store() {
+    let f = fixture();
+    let a = f.body_blocks()[0];
+    let nodes = f.store.node_count();
+    f.prepare(a, &NedMutation::Replace(vec![para_tree("X")])).unwrap();
+    f.prepare(a, &NedMutation::Delete).unwrap();
+    assert_eq!(f.store.node_count(), nodes);
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+}
+
+#[test]
+fn prepare_reports_footprint_and_document() {
+    let f = fixture();
+    let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
+    let a_text = f.text_of(a);
+    let body = f.body();
+    let tree = || vec![para_tree("X")];
+    let cases: Vec<(NodeId, NedMutation, NodeId)> = vec![
+        (a_text, NedMutation::SetText("changed".to_string()), a),
+        (a_text, sr("a", "z"), a),
+        (b, NedMutation::Replace(tree()), b),
+        (b, NedMutation::Delete, b),
+        (a, NedMutation::InsertBefore(tree()), a),
+        (a, NedMutation::InsertAfter(tree()), a),
+        (body, NedMutation::InsertChild(tree()), body),
+    ];
+    for (target, mutation, footprint) in cases {
+        let edit = f.prepare(target, &mutation).unwrap_or_else(|e| panic!("{mutation:?}: {e}"));
+        assert_eq!(edit.footprint(), footprint, "{mutation:?}");
+        assert_eq!(edit.document(), f.doc, "{mutation:?}");
+    }
+}
+
+// ── commit ──────────────────────────────────────────────────────────────────
+
+/// Guard: the canonical encoding is written, not the payload's raw attributes.
+#[test]
+fn insert_stores_canonical_encoding_not_raw_attrs() {
+    let mut f = fixture();
+    let block = f.body_blocks()[0];
+    let tree = NodeTree::element("heading")
+        .with_attr("level", "2")
+        .with_child(NodeTree::text("Section"));
+    f.run(block, &NedMutation::InsertAfter(vec![tree]));
+    let new_heading = f.body_blocks()[1];
+    let level = f
+        .store
+        .attributes(new_heading)
+        .into_iter()
+        .find(|(n, _)| f.store.resolve_name(*n) == "level")
+        .and_then(|(_, v)| f.store.get(v).cloned());
+    assert!(matches!(level, Some(Node::Integer(2))), "level: {level:?}");
+    assert_eq!(block_from_node(&f.store, new_heading), Ok(heading(2, "Section")));
+}
+
+#[test]
+fn insert_after_two_blocks_keeps_order() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    f.run(a, &NedMutation::InsertAfter(vec![para_tree("X"), para_tree("Y")]));
+    assert_eq!(f.body_texts(), vec!["a", "X", "Y", "b"]);
+}
+
+#[test]
+fn insert_before_keeps_order() {
+    let mut f = fixture();
+    let b = f.body_blocks()[1];
+    f.run(b, &NedMutation::InsertBefore(vec![para_tree("X"), para_tree("Y")]));
+    assert_eq!(f.body_texts(), vec!["a", "X", "Y", "b"]);
+}
+
+#[test]
+fn insert_child_appends_in_order() {
+    let mut f = fixture();
+    let body = f.body();
+    f.run(body, &NedMutation::InsertChild(vec![para_tree("X"), para_tree("Y")]));
+    assert_eq!(f.body_texts(), vec!["a", "b", "X", "Y"]);
+}
+
+#[test]
+fn replace_one_block_with_two() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let a_text = f.text_of(a);
+    f.run(a, &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]));
+    assert_eq!(f.body_texts(), vec!["X", "Y", "b"]);
+    assert!(f.store.get(a).is_none(), "replaced block removed");
+    assert!(f.store.get(a_text).is_none(), "replaced block's text removed");
+}
+
+#[test]
+fn delete_removes_subtree() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let a_text = f.text_of(a);
+    f.run(a, &NedMutation::Delete);
+    assert_eq!(f.body_texts(), vec!["b"]);
+    assert!(f.store.get(a).is_none());
+    assert!(f.store.get(a_text).is_none());
+}
+
+#[test]
+fn set_text_changes_only_the_target() {
+    let mut f = fixture();
+    let blocks = f.body_blocks();
+    let (a, b) = (blocks[0], blocks[1]);
+    let b_text = f.text_of(b);
+    let text = f.text_of(a);
+    f.run(text, &NedMutation::SetText("changed".to_string()));
+    assert_eq!(f.body_texts(), vec!["changed", "b"]);
+    assert_eq!(f.text_of(b), b_text, "sibling keeps its text node");
+    assert!(matches!(f.store.get(b_text), Some(Node::Text(s)) if s == "b"));
+}
+
+#[test]
+fn commit_applies_disjoint_edits_in_order() {
+    let mut f = fixture();
+    let title = f.store.children(f.slot("title"))[0];
+    let title_text = f.text_of(title);
+    let a = f.body_blocks()[0];
+    // Both are prepared against the same, unedited store.
+    let set = f.prepare(title_text, &NedMutation::SetText("New title".to_string())).unwrap();
+    let insert = f.prepare(a, &NedMutation::InsertAfter(vec![para_tree("X")])).unwrap();
+    commit(&mut f.store, vec![set, insert]);
+    assert_eq!(f.body_texts(), vec!["a", "X", "b"]);
+    assert_eq!(
+        block_from_node(&f.store, title),
+        Ok(heading(1, "New title"))
+    );
+}
+
+#[test]
+fn commit_reports_documents() {
+    let mut f = fixture();
+    let other = build_document(&mut f.store);
+    let first = f.prepare(f.body_blocks()[0], &NedMutation::Delete).unwrap();
+    let body_of_other = find_child_by_name(&f.store, other, "body").unwrap();
+    let second = {
+        let target = f.resolve(&[body_of_other], TargetKind::Container).unwrap();
+        prepare(&f.store, &target, &NedMutation::InsertChild(vec![para_tree("X")])).unwrap()
+    };
+    let third = f.prepare(f.body_blocks()[1], &NedMutation::InsertAfter(vec![para_tree("Y")])).unwrap();
+    let committed = commit(&mut f.store, vec![second, first, third]);
+    assert_eq!(committed, Committed { documents: vec![f.doc, other] });
+    assert_eq!(commit(&mut f.store, vec![]), Committed { documents: vec![] });
+}
+
+#[test]
+#[should_panic(expected = "anchor is a child of its container")]
+fn commit_with_vanished_anchor_is_a_broken_invariant() {
+    // A prepared edit committed to a store that changed under it is a bug, not
+    // input: it panics rather than skipping silently.
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let edit = f.prepare(a, &NedMutation::InsertAfter(vec![para_tree("X")])).unwrap();
+    let body = f.body();
+    f.store.remove_child_edge(body, a);
+    commit(&mut f.store, vec![edit]);
+}
+
+// ── errors ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn edit_error_maps_to_stale_cause() {
+    let invalid = |e: EditError| StaleCause::InvalidValue { detail: e.to_string() };
+    let rows: Vec<(EditError, StaleCause)> = vec![
+        (
+            EditError::TargetMismatch { expected: TargetKind::Text, found: TargetKind::Block },
+            StaleCause::InvalidValue {
+                detail: "the target kind does not match the mutation".to_string(),
+            },
+        ),
+        (EditError::ExistingNode, invalid(EditError::ExistingNode)),
+        (
+            EditError::EmptyPayload,
+            StaleCause::InvalidValue { detail: "empty payload".to_string() },
+        ),
+        (
+            EditError::Payload(BlockDecodeError::NotAnElement),
+            invalid(EditError::Payload(BlockDecodeError::NotAnElement)),
+        ),
+        (
+            EditError::OwningBlock(BlockDecodeError::NotAnElement),
+            invalid(EditError::OwningBlock(BlockDecodeError::NotAnElement)),
+        ),
+        (
+            EditError::Postcondition(RoundTripError::BlockCount(2)),
+            invalid(EditError::Postcondition(RoundTripError::BlockCount(2))),
+        ),
+        (
+            EditError::EmptySearch,
+            StaleCause::InvalidValue { detail: "empty search text".to_string() },
+        ),
+        (EditError::SearchNotFound, StaleCause::SearchNotFound),
+        (
+            EditError::SearchNotUnique { occurrences: 3 },
+            StaleCause::SearchNotUnique { occurrences: 3 },
+        ),
+        (EditError::NoChange, StaleCause::NoChange),
+    ];
+    for (error, cause) in rows {
+        assert_eq!(StaleCause::from(error.clone()), cause, "{error:?}");
+    }
+}
+
+#[test]
+fn address_errors_convert_to_stale_causes() {
+    assert_eq!(
+        StaleCause::from(AddressError::Ambiguous { matches: 3 }),
+        StaleCause::Ambiguous { matches: 3 }
+    );
+    assert_eq!(
+        AddressError::Ambiguous { matches: 3 }.to_string(),
+        StaleCause::Ambiguous { matches: 3 }.to_string()
+    );
+}

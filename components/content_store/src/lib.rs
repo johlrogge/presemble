@@ -8,6 +8,9 @@ mod access;
 mod block;
 #[cfg(test)]
 mod block_tests;
+pub mod edit;
+#[cfg(test)]
+mod edit_tests;
 mod inline_store;
 #[cfg(test)]
 mod inline_store_tests;

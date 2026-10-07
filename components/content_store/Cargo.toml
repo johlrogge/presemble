@@ -8,6 +8,7 @@ interface = "content_store"
 
 [dependencies]
 content = { workspace = true }
+editorial_types = { workspace = true }
 node_store = { workspace = true }
 ned = { workspace = true }
 schema = { workspace = true }
