@@ -107,6 +107,7 @@ DENO_TOOL_FILES=(
     "tools/ws-smoke.ts"
     "tools/text-vectors.ts"
     "tools/protocol-fixtures.ts"
+    "tools/block-edit.ts"
 )
 
 for ts_file in "${DENO_TOOL_FILES[@]}"; do
@@ -162,6 +163,27 @@ fi
 
 # All editorial requests go through here so the session cookie is sent.
 acurl() { curl -s -b "$COOKIE_JAR" "$@"; }
+
+# Apply one block edit as the browser does (tools/block-edit.ts): read the
+# editorial page, take the address and markdown of the slot's element (the
+# placeholder of an empty slot has empty markdown), build the request with
+# inject.js's own builder, POST it to /_presemble/block-edit. Passes when the
+# server says it applied the edit.
+block_edit() {
+    local desc="$1" page="$2" file="$3" slot="$4" proposed="$5" out
+    local cookie
+    cookie=$(awk '$6=="presemble_session"{print $7}' "$COOKIE_JAR")
+    out=$(PRESEMBLE_SMOKE_BASE="http://127.0.0.1:$PORT" PRESEMBLE_SMOKE_COOKIE="$cookie" \
+        deno run --no-prompt --allow-net=127.0.0.1:$PORT \
+        --allow-env=PRESEMBLE_SMOKE_BASE,PRESEMBLE_SMOKE_COOKIE \
+        --allow-read=resources/serve/inject.js \
+        tools/block-edit.ts "$page" "$file" "$slot" "$proposed" 2>&1 || true)
+    if grep -qF '"applied"' <<< "$out"; then
+        pass "$desc"
+    else
+        fail "$desc (got: $out)"
+    fi
+}
 
 # Assert a curl response contains expected text
 assert_curl() {
@@ -403,10 +425,11 @@ log "Logged in (dev session)"
 # Plain curl, no cookie.
 
 log "Testing auth boundary..."
-assert_status_anon "editorial POST without session is 401" POST "/_presemble/edit" "401" \
-    '{"file":"content/index.md","slot":"tagline","value":"x"}'
-ANON_BODY=$(curl -s -X POST "http://127.0.0.1:$PORT/_presemble/edit" -H 'Content-Type: application/json' \
-    -d '{"file":"content/index.md","slot":"tagline","value":"x"}' 2>&1 || true)
+BLOCK_EDIT_PROBE='{"file":"content/index.md","selection":"(ned/slot (ned/doc-by-path \"content/index.md\") \"tagline\")","base":{"markdown":""},"proposed":{"markdown":"x"},"intent":"apply"}'
+assert_status_anon "editorial POST without session is 401" POST "/_presemble/block-edit" "401" \
+    "$BLOCK_EDIT_PROBE"
+ANON_BODY=$(curl -s -X POST "http://127.0.0.1:$PORT/_presemble/block-edit" -H 'Content-Type: application/json' \
+    -d "$BLOCK_EDIT_PROBE" 2>&1 || true)
 assert_contains "anonymous 401 explains not logged in" "$ANON_BODY" "Not logged in"
 assert_not_contains "anonymous 401 (dev session on) does not suggest --dev-session" "$ANON_BODY" "--dev-session"
 assert_status_anon "schema URL without session is 401" GET "/_schema/index" "401"
@@ -484,7 +507,7 @@ assert_contains "logged-in page gets editorial socket" "$EDITOR_PAGE" "editorial
 # ── Test: Edit index tagline ───────────────────────────────────────────────
 
 log "Editing index tagline..."
-assert_curl "edit index tagline" "/_presemble/edit" POST '{"file":"content/index.md","slot":"tagline","value":"Smoke Test Blog"}' '"ok":true'
+block_edit "edit index tagline" "/" content/index.md tagline "Smoke Test Blog"
 
 # ── Test: Dirty buffers ───────────────────────────────────────────────────
 
@@ -506,8 +529,10 @@ assert_curl "create post" "/_presemble/create-content" POST '{"stem":"post","slu
 # ── Test: Edit content ────────────────────────────────────────────────────
 
 log "Editing content..."
-assert_curl "edit author name" "/_presemble/edit" POST '{"file":"content/author/alice.md","slot":"name","value":"Alice Smith"}' '"ok":true'
-assert_curl "edit post title" "/_presemble/edit" POST '{"file":"content/post/first-post.md","slot":"title","value":"My First Post"}' '"ok":true'
+# A new file is empty: each slot is a placeholder in the editorial page, and a
+# block edit with an empty base fills it (ADR-059 section 10).
+block_edit "fill the empty author name slot" "/author/alice" content/author/alice.md name "Alice Smith"
+block_edit "fill the empty post title slot" "/post/first-post" content/post/first-post.md title "My First Post"
 
 # ── Test: nth-child scopes edit to one paragraph, leaves others intact ────
 
@@ -960,13 +985,13 @@ else
 
         assert_status_anon "closed: published page still 200" GET "/post/hello-world" "200"
 
-        EDIT_JSON='{"file":"content/index.md","slot":"tagline","value":"x"}'
-        R=$(http_with_status -X POST "http://127.0.0.1:$PORT/_presemble/edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")
+        EDIT_JSON="$BLOCK_EDIT_PROBE"
+        R=$(http_with_status -X POST "http://127.0.0.1:$PORT/_presemble/block-edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")
         S="${R##*$'\n'}"; B="${R%$'\n'*}"
         if [ "$S" = "401" ]; then pass "closed: anonymous edit is 401"; else fail "closed: anonymous edit is 401 (got $S: $B)"; fi
         assert_contains "closed: anonymous edit says editing is disabled" "$B" "Editing is disabled"
 
-        R=$(http_with_status -b "$COOKIE_JAR" -X POST "http://127.0.0.1:$PORT/_presemble/edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")
+        R=$(http_with_status -b "$COOKIE_JAR" -X POST "http://127.0.0.1:$PORT/_presemble/block-edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")
         S="${R##*$'\n'}"; B="${R%$'\n'*}"
         if [ "$S" = "401" ]; then pass "closed: old dev cookie edit is 401"; else fail "closed: old dev cookie edit is 401 (got $S: $B)"; fi
         assert_contains "closed: old dev cookie edit says editing is disabled" "$B" "Editing is disabled"

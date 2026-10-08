@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-059 §10 (stage 5b.3).
 
-Partly superseded (stage 2e-2): the TextOneChild fast path is a BlockEdit Apply (ADR-059 §10), not a composed `ned/set-text` program. The escape hatch remains until stage 5b closes the link-picker gap.
+Partly superseded earlier (stage 2e-2): the TextOneChild fast path became a BlockEdit Apply, not a composed `ned/set-text` program. The rest went with stage 5b.3: every grammar slot is now a container in the store, an empty slot renders an addressable placeholder, and a BlockEdit with an empty base on a slot container fills it (`InsertChild`, ADR-059 §10). The link picker sends a BlockEdit. `Command::EditSlot`, `apply_slot_edit`, `SlotShape`, `node_store_bridge::modify_slot_in_store` and the `/_presemble/edit` route are removed, so there is no escape hatch left to dispatch to. The text below is the record of the decision as it was.
 
 ## Decision
 

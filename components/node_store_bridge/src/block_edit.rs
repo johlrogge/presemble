@@ -367,6 +367,71 @@ pub fn lower(
     }))
 }
 
+/// Lower a block edit whose selection addresses an empty slot container
+/// (`container_selection`): the blocks proposed are inserted into the slot
+/// (ADR-059 §10, amended in stage 5b.3).
+///
+/// The base must be empty (a client that saw blocks there is out of date:
+/// `Drifted`). `like` is the kind of block the slot holds, from the grammar:
+/// a heading of the slot's level, or a paragraph for any other kind. The
+/// proposed content goes through the Content projection, as for any slot edit.
+/// An empty proposal changes nothing. Apply and Suggest share this.
+pub fn lower_into_empty_slot(
+    container_selection: &str,
+    like: &ContentElement,
+    base: &BlockText,
+    proposed: &BlockText,
+) -> Result<Lowering, BlockEditError> {
+    let base_is_empty = match base {
+        BlockText::Markdown(md) => md.trim().is_empty(),
+        BlockText::Edn(edn) => edn.trim().is_empty(),
+    };
+    if !base_is_empty {
+        return Err(refuse(
+            BlockEditCause::Drifted,
+            "the slot has no blocks now; the edit was made against other content",
+        ));
+    }
+    let elements = match proposed {
+        BlockText::Markdown(md) => {
+            if md.trim().is_empty() {
+                return Ok(Lowering::NoChange);
+            }
+            parse_markdown_projection(md, Projection::Content, like)
+                .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?
+        }
+        BlockText::Edn(edn) => {
+            if edn.trim().is_empty() {
+                return Ok(Lowering::NoChange);
+            }
+            decode_edn(edn)?
+        }
+    };
+    if elements.is_empty() {
+        return Ok(Lowering::NoChange);
+    }
+    let trees = elements
+        .iter()
+        .map(|el| block_to_tree(el).map_err(payload_refusal))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projected = elements
+        .iter()
+        .map(|el| {
+            project_markdown(el, Projection::Content).ok_or_else(|| {
+                refuse(BlockEditCause::Invalid, "this kind of block has no markdown")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Lowering::Lowered(Lowered {
+        selection: container_selection.to_string(),
+        mutation: NedMutation::InsertChild(trees),
+        preview: SuggestionPreview {
+            base: PreviewText::new(String::new()),
+            proposed: PreviewText::new(projected.join("\n\n")),
+        },
+    }))
+}
+
 /// The search and replacement that turn the content `current` of a block in
 /// context `ctx` into `proposed`, when a text search over its edit text does
 /// exactly that: the minimal unique diff of the two edit texts, checked by
@@ -1113,6 +1178,65 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, 2, "expected the two EDN fixtures");
+    }
+
+    /// The markdown the link picker builds (inject.js `linkMarkdown`, pinned by
+    /// the `link-picker*.json` fixtures) reads back as a lone link with the
+    /// picked text and destination, and an empty slot is filled by it.
+    #[test]
+    fn link_picker_fixtures_read_as_lone_links_and_fill_the_slot() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/serve/protocol");
+        let mut seen = 0;
+        for name in ["link-picker.json", "link-picker-empty-slot.json"] {
+            let raw: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap();
+            let request: editorial_types::BlockEditRequest =
+                serde_json::from_value(raw["request"].clone()).unwrap();
+            let (text, href) = (
+                raw["linkPicker"]["text"].as_str().unwrap(),
+                raw["linkPicker"]["href"].as_str().unwrap(),
+            );
+            let BlockText::Markdown(proposed) = &request.proposed else { panic!("{name}") };
+            let like = paragraph("");
+            let elements = parse_markdown_projection(proposed, Projection::Content, &like).unwrap();
+            let [only] = elements.as_slice() else { panic!("{name}: {elements:?}") };
+            let link = only.sole_link().unwrap_or_else(|| panic!("{name}: not a lone link"));
+            assert_eq!((link.destination.as_str(), content::AsPlainText::plain_text(&link.text).as_str()), (href, text), "{name}");
+            if name == "link-picker-empty-slot.json" {
+                let l = lower_into_empty_slot(&request.selection, &like, &request.base, &request.proposed);
+                let Ok(Lowering::Lowered(l)) = l else { panic!("{name}: {l:?}") };
+                assert!(matches!(l.mutation, NedMutation::InsertChild(ref trees) if trees.len() == 1));
+                assert_eq!(l.selection, request.selection);
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 2);
+    }
+
+    /// An empty slot is filled by `InsertChild` of the proposed blocks, read
+    /// through the Content projection as the slot's kind (ADR-059 §10).
+    #[test]
+    fn lower_into_empty_slot_inserts_the_proposed_blocks() {
+        let sel = r#"(ned/slot (ned/doc-by-path "content/p.md") "title")"#;
+        let title_like = title("");
+        let Ok(Lowering::Lowered(l)) = lower_into_empty_slot(sel, &title_like, &md(""), &md("Hello *World*"))
+        else {
+            panic!("expected a lowering")
+        };
+        assert_eq!(l.selection, sel);
+        let NedMutation::InsertChild(trees) = &l.mutation else { panic!("{:?}", l.mutation) };
+        assert_eq!(trees.len(), 1);
+        assert_eq!(
+            tree_to_block(&trees[0]),
+            Ok(ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*"))
+        );
+        assert_eq!(l.preview.base, pv(""));
+        assert_eq!(l.preview.proposed, pv("Hello *World*"));
+        // Nothing proposed, nothing to do; a base that is not empty is drift.
+        assert_eq!(lower_into_empty_slot(sel, &title_like, &md(""), &md("  ")), Ok(Lowering::NoChange));
+        let drifted = lower_into_empty_slot(sel, &title_like, &md("Old"), &md("New")).unwrap_err();
+        assert_eq!(drifted.cause, BlockEditCause::Drifted);
     }
 
     /// The EDN fixture shows a heading as inline nodes; a change of its text

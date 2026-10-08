@@ -9,6 +9,11 @@ document model, the store and the renderer; heading edits are NED mutations
 over nodes; `MarkdownText`, `capitalize_first` and the markdown-source adapter
 are gone. See the stage 4 amendments below.
 
+Stage 5b (one paragraph shape, §12) is done: there are no `link` or `image`
+block kinds, a lone link or image is a paragraph whose shape decides its slot,
+and an empty slot is filled by a block edit (§10 amendment). See the stage 5b
+amendments below.
+
 ## Context
 
 - The NodeStore models a document down to blocks
@@ -331,6 +336,15 @@ All addressing stays exact (ADR-056).
   - **Same block kind, anything else:** SetInlines.
   - **A structural change** (block kind, heading level, several blocks):
     Replace.
+  - **Filling an empty slot** (stage 5b.3): the selection is a slot
+    container, not a block, and its `base` is empty: `InsertChild` of the
+    proposed blocks. Every grammar slot is a container in the store, so an
+    empty slot is addressed like any other (`(ned/slot (ned/doc-by-path F)
+    "name")`). In editorial output its placeholder carries that address as
+    `data-presemble-address` and empty `data-presemble-md`. The proposal is
+    read through the `Content` projection as the kind the schema gives the
+    slot (a heading slot's level comes from the schema). A slot that has
+    blocks is refused as `Drifted`: the client's empty base is out of date.
 - Apply and Suggest share one lowering and produce the same mutation; they
   differ only in when it is applied. Apply applies it now; Suggest stores it
   until someone approves it. A structural change (block kind, heading level,
@@ -410,6 +424,9 @@ All addressing stays exact (ADR-056).
   - string contexts use `display_text`.
 - Suggestion payloads use `paragraph`. The `link` and `image` payload kinds
   are removed.
+- Done in stage 5b (5b.0 to 5b.3). The image record's field is `src`: the
+  rename landed in 5b.0, in the same commit as the record, and every reader
+  uses `src`; no template or reader maps `path` to it.
 
 ### 13. Blockquotes and lists are containers
 
@@ -463,6 +480,10 @@ All addressing stays exact (ADR-056).
      writes the last step's name. An absent `MODEL` means no step has run. A
      name the conductor does not know was written by a newer one: nothing
      runs. A discarded suggestion is deleted, not quarantined.
+  3. `link-image-paragraphs` (stage 5b): discards every pending suggestion whose
+     payload holds a `link` or `image` element (the kinds are gone, so it could
+     never apply). Suggestions with other payloads, and accepted, rejected and
+     stale records, stay.
 
 ## Implementation plan
 
@@ -676,8 +697,10 @@ Every stage leaves the tree green and shippable.
 
 ### Limits resolved
 
-- L6, L11, L13 and L17 (blockquotes), L15, L16 (write side), and L18 (now
-  structural);
+- L6, L11, L13 and L17 (blockquotes), L15 (also for link text, stage 5b),
+  L16 (write side), and L18 (now structural);
+- the kind change when a link is edited (stage 5b): adding text to a lone link
+  is a content edit, not a `Replace`;
 - L23, L24 (used definitions);
 - ADR-058 §8 (body references), and the ADR-058 limit on image-bearing
   unassigned paragraphs;
@@ -801,6 +824,25 @@ Every stage leaves the tree green and shippable.
   reads its plain text. `ContentElement::paragraph_source()` is removed;
   `inline_children` remains for blockquotes and lists (stages 8 and 9).
 - **§15, migration:** see the step list there.
+
+### Stage 5b amendments (one paragraph shape)
+
+- **§12, done:** `ContentElement::Link` and `Image` and the store kinds `link`
+  and `image` are gone. `BlockShape` (`content::shape`) classifies a paragraph
+  from its inline nodes, and `content_store::paragraph_shape` does the same off
+  the stored children without decoding. The partition of slots is unchanged, so
+  slot assignment and serialization are too.
+- **Payload kinds:** the payload kinds are `heading`, `paragraph`,
+  `blockquote`, `list`, `code-block` and `table`. A `link` or `image` root is
+  refused (`NotPayloadKind`); a link or image is
+  `[:paragraph [:inline-link {:href ...} ...]]`.
+- **§10, filling an empty slot:** see the bullet there. This replaces
+  `Command::EditSlot`, the `/_presemble/edit` route and the slot-edit escape
+  hatch (ADR-041 is superseded, ADR-047, ADR-057 gap 7 is closed). The link
+  picker sends a block edit with `[text](href)` as the proposal.
+- **Stage 5 amendment, §10:** "a sole link or image is still a `Link` or
+  `Image` block until stage 5b" no longer holds.
+- **§15, migration:** the `link-image-paragraphs` step.
 
 ## Related
 

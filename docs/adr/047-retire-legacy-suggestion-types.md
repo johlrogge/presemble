@@ -25,8 +25,13 @@ they are not suggestion paths, and the link picker still routes through
 mutations and is tracked separately.
 
 Update (stage 2e-2): `EditBodyElement` was retired in stage 2e-2.
-`EditSlot` survives for the escape hatch and the link picker until
+`EditSlot` survived for the escape hatch and the link picker until
 stage 5b.
+
+Update (stage 5b.3): `EditSlot` is retired. Empty slots are filled
+through a BlockEdit on the slot container, the link picker sends a
+BlockEdit, and `/_presemble/edit` is removed (ADR-041 is superseded;
+ADR-059 §10).
 
 ## Why
 

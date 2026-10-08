@@ -48,6 +48,14 @@ type Outcome =
   | { readonly kind: "refused"; readonly cause: string; readonly message: string };
 
 interface Builders {
+  /** The block edit the link picker sends for the option `text`/`href`. */
+  buildLinkPickerRequest(
+    file: string,
+    selection: string,
+    baseMarkdown: string,
+    text: string,
+    href: string,
+  ): BlockEditRequest;
   buildBlockEditRequest(
     file: string,
     selection: string,
@@ -62,6 +70,8 @@ interface Builders {
 interface Fixture {
   readonly request: BlockEditRequest;
   readonly response: unknown;
+  /** The link picker option the request was built from, when it was. */
+  readonly linkPicker?: { readonly text: string; readonly href: string };
   /** `false` when the browser cannot build this request (for example EDN text). */
   readonly browser?: boolean;
 }
@@ -99,7 +109,7 @@ function loadBuilders(): Builders {
   }
   const region = source.slice(start, end);
   const factory = new Function(
-    `${region}\nreturn { buildBlockEditRequest: buildBlockEditRequest, interpretBlockEditResponse: interpretBlockEditResponse };`,
+    `${region}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse };`,
   );
   return factory() as Builders;
 }
@@ -134,14 +144,24 @@ function main(): number {
       continue;
     }
     const req = fixture.request;
-    const built = builders.buildBlockEditRequest(
-      req.file,
-      req.selection,
-      markdownOf(req.base),
-      markdownOf(req.proposed),
-      req.intent,
-      req.reason,
-    );
+    // A link picker fixture is built from the picked option; every other
+    // fixture from the whole request.
+    const built = fixture.linkPicker !== undefined
+      ? builders.buildLinkPickerRequest(
+        req.file,
+        req.selection,
+        markdownOf(req.base),
+        fixture.linkPicker.text,
+        fixture.linkPicker.href,
+      )
+      : builders.buildBlockEditRequest(
+        req.file,
+        req.selection,
+        markdownOf(req.base),
+        markdownOf(req.proposed),
+        req.intent,
+        req.reason,
+      );
     let ok = true;
     if (show(built) !== show(req)) {
       ok = false;

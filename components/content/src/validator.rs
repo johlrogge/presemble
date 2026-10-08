@@ -1009,6 +1009,36 @@ mod tests {
         assert!(errors(&doc, &grammar).is_empty(), "{:?}", errors(&doc, &grammar));
     }
 
+    /// GUARD (stage 5b.3, not red-first): every grammar slot is a container
+    /// now, so a required slot with nothing in it is reported as an empty slot
+    /// and not as a missing one. The message still names the kind: this pins
+    /// that wording for a link, an image and a paragraph slot.
+    #[test]
+    fn missing_slot_message_names_the_kind() {
+        let grammar = parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\n\
+             Summary. {#summary}\noccurs\n: exactly once\n\n\
+             [Author](/author/<name>) {#author}\noccurs\n: exactly once\n\n\
+             ![Cover](images/*.jpg) {#cover}\noccurs\n: exactly once\n\n----\n\nBody.\n",
+        )
+        .expect("schema parses");
+        let doc = parse_and_assign("# T\n\n----\n\nBody.\n", &grammar).expect("parses");
+        assert!(doc.preamble.iter().all(|s| s.name.as_str() == "title" || s.elements.is_empty()));
+        assert_eq!(doc.preamble.len(), 4, "every slot is a container");
+        let messages: Vec<String> = validate(&doc, &grammar)
+            .diagnostics
+            .into_iter()
+            .map(|d| d.message)
+            .collect();
+        for expected in [
+            "slot 'author': missing required link",
+            "slot 'cover': missing required image",
+            "slot 'summary': expected at least 1 paragraph(s), found 0",
+        ] {
+            assert!(messages.iter().any(|m| m == expected), "{expected:?} not in {messages:?}");
+        }
+    }
+
     // ── Test: wrong heading level in body produces an error ──────────────
 
     #[test]

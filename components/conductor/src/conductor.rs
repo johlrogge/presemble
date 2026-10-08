@@ -271,20 +271,6 @@ fn find_document_title(store: &node_store::NodeStore, doc_root: node_store::Node
 /// Result of rendering a single page: URL and outcome (success or error details).
 type PageRenderResult = (String, Result<(), (String, Vec<String>)>);
 
-/// Describes the current shape of a preamble slot for routing slot edits.
-enum SlotShape {
-    /// Slot node present with a single heading or paragraph child — NED fast path.
-    SingleText,
-    /// Slot node present but has no children.
-    Empty,
-    /// Slot node present but has more than one child element.
-    Multi,
-    /// Slot node present but the single child is not heading/paragraph.
-    NonText,
-    /// Slot node not present in the preamble at all.
-    Missing,
-}
-
 /// One change to what the suggestion records mean (ADR-059): from some point
 /// on, a kind of block means something else (holds inline nodes, or is no
 /// longer a block kind), and a pending suggestion made before that point which
@@ -2118,7 +2104,7 @@ impl Conductor {
     }
 
     /// Rebuild pages for a batch of content file paths (relative to site root)
-    /// whose nodes were mutated in place (NED, `EditSlot`,
+    /// whose nodes were mutated in place (NED, block edit,
     /// suggestion accept).
     ///
     /// Each path's document is a change for `propagate_document_changes`
@@ -2643,159 +2629,6 @@ impl Conductor {
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
     }
 
-    /// Classify the shape of a slot node that is already known to exist.
-    ///
-    /// Returns `Empty`, `SingleText`, `NonText`, or `Multi` depending on the
-    /// children of `slot_id`.  The `Missing` variant is **not** returned here —
-    /// callers that cannot locate the slot node should return `SlotShape::Missing`
-    /// themselves.
-    fn slot_shape_for_node(&self, slot_id: node_store::NodeId) -> SlotShape {
-        let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let children = store.children(slot_id);
-        match children.len() {
-            0 => SlotShape::Empty,
-            1 => {
-                let child = children[0];
-                if let Some(node_store::Node::Element(name)) = store.get(child) {
-                    let tag = store.resolve_name(*name).to_string();
-                    // A paragraph that holds one link or one image is a link or
-                    // image slot's content, not text (ADR-059 §12).
-                    let is_link_or_image = tag == "paragraph"
-                        && node_store_bridge::content_bridge::block_from_node(&store, child)
-                            .is_ok_and(|el| el.sole_link().is_some() || el.sole_image().is_some());
-                    if (tag == "heading" || tag == "paragraph") && !is_link_or_image {
-                        SlotShape::SingleText
-                    } else {
-                        SlotShape::NonText
-                    }
-                } else {
-                    SlotShape::NonText
-                }
-            }
-            _ => SlotShape::Multi,
-        }
-    }
-
-    /// Slot edits. Text-only 1-child cases are lowered to NED; all other shapes
-    /// (empty, multi-element, link/image/list, missing) are handled by the
-    /// grammar-aware slot_editor escape hatch in `node_store_bridge`.
-    ///
-    /// The edit is applied directly to the NodeStore — `doc_sources` is no longer
-    /// updated. Disk writes happen on explicit save.
-    fn apply_slot_edit(&self, file: &str, slot: &str, value: &str) -> Result<Vec<String>, String> {
-        // ── Locate document in store ─────────────────────────────────────────
-        let path = std::path::Path::new(file);
-        let doc_root = self.doc_root_for_path(path)
-            .ok_or_else(|| format!("no document in store for {file}"))?;
-
-        // ── Inspect current slot shape to decide NED vs escape-hatch path ────
-        let (shape, slot_node) = {
-            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-
-            let preamble = node_store_bridge::content_bridge::find_child_by_name(
-                &store, doc_root, "preamble",
-            );
-
-            // Determine shape: locate the named slot node, then classify via
-            // slot_shape_for_node.  Missing preamble or missing slot both yield
-            // SlotShape::Missing.
-            if let Some(preamble_id) = preamble {
-                let mut slot_id_opt = None;
-                for child_id in store.children(preamble_id) {
-                    if let Some(node_store::Node::Element(name)) = store.get(child_id)
-                        && store.resolve_name(*name) == "slot"
-                        && node_store_bridge::content_bridge::find_attr_text(&store, child_id, "name")
-                            .as_deref() == Some(slot)
-                    {
-                        slot_id_opt = Some(child_id);
-                        break;
-                    }
-                }
-                // Drop the read lock before calling slot_shape_for_node, which
-                // also acquires it.
-                drop(store);
-                match slot_id_opt {
-                    None => (SlotShape::Missing, None),
-                    Some(slot_id) => (self.slot_shape_for_node(slot_id), Some(slot_id)),
-                }
-            } else {
-                (SlotShape::Missing, None)
-            }
-        };
-
-        match shape {
-            SlotShape::SingleText => {
-                // ── Fast path (text-only 1-child): a BlockEdit Apply ─────────
-                // The same edit the browser sends for a block: addressed like
-                // the renderer addresses it, based on the block as it reads now.
-                let slot_node = slot_node.ok_or_else(|| format!("slot not found: {slot}"))?;
-                let element = {
-                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                    let block = store
-                        .children(slot_node)
-                        .first()
-                        .copied()
-                        .ok_or_else(|| format!("slot {slot} has no block"))?;
-                    node_store_bridge::content_bridge::block_from_node(&store, block)
-                        .map_err(|e| format!("cannot read slot {slot}: {e:?}"))?
-                };
-                let base = content::project_markdown(&element, content::Projection::Content)
-                    .ok_or_else(|| format!("slot {slot} is not text"))?;
-                let selection = content::block_addresses(
-                    file,
-                    content::AddressContainer::Slot(slot),
-                    std::slice::from_ref(&element),
-                )
-                .into_iter()
-                .next()
-                .flatten()
-                .ok_or_else(|| format!("slot {slot} has no address"))?;
-                let request = editorial_types::BlockEditRequest {
-                    file: editorial_types::ContentPath::new(file),
-                    selection,
-                    base: editorial_types::BlockText::Markdown(base),
-                    proposed: editorial_types::BlockText::Markdown(value.to_string()),
-                    intent: editorial_types::BlockEditIntent::Apply,
-                    reason: None,
-                };
-                let result = self.block_edit(&request);
-                match result.response {
-                    Response::BlockEdited(editorial_types::BlockEditResponse::Done(
-                        editorial_types::BlockEditOutcome::Applied { pages },
-                    )) => Ok(pages),
-                    Response::BlockEdited(editorial_types::BlockEditResponse::Done(_)) => Ok(vec![]),
-                    Response::BlockEdited(editorial_types::BlockEditResponse::Refused(e)) => {
-                        Err(e.message)
-                    }
-                    other => Err(format!("unexpected conductor response: {other:?}")),
-                }
-            }
-            // Escape hatch: empty, multi-element, Link, Image, List, and missing-slot
-            // cases route through modify_slot_in_store (grammar-aware Rust path).
-            // Single-text slots go through BlockEdit Apply (above). Phase C: widen
-            // NED coverage and reduce this list. See ADR-041.
-            SlotShape::Empty | SlotShape::Multi | SlotShape::NonText | SlotShape::Missing => {
-                // Load grammar so we can build the correct element type.
-                let grammar = self.load_grammar_for_file(file)?;
-
-                let content_path = std::path::PathBuf::from(file);
-                {
-                    let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
-                    node_store_bridge::modify_slot_in_store(
-                        &mut store,
-                        doc_root,
-                        &grammar,
-                        slot,
-                        value,
-                    )?;
-                }
-
-                let (rebuilt_urls, _failed_urls) = self.mark_dirty_and_rebuild(&[content_path]);
-                Ok(rebuilt_urls)
-            }
-        }
-    }
-
     /// Derive the grammar for a content file given its site-relative path.
     fn load_grammar_for_file(&self, file: &str) -> Result<schema::Grammar, String> {
         let bpath = std::path::Path::new(file);
@@ -2911,14 +2744,8 @@ impl Conductor {
             .map_err(|e| eval_error(format!("the address did not produce a node selection: {e}")))
     }
 
-    /// Mark `paths` dirty and re-render their pages.
-    ///
-    /// Returns `(rebuilt_urls, failed_urls)`.
-    fn mark_dirty_and_rebuild(&self, paths: &[PathBuf]) -> (Vec<String>, Vec<String>) {
-        self.mark_dirty_and_rebuild_with(paths, false)
-    }
-
-    /// [`Conductor::mark_dirty_and_rebuild`]; with `blocks_changed` the
+    /// Mark `paths` dirty and re-render their pages. Returns
+    /// `(rebuilt_urls, failed_urls)`. With `blocks_changed` the
     /// pages' references are recomputed first, in place, so a replaced or
     /// removed block is not referenced any more
     /// ([`Conductor::refresh_semantic_content`]), and the pages that show
@@ -3136,8 +2963,17 @@ impl Conductor {
             .eval_selection(&req.selection)
             .map_err(|c| refuse(BlockEditCause::Unaddressable, c.to_string()))?;
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let target = edit::resolve(&store, &sel, TargetKind::Block)
-            .map_err(|e| refuse(BlockEditCause::Unaddressable, e.to_string()))?;
+        let target = match edit::resolve(&store, &sel, TargetKind::Block) {
+            Ok(target) => target,
+            // The selection names a slot, not a block: an empty slot is filled
+            // by a block edit with an empty base (ADR-059 §10).
+            Err(edit::AddressError::WrongKind { ref found, .. }) if found == edit::SLOT_KIND => {
+                return self
+                    .lower_fill_of_slot(&store, &sel, req)
+                    .map(|lowering| (lowering, None));
+            }
+            Err(e) => return Err(refuse(BlockEditCause::Unaddressable, e.to_string())),
+        };
         let edit::Target::Block { block, container, document } = target else {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
@@ -3168,6 +3004,63 @@ impl Conductor {
             &req.proposed,
         )
         .map(|lowering| (lowering, body_idx))
+    }
+
+    /// Lower a block edit whose selection is a slot container: the slot must be
+    /// empty, and the proposal is inserted into it
+    /// (`block_edit::lower_into_empty_slot`). The kind of block the slot holds,
+    /// which decides how the proposal reads (a heading slot's level), comes
+    /// from the schema.
+    fn lower_fill_of_slot(
+        &self,
+        store: &node_store::NodeStore,
+        sel: &ned::Selection,
+        req: &editorial_types::BlockEditRequest,
+    ) -> Result<node_store_bridge::block_edit::Lowering, editorial_types::BlockEditError> {
+        use editorial_types::{BlockEditCause, BlockEditError, TargetKind};
+        let refuse = |cause, message: String| BlockEditError { cause, message };
+        let target = edit::resolve(store, sel, TargetKind::Container)
+            .map_err(|e| refuse(BlockEditCause::Unaddressable, e.to_string()))?;
+        let edit::Target::Container { container, document } = target else {
+            return Err(refuse(
+                BlockEditCause::Unaddressable,
+                "the selection does not address a slot".to_string(),
+            ));
+        };
+        let doc_file =
+            node_store_bridge::content_bridge::find_attr_text(store, document, "file").unwrap_or_default();
+        if Path::new(&doc_file) != Path::new(req.file.as_str()) {
+            return Err(refuse(
+                BlockEditCause::Unaddressable,
+                format!("the selection resolves into {doc_file}, not {}", req.file),
+            ));
+        }
+        if !store.children(container).is_empty() {
+            return Err(refuse(
+                BlockEditCause::Drifted,
+                "the slot has blocks now; the edit was made against other content".to_string(),
+            ));
+        }
+        let slot_name = node_store_bridge::content_bridge::find_attr_text(store, container, "name")
+            .ok_or_else(|| refuse(BlockEditCause::Unaddressable, "the slot has no name".to_string()))?;
+        let grammar = self
+            .load_grammar_for_file(req.file.as_str())
+            .map_err(|e| refuse(BlockEditCause::Unaddressable, e))?;
+        let slot = grammar
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == slot_name)
+            .ok_or_else(|| {
+                refuse(BlockEditCause::Unaddressable, format!("slot '{slot_name}' is not in the schema"))
+            })?;
+        let like = match &slot.element {
+            schema::Element::Heading { level } => content::ContentElement::heading_from_markdown(
+                schema::HeadingLevel::new(level.min.value()).unwrap_or(level.min),
+                "",
+            ),
+            _ => content::ContentElement::paragraph_from_markdown(""),
+        };
+        node_store_bridge::block_edit::lower_into_empty_slot(&req.selection, &like, &req.base, &req.proposed)
     }
 
     /// Handle [`Command::BlockEdit`]: lower, then apply now or store a
@@ -3552,7 +3445,7 @@ impl Conductor {
             Command::DocumentChanged { path, text } => {
                 let path_buf = PathBuf::from(&path);
                 // Store in memory — do NOT write to disk.
-                // Disk writes happen on explicit save (DocumentSaved) or browser edit (EditSlot).
+                // Disk writes happen on explicit save (DocumentSaved, save-all).
                 self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(path_buf.clone(), text.clone());
 
                 // Rebuild the page from in-memory text and broadcast PagesRebuilt.
@@ -3730,14 +3623,6 @@ impl Conductor {
                     ]);
                 }
                 CommandResult::ok()
-            }
-            Command::EditSlot { file, slot, value } => {
-                match self.apply_slot_edit(&file, &slot, &value) {
-                    Ok(pages) => CommandResult::ok_with_events(vec![
-                        ConductorEvent::PagesRebuilt { pages, anchor: None },
-                    ]),
-                    Err(e) => CommandResult::error(e),
-                }
             }
             Command::ApplyNedProgram { program } => {
                 self.apply_ned_program(&program)
@@ -5882,193 +5767,6 @@ mod workspace_hash_tests {
         assert!(
             hash.chars().all(|c| c.is_ascii_hexdigit()),
             "hash contains non-hex chars: {hash:?}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod slot_shape_tests {
-    use super::*;
-
-    /// Build a conductor with an empty NodeStore (no site on disk).
-    ///
-    /// `slot_shape_for_node` only reads from the NodeStore so we don't need a
-    /// full site — we construct the slot nodes manually.
-    fn make_bare_conductor() -> Conductor {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path();
-
-        // Minimal scaffolding so `with_repo` doesn't error out.
-        std::fs::create_dir_all(root.join("schemas/post")).expect("schemas");
-        std::fs::create_dir_all(root.join("templates/post")).expect("templates");
-        std::fs::create_dir_all(root.join("content/post")).expect("content");
-        std::fs::write(root.join("schemas/post/item.md"), "# Title {#title}\noccurs\n: exactly once\n")
-            .expect("schema");
-        std::fs::write(root.join("templates/post/item.hiccup"), "[:div]").expect("template");
-
-        let repo = site_repository::SiteRepository::builder()
-            .from_dir(root)
-            .build();
-        Conductor::with_repo(root.to_path_buf(), repo).expect("conductor")
-    }
-
-    /// Add an Element node named `tag` to the store and return its NodeId.
-    fn add_element(store: &mut node_store::NodeStore, tag: &str) -> node_store::NodeId {
-        let name = store.intern(tag);
-        store.add_node(node_store::Node::Element(name))
-    }
-
-    /// Add a Text node to the store and return its NodeId.
-    fn add_text(store: &mut node_store::NodeStore, text: &str) -> node_store::NodeId {
-        store.add_node(node_store::Node::Text(text.into()))
-    }
-
-    /// Add a Child edge from `parent` to `child`.
-    fn append_child(store: &mut node_store::NodeStore, parent: node_store::NodeId, child: node_store::NodeId) {
-        store.add_edge(parent, node_store::Edge::Child(child));
-    }
-
-    // -------------------------------------------------------------------------
-    // Tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn empty_slot_returns_empty() {
-        let conductor = make_bare_conductor();
-        let slot_id = {
-            let mut store = conductor.node_store.write().unwrap();
-            add_element(&mut store, "slot")
-            // no children added
-        };
-        assert!(
-            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::Empty),
-            "expected Empty for a slot with no children"
-        );
-    }
-
-    #[test]
-    fn slot_with_heading_child_returns_single_text() {
-        let conductor = make_bare_conductor();
-        let slot_id = {
-            let mut store = conductor.node_store.write().unwrap();
-            let slot = add_element(&mut store, "slot");
-            let heading = add_element(&mut store, "heading");
-            let text = add_text(&mut store, "My Heading");
-            append_child(&mut store, heading, text);
-            append_child(&mut store, slot, heading);
-            slot
-        };
-        assert!(
-            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::SingleText),
-            "expected SingleText for a slot with one heading child"
-        );
-    }
-
-    #[test]
-    fn slot_with_paragraph_child_returns_single_text() {
-        let conductor = make_bare_conductor();
-        let slot_id = {
-            let mut store = conductor.node_store.write().unwrap();
-            let slot = add_element(&mut store, "slot");
-            let para = add_element(&mut store, "paragraph");
-            let text = add_text(&mut store, "Some text");
-            append_child(&mut store, para, text);
-            append_child(&mut store, slot, para);
-            slot
-        };
-        assert!(
-            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::SingleText),
-            "expected SingleText for a slot with one paragraph child"
-        );
-    }
-
-    #[test]
-    fn slot_with_multiple_children_returns_multi() {
-        let conductor = make_bare_conductor();
-        let slot_id = {
-            let mut store = conductor.node_store.write().unwrap();
-            let slot = add_element(&mut store, "slot");
-            let heading = add_element(&mut store, "heading");
-            let para = add_element(&mut store, "paragraph");
-            append_child(&mut store, slot, heading);
-            append_child(&mut store, slot, para);
-            slot
-        };
-        assert!(
-            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::Multi),
-            "expected Multi for a slot with two children"
-        );
-    }
-
-    #[test]
-    fn slot_with_link_child_returns_non_text() {
-        let conductor = make_bare_conductor();
-        let slot_id = {
-            let mut store = conductor.node_store.write().unwrap();
-            let slot = add_element(&mut store, "slot");
-            let link = add_element(&mut store, "link");
-            append_child(&mut store, slot, link);
-            slot
-        };
-        assert!(
-            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
-            "expected NonText for a slot with a link child"
-        );
-    }
-
-    #[test]
-    fn slot_with_list_child_returns_non_text() {
-        let conductor = make_bare_conductor();
-        let slot_id = {
-            let mut store = conductor.node_store.write().unwrap();
-            let slot = add_element(&mut store, "slot");
-            let list = add_element(&mut store, "list");
-            append_child(&mut store, slot, list);
-            slot
-        };
-        assert!(
-            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
-            "expected NonText for a slot with a list child"
-        );
-    }
-
-    /// A paragraph that holds one link or one image is a link or image slot's
-    /// content, not text: a slot edit takes the grammar-aware route, not the
-    /// text fast path (ADR-059 §12).
-    #[test]
-    fn slot_with_a_lone_link_or_image_paragraph_returns_non_text() {
-        for md in ["[Jo](/author/jo)", "![A cat](c.png)"] {
-            let conductor = make_bare_conductor();
-            let slot_id = {
-                let mut store = conductor.node_store.write().unwrap();
-                let slot = add_element(&mut store, "slot");
-                let block = node_store_bridge::content_bridge::block_to_store(
-                    &content::ContentElement::paragraph_from_markdown(md),
-                    &mut store,
-                );
-                append_child(&mut store, slot, block);
-                slot
-            };
-            assert!(
-                matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
-                "expected NonText for a slot holding {md:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn slot_with_image_child_returns_non_text() {
-        let conductor = make_bare_conductor();
-        let slot_id = {
-            let mut store = conductor.node_store.write().unwrap();
-            let slot = add_element(&mut store, "slot");
-            let image = add_element(&mut store, "image");
-            append_child(&mut store, slot, image);
-            slot
-        };
-        assert!(
-            matches!(conductor.slot_shape_for_node(slot_id), SlotShape::NonText),
-            "expected NonText for a slot with an image child"
         );
     }
 }
@@ -10860,17 +10558,30 @@ mod link_expression_pipeline_tests {
         assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
     }
 
-    /// 3: the same edit through NED `EditSlot`.
+    /// 3: the same edit through a block edit.
     #[test]
-    fn incremental_published_change_via_edit_slot() {
+    fn incremental_published_change_via_block_edit() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let result = conductor.handle_command(Command::EditSlot {
-            file: "content/post/p1.md".to_string(),
-            slot: "published".to_string(),
-            value: "2026-04-01".to_string(),
-        });
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        let result = conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
+            file: editorial_types::ContentPath::new("content/post/p1.md"),
+            selection: r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/p1.md") "published")) "paragraph" 0)"#
+                .to_string(),
+            base: editorial_types::BlockText::Markdown("2026-01-10".to_string()),
+            proposed: editorial_types::BlockText::Markdown("2026-04-01".to_string()),
+            intent: editorial_types::BlockEditIntent::Apply,
+            reason: None,
+        }));
+        assert!(
+            matches!(
+                result.response,
+                Response::BlockEdited(editorial_types::BlockEditResponse::Done(
+                    editorial_types::BlockEditOutcome::Applied { .. }
+                ))
+            ),
+            "{:?}",
+            result.response
+        );
         assert_eq!(pages_of(&result), set(&["/post/p1", "/page/home", "/author/a"]));
         assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p1", "/post/p3"]));
     }
@@ -11520,6 +11231,271 @@ mod model_migration_tests {
 
         assert_eq!(listed(&conductor), vec!["sug-new".to_string()]);
         assert!(file_exists(&tmp, "sug-new"));
+    }
+}
+
+/// ADR-059 section 10, amended in stage 5b.3: every grammar slot is a
+/// container in the store, an empty one renders an addressable placeholder in
+/// editorial output, and a block edit on it fills it.
+#[cfg(test)]
+mod empty_slot_tests {
+    use super::*;
+    use editorial_types::{
+        BlockEditCause, BlockEditIntent, BlockEditOutcome, BlockEditRequest, BlockEditResponse,
+        BlockText, ContentPath,
+    };
+
+    const POST_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\n\
+         Summary. {#summary}\noccurs\n: exactly once\n\n\
+         [Author](/author/<name>) {#author}\noccurs\n: exactly once\n\n\
+         ----\n\nBody.\nheadings\n: h3..h6\n";
+    const AUTHOR_SCHEMA: &str = "# Author name {#name}\noccurs\n: exactly once\n";
+    const POST_TEMPLATE: &str = r#"<html><body>
+<presemble:insert data="input.title" as="h1"></presemble:insert>
+<presemble:insert data="input.summary" as="p"></presemble:insert>
+<presemble:insert data="input.author"></presemble:insert>
+<div><presemble:insert data="input.body"></presemble:insert></div>
+</body></html>"#;
+    const AUTHOR_TEMPLATE: &str =
+        r#"<html><body><presemble:insert data="input.name" as="h1"></presemble:insert></body></html>"#;
+
+    /// A site whose posts are: `empty` (an empty file, as a new file is),
+    /// `partial` (a title and a body, no summary or author), `bare` (a separator
+    /// and nothing else) and `full`.
+    fn site() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in [
+            "schemas/post",
+            "schemas/author",
+            "templates/post",
+            "templates/author",
+            "content/post",
+            "content/author",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("schemas/post/item.md"), POST_SCHEMA).unwrap();
+        std::fs::write(root.join("schemas/author/item.md"), AUTHOR_SCHEMA).unwrap();
+        std::fs::write(root.join("templates/post/item.html"), POST_TEMPLATE).unwrap();
+        std::fs::write(root.join("templates/author/item.html"), AUTHOR_TEMPLATE).unwrap();
+        std::fs::write(root.join("content/author/jo.md"), "# Jo\n").unwrap();
+        std::fs::write(root.join("content/post/empty.md"), "").unwrap();
+        std::fs::write(root.join("content/post/partial.md"), "# Partial\n\n----\n\nBody para.\n").unwrap();
+        std::fs::write(root.join("content/post/bare.md"), "\n----\n").unwrap();
+        std::fs::write(
+            root.join("content/post/full.md"),
+            "# Full\n\nA summary.\n\n[Jo](/author/jo)\n\n----\n\nBody para.\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn start(tmp: &tempfile::TempDir) -> Conductor {
+        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
+    }
+
+    fn slot_address(file: &str, slot: &str) -> String {
+        format!(r#"(ned/slot (ned/doc-by-path "{file}") "{slot}")"#)
+    }
+
+    /// The names of the slot containers of the document at `file`, in order.
+    fn slot_names(conductor: &Conductor, file: &str) -> Vec<String> {
+        let root = conductor.doc_root_for_path(Path::new(file)).expect("document in the store");
+        let store = conductor.node_store.read().unwrap();
+        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+            .expect("preamble");
+        store
+            .children(preamble)
+            .into_iter()
+            .filter(|c| {
+                matches!(store.get(*c), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "slot")
+            })
+            .filter_map(|c| node_store_bridge::content_bridge::find_attr_text(&store, c, "name"))
+            .collect()
+    }
+
+    /// The blocks of the slot `slot` of the document at `file`, decoded.
+    fn slot_blocks(conductor: &Conductor, file: &str, slot: &str) -> Vec<content::ContentElement> {
+        let root = conductor.doc_root_for_path(Path::new(file)).expect("document in the store");
+        let store = conductor.node_store.read().unwrap();
+        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+            .expect("preamble");
+        let slot_node = store
+            .children(preamble)
+            .into_iter()
+            .find(|c| {
+                node_store_bridge::content_bridge::find_attr_text(&store, *c, "name").as_deref() == Some(slot)
+            })
+            .unwrap_or_else(|| panic!("no slot container {slot} in {file}"));
+        store
+            .children(slot_node)
+            .into_iter()
+            .map(|b| node_store_bridge::content_bridge::block_from_node(&store, b).expect("a block"))
+            .collect()
+    }
+
+    fn fill(file: &str, slot: &str, proposed: &str, intent: BlockEditIntent) -> Command {
+        Command::BlockEdit(BlockEditRequest {
+            file: ContentPath::new(file),
+            selection: slot_address(file, slot),
+            base: BlockText::Markdown(String::new()),
+            proposed: BlockText::Markdown(proposed.to_string()),
+            intent,
+            reason: None,
+        })
+    }
+
+    fn applied(result: &CommandResult) -> bool {
+        matches!(
+            &result.response,
+            Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::Applied { .. }))
+        )
+    }
+
+    /// Every grammar slot of a document is a container in the store, empty or
+    /// not, in grammar order: a new file, a file that ends at its separator,
+    /// and a file with slots left out.
+    #[test]
+    fn a_new_file_has_every_grammar_slot_as_a_container() {
+        let tmp = site();
+        let conductor = start(&tmp);
+        for file in [
+            "content/post/empty.md",
+            "content/post/bare.md",
+            "content/post/partial.md",
+            "content/post/full.md",
+        ] {
+            assert_eq!(slot_names(&conductor, file), ["title", "summary", "author"], "{file}");
+        }
+    }
+
+    /// An empty slot renders a placeholder that names the slot container as its
+    /// address and has empty markdown, in editorial output.
+    #[test]
+    fn empty_slot_placeholder_carries_its_address() {
+        let tmp = site();
+        let conductor = start(&tmp);
+        let html = conductor.render_page("/post/partial", &RenderMode::View).expect("renders");
+        let placeholders: Vec<&str> = html
+            .split('<')
+            .filter(|chunk| chunk.contains("presemble-suggestion"))
+            .collect();
+        for slot in ["summary", "author"] {
+            let tag = placeholders
+                .iter()
+                .find(|t| t.contains(&format!(r#"data-presemble-slot="{slot}""#)))
+                .unwrap_or_else(|| panic!("no placeholder for {slot}: {html}"));
+            let address = slot_address("content/post/partial.md", slot).replace('"', "&quot;");
+            assert!(tag.contains(&format!(r#"data-presemble-address="{address}""#)), "{slot}: {tag}");
+            assert!(tag.contains(r#"data-presemble-md="""#), "{slot}: {tag}");
+        }
+    }
+
+    /// A block edit whose selection is an empty slot container and whose base is
+    /// empty fills the slot: a heading slot, a paragraph slot and a link slot.
+    #[test]
+    fn block_edit_fills_an_empty_slot() {
+        let tmp = site();
+        let conductor = start(&tmp);
+        let file = "content/post/empty.md";
+
+        let result = conductor.handle_command(fill(file, "title", "My *first* post", BlockEditIntent::Apply));
+        assert!(applied(&result), "title: {:?}", result.response);
+        let title = slot_blocks(&conductor, file, "title");
+        assert!(
+            matches!(title.as_slice(), [content::ContentElement::Heading { level, .. }] if level.value() == 1),
+            "{title:?}"
+        );
+
+        let result = conductor.handle_command(fill(file, "summary", "A summary.", BlockEditIntent::Apply));
+        assert!(applied(&result), "summary: {:?}", result.response);
+        assert_eq!(
+            slot_blocks(&conductor, file, "summary"),
+            [content::ContentElement::paragraph_from_markdown("A summary.")]
+        );
+
+        let result = conductor.handle_command(fill(file, "author", "[Jo](/author/jo)", BlockEditIntent::Apply));
+        assert!(applied(&result), "author: {:?}", result.response);
+        let author = slot_blocks(&conductor, file, "author");
+        assert!(
+            matches!(author.as_slice(), [el] if el.sole_link().is_some_and(|l| l.destination == "/author/jo")),
+            "{author:?}"
+        );
+        assert!(conductor.dirty_docs().read().unwrap().contains(Path::new(file)));
+    }
+
+    /// Suggest shares the lowering: the suggestion fills the slot when accepted.
+    #[test]
+    fn block_edit_suggested_into_an_empty_slot_fills_it_on_accept() {
+        let tmp = site();
+        let conductor = start(&tmp);
+        let file = "content/post/empty.md";
+        let result = conductor.handle_command(fill(file, "summary", "Suggested.", BlockEditIntent::Suggest));
+        let Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated { id })) =
+            result.response
+        else {
+            panic!("expected a suggestion, got {:?}", result.response)
+        };
+        assert!(slot_blocks(&conductor, file, "summary").is_empty(), "suggesting changes nothing");
+        let accepted = conductor.handle_command(Command::AcceptNedSuggestion { id });
+        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+        assert_eq!(
+            slot_blocks(&conductor, file, "summary"),
+            [content::ContentElement::paragraph_from_markdown("Suggested.")]
+        );
+    }
+
+    /// A fill suggested while the slot was empty, accepted after the slot was
+    /// filled another way, goes Stale as `Drifted`: the slot is not appended to.
+    #[test]
+    fn accepting_a_fill_after_the_slot_was_filled_is_drifted() {
+        let tmp = site();
+        let conductor = start(&tmp);
+        let file = "content/post/empty.md";
+        let suggested = conductor.handle_command(fill(file, "summary", "Suggested.", BlockEditIntent::Suggest));
+        let Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated { id })) =
+            suggested.response
+        else {
+            panic!("expected a suggestion, got {:?}", suggested.response)
+        };
+        let other = conductor.handle_command(fill(file, "summary", "Filled another way.", BlockEditIntent::Apply));
+        assert!(applied(&other), "{:?}", other.response);
+
+        let accepted = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
+        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+        let status = conductor.ned_suggestions.read().unwrap().get(&id).expect("suggestion").status.clone();
+        assert!(
+            matches!(
+                status,
+                editorial_types::NedSuggestionStatus::Stale { cause: editorial_types::StaleCause::Drifted, .. }
+            ),
+            "{status:?}"
+        );
+        assert_eq!(
+            slot_blocks(&conductor, file, "summary"),
+            [content::ContentElement::paragraph_from_markdown("Filled another way.")],
+            "the slot was not appended to"
+        );
+    }
+
+    /// A slot that already has blocks is not filled: the client's empty base is
+    /// out of date.
+    #[test]
+    fn block_edit_on_a_slot_that_has_blocks_is_refused_as_drifted() {
+        let tmp = site();
+        let conductor = start(&tmp);
+        let result =
+            conductor.handle_command(fill("content/post/full.md", "summary", "Other.", BlockEditIntent::Apply));
+        let Response::BlockEdited(BlockEditResponse::Refused(e)) = result.response else {
+            panic!("expected a refusal, got {:?}", result.response)
+        };
+        assert_eq!(e.cause, BlockEditCause::Drifted, "{e:?}");
+        assert_eq!(
+            slot_blocks(&conductor, "content/post/full.md", "summary"),
+            [content::ContentElement::paragraph_from_markdown("A summary.")]
+        );
     }
 }
 

@@ -642,6 +642,9 @@ fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Res
                     .unwrap_or_else(|| "#".to_string());
                 attrs.push(("href".to_string(), Form::Str(href)));
             }
+            if editorial {
+                attrs.extend(empty_slot_editor_attrs(&presemble_file, &slot_name));
+            }
             attrs.extend(constraint_attrs.iter().cloned());
             let element = Element {
                 name: effective_tag.to_string(),
@@ -883,16 +886,16 @@ fn render_insert_native(
                         .unwrap_or_else(|| slot_name_from_path(data_path));
                     let tag = as_tag.unwrap_or("div").to_string();
                     let combined_class = format!("{class} presemble-suggestion");
-                    let element = Element {
-                        name: tag,
-                        attrs: vec![
-                            ("class".to_string(), Form::Str(combined_class)),
-                            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_val)),
-                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                            (crate::constants::ATTR_HINT.to_string(), Form::Str(hint)),
-                        ],
-                        children: vec![],
-                    };
+                    let mut attrs = vec![
+                        ("class".to_string(), Form::Str(combined_class)),
+                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_val.clone())),
+                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                        (crate::constants::ATTR_HINT.to_string(), Form::Str(hint)),
+                    ];
+                    if editorial {
+                        attrs.extend(empty_slot_editor_attrs(presemble_file, &slot_name_val));
+                    }
+                    let element = Element { name: tag, attrs, children: vec![] };
                     return Ok(Some(vec![Node::Element(element)]));
                 }
 
@@ -1454,6 +1457,18 @@ fn source_text_attrs(source_slot: &str, sub_graph: &DataGraph, file: &str) -> Ve
         return Vec::new();
     }
     editor_record_attrs(sub_graph, file)
+}
+
+/// The editor attributes of the placeholder of an empty slot (editorial output
+/// only): the address of the slot container, and empty markdown, so a block
+/// edit with an empty base fills the slot (ADR-059 §10). The body has no
+/// slot container to fill this way; nor does a document whose file is not
+/// known.
+fn empty_slot_editor_attrs(file: &str, slot_name: &str) -> Vec<(String, Form)> {
+    if file.is_empty() || slot_name == "body" {
+        return Vec::new();
+    }
+    editor_attrs(Some(content::address::slot_address(file, slot_name)), Some(String::new()))
 }
 
 /// The editor attributes of one element: `data-presemble-md` and

@@ -29,6 +29,14 @@ pub(crate) fn check_drift(
     mutation: &NedMutation,
     preview: &SuggestionPreview,
 ) -> Result<(), StaleCause> {
+    // A block edit that fills an empty slot (`InsertChild` with an empty base)
+    // was made against a slot with no blocks: if it has some now, the edit is
+    // out of date.
+    if let (NedMutation::InsertChild(_), Target::Container { container, .. }) = (mutation, target)
+        && preview.base.markdown.trim().is_empty()
+        && !store.children(*container).is_empty()    {
+        return Err(StaleCause::Drifted);
+    }
     if !matches!(
         mutation,
         NedMutation::Replace(_) | NedMutation::SetText(_) | NedMutation::SetInlines(_)

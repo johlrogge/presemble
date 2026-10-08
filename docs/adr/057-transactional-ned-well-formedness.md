@@ -59,7 +59,7 @@ This replaces the first version's scope rules and well-formedness gate. "Can thi
 
 - Suggestion accept and BlockEdit Apply run as a plan of one step (`apply_ned_mutation` in the conductor). Under one write lock the conductor does, in order: `resolve`, the file check, the "already in place" check, `check_drift`, then `execute`. The file check comes first because a block in another document is never "in place" and is never drift. `execute` re-resolves the same selection under the same lock, so it cannot disagree with the conductor. The drift check stays in the conductor until suggestions carry plans (channel gap 10).
 - **A no-op counts as applied.** Accepting a suggestion whose content already reads as proposed marks it `Accepted`, changes nothing, and rebuilds nothing (commit 8a179cc). Creating such a suggestion answers "already in place" and stores nothing (commit 8d26d1f, `Response::AlreadyInPlace`). A block edit whose proposal is already in place answers `NoChange`, for both intents.
-- **Slot and body edits go through BlockEdit Apply.** The `EditSlot` fast path for single-text slots is a BlockEdit Apply (ADR-059 §10). `Command::EditBodyElement` and `/_presemble/edit-body` are removed; the scroll anchor after a body edit is computed by BlockEdit Apply (ADR-046). `EditSlot` survives only for the escape hatch and the link picker (ADR-041, ADR-047) until stage 5b.
+- **Slot and body edits go through BlockEdit Apply.** The `EditSlot` fast path for single-text slots is a BlockEdit Apply (ADR-059 §10). `Command::EditBodyElement` and `/_presemble/edit-body` are removed; the scroll anchor after a body edit is computed by BlockEdit Apply (ADR-046). `EditSlot` is retired (stage 5b.3, ADR-041 superseded, ADR-047): an empty slot is filled by a BlockEdit on its container (ADR-059 §10), and the link picker sends a BlockEdit.
 - **Limitation.** "Already in place" is only detected for a single block. A structural (multi-block) suggestion whose result is already in place goes `Stale` with `Drifted`.
 
 ### 4. Validity is reported, never enforced
@@ -109,7 +109,7 @@ Rejecting schema-invalid edits would make intermediate states impossible to reac
 Each has the work that closes it:
 
 - **Gap 6:** M1.
-- **Gap 7:** stage 5b (the link picker and the `EditSlot` escape hatch).
+- **Gap 7:** closed in stage 5b.3 (see below).
 - **Gap 8** (LSP buffer edits bypass NED, so buffers held only by the editor, the LSP mirror `doc_sources`, are not tracked as conflicts) and **gap 9:** the auto-save ADR. The editor owns those buffers and resolves its own conflicts until then (ADR-065).
 - **Gap 10:** plans as the suggestion payload. Until then the drift check stays in the conductor.
 - **The nREPL publish path:** closed by S2 (`refactor(editor_server)!: the nREPL runs its plans on the conductor's command loop`): the nREPL's plans run on the daemon's single writer thread through `Conductor::execute_plan`, and the events of every job are published.
@@ -120,6 +120,10 @@ Each has the work that closes it:
 - **Gap 3, `Command::EditBodyElement`:** a positional body edit (`body_idx`) kept for older clients. It composed its own `ned/replace` program with `ned/parse-body`. It was removed in commit d6dce54; body edits go through BlockEdit Apply.
 - **A no-op suggestion** is applied (accept) or answered "already in place" (create), instead of going stale (§3).
 - **The `EditSlot` fast path** for single-text slots is a BlockEdit Apply; only the escape hatch and the link picker remain on `EditSlot` (§3).
+
+## Closed in stage 5b.3
+
+- **Gap 7, `Command::EditSlot` and the escape hatch:** removed together with `apply_slot_edit`, `SlotShape`, `modify_slot_in_store` and the `/_presemble/edit` route. Every grammar slot is a container in the store, so there is no missing slot to insert; an empty slot is addressed by its container (`(ned/slot (ned/doc-by-path F) "name")`) and filled by a BlockEdit with an empty base, which lowers to `InsertChild` (ADR-059 §10). The link picker sends a BlockEdit. A document's validity and the files on disk are unchanged: an empty slot container writes nothing.
 
 ## Open questions
 

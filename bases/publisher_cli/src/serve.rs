@@ -522,7 +522,6 @@ fn app_router(state: AppState) -> Router {
         .route("/_presemble/editorial-ws", get(editorial_ws_handler))
         .route("/_presemble/session", get(session_handler))
         .route("/_presemble/lsp", get(lsp_ws_handler))
-        .route("/_presemble/edit", post(edit_handler))
         .route("/_presemble/apply", post(apply_handler))
         .route("/_presemble/render", get(render_handler))
         .route("/_presemble/grammar", get(grammar_handler))
@@ -554,13 +553,6 @@ fn app_router(state: AppState) -> Router {
         .route("/_presemble/login", get(login_handler))
         .fallback(get(file_handler))
         .with_state(state)
-}
-
-#[derive(serde::Deserialize)]
-struct EditRequest {
-    file: String,   // content file, e.g. "content/post/building-presemble.md"
-    slot: String,   // slot name, e.g. "title"
-    value: String,  // new plain text value
 }
 
 #[derive(serde::Serialize)]
@@ -675,18 +667,6 @@ fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum:
             axum::Json(EditResponse::err("unexpected conductor response".to_string()))
         }
     }
-}
-
-async fn edit_handler(
-    _session: Session,
-    State(state): State<AppState>,
-    axum::Json(req): axum::Json<EditRequest>,
-) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::EditSlot {
-        file: req.file,
-        slot: req.slot,
-        value: req.value,
-    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -3572,6 +3552,18 @@ mod tests {
 
     const TITLE_HEADING: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")) "heading" 0)"#;
 
+    /// A block edit the auth tests post to an editorial route: what matters is
+    /// whether the session lets it through, not whether it applies.
+    fn block_edit_probe() -> serde_json::Value {
+        serde_json::json!({
+            "file": "content/test/doc.md",
+            "selection": TITLE_HEADING,
+            "base": { "markdown": "Title" },
+            "proposed": { "markdown": "New Title" },
+            "intent": "apply"
+        })
+    }
+
     async fn post_block_edit(
         app: &axum::Router,
         body: serde_json::Value,
@@ -4184,7 +4176,7 @@ mod tests {
         test_app_full_with_store(client, out_dir, session_store)
     }
 
-    // (a) POST /_presemble/edit without cookie → 401
+    // (a) POST /_presemble/block-edit without cookie → 401
     #[tokio::test]
     async fn auth_edit_no_cookie_returns_401() {
         use tower::ServiceExt;
@@ -4194,14 +4186,10 @@ mod tests {
         std::fs::create_dir_all(&out_dir).unwrap();
         let app = test_app_full(client, out_dir);
 
-        let body = serde_json::json!({
-            "file": "content/test/doc.md",
-            "slot": "title",
-            "value": "New Title"
-        });
+        let body = block_edit_probe();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/_presemble/edit")
+            .uri("/_presemble/block-edit")
             .header("content-type", "application/json")
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
@@ -4210,7 +4198,7 @@ mod tests {
             "edit without cookie must return 401");
     }
 
-    // (b) POST /_presemble/edit with valid cookie → not 401
+    // (b) POST /_presemble/block-edit with valid cookie → not 401
     #[tokio::test]
     async fn auth_edit_with_cookie_not_401() {
         use tower::ServiceExt;
@@ -4220,14 +4208,10 @@ mod tests {
         std::fs::create_dir_all(&out_dir).unwrap();
         let app = test_app_full(client, out_dir);
 
-        let body = serde_json::json!({
-            "file": "content/test/doc.md",
-            "slot": "title",
-            "value": "New Title"
-        });
+        let body = block_edit_probe();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/_presemble/edit")
+            .uri("/_presemble/block-edit")
             .header("content-type", "application/json")
             .header("cookie", test_session_cookie())
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
@@ -4794,7 +4778,7 @@ mod tests {
     }
 
     // (V1-d) After obtaining a session cookie via /_presemble/login (magic-link path),
-    // a subsequent POST /_presemble/edit carrying that cookie is NOT 401.
+    // a subsequent POST /_presemble/block-edit carrying that cookie is NOT 401.
     #[tokio::test]
     async fn v1_magic_link_cookie_authenticates_edit() {
         use tower::ServiceExt;
@@ -4815,14 +4799,10 @@ mod tests {
         // Build the cookie value the same way login_handler would set it
         let cookie_header = format!("presemble_session={}", session_token.as_str());
 
-        let edit_body = serde_json::json!({
-            "file": "content/test/doc.md",
-            "slot": "title",
-            "value": "V1 Authenticated Edit"
-        });
+        let edit_body = block_edit_probe();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/_presemble/edit")
+            .uri("/_presemble/block-edit")
             .header("content-type", "application/json")
             .header("cookie", cookie_header)
             .body(axum::body::Body::from(serde_json::to_vec(&edit_body).unwrap()))
@@ -4830,7 +4810,7 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
 
         assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "POST /_presemble/edit with magic-link session cookie must not return 401");
+            "POST /_presemble/block-edit with magic-link session cookie must not return 401");
     }
 
     // (V1-e) V0 regression: editorial routes still 401 without a cookie.
@@ -4848,15 +4828,11 @@ mod tests {
         std::fs::create_dir_all(&out_dir).unwrap();
         let app = test_app_full_with_store(client, out_dir, serve_store);
 
-        // POST /_presemble/edit without any session cookie → must be 401
-        let edit_body = serde_json::json!({
-            "file": "content/test/doc.md",
-            "slot": "title",
-            "value": "Unauthenticated"
-        });
+        // POST /_presemble/block-edit without any session cookie → must be 401
+        let edit_body = block_edit_probe();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/_presemble/edit")
+            .uri("/_presemble/block-edit")
             .header("content-type", "application/json")
             .body(axum::body::Body::from(serde_json::to_vec(&edit_body).unwrap()))
             .unwrap();
@@ -5009,10 +4985,10 @@ mod tests {
 
         let (client, tmp) = start_test_conductor();
         let app = closed_app(&tmp, client);
-        let body = serde_json::json!({"file": "content/test/doc.md", "slot": "title", "value": "x"});
+        let body = block_edit_probe();
         let req = axum::http::Request::builder()
             .method("POST")
-            .uri("/_presemble/edit")
+            .uri("/_presemble/block-edit")
             .header("content-type", "application/json")
             .header("cookie", test_session_cookie())
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))

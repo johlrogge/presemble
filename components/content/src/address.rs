@@ -60,6 +60,13 @@ fn doc_expr(file: &str) -> String {
     format!("(ned/doc-by-path {})", clj_str(file))
 }
 
+/// The address of the preamble slot container `slot_name` of the document at
+/// `file`: `(ned/slot (ned/doc-by-path "<file>") "<slot>")`. An empty slot is
+/// addressed by it (a block edit with an empty base fills it, ADR-059 §10).
+pub fn slot_address(file: &str, slot_name: &str) -> String {
+    format!("(ned/slot {} {})", doc_expr(file), clj_str(slot_name))
+}
+
 /// The text of `doc-by-path` for an address built without a file. A render
 /// path that does not know the file yet builds addresses with `""` and
 /// fills it in later with [`with_file`].

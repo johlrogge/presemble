@@ -330,6 +330,14 @@ fn assign_positionally(
         }
     }
 
+    // Every grammar slot is a container of the document, whatever the file
+    // holds (ADR-059 §10, stage 5b.3): the slots after an early separator are
+    // empty. An empty slot writes nothing, so no file changes.
+    for slot in grammar.preamble.iter().skip(preamble.len()) {
+        push_empty_slot(&mut preamble, slot);
+        slot_positions.push(Vec::new());
+    }
+
     // If the separator was not encountered during slot processing, scan forward
     // to find it so body collection starts at the right position. Every
     // element passed over fills no slot.
@@ -545,10 +553,12 @@ headings
         let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(slotted.has_separator);
-        // The title slot should be present but empty (separator hit before consuming any title).
-        assert_eq!(slotted.preamble.len(), 1);
+        // Every slot is present and empty (the separator came before any).
+        assert_eq!(slotted.preamble.len(), 2);
         assert_eq!(slotted.preamble[0].elements.len(), 0);
         assert_eq!(slotted.preamble[0].name.as_str(), "title");
+        assert_eq!(slotted.preamble[1].elements.len(), 0);
+        assert_eq!(slotted.preamble[1].name.as_str(), "summary");
         assert!(slotted.body.is_empty());
     }
 
@@ -685,6 +695,30 @@ headings
         assert_eq!(author_slot.name.as_str(), "author");
         assert_eq!(author_slot.elements.len(), 1);
         assert!(author_slot.elements[0].node.is_sole_link());
+    }
+
+    /// Every grammar slot is a container of the assigned document, in grammar
+    /// order, whether or not the file has anything for it (stage 5b.3): an empty
+    /// one is where a block edit can fill it.
+    #[test]
+    fn every_grammar_slot_is_a_container_whatever_the_document_holds() {
+        let grammar = simple_grammar();
+        let names = |elements: im::Vector<Spanned<ContentElement>>| -> Vec<String> {
+            assign_slots(&FlatDocument::from_elements(elements), &grammar)
+                .preamble
+                .iter()
+                .map(|s| s.name.as_str().to_string())
+                .collect()
+        };
+        let all = vec!["title".to_string(), "summary".to_string()];
+        assert_eq!(names(im::Vector::new()), all, "an empty file");
+        assert_eq!(names(im::vector![separator()]), all, "a file that starts at the separator");
+        assert_eq!(names(im::vector![heading(1, "T"), separator()]), all, "a separator after the first slot");
+        assert_eq!(
+            names(im::vector![heading(1, "T"), paragraph("S."), separator(), paragraph("B.")]),
+            all,
+            "a full preamble"
+        );
     }
 
     #[test]
@@ -918,9 +952,9 @@ headings
             "0..1",
         );
         assert_eq!(slot_labels(&doc, "news"), vec!["One", "Two"]);
-        // The separator directly after the title ends positional assignment
-        // (unchanged behaviour), so `latest` is not in the preamble at all.
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("news", 2)]));
+        // The separator directly after the title ends positional assignment,
+        // so `latest` is an empty slot.
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 2)]));
     }
 
     #[test]
@@ -956,8 +990,9 @@ headings
     #[test]
     fn marker_naming_no_slot_is_unassigned() {
         let doc = assign_page("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
-        // The separator directly after the title ends positional assignment.
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1)]));
+        // The separator directly after the title ends positional assignment;
+        // the other slots are empty.
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 0)]));
         assert_eq!(doc.unassigned.len(), 1);
         assert_eq!(
             reasons(&doc, &page_grammar("*")),
@@ -970,7 +1005,7 @@ headings
     fn marker_naming_a_non_link_slot_is_unassigned() {
         let doc = assign_page("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
         assert_eq!(slot_labels(&doc, "title").len(), 1, "title keeps its heading");
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1)]));
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 0)]));
         assert_eq!(
             reasons(&doc, &page_grammar("*")),
             vec![UnassignedReason::MarkerNamesNonLinkSlot(Keyword::new("title").unwrap())]
@@ -1121,7 +1156,7 @@ headings
             "*",
         );
         assert_eq!(slot_labels(&doc, "latest"), vec!["news", "latest"]);
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 2)]));
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 2), ("news", 0)]));
     }
 
     #[test]
@@ -1145,20 +1180,21 @@ headings
     fn bound_expression_after_separator_stays_in_body() {
         let doc = assign_page("# Home\n\n----\n\n[In the news](->> :post) {#news}\n", "*");
         assert!(doc.has_separator);
-        // Unchanged: the separator right after the title ends the preamble.
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1)]));
+        // The separator right after the title ends the preamble; the other
+        // slots are empty.
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 0)]));
         assert_eq!(doc.body.len(), 1);
         assert!(matches!(doc.body[0].node, ContentElement::LinkExpression { .. }));
     }
 
     #[test]
-    fn bound_slot_after_early_separator_is_appended_in_schema_order() {
-        // Positional assignment stops at the separator after `title`, so
-        // `latest` is absent (unchanged); the bound `news` slot is appended.
+    fn bound_slot_after_early_separator_is_in_schema_order() {
+        // Positional assignment stops at the separator after `title`: `latest`
+        // is empty, and the bound expression is in `news`, in schema order.
         let doc = assign_page("# Home\n\n[In the news](->> :post) {#news}\n\n----\n\nBody.\n", "*");
         assert!(doc.has_separator);
         assert!(doc.separator_span.is_some());
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("news", 1)]));
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 1)]));
         assert_eq!(doc.body.len(), 1);
     }
 
@@ -1166,7 +1202,7 @@ headings
     fn separator_handling_is_unchanged_without_bindings() {
         let doc = assign_page("# Home\n\n[a](/post/a)\n\n----\n\nBody.\n\nMore.\n", "*");
         assert!(doc.has_separator);
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1)]));
+        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 0)]));
         assert_eq!(doc.body.len(), 2);
     }
 

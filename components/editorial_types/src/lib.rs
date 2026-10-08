@@ -822,6 +822,15 @@ mod tests {
         /// browser only speaks markdown); absent otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         browser: Option<bool>,
+        /// The link picker option the request was built from, when it was.
+        #[serde(default, rename = "linkPicker", skip_serializing_if = "Option::is_none")]
+        link_picker: Option<LinkPickerChoice>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct LinkPickerChoice {
+        text: String,
+        href: String,
     }
 
     #[test]
@@ -851,6 +860,8 @@ mod tests {
                 "apply-slot-heading.json",
                 "drifted.json",
                 "forbidden-kind.json",
+                "link-picker-empty-slot.json",
+                "link-picker.json",
                 "no-change.json",
                 "structural-apply.json",
                 "structural-suggest.json",

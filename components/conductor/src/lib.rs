@@ -229,14 +229,19 @@ mod tests {
             .build();
         let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
 
-        let result = conductor.handle_command(Command::EditSlot {
-            file: "content/article/test.md".to_string(),
-            slot: "title".to_string(),
-            value: "New Title".to_string(),
-        });
+        let result = conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
+            file: editorial_types::ContentPath::new("content/article/test.md"),
+            selection: r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/article/test.md") "title")) "heading" 0)"#
+                .to_string(),
+            base: editorial_types::BlockText::Markdown("Old Title".to_string()),
+            proposed: editorial_types::BlockText::Markdown("New Title".to_string()),
+            intent: editorial_types::BlockEditIntent::Apply,
+            reason: None,
+        }));
 
-        // EditSlot may return Ok or Error depending on whether a template exists.
-        // The test only verifies the NodeStore mutation and dirty-docs tracking.
+        // The edit may be Applied or refused depending on whether a template
+        // exists. The test only verifies the NodeStore mutation and dirty-docs
+        // tracking.
 
         // Verify file on disk was NOT modified (dirty buffer model)
         let disk_content = std::fs::read_to_string(&content_file).unwrap();
@@ -248,7 +253,7 @@ mod tests {
         // Verify the NodeStore slot was updated
         let rel_path = std::path::Path::new("content/article/test.md");
         let doc_root = conductor.doc_root_for_path(rel_path)
-            .expect("document should exist in NodeStore after EditSlot");
+            .expect("document should exist in NodeStore after the block edit");
         let node_store_arc = conductor.node_store();
         let store = node_store_arc.read().unwrap();
         // Walk preamble → slot("title") → heading → text child
@@ -279,7 +284,7 @@ mod tests {
         let dirty = conductor.dirty_docs().read().unwrap();
         assert!(
             dirty.contains(rel_path),
-            "dirty_docs should contain the modified path after EditSlot"
+            "dirty_docs should contain the modified path after the block edit"
         );
     }
 
@@ -424,7 +429,6 @@ mod tests {
         }
     }
 
-    const ARTICLE_SCHEMA_SRC: &str = "# Your blog post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\nYour article summary. {#summary}\noccurs\n: 1..3\n";
 
     // ── SiteGraph ─────────────────────────────────────────────────────────────
 
@@ -957,220 +961,6 @@ mod tests {
         let (rebuilt, failed) = conductor.rebuild_pages_for_modified_nodes(&paths);
         assert!(rebuilt.is_empty(), "unknown path should be silently skipped, rebuilt: {rebuilt:?}");
         assert!(failed.is_empty(), "unknown path should not appear in failed, failed: {failed:?}");
-    }
-
-    // ── apply_slot_edit precondition/escape-hatch tests ──────────────────────
-
-    /// Build a conductor with a multi-paragraph summary slot (Value::List case).
-    fn multi_paragraph_conductor() -> (tempfile::TempDir, Conductor) {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Write schema to disk so populate_node_store can discover it
-        let schemas_dir = dir.path().join("schemas");
-        std::fs::create_dir_all(&schemas_dir).unwrap();
-        std::fs::write(schemas_dir.join("article.md"), ARTICLE_SCHEMA_SRC).unwrap();
-
-        // Content file with two summary paragraphs (occurs: 1..3 produces Value::List)
-        let content_dir = dir.path().join("content/article");
-        std::fs::create_dir_all(&content_dir).unwrap();
-        std::fs::write(
-            content_dir.join("multi.md"),
-            "# Multi Para Title\n\nFirst summary paragraph.\n\nSecond summary paragraph.\n",
-        )
-        .unwrap();
-
-        let repo = site_repository::SiteRepository::builder()
-            .schema("article", ARTICLE_SCHEMA_SRC)
-            .build();
-        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
-        (dir, conductor)
-    }
-
-    /// Contract update: multi-paragraph slot now collapses to a single new element
-    /// via the grammar-aware escape hatch instead of returning an error.
-    #[test]
-    fn apply_slot_edit_multi_paragraph_slot_replaces_with_single_new_element() {
-        // The summary slot has 2 children (occurs: 1..3, content has two paragraphs).
-        let (_dir, conductor) = multi_paragraph_conductor();
-
-        let result = conductor.handle_command(Command::EditSlot {
-            file: "content/article/multi.md".to_string(),
-            slot: "summary".to_string(),
-            value: "Single new summary.".to_string(),
-        });
-
-        // Should succeed (Ok or ok-with-events).
-        assert!(
-            matches!(result.response, Response::Ok),
-            "expected Response::Ok for multi-element slot escape hatch, got {:?}",
-            result.response
-        );
-
-        // The NodeStore slot should now have exactly 1 child containing "Single new summary.".
-        let rel_path = std::path::Path::new("content/article/multi.md");
-        let doc_root = conductor
-            .doc_root_for_path(rel_path)
-            .expect("document should be in NodeStore");
-        let node_store_arc = conductor.node_store();
-        let store = node_store_arc.read().unwrap();
-        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
-            .expect("document should have a preamble");
-        let summary_text = store.children(preamble).iter().find_map(|&slot_id| {
-            let name_attr = node_store_bridge::content_bridge::find_attr_text(&store, slot_id, "name")?;
-            if name_attr != "summary" { return None; }
-            let children = store.children(slot_id);
-            assert_eq!(children.len(), 1, "slot 'summary' should have exactly 1 child after escape-hatch edit");
-            store.children(children[0]).iter().find_map(|&text_id| {
-                if let Some(node_store::Node::Text(s)) = store.get(text_id) {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            })
-        });
-        assert_eq!(
-            summary_text.as_deref(),
-            Some("Single new summary."),
-            "slot 'summary' should contain 'Single new summary.' after edit"
-        );
-    }
-
-    /// Contract update: a slot that IS in the grammar but absent from the document
-    /// is now inserted at the grammar-order-correct position instead of returning an error.
-    #[test]
-    fn apply_slot_edit_missing_slot_inserts_new_slot() {
-        // Build a conductor where the content file has only the title — no summary yet.
-        let dir = tempfile::tempdir().unwrap();
-        let schemas_dir = dir.path().join("schemas");
-        std::fs::create_dir_all(&schemas_dir).unwrap();
-        std::fs::write(schemas_dir.join("article.md"), ARTICLE_SCHEMA_SRC).unwrap();
-        let content_dir = dir.path().join("content/article");
-        std::fs::create_dir_all(&content_dir).unwrap();
-        // Content has only the title slot — summary is absent.
-        std::fs::write(content_dir.join("nosummary.md"), "# Only Title\n").unwrap();
-        let repo = site_repository::SiteRepository::builder()
-            .schema("article", ARTICLE_SCHEMA_SRC)
-            .build();
-        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
-
-        let result = conductor.handle_command(Command::EditSlot {
-            file: "content/article/nosummary.md".to_string(),
-            slot: "summary".to_string(),
-            value: "Newly inserted summary.".to_string(),
-        });
-
-        assert!(
-            matches!(result.response, Response::Ok),
-            "expected Response::Ok for missing-slot insertion, got {:?}",
-            result.response
-        );
-
-        // The NodeStore preamble should now contain a summary slot with the new text.
-        let rel_path = std::path::Path::new("content/article/nosummary.md");
-        let doc_root = conductor
-            .doc_root_for_path(rel_path)
-            .expect("document should be in NodeStore");
-        let node_store_arc = conductor.node_store();
-        let store = node_store_arc.read().unwrap();
-        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
-            .expect("document should have a preamble");
-        let summary_text = store.children(preamble).iter().find_map(|&slot_id| {
-            let name_attr = node_store_bridge::content_bridge::find_attr_text(&store, slot_id, "name")?;
-            if name_attr != "summary" { return None; }
-            store.children(slot_id).iter().find_map(|&elem_id| {
-                store.children(elem_id).iter().find_map(|&text_id| {
-                    if let Some(node_store::Node::Text(s)) = store.get(text_id) {
-                        Some(s.clone())
-                    } else {
-                        None
-                    }
-                })
-            })
-        });
-        assert_eq!(
-            summary_text.as_deref(),
-            Some("Newly inserted summary."),
-            "slot 'summary' should be inserted with the new text"
-        );
-
-        // dirty_docs should contain the path.
-        let dirty = conductor.dirty_docs().read().unwrap();
-        assert!(
-            dirty.contains(rel_path),
-            "dirty_docs should contain the modified path"
-        );
-    }
-
-    /// New test: empty slot (slot node present but no children) now handled by escape hatch.
-    #[test]
-    fn apply_slot_edit_empty_slot_inserts_grammar_element() {
-        // Build a conductor where the content file has a title slot with no content (empty slot).
-        let dir = tempfile::tempdir().unwrap();
-        let schemas_dir = dir.path().join("schemas");
-        std::fs::create_dir_all(&schemas_dir).unwrap();
-        std::fs::write(schemas_dir.join("article.md"), ARTICLE_SCHEMA_SRC).unwrap();
-        let content_dir = dir.path().join("content/article");
-        std::fs::create_dir_all(&content_dir).unwrap();
-        // Scaffold-style content: separator present but title slot explicitly empty.
-        // Parsing "# \n\n----\n" with the article grammar produces an empty title slot.
-        std::fs::write(content_dir.join("empty.md"), "\n----\n").unwrap();
-        let repo = site_repository::SiteRepository::builder()
-            .schema("article", ARTICLE_SCHEMA_SRC)
-            .build();
-        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
-
-        let result = conductor.handle_command(Command::EditSlot {
-            file: "content/article/empty.md".to_string(),
-            slot: "title".to_string(),
-            value: "New Title".to_string(),
-        });
-
-        assert!(
-            matches!(result.response, Response::Ok),
-            "expected Response::Ok for empty-slot insertion, got {:?}",
-            result.response
-        );
-
-        // The NodeStore slot should now have a heading child with text "New Title".
-        let rel_path = std::path::Path::new("content/article/empty.md");
-        let doc_root = conductor
-            .doc_root_for_path(rel_path)
-            .expect("document should be in NodeStore");
-        let node_store_arc = conductor.node_store();
-        let store = node_store_arc.read().unwrap();
-        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
-            .expect("document should have a preamble");
-        let title_text = store.children(preamble).iter().find_map(|&slot_id| {
-            let name_attr = node_store_bridge::content_bridge::find_attr_text(&store, slot_id, "name")?;
-            if name_attr != "title" { return None; }
-            let children = store.children(slot_id);
-            // Should have exactly 1 child (the new heading).
-            if children.is_empty() { return None; }
-            let elem_id = children[0];
-            // Check it's a heading element.
-            if let Some(node_store::Node::Element(n)) = store.get(elem_id) {
-                assert_eq!(store.resolve_name(*n), "heading", "expected heading element for title slot");
-            }
-            store.children(elem_id).iter().find_map(|&text_id| {
-                if let Some(node_store::Node::Text(s)) = store.get(text_id) {
-                    Some(s.clone())
-                } else {
-                    None
-                }
-            })
-        });
-        assert_eq!(
-            title_text.as_deref(),
-            Some("New Title"),
-            "slot 'title' should have heading with text 'New Title' after empty-slot edit"
-        );
-
-        // dirty_docs should contain the path.
-        let dirty = conductor.dirty_docs().read().unwrap();
-        assert!(
-            dirty.contains(rel_path),
-            "dirty_docs should contain the modified path after empty-slot edit"
-        );
     }
 
     /// Task B regression: `render_insert_native` must propagate constraint_attrs to the rendered

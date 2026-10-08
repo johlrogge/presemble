@@ -7,7 +7,6 @@ pub mod template_bridge;
 pub mod value_bridge;
 pub mod store_pipeline;
 pub mod graph_view_impl;
-pub mod slot_edit;
 pub mod block_edit;
 
 pub use body_fragment::parse_body_fragment;
@@ -19,4 +18,3 @@ pub use content_bridge::{
 };
 pub use value_bridge::{node_to_value, value_to_node};
 pub use graph_view_impl::{LayeredGraphView, MultiRootView, NodeStoreView, PrefixedGraphView};
-pub use slot_edit::modify_slot_in_store;

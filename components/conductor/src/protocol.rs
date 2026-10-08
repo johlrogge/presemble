@@ -50,8 +50,6 @@ pub enum Command {
     /// (`presemble reload`). `path` is site-relative. Other documents keep
     /// their unsaved edits.
     ReloadDocument { path: String },
-    /// Browser edit: modify a slot and write to disk.
-    EditSlot { file: String, slot: String, value: String },
     /// Request a cached grammar for a schema stem.
     GetGrammar { stem: String },
     /// Request in-memory document text (editor's working copy or disk fallback).

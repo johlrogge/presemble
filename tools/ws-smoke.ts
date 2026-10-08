@@ -470,13 +470,15 @@ function unescapeAttr(s: string): string {
 }
 
 /**
- * The `index`-th editable block (zero-based) of `file`'s `body` on an
+ * The `index`-th editable element (zero-based) of `file`'s slot `slot` on an
  * editorial page: its emitted `data-presemble-address` and
- * `data-presemble-md`, read through inject.js's `editTarget` as the browser does.
+ * `data-presemble-md`, read through inject.js's `editTarget` as the browser
+ * does. An empty slot's placeholder is one (its markdown is empty).
  */
-function bodyBlockOnPage(
+function slotBlockOnPage(
   html: string,
   file: string,
+  slot: string,
   index: number,
 ): { address: string; md: string } | null {
   const attr = (tag: string, name: string): string | null => {
@@ -486,10 +488,19 @@ function bodyBlockOnPage(
   const { editTarget } = loadBuilders();
   const tags = html.match(/<[a-zA-Z][a-zA-Z0-9]*\s[^>]*data-presemble-address="[^"]*"[^>]*>/g) ?? [];
   const blocks = tags
-    .filter((t) => attr(t, "data-presemble-file") === file && attr(t, "data-presemble-slot") === "body")
+    .filter((t) => attr(t, "data-presemble-file") === file && attr(t, "data-presemble-slot") === slot)
     .map((t) => editTarget(attr(t, "data-presemble-address"), attr(t, "data-presemble-md")))
     .filter((t): t is { address: string; md: string } => t !== null);
   return blocks[index] ?? null;
+}
+
+/** The `index`-th editable block of `file`'s `body` on an editorial page. */
+function bodyBlockOnPage(
+  html: string,
+  file: string,
+  index: number,
+): { address: string; md: string } | null {
+  return slotBlockOnPage(html, file, "body", index);
 }
 
 // ── Scenario ────────────────────────────────────────────────────────────────
@@ -539,25 +550,36 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
 
     await Promise.all([publicInbox.quiesce(), editorialInbox.quiesce()]);
 
-    // 2. /edit → reload of the post page.
+    // 2. A title block edit (built from the editorial page, as the browser
+    //    builds it) → reload of the post page.
     {
-      const r = await http.post("/_presemble/edit", {
-        file: FILE,
-        slot: "title",
-        value: "WS Edit Title",
-      });
-      expectOk("ws: /edit returns ok", r);
+      const page = await http.get(PAGE);
+      const target = slotBlockOnPage(page.text, FILE, "title", 0);
+      if (target === null) throw new StepFailure("ws: title block", "not found on the editorial page");
+      const request = loadBuilders().buildBlockEditRequest(
+        FILE,
+        target.address,
+        target.md,
+        "WS Edit Title",
+        "apply",
+      );
+      const r = await http.post("/_presemble/block-edit", request);
+      check(
+        "ws: /block-edit on the title returns applied",
+        r.status === 200 && r.text.includes('"applied"'),
+        r.text,
+      );
       const m = await editorialInbox.expect(
-        `ws: /edit broadcasts editorial reload including ${PAGE}`,
+        `ws: /block-edit broadcasts editorial reload including ${PAGE}`,
         reloadIncluding(PAGE),
       );
       check(
-        "ws: /edit editorial reload primary is pages[0]",
+        "ws: /block-edit editorial reload primary is pages[0]",
         m.primary === m.pages[0],
         `primary=${JSON.stringify(m.primary)} pages=${JSON.stringify(m.pages)}`,
       );
       await publicInbox.expect(
-        `ws: /edit broadcasts public reload including ${PAGE}`,
+        `ws: /block-edit broadcasts public reload including ${PAGE}`,
         reloadIncluding(PAGE),
       );
     }

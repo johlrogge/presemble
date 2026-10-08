@@ -1,0 +1,11 @@
+{
+  "request": {
+    "file": "content/post/hello.md",
+    "selection": "(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path \"content/post/hello.md\") \"author\")) \"paragraph\" 0)",
+    "base": { "markdown": "[Jo](/author/jo)" },
+    "proposed": { "markdown": "[Alice Smith](/author/alice)" },
+    "intent": "apply"
+  },
+  "linkPicker": { "text": "Alice Smith", "href": "/author/alice" },
+  "response": { "done": { "applied": { "pages": ["/post/hello"] } } }
+}

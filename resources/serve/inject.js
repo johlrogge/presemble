@@ -32,6 +32,23 @@ function buildBlockEditRequest(file, selection, baseMarkdown, proposedMarkdown, 
   return req;
 }
 
+// The markdown of a link with this text and destination: `\`, `[` and `]` in
+// the text are escaped; a destination with anything but plain characters is
+// written in angle brackets, with `\`, `<` and `>` escaped.
+function linkMarkdown(text, href) {
+  var t = String(text).replace(/([\\\[\]])/g, '\\$1');
+  var h = String(href);
+  var d = /^[^\s()<>\\]*$/.test(h) ? h : '<' + h.replace(/([\\<>])/g, '\\$1') + '>';
+  return '[' + t + '](' + d + ')';
+}
+
+// The block edit the link picker sends for the option `text`/`href`: apply
+// `[text](href)` at `selection`, the link element or the empty slot's
+// placeholder, with `baseMarkdown` its markdown now ('' for an empty slot).
+function buildLinkPickerRequest(file, selection, baseMarkdown, text, href) {
+  return buildBlockEditRequest(file, selection, baseMarkdown, linkMarkdown(text, href), 'apply');
+}
+
 // Read a block-edit response into what the browser acts on:
 //   {kind:'applied', pages}        the edit was applied
 //   {kind:'suggestion-created', id} stored as a pending suggestion
@@ -1201,23 +1218,24 @@ sel.appendChild(ph);
 options.forEach(function(opt){
 var o=document.createElement('option');
 o.textContent=opt.text;
-o.value=opt.text+'|'+opt.href;
+o.value=opt.href;
 sel.appendChild(o);
 });
 el.after(sel);
 sel.focus();
-// TODO(phase-c): route through /_presemble/apply once NED has link/image mutations
+// The pick is a block edit: `[text](href)` at the link element, or at the
+// empty slot's placeholder (ADR-059 section 10). The page reloads when the
+// server says it was rebuilt.
 sel.onchange=function(){
 lac.abort();
-if(sel.value){
-fetchJson('/_presemble/edit',{
-method:'POST',
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({file:afile,slot:aslot,value:sel.value})
-}).then(function(data){
+var choice=options[sel.selectedIndex-1];
+if(choice){
+var ltarget=_editTargetOf(el);
+if(!ltarget){sel.remove();_toast(_NOT_EDITABLE_MSG);return;}
+_postBlockEdit(buildLinkPickerRequest(afile,ltarget.address,ltarget.md,choice.text,choice.href)).then(function(outcome){
 sel.remove();
-if(data.ok){setTimeout(function(){location.reload();},500);}
-else{alert(data.error||'Link update failed');}
+if(outcome.kind==='refused'){_toast('Link update failed: '+(outcome.message||'refused'));return;}
+if(outcome.kind==='applied'&&window._fetchDirtyCount){window._fetchDirtyCount();}
 }).catch(function(err){
 sel.remove();
 _toast('Link update failed: '+err.message);

@@ -372,13 +372,14 @@ pub fn fill_semantic_content(
         let slot_name = slot.name.as_str().to_string();
         let max = slot.max_count();
 
-        // Check if this slot is present in the preamble
-        let slot_found = preamble
+        // A slot with no blocks (the container is there, or the document
+        // predates it) is rendered as a placeholder.
+        let slot_filled = preamble
             .and_then(|p| find_slot_by_name(store, p, &slot_name))
-            .is_some();
+            .is_some_and(|slot_id| !store.children(slot_id).is_empty());
 
-        if !slot_found {
-            // Missing slot — create a suggestion node so the renderer can show a placeholder
+        if !slot_filled {
+            // Empty slot — create a suggestion node so the renderer can show a placeholder
             let suggestion_elem_name = store.intern("suggestion");
             let suggestion = store.add_node(Node::Element(suggestion_elem_name));
             add_text_attr(store, suggestion, "hint", &format!("Add {slot_name}"));
@@ -1062,8 +1063,19 @@ mod tests {
             .map(|(n, _)| store.resolve_name(*n).to_string())
             .collect();
         assert!(!names.iter().any(|n| n == "unassigned"), "{names:?}");
-        // The unassigned paragraph does not fill the (empty) `summary` slot.
-        assert!(!names.iter().any(|n| n == "summary"), "{names:?}");
+        // The unassigned paragraph does not fill the (empty) `summary` slot:
+        // that is a placeholder.
+        let summary = store
+            .consists_of(sem)
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "summary")
+            .map(|(_, part)| *part)
+            .expect("an empty slot is a placeholder");
+        assert!(
+            matches!(store.get(summary), Some(Node::Element(n)) if store.resolve_name(*n) == "suggestion"),
+            "{:?}",
+            store.get(summary)
+        );
     }
 
     /// The semantic node points at its document, by a name no slot can have,

@@ -876,6 +876,28 @@ headings
         assert_eq!(serialize_document(&d), "![](img.jpg)\n");
     }
 
+    /// Guard (stage 5b.3): an empty slot container writes nothing, the same as
+    /// an absent one, so giving every grammar slot a container changes no file.
+    #[test]
+    fn an_empty_slot_writes_nothing() {
+        let grammar = schema::parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\n\
+             Summary. {#summary}\noccurs\n: 1..2\n\n----\n\nBody.\n",
+        )
+        .expect("schema parses");
+        for src in ["", "\n----\n", "# T\n\n----\n\nBody.\n", "# T\n\nS.\n\n----\n\nBody.\n", "# T\n"] {
+            let doc = crate::parser::parse_and_assign(src, &grammar).expect("parses");
+            let mut without_empty = doc.clone();
+            without_empty.preamble =
+                doc.preamble.iter().filter(|s| !s.elements.is_empty()).cloned().collect();
+            assert_eq!(
+                serialize_document(&doc),
+                serialize_document(&without_empty),
+                "empty slots changed the output for {src:?}"
+            );
+        }
+    }
+
     #[test]
     fn serialize_separator() {
         let d = Document {
