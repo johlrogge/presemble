@@ -58,8 +58,8 @@ impl ConductorClient {
     }
 
     /// Classify a file path into its site role.
-    pub fn classify(&self, path: &str) -> Result<FileClassification, String> {
-        match self.send(&Command::Classify { path: path.to_string() })? {
+    pub fn classify(&self, path: &editorial_types::SitePath) -> Result<FileClassification, String> {
+        match self.send(&Command::Classify { path: path.clone() })? {
             Response::FileClassification(fc) => Ok(fc),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),
@@ -76,8 +76,8 @@ impl ConductorClient {
     }
 
     /// Get the in-memory text of a document (editor buffer or disk fallback).
-    pub fn get_document_text(&self, path: &str) -> Result<Option<String>, String> {
-        match self.send(&Command::GetDocumentText { path: path.to_string() })? {
+    pub fn get_document_text(&self, path: &editorial_types::SitePath) -> Result<Option<String>, String> {
+        match self.send(&Command::GetDocumentText { path: path.clone() })? {
             Response::DocumentText(text) => Ok(text),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),

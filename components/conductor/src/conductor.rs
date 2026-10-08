@@ -194,7 +194,7 @@ pub struct Conductor {
     output_dir: PathBuf,
     dep_graph: RwLock<dep_graph::DependencyGraph>,
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
-    doc_sources: RwLock<HashMap<PathBuf, String>>, // path -> in-memory text
+    doc_sources: RwLock<HashMap<editorial_types::SitePath, String>>, // site path -> in-memory text
     site_index: RwLock<site_index::SiteIndex>,
     repo: site_repository::SiteRepository,
     build_errors: RwLock<HashMap<String, Vec<String>>>,
@@ -584,11 +584,6 @@ impl Conductor {
         &self.dirty_docs
     }
 
-    /// `path` (absolute, or already site-relative) as a site-relative path.
-    fn site_relative(&self, path: &Path) -> PathBuf {
-        path.strip_prefix(&self.site_dir).map(Path::to_path_buf).unwrap_or_else(|_| path.to_path_buf())
-    }
-
     /// Remember what the file at site-relative `rel` looks like now, as the
     /// version our copy is based on. Call it before reading the file (a
     /// change in between then shows as a change, never as a missed one), and
@@ -599,10 +594,16 @@ impl Conductor {
     }
 
     /// Write a document's text and remember the resulting file as the base of
-    /// our copy. `abs` is the absolute path.
-    fn write_document(&self, abs: &Path, text: &[u8]) -> std::io::Result<()> {
-        crate::self_write_tracker::write_source_file(abs, text, &self.self_write_tracker)?;
-        self.stamp_disk(&self.site_relative(abs));
+    /// our copy. `rel` is site-relative; it is resolved inside the site (the
+    /// one way a path becomes a file to write) and refused if it is not.
+    fn write_document(&self, rel: &Path, text: &[u8]) -> std::io::Result<()> {
+        let refuse = |e: editorial_types::PathError| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}: {e}", rel.display()))
+        };
+        let site_path = editorial_types::SitePath::parse(&rel.to_string_lossy()).map_err(refuse)?;
+        let abs = crate::site_resolve::resolve_in_site(&self.site_dir, &site_path).map_err(refuse)?;
+        crate::self_write_tracker::write_source_file(&abs, text, &self.self_write_tracker)?;
+        self.stamp_disk(rel);
         Ok(())
     }
 
@@ -1915,11 +1916,20 @@ impl Conductor {
     }
 
     /// Get in-memory document text, falling back to disk.
-    pub fn document_text(&self, path: &Path) -> Option<String> {
+    ///
+    /// A path that resolves outside the site is not found.
+    pub fn document_text(&self, path: &editorial_types::SitePath) -> Option<String> {
         if let Some(text) = self.doc_sources.read().unwrap_or_else(|e| e.into_inner()).get(path) {
             return Some(text.clone());
         }
-        std::fs::read_to_string(path).ok()
+        let abs = crate::site_resolve::resolve_in_site(&self.site_dir, path).ok()?;
+        std::fs::read_to_string(abs).ok()
+    }
+
+    /// [`Conductor::document_text`] for a path the conductor built itself.
+    fn document_text_at(&self, abs: &Path) -> Option<String> {
+        let path = editorial_types::SitePath::from_absolute(&self.site_dir, abs).ok()?;
+        self.document_text(&path)
     }
 
     /// List all link completion options for a given schema stem.
@@ -2551,7 +2561,7 @@ impl Conductor {
         let grammar = schema::parse_schema(&schema_src).ok()?;
 
         let abs_path = self.site_dir.join(file);
-        let src = self.document_text(&abs_path)?;
+        let src = self.document_text_at(&abs_path)?;
         let doc = content::parse_and_assign(&src, &grammar).ok()?;
 
         body_idx_to_structural(&doc, file, body_idx)
@@ -2874,7 +2884,7 @@ impl Conductor {
     /// drift-check data only.
     fn create_ned_suggestion(
         &self,
-        file: &Path,
+        file: &editorial_types::ContentPath,
         selection: String,
         mutation: editorial_types::NedMutation,
         reason: String,
@@ -2910,10 +2920,9 @@ impl Conductor {
         };
         match checked {
             Err(cause) => return Self::creation_error(&cause, kind),
-            Ok((doc_file, _)) if Path::new(&doc_file) != file => {
+            Ok((doc_file, _)) if Path::new(&doc_file) != Path::new(file.as_str()) => {
                 return CommandResult::error(format!(
-                    "selection resolves into {doc_file}, not {}",
-                    file.display()
+                    "selection resolves into {doc_file}, not {file}"
                 ));
             }
             // The content already reads as suggested: not an error, and
@@ -2926,7 +2935,7 @@ impl Conductor {
         let sug = editorial_types::NedSuggestion {
             id: id.clone(),
             author,
-            file: editorial_types::ContentPath::new(file.to_string_lossy()),
+            file: file.clone(),
             selection,
             mutation,
             workspace_hash: self.workspace_hash(),
@@ -3070,7 +3079,7 @@ impl Conductor {
         match self.lower_block_edit(req) {
             Ok((node_store_bridge::block_edit::Lowering::Lowered(lowered), body_idx)) => self.run_lowered(
                 req.intent,
-                Path::new(req.file.as_str()),
+                &req.file,
                 lowered,
                 body_idx,
                 req.reason.clone(),
@@ -3112,7 +3121,7 @@ impl Conductor {
     fn run_lowered(
         &self,
         intent: editorial_types::BlockEditIntent,
-        file: &Path,
+        file: &editorial_types::ContentPath,
         lowered: node_store_bridge::block_edit::Lowered,
         body_idx: Option<usize>,
         reason: Option<String>,
@@ -3133,7 +3142,7 @@ impl Conductor {
                 match self.apply_ned_mutation(
                     &lowered.selection,
                     &lowered.mutation,
-                    file,
+                    Path::new(file.as_str()),
                     Some(&lowered.preview),
                     "block-edit",
                 ) {
@@ -3147,7 +3156,7 @@ impl Conductor {
                                 pages: pages.clone(),
                                 // After the rebuild: the anchor reads the new body.
                                 anchor: body_idx.and_then(|idx| {
-                                    self.compute_body_anchor(&file.to_string_lossy(), idx)
+                                    self.compute_body_anchor(file.as_str(), idx)
                                 }),
                             });
                         }
@@ -3428,14 +3437,7 @@ impl Conductor {
                 CommandResult::with_response(Response::SchemaSource(self.schema_source(&stem)))
             }
             Command::GetDocumentText { path } => {
-                // Accept both absolute paths and site-relative paths (e.g. "content/post/hello.md").
-                // A path that does not start with '/' is resolved relative to site_dir.
-                let resolved = if Path::new(&path).is_absolute() {
-                    PathBuf::from(&path)
-                } else {
-                    self.site_dir.join(&path)
-                };
-                CommandResult::with_response(Response::DocumentText(self.document_text(&resolved)))
+                CommandResult::with_response(Response::DocumentText(self.document_text(&path)))
             }
             Command::GetBuildErrors => {
                 let errors = self.build_errors.read().unwrap_or_else(|e| e.into_inner());
@@ -3443,10 +3445,13 @@ impl Conductor {
             }
             Command::Shutdown => CommandResult::ok(),
             Command::DocumentChanged { path, text } => {
-                let path_buf = PathBuf::from(&path);
+                let path_buf = match crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
+                    Ok(abs) => abs,
+                    Err(e) => return CommandResult::error(format!("{path}: {e}")),
+                };
                 // Store in memory — do NOT write to disk.
                 // Disk writes happen on explicit save (DocumentSaved, save-all).
-                self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(path_buf.clone(), text.clone());
+                self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(path.clone(), text.clone());
 
                 // Rebuild the page from in-memory text and broadcast PagesRebuilt.
                 match self.rebuild_page(&path_buf, &text) {
@@ -3481,13 +3486,14 @@ impl Conductor {
                 }
             }
             Command::DocumentSaved { path } => {
-                let path = PathBuf::from(&path);
+                if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
+                    return CommandResult::error(format!("{path}: {e}"));
+                }
                 // Clear in-memory version — disk is now authoritative
                 self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
                 // The editor wrote the file itself. If the store holds unsaved
                 // edits for it, they now conflict with what was written.
-                let rel = self.site_relative(&path);
-                match self.record_disk_conflict(&rel) {
+                match self.record_disk_conflict(path.as_path()) {
                     Some(event) => CommandResult::ok_with_events(vec![event]),
                     None => CommandResult::ok(),
                 }
@@ -3497,12 +3503,10 @@ impl Conductor {
                 //    We resolve each path to an absolute path and check the on-disk mtime.
                 //    If the mtime matches a recorded self-write, the event is suppressed.
                 //    Deletions (no metadata) are always processed.
-                let external_paths: Vec<String> = paths.iter().filter(|p| {
-                    let raw = Path::new(p.as_str());
-                    let abs = if raw.is_absolute() {
-                        raw.to_path_buf()
-                    } else {
-                        self.site_dir.join(raw)
+                //    A path that resolves outside the site is not ours: it is dropped.
+                let external_paths: Vec<editorial_types::SitePath> = paths.iter().filter(|p| {
+                    let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, p) else {
+                        return false;
                     };
                     let mtime = std::fs::metadata(&abs).ok().and_then(|m| m.modified().ok());
                     match mtime {
@@ -3518,8 +3522,7 @@ impl Conductor {
 
                 // 1. Clear in-memory versions (only for genuinely external paths)
                 for p in &external_paths {
-                    let path = PathBuf::from(p);
-                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
+                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(p);
                 }
 
                 // Rebind so the rest of this handler uses the filtered set.
@@ -3544,7 +3547,7 @@ impl Conductor {
                 let mut disk_wins: Vec<PathBuf> = Vec::new();
                 let mut conflict_events: Vec<ConductorEvent> = Vec::new();
                 for p in &paths {
-                    let rel = self.site_relative(Path::new(p));
+                    let rel = p.as_path().to_path_buf();
                     if let Some(event) = self.record_disk_conflict(&rel) {
                         conflict_events.push(event);
                     } else if !self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel) {
@@ -3557,12 +3560,7 @@ impl Conductor {
                 let has_stylesheet_change = {
                     let site_idx = self.site_index.read().unwrap_or_else(|e| e.into_inner());
                     paths.iter().any(|p| {
-                        let raw = Path::new(p);
-                        let path = if raw.is_absolute() {
-                            raw.to_path_buf()
-                        } else {
-                            self.site_dir.join(raw)
-                        };
+                        let path = self.site_dir.join(p.as_path());
                         matches!(site_idx.classify(&path), site_index::FileKind::Stylesheet)
                     })
                 };
@@ -3584,8 +3582,10 @@ impl Conductor {
                 // Throw away this document's unsaved edits (the NED copy and
                 // the LSP mirror) and load it from disk. Every other document
                 // keeps its unsaved edits (the repopulate rule).
-                let rel = PathBuf::from(&path);
-                let abs = self.site_dir.join(&rel);
+                if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path()) {
+                    return CommandResult::error(format!("{path}: {e}"));
+                }
+                let rel = PathBuf::from(path.as_str());
                 let was_dirty = {
                     let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
                     let was = dirty.contains(&rel);
@@ -3594,9 +3594,7 @@ impl Conductor {
                 };
                 let had_mirror = {
                     let mut sources = self.doc_sources.write().unwrap_or_else(|e| e.into_inner());
-                    let a = sources.remove(&abs).is_some();
-                    let b = sources.remove(&rel).is_some();
-                    a || b
+                    sources.remove(path.as_site_path()).is_some()
                 };
                 self.populate_node_store(&[rel]);
 
@@ -3614,9 +3612,8 @@ impl Conductor {
                 }
             }
             Command::CursorMoved { path, line } => {
-                let abs_path = self.site_dir.join(&path);
-                if let Some(src) = self.document_text(&abs_path)
-                    && let Some(anchor) = self.body_element_anchor_at_line(&src, &path, line)
+                if let Some(src) = self.document_text(&path)
+                    && let Some(anchor) = self.body_element_anchor_at_line(&src, path.as_str(), line)
                 {
                     return CommandResult::ok_with_events(vec![
                         ConductorEvent::CursorScrollTo { anchor },
@@ -3678,7 +3675,7 @@ impl Conductor {
                         }
 
                         // Rebuild the new content page itself
-                        if let Some(text) = self.document_text(&path) {
+                        if let Some(text) = self.document_text_at(&path) {
                             match self.rebuild_page(&path, &text) {
                                 Ok(mut pages) => rebuilt_pages.append(&mut pages),
                                 Err(e) => eprintln!("conductor: rebuild failed for new content {}: {e}", path.display()),
@@ -3688,7 +3685,7 @@ impl Conductor {
                         // Rebuild the collection index page if it exists
                         let collection_index = self.site_dir.join("content").join(&stem).join("index.md");
                         if collection_index.exists()
-                            && let Some(text) = self.document_text(&collection_index)
+                            && let Some(text) = self.document_text_at(&collection_index)
                         {
                             match self.rebuild_page(&collection_index, &text) {
                                 Ok(mut pages) => rebuilt_pages.append(&mut pages),
@@ -3699,7 +3696,7 @@ impl Conductor {
                         // Rebuild the site root index if it exists
                         let site_index_path = self.site_dir.join("content").join("index.md");
                         if site_index_path.exists()
-                            && let Some(text) = self.document_text(&site_index_path)
+                            && let Some(text) = self.document_text_at(&site_index_path)
                         {
                             match self.rebuild_page(&site_index_path, &text) {
                                 Ok(mut pages) => rebuilt_pages.append(&mut pages),
@@ -3723,7 +3720,7 @@ impl Conductor {
             Command::GetDirtyBuffers => {
                 // Union of NED dirty_docs (NodeStore edits) and LSP doc_sources (editor buffer edits).
                 // - dirty_docs uses site-relative paths (e.g. "content/post/first.md")
-                // - doc_sources uses absolute paths; strip site_dir prefix to normalise
+                // - doc_sources is keyed by site path as well
                 let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
                 // NED dirty_docs (site-relative)
@@ -3733,12 +3730,10 @@ impl Conductor {
                 }
                 drop(dirty);
 
-                // LSP doc_sources (absolute → strip site_dir prefix)
+                // LSP doc_sources
                 let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
-                for abs_path in sources.keys() {
-                    if let Ok(rel) = abs_path.strip_prefix(&self.site_dir) {
-                        paths.insert(rel.to_string_lossy().to_string());
-                    }
+                for path in sources.keys() {
+                    paths.insert(path.to_string());
                 }
                 drop(sources);
 
@@ -3756,8 +3751,10 @@ impl Conductor {
                 CommandResult::with_response(Response::Conflicts(files))
             }
             Command::SaveBuffer { path, consent } => {
-                let rel_path = PathBuf::from(&path);
-                let abs_path = self.site_dir.join(&rel_path);
+                if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
+                    return CommandResult::error(format!("{path}: {e}"));
+                }
+                let rel_path = path.as_path().to_path_buf();
 
                 // The watcher may not have reported a change to the file yet:
                 // look at the file ourselves first (ADR-065).
@@ -3766,10 +3763,10 @@ impl Conductor {
                 // A save never overwrites a conflict without consent that
                 // names the file (ADR-065). Nothing is written.
                 if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).is_conflicted(&rel_path)
-                    && !consent.covers(&path)
+                    && !consent.covers(path.as_str())
                 {
                     return CommandResult {
-                        response: Response::ConflictsNeedConfirmation(vec![path]),
+                        response: Response::ConflictsNeedConfirmation(vec![path.to_string()]),
                         events: detected.into_iter().collect(),
                     };
                 }
@@ -3790,22 +3787,22 @@ impl Conductor {
                         }
                         None => return CommandResult::error(format!("document not in store: {path}")),
                     };
-                    if let Err(e) = self.write_document(&abs_path, text.as_bytes()) {
+                    if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
                     self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(&rel_path);
                     return CommandResult::ok();
                 }
 
-                // Backward compatibility: LSP-owned buffer (abs path in doc_sources)
+                // LSP-owned buffer (site path in doc_sources)
                 let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
-                if let Some(text) = sources.get(&abs_path) {
+                if let Some(text) = sources.get(&path) {
                     let text = text.clone();
                     drop(sources);
-                    if let Err(e) = self.write_document(&abs_path, text.as_bytes()) {
+                    if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
-                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&abs_path);
+                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
                     CommandResult::ok()
                 } else {
                     CommandResult::error(format!("buffer not dirty: {path}"))
@@ -3859,7 +3856,6 @@ impl Conductor {
                             .unwrap_or_else(|e| e.into_inner())
                             .restore(rel_path.clone(), *state);
                     };
-                    let abs_path = self.site_dir.join(rel_path);
                     let text = match self.doc_root_for_path(rel_path) {
                         Some(root) => {
                             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
@@ -3884,25 +3880,25 @@ impl Conductor {
                             continue;
                         }
                     };
-                    if let Err(e) = self.write_document(&abs_path, text.as_bytes()) {
+                    if let Err(e) = self.write_document(rel_path, text.as_bytes()) {
                         keep_dirty(&self.dirty_docs);
-                        failures.push(format!("write error for {}: {e}", abs_path.display()));
+                        failures.push(format!("write error for {}: {e}", rel_path.display()));
                         continue;
                     }
                 }
 
                 // Save LSP-owned buffers (doc_sources → disk)
                 let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
-                let buffers: Vec<(PathBuf, String)> = sources.iter()
+                let buffers: Vec<(editorial_types::SitePath, String)> = sources.iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 drop(sources);
-                let mut written: Vec<PathBuf> = Vec::new();
+                let mut written: Vec<editorial_types::SitePath> = Vec::new();
                 for (path, text) in buffers {
-                    match self.write_document(&path, text.as_bytes()) {
+                    match self.write_document(path.as_path(), text.as_bytes()) {
                         Ok(_) => written.push(path),
                         Err(e) => {
-                            failures.push(format!("write error for {}: {e}", path.display()));
+                            failures.push(format!("write error for {path}: {e}"));
                         }
                     }
                 }
@@ -3976,11 +3972,11 @@ impl Conductor {
                 }
             }
             Command::Classify { path } => {
-                let file_path = std::path::Path::new(&path);
-                let abs_path = if file_path.is_absolute() {
-                    file_path.to_path_buf()
-                } else {
-                    self.site_dir.join(file_path)
+                let Ok(abs_path) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) else {
+                    // Outside the site: not a site file.
+                    return CommandResult::with_response(Response::FileClassification(
+                        FileClassification::Unknown,
+                    ));
                 };
                 let kind = self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(&abs_path);
                 let classification = match kind {
@@ -4420,8 +4416,7 @@ mod smoke_tests {
     fn classify_absolute_content_path() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let abs_path = tmp.path().join("content/post/hello.md");
-        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let cmd = Command::Classify { path: editorial_types::SitePath::parse("content/post/hello.md").expect("valid") };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(
@@ -4438,8 +4433,7 @@ mod smoke_tests {
     fn classify_absolute_template_path() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let abs_path = tmp.path().join("templates/post/item.hiccup");
-        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let cmd = Command::Classify { path: editorial_types::SitePath::parse("templates/post/item.hiccup").expect("valid") };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(
@@ -4456,8 +4450,7 @@ mod smoke_tests {
     fn classify_absolute_schema_path() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let abs_path = tmp.path().join("schemas/post/item.md");
-        let cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let cmd = Command::Classify { path: editorial_types::SitePath::parse("schemas/post/item.md").expect("valid") };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(
@@ -4471,10 +4464,10 @@ mod smoke_tests {
     }
 
     #[test]
-    fn classify_outside_site_returns_unknown() {
+    fn classify_a_path_that_is_no_site_file_returns_unknown() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let cmd = Command::Classify { path: "/tmp/not-a-site/foo.md".to_string() };
+        let cmd = Command::Classify { path: editorial_types::SitePath::parse("not-a-site/foo.md").expect("valid") };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(result.response, Response::FileClassification(FileClassification::Unknown)),
@@ -4502,8 +4495,7 @@ mod smoke_tests {
         let conductor = make_conductor(&tmp);
 
         // Step 1: classify the content file (as the LSP does)
-        let abs_path = tmp.path().join("content/post/hello.md");
-        let classify_cmd = Command::Classify { path: abs_path.to_string_lossy().to_string() };
+        let classify_cmd = Command::Classify { path: editorial_types::SitePath::parse("content/post/hello.md").expect("valid") };
         let classify_result = conductor.handle_command(classify_cmd);
 
         let stem = match classify_result.response {
@@ -4537,19 +4529,18 @@ mod smoke_tests {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
 
-        let abs_path = tmp.path().join("content/post/hello.md");
-        let abs_path_str = abs_path.to_string_lossy().to_string();
+        let path = editorial_types::SitePath::parse("content/post/hello.md").expect("valid");
         let new_text = "title: Changed\n---\nNew body\n".to_string();
 
         // Notify conductor of the in-memory change
         let changed_cmd = Command::DocumentChanged {
-            path: abs_path_str.clone(),
+            path: path.clone(),
             text: new_text.clone(),
         };
         conductor.handle_command(changed_cmd);
 
         // Retrieve the in-memory text
-        let get_cmd = Command::GetDocumentText { path: abs_path_str };
+        let get_cmd = Command::GetDocumentText { path };
         let get_result = conductor.handle_command(get_cmd);
 
         match get_result.response {
@@ -5875,7 +5866,7 @@ mod creation_check_tests {
     ) -> Response {
         conductor
             .handle_command(Command::CreateNedSuggestion {
-                file: PathBuf::from(file),
+                file: editorial_types::ContentPath::parse(file).expect("valid"),
                 selection: selection.to_string(),
                 mutation,
                 reason: "test".to_string(),
@@ -6137,7 +6128,7 @@ mod ned_suggestion_handler_tests {
 
         let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let cmd = Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: selection.to_string(),
             mutation: editorial_types::NedMutation::SetText("Updated Title".to_string()),
             reason: "Better title".to_string(),
@@ -6187,7 +6178,7 @@ mod ned_suggestion_handler_tests {
         // link-slot is NonText — should be rejected at creation
         let selection = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "link-slot")"#;
         let cmd = Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: selection.to_string(),
             mutation: editorial_types::NedMutation::SetText("x".to_string()),
             reason: "should fail".to_string(),
@@ -6224,7 +6215,7 @@ mod ned_suggestion_handler_tests {
 
         let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let create_cmd = Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: selection.to_string(),
             mutation: editorial_types::NedMutation::SearchReplace {
                 search: "Test Title".to_string(),
@@ -6283,7 +6274,7 @@ mod ned_suggestion_handler_tests {
         // so that after we clear the NodeStore, the selection will fail to resolve.
         let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let create_cmd = Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: selection.to_string(),
             mutation: editorial_types::NedMutation::SetText("Changed".to_string()),
             reason: "test stale".to_string(),
@@ -6345,7 +6336,7 @@ mod ned_suggestion_handler_tests {
         // Delete addresses a block: the title slot's single heading.
         let selection = r#"(ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))"#;
         let create_cmd = Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: selection.to_string(),
             mutation: editorial_types::NedMutation::Delete,
             reason: "test reject".to_string(),
@@ -6396,7 +6387,7 @@ mod ned_suggestion_handler_tests {
     fn get_ned_suggestions_empty_for_unknown_file() {
         let (conductor, _tmp) = make_conductor_with_doc();
 
-        let file = editorial_types::ContentPath::new("content/test/nonexistent.md");
+        let file = editorial_types::ContentPath::parse("content/test/nonexistent.md").expect("valid");
         let result = conductor.handle_command(Command::GetNedSuggestions { file });
 
         match result.response {
@@ -6411,7 +6402,7 @@ mod ned_suggestion_handler_tests {
 
         let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let create_cmd = Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: selection.to_string(),
             mutation: editorial_types::NedMutation::SetText("Pending Title".to_string()),
             reason: "pending test".to_string(),
@@ -6423,7 +6414,7 @@ mod ned_suggestion_handler_tests {
             other => panic!("expected SuggestionCreated, got: {other:?}"),
         };
 
-        let file = editorial_types::ContentPath::new("content/test/doc.md");
+        let file = editorial_types::ContentPath::parse("content/test/doc.md").expect("valid");
         let result = conductor.handle_command(Command::GetNedSuggestions { file });
 
         match result.response {
@@ -6440,8 +6431,8 @@ mod ned_suggestion_handler_tests {
     fn get_ned_suggestions_returns_all_statuses() {
         let (conductor, _tmp) = make_conductor_with_doc();
 
-        let file_path = std::path::PathBuf::from("content/test/doc.md");
-        let file = editorial_types::ContentPath::new("content/test/doc.md");
+        let file = editorial_types::ContentPath::parse("content/test/doc.md").expect("valid");
+        let file_path = file.clone();
         let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
 
         // Create a Pending suggestion
@@ -6531,7 +6522,7 @@ mod ned_suggestion_handler_tests {
     fn get_ned_suggestions_filters_by_file() {
         let (conductor, _tmp) = make_conductor_with_doc();
 
-        let file_a = std::path::PathBuf::from("content/test/doc.md");
+        let file_a = editorial_types::ContentPath::parse("content/test/doc.md").expect("valid");
         let selection_a = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
 
         // Create suggestion on file_a
@@ -6552,7 +6543,7 @@ mod ned_suggestion_handler_tests {
         let sug_b = editorial_types::NedSuggestion {
             id: id_b.clone(),
             author: editorial_types::Author::Human("editor".to_string()),
-            file: editorial_types::ContentPath::new("content/test/other.md"),
+            file: editorial_types::ContentPath::parse("content/test/other.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("For file B".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6564,7 +6555,7 @@ mod ned_suggestion_handler_tests {
         conductor.ned_suggestions.write().unwrap().insert(id_b, sug_b);
 
         // Query file_a only
-        let file_a_query = editorial_types::ContentPath::new("content/test/doc.md");
+        let file_a_query = editorial_types::ContentPath::parse("content/test/doc.md").expect("valid");
         let result_a = conductor.handle_command(Command::GetNedSuggestions { file: file_a_query });
 
         match result_a.response {
@@ -6576,13 +6567,13 @@ mod ned_suggestion_handler_tests {
         }
 
         // Query file_b only
-        let file_b_query = editorial_types::ContentPath::new("content/test/other.md");
+        let file_b_query = editorial_types::ContentPath::parse("content/test/other.md").expect("valid");
         let result_b = conductor.handle_command(Command::GetNedSuggestions { file: file_b_query });
 
         match result_b.response {
             Response::NedSuggestions(v) => {
                 assert_eq!(v.len(), 1, "expected only file_b suggestion");
-                assert_eq!(v[0].file, editorial_types::ContentPath::new("content/test/other.md"));
+                assert_eq!(v[0].file, editorial_types::ContentPath::parse("content/test/other.md").expect("valid"));
             }
             other => panic!("expected NedSuggestions, got: {other:?}"),
         }
@@ -6598,7 +6589,7 @@ mod ned_suggestion_handler_tests {
         let sug_a = editorial_types::NedSuggestion {
             id: id_a.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/alpha.md"),
+            file: editorial_types::ContentPath::parse("content/test/alpha.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("Alpha".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6612,7 +6603,7 @@ mod ned_suggestion_handler_tests {
         let sug_b = editorial_types::NedSuggestion {
             id: id_b.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/beta.md"),
+            file: editorial_types::ContentPath::parse("content/test/beta.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("Beta".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6627,7 +6618,7 @@ mod ned_suggestion_handler_tests {
         let sug_c = editorial_types::NedSuggestion {
             id: id_c.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/gamma.md"),
+            file: editorial_types::ContentPath::parse("content/test/gamma.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("Gamma".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6664,7 +6655,7 @@ mod ned_suggestion_handler_tests {
         let sug_rejected = editorial_types::NedSuggestion {
             id: id_rejected.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("No show".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6678,7 +6669,7 @@ mod ned_suggestion_handler_tests {
         let sug_accepted = editorial_types::NedSuggestion {
             id: id_accepted.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/other.md"),
+            file: editorial_types::ContentPath::parse("content/test/other.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("Accepted".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6713,7 +6704,7 @@ mod ned_suggestion_handler_tests {
         let sug_stale = editorial_types::NedSuggestion {
             id: id_stale.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/stale-doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/stale-doc.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("Stale".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6746,7 +6737,7 @@ mod ned_suggestion_handler_tests {
         let sug_1 = editorial_types::NedSuggestion {
             id: id_1.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("First".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6759,7 +6750,7 @@ mod ned_suggestion_handler_tests {
         let sug_2 = editorial_types::NedSuggestion {
             id: id_2.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: "(some-selection)".to_string(),
             mutation: editorial_types::NedMutation::SetText("Second".to_string()),
             workspace_hash: "abc".to_string(),
@@ -6832,7 +6823,7 @@ mod suggestion_accept_tests {
 
     fn create(conductor: &Conductor, selection: &str, mutation: NedMutation) -> SuggestionId {
         let result = conductor.handle_command(Command::CreateNedSuggestion {
-            file: PathBuf::from(FILE),
+            file: editorial_types::ContentPath::parse(FILE).expect("valid"),
             selection: selection.to_string(),
             mutation,
             reason: "test".to_string(),
@@ -7014,7 +7005,7 @@ mod suggestion_accept_tests {
         let sug = editorial_types::NedSuggestion {
             id: id.clone(),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new(FILE),
+            file: editorial_types::ContentPath::parse(FILE).expect("valid"),
             selection: format!(
                 r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{OTHER}") "title")))"#
             ),
@@ -7051,7 +7042,7 @@ mod suggestion_accept_tests {
 
         // The title already reads "First Post".
         let result = conductor.handle_command(Command::CreateNedSuggestion {
-            file: PathBuf::from(FILE),
+            file: editorial_types::ContentPath::parse(FILE).expect("valid"),
             selection: TITLE_TEXT.to_string(),
             mutation: NedMutation::SetText("First Post".into()),
             reason: "test".to_string(),
@@ -7084,7 +7075,7 @@ mod suggestion_accept_tests {
         // B changes on disk, from outside.
         std::fs::write(tmp.path().join(OTHER), "# Second Post\n\n----\n\nDelta.\n").unwrap();
         let result =
-            conductor.handle_command(Command::FileChanged { paths: vec![OTHER.to_string()] });
+            conductor.handle_command(Command::FileChanged { paths: vec![editorial_types::SitePath::parse(OTHER).expect("valid")] });
         assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
 
         assert_eq!(title(&conductor), "Edited A", "A's unsaved edit survives");
@@ -7117,7 +7108,7 @@ mod suggestion_accept_tests {
     }
 
     fn reload(conductor: &Conductor, file: &str) -> CommandResult {
-        conductor.handle_command(Command::ReloadDocument { path: file.to_string() })
+        conductor.handle_command(Command::ReloadDocument { path: editorial_types::ContentPath::parse(file).expect("valid") })
     }
 
     #[test]
@@ -7163,9 +7154,9 @@ mod suggestion_accept_tests {
     fn reload_with_only_an_editor_buffer_does_not_claim_to_discard_it() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let abs = tmp.path().join(FILE);
+        let key = editorial_types::SitePath::parse(FILE).expect("valid");
         conductor.handle_command(Command::DocumentChanged {
-            path: abs.to_string_lossy().to_string(),
+            path: key.clone(),
             text: "# Buffer Title\n\n----\n\nBody.\n".to_string(),
         });
         assert!(!is_dirty(&conductor), "no store edit");
@@ -7178,7 +7169,7 @@ mod suggestion_accept_tests {
             result.response
         );
         assert!(
-            conductor.doc_sources.read().unwrap().get(&abs).is_none(),
+            conductor.doc_sources.read().unwrap().get(&key).is_none(),
             "the conductor's copy of the buffer is gone"
         );
     }
@@ -7223,11 +7214,11 @@ mod suggestion_accept_tests {
         let conductor = make_conductor(&tmp);
         edit_title(&conductor, FILE, "Edited A");
         std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
-        let mut changed = vec![FILE.to_string()];
+        let mut changed = vec![editorial_types::SitePath::parse(FILE).expect("valid")];
         if both {
             edit_title(&conductor, OTHER_FILE, "Edited B");
             std::fs::write(tmp.path().join(OTHER_FILE), SHELL_B).unwrap();
-            changed.push(OTHER_FILE.to_string());
+            changed.push(editorial_types::SitePath::parse(OTHER_FILE).expect("valid"));
         }
         conductor.handle_command(Command::FileChanged { paths: changed });
         (conductor, tmp)
@@ -7256,7 +7247,7 @@ mod suggestion_accept_tests {
         std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
 
         let result =
-            conductor.handle_command(Command::FileChanged { paths: vec![FILE.to_string()] });
+            conductor.handle_command(Command::FileChanged { paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")] });
 
         assert_eq!(title(&conductor), "Edited A", "the disk version does not win");
         assert!(is_dirty(&conductor));
@@ -7271,7 +7262,7 @@ mod suggestion_accept_tests {
         // A second event for the same conflict is not announced again.
         std::fs::write(tmp.path().join(FILE), "# Shell Again\n\n----\n\nAgain.\n").unwrap();
         let again =
-            conductor.handle_command(Command::FileChanged { paths: vec![FILE.to_string()] });
+            conductor.handle_command(Command::FileChanged { paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")] });
         assert!(
             !again.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { .. })),
             "{:?}",
@@ -7288,7 +7279,7 @@ mod suggestion_accept_tests {
         // The editor wrote the file itself, then says so.
         std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
         let result = conductor.handle_command(Command::DocumentSaved {
-            path: tmp.path().join(FILE).to_string_lossy().to_string(),
+            path: editorial_types::SitePath::parse(FILE).expect("valid"),
         });
 
         assert!(
@@ -7358,7 +7349,7 @@ mod suggestion_accept_tests {
         let (conductor, tmp) = conflicted(false);
 
         let refused = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
             .response;
         assert!(
             matches!(&refused, Response::ConflictsNeedConfirmation(files) if files == &vec![FILE.to_string()]),
@@ -7367,7 +7358,7 @@ mod suggestion_accept_tests {
         assert_eq!(disk(&tmp, FILE), SHELL_A);
 
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: consent(&[FILE]) })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: consent(&[FILE]) })
             .response;
         assert!(matches!(saved, Response::Ok), "{saved:?}");
         assert!(disk(&tmp, FILE).contains("Edited A"));
@@ -7386,7 +7377,7 @@ mod suggestion_accept_tests {
         std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
 
         let refused = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
 
         assert!(
             matches!(&refused.response, Response::ConflictsNeedConfirmation(files) if files == &vec![FILE.to_string()]),
@@ -7404,7 +7395,7 @@ mod suggestion_accept_tests {
 
         // With consent that names the file, the save goes through.
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: consent(&[FILE]) })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: consent(&[FILE]) })
             .response;
         assert!(matches!(saved, Response::Ok), "{saved:?}");
         assert!(disk(&tmp, FILE).contains("Edited A"));
@@ -7444,13 +7435,13 @@ mod suggestion_accept_tests {
         let conductor = make_conductor(&tmp);
         edit_title(&conductor, FILE, "Edited A");
         let first = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
             .response;
         assert!(matches!(first, Response::Ok), "{first:?}");
 
         edit_title(&conductor, FILE, "Edited again");
         let second = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
             .response;
         assert!(matches!(second, Response::Ok), "{second:?}");
         assert!(disk(&tmp, FILE).contains("Edited again"));
@@ -7465,13 +7456,13 @@ mod suggestion_accept_tests {
         std::fs::remove_file(tmp.path().join(FILE)).unwrap();
 
         let refused = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
             .response;
         assert!(matches!(refused, Response::ConflictsNeedConfirmation(_)), "{refused:?}");
         assert!(!tmp.path().join(FILE).exists(), "nothing was written");
 
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: consent(&[FILE]) })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: consent(&[FILE]) })
             .response;
         assert!(matches!(saved, Response::Ok), "{saved:?}");
         assert!(disk(&tmp, FILE).contains("Edited A"), "the file is recreated on consent");
@@ -7510,7 +7501,7 @@ mod suggestion_accept_tests {
         );
         // So the watcher's event for it changes nothing.
         let event = conductor.handle_command(Command::FileChanged {
-            paths: vec!["content/post/new.md".to_string()],
+            paths: vec![editorial_types::SitePath::parse("content/post/new.md").expect("valid")],
         });
         assert!(matches!(event.response, Response::Ok) && event.events.is_empty());
     }
@@ -7855,7 +7846,7 @@ mod suggestion_accept_tests {
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert!(is_dirty(&conductor));
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
             .response;
         assert!(!matches!(saved, Response::Error(_)), "save: {saved:?}");
         std::fs::read_to_string(tmp.path().join(FILE)).expect("file written")
@@ -7976,7 +7967,7 @@ mod block_edit_tests {
         intent: BlockEditIntent,
     ) -> BlockEditRequest {
         BlockEditRequest {
-            file: editorial_types::ContentPath::new(file),
+            file: editorial_types::ContentPath::parse(file).expect("valid"),
             selection: selection.to_string(),
             base: BlockText::Markdown(base.to_string()),
             proposed: BlockText::Markdown(proposed.to_string()),
@@ -8129,7 +8120,7 @@ mod block_edit_tests {
 
     fn saved_file(tmp: &tempfile::TempDir, conductor: &Conductor) -> String {
         let result = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
         assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
         std::fs::read_to_string(tmp.path().join(FILE)).expect("content file")
     }
@@ -8421,7 +8412,7 @@ mod block_edit_tests {
         };
         let saved = |tmp: &tempfile::TempDir, conductor: &Conductor| {
             let result = conductor
-                .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
+                .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
             assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
             std::fs::read_to_string(tmp.path().join(FILE)).expect("content file")
         };
@@ -8717,7 +8708,7 @@ mod block_edit_tests {
             "{:?}",
             response(&applied)
         );
-        let saved = conductor.handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() });
+        let saved = conductor.handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
         assert!(matches!(saved.response, Response::Ok), "{:?}", saved.response);
         assert!(dirty_buffers(&conductor).is_empty());
 
@@ -8858,7 +8849,7 @@ mod block_edit_tests {
             manual_edit_first_paragraph(&conductor, "Totally different");
             let result = conductor.run_lowered(
                 BlockEditIntent::Apply,
-                Path::new(FILE),
+                &editorial_types::ContentPath::parse(FILE).expect("valid"),
                 lowered,
                 None,
                 None,
@@ -9558,7 +9549,7 @@ mod body_structural_bsave_tests {
         dirty_doc_without_body(&conductor, doc_root);
 
         let response = conductor
-            .handle_command(Command::SaveBuffer { path: FILE.to_string(), consent: Default::default() })
+            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
             .response;
         assert!(
             !matches!(response, Response::Error(_)),
@@ -10157,7 +10148,7 @@ mod link_expression_pipeline_tests {
         proposed: editorial_types::BlockText,
     ) {
         let result = conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
-            file: editorial_types::ContentPath::new(file),
+            file: editorial_types::ContentPath::parse(file).expect("valid"),
             selection: selection.to_string(),
             base,
             proposed,
@@ -10295,9 +10286,9 @@ mod link_expression_pipeline_tests {
             .collect()
     }
 
-    fn document_changed(conductor: &Conductor, tmp: &tempfile::TempDir, rel: &str, text: &str) -> BTreeSet<String> {
+    fn document_changed(conductor: &Conductor, _tmp: &tempfile::TempDir, rel: &str, text: &str) -> BTreeSet<String> {
         let result = conductor.handle_command(Command::DocumentChanged {
-            path: tmp.path().join(rel).to_string_lossy().into_owned(),
+            path: editorial_types::SitePath::parse(rel).expect("valid"),
             text: text.to_string(),
         });
         assert!(
@@ -10564,7 +10555,7 @@ mod link_expression_pipeline_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         let result = conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
-            file: editorial_types::ContentPath::new("content/post/p1.md"),
+            file: editorial_types::ContentPath::parse("content/post/p1.md").expect("valid"),
             selection: r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/p1.md") "published")) "paragraph" 0)"#
                 .to_string(),
             base: editorial_types::BlockText::Markdown("2026-01-10".to_string()),
@@ -10647,7 +10638,7 @@ mod link_expression_pipeline_tests {
         let p2 = tmp.path().join("content/post/p2.md");
         std::fs::remove_file(&p2).unwrap();
         conductor.handle_command(Command::FileChanged {
-            paths: vec![p2.to_string_lossy().into_owned()],
+            paths: vec![editorial_types::SitePath::parse("content/post/p2.md").expect("valid")],
         });
         assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p1"]));
         assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p3"]));
@@ -10849,7 +10840,7 @@ mod model_migration_tests {
         let suggestion = NedSuggestion {
             id: SuggestionId::from(id.to_string()),
             author: Author::Claude,
-            file: ContentPath::new(FILE),
+            file: ContentPath::parse(FILE).expect("valid"),
             selection: selection.to_string(),
             mutation,
             workspace_hash: "untracked".to_string(),
@@ -11338,7 +11329,7 @@ mod empty_slot_tests {
 
     fn fill(file: &str, slot: &str, proposed: &str, intent: BlockEditIntent) -> Command {
         Command::BlockEdit(BlockEditRequest {
-            file: ContentPath::new(file),
+            file: ContentPath::parse(file).expect("valid"),
             selection: slot_address(file, slot),
             base: BlockText::Markdown(String::new()),
             proposed: BlockText::Markdown(proposed.to_string()),
@@ -11719,5 +11710,291 @@ mod emitted_address_tests {
         // Every editable element is covered, but the multi-value link slots.
         assert_eq!(checked, editable_count - reference_links);
         assert_eq!(reference_links, 0, "site/ has no multi-value reference link slot rendered");
+    }
+}
+
+/// A client path never leaves the site directory (reads or writes).
+///
+/// Every test lays out `<tmp>/site/` (the site) beside `<tmp>/outside.md` and
+/// `<tmp>/outside-dir/`, tries the attack, and checks that what is outside is
+/// unchanged. A path the boundary refuses to build (`SitePath::parse`) cannot
+/// be sent: that is the first line of defence and the attack stops there; the
+/// conductor's own checks are the second, shown by the symlink tests, which
+/// build a lexically valid path.
+#[cfg(test)]
+mod path_boundary_tests {
+    use super::*;
+    use editorial_types::{ContentPath, SitePath};
+
+    const SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+    const TEMPLATE: &str = "[:div [:h1 title]]";
+    const OUTSIDE: &str = "# Outside\n\n----\n\nThe original text.\n";
+    const BUFFER: &str = "# Overwritten\n\n----\n\nThis must never reach the file.\n";
+
+    struct World {
+        tmp: tempfile::TempDir,
+        conductor: Conductor,
+    }
+
+    impl World {
+        fn site(&self) -> PathBuf {
+            self.tmp.path().join("site")
+        }
+        fn outside_file(&self) -> PathBuf {
+            self.tmp.path().join("outside.md")
+        }
+        fn outside_dir(&self) -> PathBuf {
+            self.tmp.path().join("outside-dir")
+        }
+        fn outside_bytes(&self) -> Vec<u8> {
+            std::fs::read(self.outside_file()).expect("outside.md exists")
+        }
+    }
+
+    fn world() -> World {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let site = tmp.path().join("site");
+        for dir in ["schemas/post", "templates/post", "content/post"] {
+            std::fs::create_dir_all(site.join(dir)).unwrap();
+        }
+        std::fs::write(site.join("schemas/post/item.md"), SCHEMA).unwrap();
+        std::fs::write(site.join("templates/post/item.hiccup"), TEMPLATE).unwrap();
+        std::fs::write(site.join("content/post/hello.md"), "# Hello\n\n----\n\nBody.\n").unwrap();
+        std::fs::write(tmp.path().join("outside.md"), OUTSIDE).unwrap();
+        std::fs::create_dir_all(tmp.path().join("outside-dir")).unwrap();
+        let repo = site_repository::SiteRepository::builder().from_dir(&site).build();
+        let conductor = Conductor::with_repo(site, repo).expect("conductor");
+        World { tmp, conductor }
+    }
+
+    /// The ways a client may spell "the file beside the site".
+    fn spellings_of_outside(w: &World) -> Vec<String> {
+        vec![
+            w.outside_file().to_string_lossy().into_owned(),
+            "../outside.md".to_string(),
+            "content/../../outside.md".to_string(),
+            "content/post/../../../outside.md".to_string(),
+        ]
+    }
+
+    fn response_is_error(r: &Response) -> bool {
+        matches!(r, Response::Error(_))
+    }
+
+    /// THE write: an editor buffer with a path outside the site, then a save.
+    #[test]
+    fn editor_buffer_outside_the_site_is_never_saved() {
+        let w = world();
+        let before = w.outside_bytes();
+        for spelling in spellings_of_outside(&w) {
+            let Ok(path) = SitePath::parse(&spelling) else { continue };
+            w.conductor.handle_command(Command::DocumentChanged { path, text: BUFFER.to_string() });
+            w.conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() });
+            assert_eq!(w.outside_bytes(), before, "{spelling} overwrote a file outside the site");
+        }
+        assert_eq!(w.outside_bytes(), before);
+    }
+
+    #[test]
+    fn save_buffer_with_an_absolute_path_writes_nothing_outside() {
+        let w = world();
+        let before = w.outside_bytes();
+        let spelling = w.outside_file().to_string_lossy().into_owned();
+        if let Ok(path) = SitePath::parse(&spelling) {
+            w.conductor.handle_command(Command::DocumentChanged {
+                path: path.clone(),
+                text: BUFFER.to_string(),
+            });
+            let saved = w
+                .conductor
+                .handle_command(Command::SaveBuffer { path, consent: Default::default() });
+            assert!(
+                response_is_error(&saved.response),
+                "saving outside the site must be refused: {:?}",
+                saved.response
+            );
+        }
+        assert_eq!(w.outside_bytes(), before, "an absolute path wrote outside the site");
+    }
+
+    #[test]
+    fn save_buffer_with_parent_segments_writes_nothing_outside() {
+        let w = world();
+        let before = w.outside_bytes();
+        for spelling in ["../outside.md", "content/../../outside.md", "content/post/../../../outside.md"] {
+            if let Ok(path) = SitePath::parse(spelling) {
+                w.conductor.handle_command(Command::DocumentChanged {
+                    path: path.clone(),
+                    text: BUFFER.to_string(),
+                });
+                let saved = w
+                    .conductor
+                    .handle_command(Command::SaveBuffer { path, consent: Default::default() });
+                assert!(
+                    response_is_error(&saved.response),
+                    "{spelling}: saving outside the site must be refused: {:?}",
+                    saved.response
+                );
+            }
+            assert_eq!(w.outside_bytes(), before, "{spelling} wrote outside the site");
+        }
+    }
+
+    /// THE read: asking for the text of a file outside the site.
+    #[test]
+    fn get_document_text_cannot_read_outside_the_site() {
+        let w = world();
+        for spelling in spellings_of_outside(&w) {
+            let Ok(path) = SitePath::parse(&spelling) else { continue };
+            let answer = w.conductor.handle_command(Command::GetDocumentText { path }).response;
+            assert!(
+                matches!(answer, Response::DocumentText(None)),
+                "{spelling} read a file outside the site: {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_moved_cannot_read_outside_the_site() {
+        let w = world();
+        // `content/post/` names the `post` schema, so a read would parse and
+        // answer with an anchor.
+        for spelling in ["content/post/../../../outside.md"] {
+            let Ok(path) = SitePath::parse(spelling) else { continue };
+            let result = w.conductor.handle_command(Command::CursorMoved { path, line: 4 });
+            assert!(
+                result.events.is_empty(),
+                "{spelling} read a file outside the site: {:?}",
+                result.events
+            );
+        }
+    }
+
+    #[test]
+    fn reload_refuses_a_path_outside_the_site() {
+        let w = world();
+        for spelling in ["content/../../outside.md", "content/post/../../../outside.md"] {
+            let Ok(path) = ContentPath::parse(spelling) else { continue };
+            let result = w.conductor.handle_command(Command::ReloadDocument { path });
+            assert!(
+                response_is_error(&result.response),
+                "{spelling} must be refused: {:?}",
+                result.response
+            );
+        }
+    }
+
+    /// A symlink inside the site that points out of it. The path is lexically
+    /// fine, so only the conductor's own check can stop it.
+    #[cfg(unix)]
+    fn link_out(w: &World) {
+        std::os::unix::fs::symlink(w.outside_dir(), w.site().join("content/escape"))
+            .expect("symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_the_site_pointing_out_is_not_written_through() {
+        let w = world();
+        link_out(&w);
+        let path = SitePath::parse("content/escape/note.md").expect("a plain site path");
+        w.conductor.handle_command(Command::DocumentChanged {
+            path: path.clone(),
+            text: BUFFER.to_string(),
+        });
+        w.conductor.handle_command(Command::SaveBuffer { path, consent: Default::default() });
+        w.conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() });
+        assert!(
+            !w.outside_dir().join("note.md").exists(),
+            "the buffer was written through a symlink out of the site"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_the_site_pointing_out_is_not_read_through() {
+        let w = world();
+        std::fs::write(w.outside_dir().join("secret.md"), OUTSIDE).unwrap();
+        link_out(&w);
+        let path = SitePath::parse("content/escape/secret.md").expect("a plain site path");
+        let answer = w.conductor.handle_command(Command::GetDocumentText { path }).response;
+        assert!(
+            matches!(answer, Response::DocumentText(None)),
+            "read through a symlink out of the site: {answer:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_changed_outside_the_site_is_ignored() {
+        let w = world();
+        link_out(&w);
+        std::fs::write(w.outside_dir().join("note.md"), OUTSIDE).unwrap();
+        // The reference: a change inside the site is a rebuild with events.
+        let inside = w.conductor.handle_command(Command::FileChanged {
+            paths: vec![SitePath::parse("content/post/hello.md").expect("valid")],
+        });
+        assert!(!inside.events.is_empty(), "the reference change must rebuild: {:?}", inside.events);
+
+        // A change that resolves outside the site is not the conductor's.
+        let outside = w.conductor.handle_command(Command::FileChanged {
+            paths: vec![SitePath::parse("content/escape/note.md").expect("a plain site path")],
+        });
+        assert!(matches!(outside.response, Response::Ok), "{:?}", outside.response);
+        assert!(outside.events.is_empty(), "an outside change was acted on: {:?}", outside.events);
+    }
+
+    /// GUARD: a block edit for a file outside the site was already refused (the
+    /// selection resolves into another document). It must stay refused.
+    #[test]
+    fn block_edit_with_a_traversal_file_is_refused() {
+        let w = world();
+        let Ok(file) = ContentPath::parse("content/../../outside.md") else { return };
+        let result = w.conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
+            file,
+            selection: r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/hello.md") "body")) "paragraph" 0)"#.to_string(),
+            base: editorial_types::BlockText::Markdown("Body.".to_string()),
+            proposed: editorial_types::BlockText::Markdown("Changed.".to_string()),
+            intent: editorial_types::BlockEditIntent::Apply,
+            reason: None,
+        }));
+        assert!(
+            matches!(result.response, Response::BlockEdited(editorial_types::BlockEditResponse::Refused(_))),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(w.outside_bytes(), OUTSIDE.as_bytes());
+    }
+
+    /// GUARD: as above, for a suggestion.
+    #[test]
+    fn create_ned_suggestion_with_a_traversal_file_is_refused() {
+        let w = world();
+        let Ok(file) = ContentPath::parse("content/../../outside.md") else { return };
+        let result = w.conductor.handle_command(Command::CreateNedSuggestion {
+            file,
+            selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/hello.md") "title")))"#.to_string(),
+            mutation: editorial_types::NedMutation::SetText("Hijacked".to_string()),
+            reason: "traversal".to_string(),
+            author: editorial_types::Author::Claude,
+        });
+        assert!(response_is_error(&result.response), "{:?}", result.response);
+        assert_eq!(w.outside_bytes(), OUTSIDE.as_bytes());
+    }
+
+    /// GUARD: a slug is a name, never a path.
+    #[test]
+    fn create_content_refuses_a_traversal_slug() {
+        let w = world();
+        for slug in ["../../outside-dir/evil", "../evil", "/tmp/evil"] {
+            let result = w.conductor.handle_command(Command::CreateContent {
+                stem: "post".to_string(),
+                slug: slug.to_string(),
+            });
+            assert!(response_is_error(&result.response), "{slug}: {:?}", result.response);
+        }
+        assert!(!w.outside_dir().join("evil.md").exists());
+        assert!(!w.tmp.path().join("evil.md").exists());
+        assert!(!w.site().join("content/evil.md").exists());
     }
 }

@@ -77,6 +77,23 @@ fn json_rpc_ok(id: Value, result: Value) -> JsonRpcResponse {
     }
 }
 
+/// The `file` argument of a tool as a content path, or the error to answer
+/// with. The tools never pass an unchecked path on to the conductor.
+fn parse_file_arg(
+    id: &Value,
+    file: &str,
+) -> Result<editorial_types::ContentPath, JsonRpcResponse> {
+    editorial_types::ContentPath::parse(file).map_err(|e| {
+        json_rpc_ok(
+            id.clone(),
+            serde_json::json!({
+                "content": [{"type": "text", "text": format!("Invalid file {file:?}: {e}")}],
+                "isError": true
+            }),
+        )
+    })
+}
+
 /// The answer to a suggestion that the content already satisfies: not an
 /// error, and no suggestion was created.
 fn already_in_place(id: Value) -> JsonRpcResponse {
@@ -406,9 +423,12 @@ fn handle_request(
                         .get("file")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
-                    let abs_path = tool_site_dir.join(file);
+                    let content_file = match parse_file_arg(&req.id, file) {
+                        Ok(f) => f,
+                        Err(refusal) => return refusal,
+                    };
                     match cond.send(&conductor::Command::GetDocumentText {
-                        path: abs_path.to_string_lossy().to_string(),
+                        path: content_file.into(),
                     }) {
                         Ok(conductor::Response::DocumentText(Some(text))) => {
                             json_rpc_ok(
@@ -498,9 +518,13 @@ fn handle_request(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
+                    let content_file = match parse_file_arg(&req.id, file) {
+                        Ok(f) => f,
+                        Err(refusal) => return refusal,
+                    };
                     let (selection, mutation) = lower_suggest_args(file, slot, value);
                     match cond.send(&conductor::Command::CreateNedSuggestion {
-                        file: std::path::PathBuf::from(file),
+                        file: content_file,
                         selection,
                         mutation,
                         reason: reason.to_string(),
@@ -544,8 +568,12 @@ fn handle_request(
                         .unwrap_or("");
 
                     // Query NED suggestions.
+                    let content_file = match parse_file_arg(&req.id, file) {
+                        Ok(f) => f,
+                        Err(refusal) => return refusal,
+                    };
                     let (ned_lines, ned_error) = match cond.send(&conductor::Command::GetNedSuggestions {
-                        file: editorial_types::ContentPath::new(file),
+                        file: content_file,
                     }) {
                         Ok(conductor::Response::NedSuggestions(suggestions)) => {
                             let lines: Vec<String> = suggestions
@@ -610,9 +638,13 @@ fn handle_request(
                         );
                     }
 
+                    let content_file = match parse_file_arg(&req.id, file) {
+                        Ok(f) => f,
+                        Err(refusal) => return refusal,
+                    };
                     let (selection, mutation) = lower_body_edit_args(file, search, replace);
                     match cond.send(&conductor::Command::CreateNedSuggestion {
-                        file: std::path::PathBuf::from(file),
+                        file: content_file,
                         selection,
                         mutation,
                         reason: reason.to_string(),
@@ -675,8 +707,12 @@ fn handle_request(
                             }),
                         );
                     }
+                    let content_file = match parse_file_arg(&req.id, file) {
+                        Ok(f) => f,
+                        Err(refusal) => return refusal,
+                    };
                     match cond.send(&conductor::Command::CreateNedSuggestion {
-                        file: std::path::PathBuf::from(file),
+                        file: content_file,
                         selection: selection.to_string(),
                         mutation,
                         reason: reason.to_string(),
@@ -1347,7 +1383,7 @@ mod tests {
         editorial_types::NedSuggestion {
             id: editorial_types::SuggestionId::from("sug-test-id".to_string()),
             author,
-            file: editorial_types::ContentPath::new("content/post/hello.md"),
+            file: editorial_types::ContentPath::parse("content/post/hello.md").expect("valid"),
             selection: "(ned/slot (ned/doc-by-path \"content/post/hello.md\") \"title\")".to_string(),
             mutation,
             workspace_hash: "abc123".to_string(),
@@ -2088,13 +2124,54 @@ mod tests {
         )
     }
 
+    #[test]
+    fn suggest_ned_with_a_traversal_file_is_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        let _url = start_conductor_server(tmp.path());
+
+        for bad in ["../outside.md", "/etc/passwd", "content/../../x.md", "schemas/post/item.md"] {
+            let resp = call_tool(
+                tmp.path(),
+                "suggest_ned",
+                serde_json::json!({
+                    "file": bad,
+                    "selection": r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first-post.md") "title")))"#,
+                    "mutation": { "SetText": "Hijacked" },
+                    "reason": "traversal"
+                }),
+            );
+            assert!(is_error(&resp), "{bad} must be an error");
+            let text = extract_text(&resp);
+            assert!(
+                text.starts_with("Invalid file"),
+                "{bad} must be refused as an invalid file before the conductor; got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_content_with_a_traversal_file_is_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        build_e2e_site(&tmp);
+        std::fs::write(tmp.path().join("outside-marker.md"), "SECRET").expect("write");
+        let _url = start_conductor_server(tmp.path());
+
+        for bad in ["../outside-marker.md", "/etc/passwd"] {
+            let resp = call_tool(tmp.path(), "get_content", serde_json::json!({ "file": bad }));
+            assert!(is_error(&resp), "{bad} must be an error");
+            let text = extract_text(&resp);
+            assert!(text.starts_with("Invalid file"), "{bad}: {text}");
+        }
+    }
+
     /// Accept the only suggestion for `E2E_FILE`, save the document and return
     /// the file's new contents on disk.
     fn accept_only_suggestion_and_save(url: &str, site_dir: &std::path::Path) -> String {
         let client = conductor::ConductorClient::connect(url).expect("connect");
         let suggestions = match client
             .send(&conductor::Command::GetNedSuggestions {
-                file: editorial_types::ContentPath::new(E2E_FILE),
+                file: editorial_types::ContentPath::parse(E2E_FILE).expect("valid"),
             })
             .expect("get suggestions")
         {
@@ -2111,7 +2188,7 @@ mod tests {
 
         let after = match client
             .send(&conductor::Command::GetNedSuggestions {
-                file: editorial_types::ContentPath::new(E2E_FILE),
+                file: editorial_types::ContentPath::parse(E2E_FILE).expect("valid"),
             })
             .expect("get suggestions")
         {
@@ -2126,7 +2203,7 @@ mod tests {
 
         let saved = client
             .send(&conductor::Command::SaveBuffer {
-                path: E2E_FILE.to_string(),
+                path: editorial_types::SitePath::parse(E2E_FILE).expect("valid"),
                 consent: editorial_types::ConflictConsent::None,
             })
             .expect("save");
@@ -2265,7 +2342,7 @@ mod tests {
         let client = conductor::ConductorClient::connect(&url).expect("connect");
         match client
             .send(&conductor::Command::GetNedSuggestions {
-                file: editorial_types::ContentPath::new(E2E_FILE),
+                file: editorial_types::ContentPath::parse(E2E_FILE).expect("valid"),
             })
             .expect("get suggestions")
         {

@@ -466,6 +466,9 @@ fn reload_message(file: &str, discarded: bool, editor_buffer: bool) -> String {
 /// `ensure_conductor` it never starts a conductor. With none running there is
 /// nothing to reload, which is not an error.
 fn reload_document(site_dir: &Path, file: &str) -> Result<(), CliError> {
+    // Checked before anything is sent: the file must be a content file of the site.
+    let path = editorial_types::ContentPath::parse(file)
+        .map_err(|e| CliError::Render(format!("cannot reload {file}: {e}")))?;
     let client = conductor::ConductorClient::connect(&conductor::socket_url(site_dir))
         .ok()
         .filter(|client| client.ping().is_ok());
@@ -474,7 +477,7 @@ fn reload_document(site_dir: &Path, file: &str) -> Result<(), CliError> {
         return Ok(());
     };
     match client
-        .send(&conductor::Command::ReloadDocument { path: file.to_string() })
+        .send(&conductor::Command::ReloadDocument { path })
         .map_err(CliError::Render)?
     {
         conductor::Response::Reloaded { discarded, editor_buffer } => {
@@ -857,6 +860,19 @@ mod tests {
              Note: content/x.md also has unsaved changes in your editor. They stay there; save or discard them in the editor."
         );
         assert!(reload_message("content/x.md", true, true).contains("discarded unsaved edits."));
+    }
+
+    #[test]
+    fn reload_cli_refuses_a_path_outside_the_site() {
+        // No conductor runs for this directory, so a path that were accepted
+        // would end in "nothing to reload" (Ok). A refusal is an error.
+        let dir = std::env::temp_dir().join("presemble-reload-refusal-no-site");
+        for bad in ["../outside.md", "/etc/passwd", "content/../../x.md", "schemas/a.md", "content/a.txt"] {
+            assert!(
+                reload_document(&dir, bad).is_err(),
+                "{bad} must be refused before anything is sent"
+            );
+        }
     }
     use site_index::{NodeRole, SiteGraph, SiteNode, UrlPath};
 

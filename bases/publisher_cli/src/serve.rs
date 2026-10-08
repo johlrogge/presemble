@@ -895,7 +895,7 @@ async fn block_edit_handler(
 
 #[derive(serde::Deserialize)]
 struct NedSuggestionCreateRequest {
-    file: String,
+    file: editorial_types::ContentPath,
     selection: String,
     mutation: editorial_types::NedMutation,
     reason: String,
@@ -930,7 +930,7 @@ async fn ned_suggestions_create_handler(
         return failed(e);
     }
     match state.conductor.send(&conductor::Command::CreateNedSuggestion {
-        file: std::path::PathBuf::from(&req.file),
+        file: req.file,
         selection: req.selection,
         mutation: req.mutation,
         reason: req.reason,
@@ -977,9 +977,19 @@ async fn ned_suggestions_list_handler(
         ).into_response();
     }
 
-    match state.conductor.send(&conductor::Command::GetNedSuggestions {
-        file: editorial_types::ContentPath::new(&query.file),
-    }) {
+    let file = match editorial_types::ContentPath::parse(&query.file) {
+        Ok(file) => file,
+        Err(e) => {
+            let body = format!(r#"{{"error":{:?}}}"#, e.to_string());
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                body.into_bytes(),
+            ).into_response();
+        }
+    };
+
+    match state.conductor.send(&conductor::Command::GetNedSuggestions { file }) {
         Ok(conductor::Response::NedSuggestions(suggestions)) => {
             let browser: Vec<NedSuggestionJson> = suggestions.iter().map(NedSuggestionJson::from).collect();
             let json = serde_json::to_vec(&browser).unwrap_or_else(|_| b"[]".to_vec());
@@ -2020,13 +2030,9 @@ fn watch_and_rebuild(
         // Convert dirty paths to site-relative strings for the conductor.
         // The notify watcher returns absolute paths; strip the site_dir prefix
         // so the conductor can join them with its own site_dir cleanly.
-        let paths: Vec<String> = dirty.iter()
-            .filter_map(|p| {
-                p.strip_prefix(site_dir)
-                    .unwrap_or(p)
-                    .to_str()
-                    .map(|s| s.to_string())
-            })
+        // A path outside the site (or not a plain site path) is dropped here.
+        let paths: Vec<editorial_types::SitePath> = dirty.iter()
+            .filter_map(|p| editorial_types::SitePath::from_absolute(site_dir, p).ok())
             .collect();
 
         println!("  rebuild: {} file(s) changed [{}]",
@@ -2780,7 +2786,7 @@ mod tests {
         let suggestion = editorial_types::NedSuggestion {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/post/a.md"),
+            file: editorial_types::ContentPath::parse("content/post/a.md").expect("valid"),
             selection: "(root)".to_string(),
             mutation: editorial_types::NedMutation::Delete,
             workspace_hash: "untracked".to_string(),
@@ -2802,7 +2808,7 @@ mod tests {
     fn editorial_message_for_ned_suggestion_staled_is_suggestion_list_changed() {
         let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionStaled {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
-            file: editorial_types::ContentPath::new("content/post/a.md"),
+            file: editorial_types::ContentPath::parse("content/post/a.md").expect("valid"),
             reason: "gone".to_string(),
         });
         match msg {
@@ -2817,7 +2823,7 @@ mod tests {
     fn editorial_message_for_ned_suggestion_accepted_is_reload_of_pages() {
         let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
-            file: editorial_types::ContentPath::new("content/post/a.md"),
+            file: editorial_types::ContentPath::parse("content/post/a.md").expect("valid"),
             pages: vec!["/post/a".to_string()],
         });
         match msg {
@@ -2832,7 +2838,7 @@ mod tests {
     fn editorial_message_for_ned_suggestion_accepted_without_pages_is_suggestion_list_changed() {
         let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionAccepted {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
-            file: editorial_types::ContentPath::new("content/post/a.md"),
+            file: editorial_types::ContentPath::parse("content/post/a.md").expect("valid"),
             pages: vec![],
         });
         match msg {
@@ -2847,7 +2853,7 @@ mod tests {
     fn editorial_message_for_ned_suggestion_rejected_is_suggestion_list_changed() {
         let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionRejected {
             id: editorial_types::SuggestionId::from("sug-1".to_string()),
-            file: editorial_types::ContentPath::new("content/post/a.md"),
+            file: editorial_types::ContentPath::parse("content/post/a.md").expect("valid"),
         });
         match msg {
             EditorialMessage::SuggestionListChanged { file } => {
@@ -3371,7 +3377,7 @@ mod tests {
         let sug = editorial_types::NedSuggestion {
             id: editorial_types::SuggestionId::from("sug-00000000roundtrip".to_string()),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/post/hello.md"),
+            file: editorial_types::ContentPath::parse("content/post/hello.md").expect("valid"),
             selection: r#"(ned/slot (ned/doc-by-path "content/post/hello.md") "title")"#.to_string(),
             mutation: editorial_types::NedMutation::SetText("New Title".to_string()),
             workspace_hash: "abc123".to_string(),
@@ -3400,7 +3406,7 @@ mod tests {
         let stale_sug = editorial_types::NedSuggestion {
             id: editorial_types::SuggestionId::from("sug-00000000stale".to_string()),
             author: editorial_types::Author::Claude,
-            file: editorial_types::ContentPath::new("content/post/hello.md"),
+            file: editorial_types::ContentPath::parse("content/post/hello.md").expect("valid"),
             selection: r#"(ned/slot (ned/doc-by-path "content/post/hello.md") "title")"#
                 .to_string(),
             mutation: editorial_types::NedMutation::SetText("New Title".to_string()),
@@ -3811,7 +3817,7 @@ mod tests {
             .unwrap();
         client
             .send(&conductor::Command::DocumentSaved {
-                path: tmp.path().join("content/test/doc.md").to_string_lossy().to_string(),
+                path: editorial_types::SitePath::parse("content/test/doc.md").expect("valid"),
             })
             .unwrap();
         let app = test_app(client);
@@ -3958,7 +3964,7 @@ mod tests {
 
         // Create a suggestion via conductor directly (not HTTP) so we get the id.
         let create_result = client.send(&conductor::Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#.to_string(),
             mutation: editorial_types::NedMutation::SetText("Accepted Title".to_string()),
             reason: "accept test".to_string(),
@@ -4007,7 +4013,7 @@ mod tests {
 
         // Follow-up via conductor directly: suggestion must be Accepted or Stale (conductor took one path).
         let list_result = conductor.send(&conductor::Command::GetNedSuggestions {
-            file: editorial_types::ContentPath::new("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
         }).unwrap();
         let suggestions = match list_result {
             conductor::Response::NedSuggestions(s) => s,
@@ -4030,7 +4036,7 @@ mod tests {
 
         // Create suggestion via conductor directly
         let create_result = client.send(&conductor::Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#.to_string(),
             mutation: editorial_types::NedMutation::SetText("Rejected Title".to_string()),
             reason: "reject test".to_string(),
@@ -4081,7 +4087,7 @@ mod tests {
 
         // Create a suggestion — it will be Pending
         let create_result = client.send(&conductor::Command::CreateNedSuggestion {
-            file: std::path::PathBuf::from("content/test/doc.md"),
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#.to_string(),
             mutation: editorial_types::NedMutation::SetText("Files Test".to_string()),
             reason: "files test".to_string(),

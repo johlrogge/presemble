@@ -3,6 +3,7 @@ mod conductor;
 mod dirty;
 mod protocol;
 pub(crate) mod self_write_tracker;
+pub(crate) mod site_resolve;
 pub(crate) mod suggestion_apply;
 
 pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber, SubscriberError};
@@ -25,6 +26,10 @@ mod tests {
 
     const POST_TEMPLATE_SRC: &str =
         r#"<html><body><presemble:insert data="post.title" as="h1"></presemble:insert></body></html>"#;
+
+    fn sp(s: &str) -> editorial_types::SitePath {
+        editorial_types::SitePath::parse(s).expect("a valid site path")
+    }
 
     fn empty_conductor() -> Conductor {
         let repo = site_repository::SiteRepository::builder().build();
@@ -73,7 +78,7 @@ mod tests {
     fn conductor_get_document_text_missing_returns_none() {
         let conductor = empty_conductor();
         let result = conductor.handle_command(Command::GetDocumentText {
-            path: "/nonexistent/file.md".to_string(),
+            path: sp("nonexistent/file.md"),
         });
         match result.response {
             Response::DocumentText(None) => {}
@@ -84,7 +89,7 @@ mod tests {
     #[test]
     fn document_changed_stores_in_memory() {
         let conductor = empty_conductor();
-        let path = "/test-site/content/article/test.md".to_string();
+        let path = sp("content/article/test.md");
         let text = "# My Title\n".to_string();
 
         let result = conductor.handle_command(Command::DocumentChanged {
@@ -112,15 +117,15 @@ mod tests {
     #[test]
     fn document_changed_does_not_write_to_disk() {
         let conductor = empty_conductor();
-        let path = "/test-site/content/article/test.md";
+        let path = "content/article/test.md";
         let result = conductor.handle_command(Command::DocumentChanged {
-            path: path.to_string(),
+            path: sp(path),
             text: "# Hello\n".to_string(),
         });
         assert!(matches!(result.response, Response::Ok));
         // File should NOT exist on disk
         assert!(
-            !std::path::Path::new(path).exists(),
+            !std::path::Path::new("/test-site").join(path).exists(),
             "DocumentChanged should not write to disk"
         );
     }
@@ -128,7 +133,7 @@ mod tests {
     #[test]
     fn document_saved_clears_memory() {
         let conductor = empty_conductor();
-        let path = "/test-site/content/article/test.md".to_string();
+        let path = sp("content/article/test.md");
         let text = "# My Title\n".to_string();
 
         // Store in memory
@@ -166,11 +171,9 @@ mod tests {
             .build();
         let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
 
-        // content path must be under site_dir so classify() works
-        let content_path = dir.path().join("content/post/hello.md");
         let text = "# My Post Title\n\n----\n\nSome body content.\n".to_string();
         let result = conductor.handle_command(Command::DocumentChanged {
-            path: content_path.to_string_lossy().to_string(),
+            path: sp("content/post/hello.md"),
             text,
         });
 
@@ -188,10 +191,8 @@ mod tests {
     #[test]
     fn document_changed_emits_build_failed_when_no_template_exists() {
         let conductor = minimal_post_conductor();
-        let content_path = "/test-site/content/post/hello.md";
-
         let result = conductor.handle_command(Command::DocumentChanged {
-            path: content_path.to_string(),
+            path: sp("content/post/hello.md"),
             text: "# My Title\n".to_string(),
         });
 
@@ -230,7 +231,7 @@ mod tests {
         let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
 
         let result = conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
-            file: editorial_types::ContentPath::new("content/article/test.md"),
+            file: editorial_types::ContentPath::parse("content/article/test.md").expect("valid"),
             selection: r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/article/test.md") "title")) "heading" 0)"#
                 .to_string(),
             base: editorial_types::BlockText::Markdown("Old Title".to_string()),
@@ -295,7 +296,7 @@ mod tests {
         let conductor = minimal_post_conductor();
         // No document stored — CursorMoved should return Ok without events.
         let result = conductor.handle_command(Command::CursorMoved {
-            path: "content/post/nonexistent.md".to_string(),
+            path: sp("content/post/nonexistent.md"),
             line: 0,
         });
         assert!(matches!(result.response, Response::Ok));
@@ -307,7 +308,6 @@ mod tests {
         let conductor = minimal_post_conductor();
 
         // Store content in memory via DocumentChanged.
-        // The absolute path is site_dir + relative path.
         // Line 0: "# My Post Title"   (title heading)
         // Line 1: ""
         // Line 2: "----"              (separator)
@@ -316,16 +316,15 @@ mod tests {
         // Line 5: ""
         // Line 6: "Second paragraph." (body element 1)
         let text = "# My Post Title\n\n----\n\nFirst paragraph.\n\nSecond paragraph.\n".to_string();
-        let abs_path = "/test-site/content/post/my-post.md".to_string();
 
         conductor.handle_command(Command::DocumentChanged {
-            path: abs_path,
+            path: sp("content/post/my-post.md"),
             text,
         });
 
         // Cursor on line 4 ("First paragraph.") → body element 0.
         let result = conductor.handle_command(Command::CursorMoved {
-            path: "content/post/my-post.md".to_string(),
+            path: sp("content/post/my-post.md"),
             line: 4,
         });
 
@@ -349,16 +348,15 @@ mod tests {
         // Preamble elements don't have IDs in the rendered HTML, so cursor
         // in preamble falls through to the nearest body element.
         let text = "# My Post Title\n\n----\n\nSome body.\n".to_string();
-        let abs_path = "/test-site/content/post/my-post.md".to_string();
 
         conductor.handle_command(Command::DocumentChanged {
-            path: abs_path,
+            path: sp("content/post/my-post.md"),
             text,
         });
 
         // Cursor on line 0 → preamble, falls through to nearest body element.
         let result = conductor.handle_command(Command::CursorMoved {
-            path: "content/post/my-post.md".to_string(),
+            path: sp("content/post/my-post.md"),
             line: 0,
         });
 
@@ -399,8 +397,7 @@ mod tests {
             "Third.\n\n",
             "Fourth.\n",
         ).to_string();
-        let abs_path = "/test-site/content/post/my-post.md".to_string();
-        conductor.handle_command(Command::DocumentChanged { path: abs_path, text: text.clone() });
+        conductor.handle_command(Command::DocumentChanged { path: sp("content/post/my-post.md"), text: text.clone() });
 
         // Count lines to the "Fourth." paragraph
         let fourth_line = text.lines().enumerate()
@@ -409,7 +406,7 @@ mod tests {
             .expect("Fourth. must exist");
 
         let result = conductor.handle_command(Command::CursorMoved {
-            path: "content/post/my-post.md".to_string(),
+            path: sp("content/post/my-post.md"),
             line: fourth_line,
         });
 
@@ -523,7 +520,7 @@ mod tests {
     fn classify_content_file_returns_content_classification() {
         let conductor = minimal_post_conductor();
         let result = conductor.handle_command(Command::Classify {
-            path: "content/post/hello.md".to_string(),
+            path: sp("content/post/hello.md"),
         });
         match result.response {
             Response::FileClassification(FileClassification::Content { schema_stem }) => {
@@ -537,7 +534,7 @@ mod tests {
     fn classify_unknown_file_returns_unknown_classification() {
         let conductor = empty_conductor();
         let result = conductor.handle_command(Command::Classify {
-            path: "random/thing.txt".to_string(),
+            path: sp("random/thing.txt"),
         });
         match result.response {
             Response::FileClassification(FileClassification::Unknown) => {}
@@ -549,7 +546,7 @@ mod tests {
     fn classify_schema_file_returns_schema_classification() {
         let conductor = minimal_post_conductor();
         let result = conductor.handle_command(Command::Classify {
-            path: "schemas/post.md".to_string(),
+            path: sp("schemas/post.md"),
         });
         match result.response {
             Response::FileClassification(FileClassification::Schema { stem }) => {

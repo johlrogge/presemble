@@ -41,19 +41,18 @@ pub enum RenderMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     /// Editor updated a document's text (from LSP did_change). Does NOT write to disk.
-    DocumentChanged { path: String, text: String },
+    DocumentChanged { path: editorial_types::SitePath, text: String },
     /// Editor saved a document (from LSP did_save).
-    DocumentSaved { path: String },
+    DocumentSaved { path: editorial_types::SitePath },
     /// Files changed on disk (from file watcher).
-    FileChanged { paths: Vec<String> },
+    FileChanged { paths: Vec<editorial_types::SitePath> },
     /// Throw away the unsaved edits of one document and load it from disk
-    /// (`presemble reload`). `path` is site-relative. Other documents keep
-    /// their unsaved edits.
-    ReloadDocument { path: String },
+    /// (`presemble reload`). Other documents keep their unsaved edits.
+    ReloadDocument { path: editorial_types::ContentPath },
     /// Request a cached grammar for a schema stem.
     GetGrammar { stem: String },
     /// Request in-memory document text (editor's working copy or disk fallback).
-    GetDocumentText { path: String },
+    GetDocumentText { path: editorial_types::SitePath },
     /// Request current build errors.
     GetBuildErrors,
     /// Health check.
@@ -61,7 +60,7 @@ pub enum Command {
     /// Request conductor shutdown.
     Shutdown,
     /// Editor cursor moved to a new position.
-    CursorMoved { path: String, line: u32 },
+    CursorMoved { path: editorial_types::SitePath, line: u32 },
     /// Apply a NED program string (Clojure source) to the conductor's NodeStore.
     /// The program is evaluated in a NED-enabled root environment and may
     /// mutate the store. Return: `Response::Ok` on success, `Response::Error(msg)`
@@ -83,7 +82,7 @@ pub enum Command {
     /// disk is only written if `consent` names it; otherwise nothing is
     /// written and the answer is `ConflictsNeedConfirmation`.
     SaveBuffer {
-        path: String,
+        path: editorial_types::SitePath,
         #[serde(default)]
         consent: editorial_types::ConflictConsent,
     },
@@ -106,7 +105,7 @@ pub enum Command {
         theme: String,
     },
     /// Classify a file path into its site role.
-    Classify { path: String },
+    Classify { path: editorial_types::SitePath },
     /// List all schema stems with their source text.
     ListSchemas,
     /// List all link options for a given schema stem (for completions).
@@ -127,7 +126,7 @@ pub enum Command {
     RenderPage { path: String, mode: RenderMode },
     /// Create a NED-based editorial suggestion without applying it.
     CreateNedSuggestion {
-        file: std::path::PathBuf,
+        file: editorial_types::ContentPath,
         selection: String,
         mutation: editorial_types::NedMutation,
         reason: String,
@@ -453,7 +452,7 @@ mod protocol_tests {
     fn ned_suggestion_accepted_event_roundtrips_through_json() {
         use editorial_types::{ContentPath, SuggestionId};
         let id = SuggestionId::from("test-accept-id".to_string());
-        let file = ContentPath::new("content/post/hello.md");
+        let file = ContentPath::parse("content/post/hello.md").expect("valid");
         let event = ConductorEvent::NedSuggestionAccepted {
             id: id.clone(),
             file: file.clone(),
@@ -475,7 +474,7 @@ mod protocol_tests {
     fn ned_suggestion_rejected_event_roundtrips_through_json() {
         use editorial_types::{ContentPath, SuggestionId};
         let id = SuggestionId::from("test-reject-id".to_string());
-        let file = ContentPath::new("content/post/hello.md");
+        let file = ContentPath::parse("content/post/hello.md").expect("valid");
         let event = ConductorEvent::NedSuggestionRejected {
             id: id.clone(),
             file: file.clone(),
@@ -505,5 +504,34 @@ mod protocol_tests {
         let json_none = serde_json::to_string(&resp_none).expect("serialize");
         let decoded_none: Response = serde_json::from_str(&json_none).expect("deserialize");
         assert!(matches!(decoded_none, Response::LinkTargetStem(None)));
+    }
+
+    /// A client path that is not a plain site path never becomes a command:
+    /// the message fails to decode.
+    #[test]
+    fn commands_with_unsafe_paths_fail_to_decode() {
+        for json in [
+            r#"{"DocumentChanged":{"path":"/etc/passwd","text":"x"}}"#,
+            r#"{"DocumentChanged":{"path":"../x.md","text":"x"}}"#,
+            r#"{"DocumentSaved":{"path":"content/../../x.md"}}"#,
+            r#"{"GetDocumentText":{"path":"/tmp/x.md"}}"#,
+            r#"{"CursorMoved":{"path":"./content/a.md","line":1}}"#,
+            r#"{"SaveBuffer":{"path":"/tmp/x.md"}}"#,
+            r#"{"Classify":{"path":"../x"}}"#,
+            r#"{"FileChanged":{"paths":["content/a.md","/etc/passwd"]}}"#,
+            r#"{"ReloadDocument":{"path":"../x.md"}}"#,
+            r#"{"ReloadDocument":{"path":"schemas/x.md"}}"#,
+            r#"{"GetNedSuggestions":{"file":"/etc/passwd"}}"#,
+        ] {
+            let decoded: Result<Command, _> = serde_json::from_str(json);
+            assert!(decoded.is_err(), "{json} must not decode, got {decoded:?}");
+        }
+    }
+
+    #[test]
+    fn commands_with_site_paths_decode() {
+        let json = r#"{"DocumentChanged":{"path":"content/post/a.md","text":"x"}}"#;
+        let decoded: Command = serde_json::from_str(json).expect("a plain site path decodes");
+        assert!(matches!(decoded, Command::DocumentChanged { .. }));
     }
 }

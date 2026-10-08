@@ -913,8 +913,9 @@ mod tests {
                     template::Value::Text(s) => s.clone(),
                     _ => return Err("get-content path must be a string".into()),
                 };
-                let abs_path = cond.site_dir().join(&path_str);
-                match cond.document_text(&abs_path) {
+                let content_path = editorial_types::ContentPath::parse(&path_str)
+                    .map_err(|e| format!("get-content: {path_str}: {e}"))?;
+                match cond.document_text(content_path.as_site_path()) {
                     Some(text) => Ok(template::Value::Text(text)),
                     None => Err(format!("file not found: {path_str}")),
                 }
@@ -1014,8 +1015,9 @@ mod tests {
             let start = code.find('"').ok_or("expected string argument")?;
             let end = code[start + 1..].find('"').ok_or("unterminated string")?;
             let path = &code[start + 1..start + 1 + end];
-            let abs_path = conductor.site_dir().join(path);
-            return match conductor.document_text(&abs_path) {
+            let content_path = editorial_types::ContentPath::parse(path)
+                .map_err(|e| format!("get-content: {path}: {e}"))?;
+            return match conductor.document_text(content_path.as_site_path()) {
                 Some(text) => Ok(template::Value::Text(text)),
                 None => Err(format!("file not found: {path}")),
             };

@@ -1,7 +1,9 @@
 use ned::NodeTree;
 
 mod ned_program;
+mod paths;
 pub use ned_program::clj_str_literal;
+pub use paths::{canonical_deepest, ContentPath, PathError, SitePath};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -65,30 +67,6 @@ impl fmt::Display for Author {
     }
 }
 
-/// Content-relative file path (e.g., "content/post/hello.md").
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ContentPath(String);
-
-impl ContentPath {
-    pub fn new(path: impl Into<String>) -> Self {
-        Self(path.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Resolve to an absolute path given a site directory.
-    pub fn resolve(&self, site_dir: &std::path::Path) -> std::path::PathBuf {
-        site_dir.join(&self.0)
-    }
-}
-
-impl fmt::Display for ContentPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 // ── NED-based suggestion types (Phase C) ─────────────────────────────────────
 
@@ -545,7 +523,7 @@ mod tests {
 
     #[test]
     fn content_path_resolve_joins_site_dir() {
-        let path = ContentPath::new("content/post/hello.md");
+        let path = ContentPath::parse("content/post/hello.md").expect("valid");
         let site = std::path::Path::new("/home/user/mysite");
         assert_eq!(
             path.resolve(site),
@@ -555,7 +533,7 @@ mod tests {
 
     #[test]
     fn content_path_display_matches_as_str() {
-        let path = ContentPath::new("content/post/hello.md");
+        let path = ContentPath::parse("content/post/hello.md").expect("valid");
         assert_eq!(path.to_string(), "content/post/hello.md");
         assert_eq!(path.as_str(), "content/post/hello.md");
     }
@@ -638,7 +616,7 @@ mod tests {
         NedSuggestion {
             id: SuggestionId(String::from("sug-000000000000ff01")),
             author: Author::Claude,
-            file: ContentPath::new("content/post/hello.md"),
+            file: ContentPath::parse("content/post/hello.md").expect("valid"),
             selection: String::from("(slot (doc-by-path \"content/post/hello.md\") \"title\")"),
             mutation,
             workspace_hash: String::from("abc123def456abc123def456abc123def456abc1"),

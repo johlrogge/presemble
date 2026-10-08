@@ -44,6 +44,16 @@ fn ranges_overlap(a: &Range, b: &Range) -> bool {
         || (b.end.line == a.start.line && b.end.character < a.start.character))
 }
 
+/// The site path of the file at `abs`, or `None` when it is not inside
+/// `site_dir`. A file outside the site is not the conductor's business: the
+/// LSP never sends it.
+fn site_path_for(
+    site_dir: &std::path::Path,
+    abs: &std::path::Path,
+) -> Option<conductor::editorial_types::SitePath> {
+    conductor::editorial_types::SitePath::from_absolute(site_dir, abs).ok()
+}
+
 const DISK_CONFLICT_MESSAGE: &str = "Unsaved edits from the browser or REPL conflict with this file on disk. Save them from the browser (you will be asked to confirm), or run `presemble reload <site-dir> <file>` to keep the file.";
 
 struct StoredDiagnostic {
@@ -76,13 +86,13 @@ impl PresembleLsp {
 
     async fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
-        let path_str = path.to_string_lossy().to_string();
+        let site_path = site_path_for(&self.site_dir, &path)?;
         let cond = self.conductor.lock().await;
-        let stem = match cond.classify(&path_str) {
+        let stem = match cond.classify(&site_path) {
             Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
             Ok(_) => return None,  // Not a content file — expected, no need to log
             Err(e) => {
-                eprintln!("presemble-lsp: classify error for {path_str}: {e}");
+                eprintln!("presemble-lsp: classify error for {site_path}: {e}");
                 return None;
             }
         };
@@ -109,13 +119,13 @@ impl PresembleLsp {
 
     async fn grammar_for_template_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
         let path = uri.to_file_path().ok()?;
-        let path_str = path.to_string_lossy().to_string();
+        let site_path = site_path_for(&self.site_dir, &path)?;
         let cond = self.conductor.lock().await;
-        let stem = match cond.classify(&path_str) {
+        let stem = match cond.classify(&site_path) {
             Ok(conductor::FileClassification::Template { schema_stem }) => schema_stem,
             Ok(_) => return None,
             Err(e) => {
-                eprintln!("presemble-lsp: classify error for {path_str}: {e}");
+                eprintln!("presemble-lsp: classify error for {site_path}: {e}");
                 return None;
             }
         };
@@ -142,9 +152,9 @@ impl PresembleLsp {
 
     async fn schema_stem(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
-        let path_str = path.to_string_lossy().to_string();
+        let site_path = site_path_for(&self.site_dir, &path)?;
         let cond = self.conductor.lock().await;
-        match cond.classify(&path_str) {
+        match cond.classify(&site_path) {
             Ok(conductor::FileClassification::Schema { stem }) => Some(stem),
             _ => None,
         }
@@ -152,12 +162,14 @@ impl PresembleLsp {
 
     /// Classify a path using the conductor.
     async fn classify_path(&self, path: &std::path::Path) -> conductor::FileClassification {
-        let path_str = path.to_string_lossy().to_string();
+        let Some(site_path) = site_path_for(&self.site_dir, path) else {
+            return conductor::FileClassification::Unknown;
+        };
         let cond = self.conductor.lock().await;
-        match cond.classify(&path_str) {
+        match cond.classify(&site_path) {
             Ok(fc) => fc,
             Err(e) => {
-                eprintln!("presemble-lsp: classify error for {path_str}: {e}");
+                eprintln!("presemble-lsp: classify error for {site_path}: {e}");
                 conductor::FileClassification::Unknown
             }
         }
@@ -170,12 +182,9 @@ impl PresembleLsp {
     #[allow(dead_code)] // will be wired to remaining fs::read_to_string call sites incrementally
     async fn document_text(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
-        let path_str = path.to_string_lossy();
+        let site_path = site_path_for(&self.site_dir, &path)?;
         let cond = self.conductor.lock().await;
-        if let Ok(maybe_text) = cond.get_document_text(&path_str) {
-            return maybe_text.or_else(|| std::fs::read_to_string(&path).ok());
-        }
-        std::fs::read_to_string(&path).ok()
+        cond.get_document_text(&site_path).ok().flatten()
     }
 
     /// Whether the conductor holds unsaved edits for this file that conflict
@@ -455,10 +464,10 @@ impl LanguageServer for PresembleLsp {
             let kind = self.classify_path(&path).await;
             // Notify conductor of the change (triggers rebuild + browser reload).
             // Fire-and-forget: if it fails, the LSP still works locally.
-            {
+            if let Some(site_path) = site_path_for(&self.site_dir, &path) {
                 let cond = self.conductor.lock().await;
                 let _ = cond.send(&conductor::Command::DocumentChanged {
-                    path: path.to_string_lossy().to_string(),
+                    path: site_path,
                     text: c.text.clone(),
                 });
             }
@@ -478,14 +487,16 @@ impl LanguageServer for PresembleLsp {
     async fn did_save(&self, p: DidSaveTextDocumentParams) {
         // Notify conductor that this file was saved (clears in-memory buffer, triggers rebuild).
         // Fire-and-forget: if it fails, the LSP still works locally.
+        let saved = p.text_document.uri.to_file_path().unwrap_or_default();
+        // A file outside the site is not read, validated or reported.
+        let Some(site_path) = site_path_for(&self.site_dir, &saved) else {
+            return;
+        };
         {
             let cond = self.conductor.lock().await;
-            let path = p.text_document.uri.to_file_path().unwrap_or_default();
-            let _ = cond.send(&conductor::Command::DocumentSaved {
-                path: path.to_string_lossy().to_string(),
-            });
+            let _ = cond.send(&conductor::Command::DocumentSaved { path: site_path });
         }
-        if let Ok(src) = std::fs::read_to_string(p.text_document.uri.to_file_path().unwrap_or_default()) {
+        if let Ok(src) = std::fs::read_to_string(&saved) {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
             let kind = self.classify_path(&path).await;
@@ -691,13 +702,10 @@ impl LanguageServer for PresembleLsp {
         // Notify conductor of cursor position for browser scroll-follow.
         // Fire-and-forget: failures are ignored.
         {
-            let cond = self.conductor.lock().await;
-            let rel = path
-                .strip_prefix(&self.site_dir)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .to_string();
-            let _ = cond.send(&conductor::Command::CursorMoved { path: rel, line });
+            if let Some(site_path) = site_path_for(&self.site_dir, &path) {
+                let cond = self.conductor.lock().await;
+                let _ = cond.send(&conductor::Command::CursorMoved { path: site_path, line });
+            }
         }
         let kind = self.classify_path(&path).await;
         match kind {
@@ -875,5 +883,26 @@ fn separator_line(src: &str) -> Option<u32> {
         .enumerate()
         .find(|(_, l)| l.trim() == "----")
         .map(|(i, _)| i as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn lsp_ignores_a_file_outside_the_site() {
+        let site = Path::new("/srv/site");
+        assert!(site_path_for(site, Path::new("/etc/passwd")).is_none());
+        assert!(site_path_for(site, Path::new("/srv/other/content/a.md")).is_none());
+        assert!(site_path_for(site, Path::new("/srv/site/../other/a.md")).is_none());
+    }
+
+    #[test]
+    fn lsp_sends_a_file_inside_the_site_as_a_site_relative_path() {
+        let site = Path::new("/srv/site");
+        let sent = site_path_for(site, Path::new("/srv/site/content/post/a.md")).expect("inside");
+        assert_eq!(sent.as_str(), "content/post/a.md");
+    }
 }
 

@@ -77,8 +77,9 @@ pub fn register_conductor_builtins(root: &evaluator::RootEnv, conductor: &Arc<Co
                 template::Value::Text(s) => s.clone(),
                 _ => return Err("get-content path must be a string".into()),
             };
-            let abs_path = cond.site_dir().join(&path_str);
-            match cond.document_text(&abs_path) {
+            let content_path = editorial_types::ContentPath::parse(&path_str)
+                .map_err(|e| format!("get-content: {path_str}: {e}"))?;
+            match cond.document_text(content_path.as_site_path()) {
                 Some(text) => Ok(template::Value::Text(text)),
                 None => Err(format!("file not found: {path_str}")),
             }
@@ -531,7 +532,7 @@ mod tests {
     /// for the document now.
     fn saved_text(harness: &Harness) -> String {
         let saved = harness.ipc(Command::SaveBuffer {
-            path: FILE.to_string(),
+            path: editorial_types::SitePath::parse(FILE).expect("valid"),
             consent: Default::default(),
         });
         assert!(matches!(saved.response, Response::Ok), "{:?}", saved.response);
@@ -558,6 +559,32 @@ mod tests {
             )),
             "the nREPL edit's events are published: {events:?}"
         );
+    }
+
+    #[test]
+    fn get_content_with_a_traversal_path_is_an_error() {
+        let harness = Harness::start();
+        let handler = harness.handler();
+        let site = harness._site.path().display().to_string();
+
+        // The plain path reads (so the refusals below are about the path).
+        let read = handler.eval("s", &format!(r#"(get-content "{FILE}")"#)).ok().expect("reads");
+        // Multi-line text comes back as the nREPL "out".
+        assert!(read.out.as_deref().is_some_and(|o| o.contains("First Post")), "{:?}", read.out);
+
+        for bad in [
+            // Stays inside the site, but is not a plain site path.
+            "content/../schemas/post/item.md".to_string(),
+            "content/./post/first.md".to_string(),
+            // The absolute path of a file that exists.
+            format!("{site}/{FILE}"),
+            "/etc/passwd".to_string(),
+            "../outside.md".to_string(),
+        ] {
+            let result = handler.eval("s", &format!(r#"(get-content "{bad}")"#));
+            assert!(result.is_err(), "{bad} must be refused, got {:?}", result.ok().map(|r| r.out));
+        }
+        harness.finish();
     }
 
     #[test]
