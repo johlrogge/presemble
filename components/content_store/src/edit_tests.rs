@@ -599,16 +599,14 @@ fn insert_after_html_block_payload_is_refused() {
 }
 
 #[test]
-fn image_payload_with_children_is_refused() {
+fn image_payload_root_is_refused() {
     let f = fixture();
     let block = f.body_blocks()[0];
-    let tree = NodeTree::element("image")
-        .with_attr("path", "x.png")
-        .with_child(NodeTree::text("oops"));
-    assert!(matches!(
+    let tree = NodeTree::element("image").with_attr("path", "x.png");
+    assert_eq!(
         f.prepare(block, &NedMutation::InsertAfter(vec![tree])),
-        Err(EditError::Payload(BlockDecodeError::UnexpectedChild { .. }))
-    ));
+        Err(EditError::Payload(BlockDecodeError::NotPayloadKind("image".to_string())))
+    );
 }
 
 #[test]

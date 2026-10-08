@@ -949,17 +949,7 @@ fn render_insert_native(
                 };
                 let path_val = match &lone {
                     Some(Lone::Image { src, .. }) => Some(src.clone()),
-                    _ => attrs.iter().find_map(|(n, v)| {
-                        if store.resolve_name(*n) == "path" {
-                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
-                                Some(t.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    }),
+                    _ => None,
                 };
 
                 if let Some(href) = href {
@@ -4193,20 +4183,6 @@ mod tests {
                 text_child(store, b, code);
                 b
             }
-            ContentElement::Image { path, alt } => {
-                let b = element(store, "image");
-                text_attr(store, b, "path", path);
-                if let Some(alt) = alt {
-                    text_attr(store, b, "alt", alt);
-                }
-                b
-            }
-            ContentElement::Link { text, href } => {
-                let b = element(store, "link");
-                text_attr(store, b, "href", href);
-                text_child(store, b, text);
-                b
-            }
             ContentElement::Separator => element(store, "separator"),
             ContentElement::Table { headers, rows } => {
                 let b = element(store, "table");
@@ -4263,9 +4239,9 @@ mod tests {
             C::paragraph_from_markdown("a <script>x</script> **b** `c<d` [l](/a \"t\")"),
             C::Separator,
             C::HtmlBlock { source: "<div>secret</div>".to_string() },
-            C::Link { text: "A link".to_string(), href: "/a?x=1&y=2".to_string() },
-            C::Image { alt: Some("An image".to_string()), path: "/i.png".to_string() },
-            C::Image { alt: None, path: "/j.png".to_string() },
+            C::lone_link("A link", "/a?x=1&y=2"),
+            C::lone_image("An image", "/i.png"),
+            C::lone_image("", "/j.png"),
             C::Table {
                 headers: vec!["`a|b`".to_string(), "**H**".to_string()],
                 rows: vec![vec!["x".to_string(), "<i>y</i>".to_string()], vec!["-".to_string(), "".to_string()]],
@@ -4451,7 +4427,7 @@ mod tests {
     #[test]
     fn table_and_image_body_blocks_carry_md() {
         let elements = vec![
-            content::ContentElement::Image { path: "/i.png".to_string(), alt: Some("a".to_string()) },
+            content::ContentElement::lone_image("a", "/i.png"),
             content::ContentElement::Table {
                 headers: vec!["h1".to_string(), "h2".to_string()],
                 rows: vec![vec!["a".to_string(), "b".to_string()]],
@@ -4473,7 +4449,7 @@ mod tests {
         let elements = vec![
             heading_el(2, "Section"),
             content::ContentElement::paragraph_from_markdown("A *para*"),
-            content::ContentElement::Image { path: "/i.png".to_string(), alt: None },
+            content::ContentElement::lone_image("", "/i.png"),
         ];
         let spanned: im::Vector<_> = elements
             .iter()
@@ -5197,10 +5173,7 @@ mod tests {
 
     #[test]
     fn native_body_renders_an_empty_href_link_like_legacy() {
-        let elements = vec![content::ContentElement::Link {
-            text: "x".to_string(),
-            href: String::new(),
-        }];
+        let elements = vec![content::ContentElement::lone_link("x", "")];
         let spanned: im::Vector<_> = elements
             .iter()
             .cloned()

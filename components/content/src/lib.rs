@@ -1,8 +1,3 @@
-// 5b.2: the `Link` and `Image` block kinds are deprecated, never produced by
-// the parser, and removed in 5b.2; until then this crate still matches them.
-// 5b.2: remove this allow
-#![allow(deprecated)]
-
 mod adapters;
 pub mod address;
 mod block;

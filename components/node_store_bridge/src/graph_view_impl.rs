@@ -612,10 +612,7 @@ mod tests {
         let page_name = store.intern("page");
         let root = store.add_node(Node::Element(page_name));
         let image = content_store::block_to_store(
-            &content::ContentElement::Image {
-                alt: Some("A cat".to_string()),
-                path: "images/cat.jpg".to_string(),
-            },
+            &content::ContentElement::lone_image("A cat", "images/cat.jpg"),
             &mut store,
         );
         let cover = store.intern("cover");

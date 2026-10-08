@@ -1,8 +1,8 @@
 use crate::document::{ContentElement, Document, Keyword, LinkText};
 use crate::inline::AsPlainText;
-use crate::link_expression::{diagnose_paragraph, parse_destination, LinkExpressionDiagnostic};
+use crate::link_expression::{diagnose_paragraph, LinkExpressionDiagnostic};
 use crate::parse_list_items;
-use crate::parser::{diagnose_paragraph_marker, is_link_expression};
+use crate::parser::diagnose_paragraph_marker;
 use crate::serializer::serialize_element;
 use crate::slot_assignment::{element_matches_slot, unassigned_reason, UnassignedReason};
 use schema::{
@@ -386,11 +386,9 @@ fn kind_name(el: &ContentElement) -> &'static str {
     match el {
         ContentElement::Heading { .. } => "heading",
         // A paragraph is named by its shape: a lone link is a link.
-        ContentElement::Paragraph { .. } if el.sole_link().is_some() => "link",
-        ContentElement::Paragraph { .. } if el.sole_image().is_some() => "image",
+        ContentElement::Paragraph { .. } if el.is_sole_link() => "link",
+        ContentElement::Paragraph { .. } if el.is_sole_image() => "image",
         ContentElement::Paragraph { .. } => "paragraph",
-        ContentElement::Image { .. } => "image",
-        ContentElement::Link { .. } => "link",
         ContentElement::Separator => "separator",
         ContentElement::CodeBlock { .. } => "code block",
         ContentElement::Table { .. } => "table",
@@ -405,11 +403,10 @@ fn kind_name(el: &ContentElement) -> &'static str {
 fn kind_plural(el: &ContentElement) -> &'static str {
     match el {
         ContentElement::Heading { .. } => "headings",
-        ContentElement::Paragraph { .. } if el.sole_link().is_some() => "links",
-        ContentElement::Paragraph { .. } if el.sole_image().is_some() => "images",
+        ContentElement::Paragraph { .. } if el.is_sole_link() => "links",
+        ContentElement::Paragraph { .. } if el.is_sole_image() => "images",
         ContentElement::Paragraph { .. } => "paragraphs",
-        ContentElement::Image { .. } => "images",
-        ContentElement::Link { .. } | ContentElement::LinkExpression { .. } => "links",
+        ContentElement::LinkExpression { .. } => "links",
         ContentElement::List { .. } => "lists",
         _ => "elements of this kind",
     }
@@ -451,13 +448,6 @@ fn validate_link_expressions(
                 Some(d) => push(Severity::Error, d.to_string()),
                 None => {}
             },
-            // pulldown reads a destination without spaces (`[x](->>)`,
-            // `[x](->)`) as a plain link when it is not a link expression.
-            ContentElement::Link { href, .. } if is_link_expression(href) => {
-                if let Err(e) = parse_destination(&href.replace("%20", " ")) {
-                    push(Severity::Error, LinkExpressionDiagnostic::Malformed(e).to_string());
-                }
-            }
             ContentElement::LinkExpression { .. } if slot.is_none() => {
                 push(
                     Severity::Warning,
@@ -721,7 +711,7 @@ fn validate_links(
 ) -> usize {
     let mut count = 0usize;
     for spanned in elements {
-        if spanned.node.sole_link().is_some()
+        if spanned.node.is_sole_link()
             || matches!(spanned.node, ContentElement::LinkExpression { .. })
         {
             count += 1;

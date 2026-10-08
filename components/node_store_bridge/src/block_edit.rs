@@ -1179,7 +1179,7 @@ mod tests {
     #[test]
     fn check_base_agrees_with_lower() {
         let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
-        let img = ContentElement::Image { alt: None, path: "p.jpg".to_string() };
+        let img = ContentElement::lone_image("", "p.jpg");
         let cases: Vec<(&str, ContentElement, &str)> = vec![
             ("body", paragraph("Alpha beta."), "Alpha beta."),
             ("body", paragraph("Alpha beta."), "Alpha gamma."),
@@ -1274,10 +1274,7 @@ mod tests {
         let samples = vec![
             ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "A *title*"),
             paragraph("Some **text**."),
-            ContentElement::Link {
-                text: "t".to_string(),
-                href: "/x".to_string(),
-            },
+            ContentElement::lone_link("t", "/x"),
             ContentElement::Blockquote { text: "q".to_string() },
             ContentElement::List { source: "- a\n- b".to_string() },
             ContentElement::CodeBlock {
@@ -1285,8 +1282,8 @@ mod tests {
                 code: "fn main() {}".to_string(),
             },
             ContentElement::CodeBlock { language: None, code: "x".to_string() },
-            ContentElement::Image { alt: Some("a".to_string()), path: "p.jpg".to_string() },
-            ContentElement::Image { alt: None, path: "p.jpg".to_string() },
+            ContentElement::lone_image("a", "p.jpg"),
+            ContentElement::lone_image("", "p.jpg"),
             ContentElement::Table {
                 headers: vec!["h1".to_string(), "h2".to_string()],
                 rows: vec![

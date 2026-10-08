@@ -83,17 +83,6 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             }
             _ => vec![el("p", slot_attrs(ctx), crate::inline_nodes::inline_nodes(content))],
         },
-        ContentElement::Image { path, alt } => {
-            let mut attrs = slot_attrs(ctx);
-            attrs.push(attr("src", path.as_str()));
-            attrs.push(attr("alt", alt.as_deref().unwrap_or("")));
-            vec![el("img", attrs, Vec::new())]
-        }
-        ContentElement::Link { text, href } => {
-            let mut attrs = slot_attrs(ctx);
-            attrs.push(attr("href", href.as_str()));
-            vec![el("a", attrs, vec![Node::Text(text.clone())])]
-        }
         ContentElement::CodeBlock { language, code } => {
             let code_attrs = language
                 .as_ref()
@@ -247,7 +236,7 @@ mod tests {
 
     #[test]
     fn image_without_alt_has_empty_alt() {
-        let html = render(ContentElement::Image { alt: None, path: "/i.png".to_string() });
+        let html = render(ContentElement::lone_image("", "/i.png"));
         assert_eq!(html, r#"<img data-presemble-slot="body" src="/i.png" alt="" />"#);
     }
 

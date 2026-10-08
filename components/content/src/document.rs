@@ -148,16 +148,9 @@ pub enum ContentElement {
         content: crate::inline::Inlines,
         marker: Option<SlotMarker>,
     },
-    /// A lone image is a paragraph of shape `SoleImage` (ADR-059 §12). The
-    /// parser no longer produces this kind; it is removed in stage 5b.2.
-    /// Readers go through [`ContentElement::sole_image`].
-    #[deprecated(note = "a lone image is a paragraph of shape SoleImage; removed in 5b.2")]
-    Image { alt: Option<String>, path: String },
-    /// A lone link is a paragraph of shape `SoleLink` (ADR-059 §12). The
-    /// parser no longer produces this kind; it is removed in stage 5b.2.
-    /// Readers go through [`ContentElement::sole_link`].
-    #[deprecated(note = "a lone link is a paragraph of shape SoleLink; removed in 5b.2")]
-    Link { text: String, href: String },
+    // A lone link or image is a paragraph of shape `SoleLink` or `SoleImage`
+    // (ADR-059 §12); there are no block kinds for them. Readers go through
+    // `ContentElement::sole_link` and `sole_image`.
     Separator,
     CodeBlock { language: Option<String>, code: String },
     Table {

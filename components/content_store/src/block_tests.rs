@@ -269,18 +269,44 @@ fn paragraph_without_children_decodes_as_empty() {
     assert!(matches!(&el, ContentElement::Paragraph { content, marker: None } if content.is_empty()));
 }
 
+/// A link is `[:paragraph [:inline-link …]]` (ADR-059 §12), not a block kind
+/// of its own: a payload with a `link` root is refused.
 #[test]
-fn tree_to_block_refuses_image_with_children() {
-    let tree = NodeTree::element("image")
-        .with_attr("path", "p.jpg")
-        .with_child(NodeTree::text("oops"));
+fn link_payload_root_is_refused() {
+    let tree = NodeTree::element("link").with_attr("href", "/x").with_child(NodeTree::text("t"));
     assert_eq!(
         tree_to_block(&tree),
-        Err(BlockDecodeError::UnexpectedChild {
-            kind: "image".to_string(),
-            child: "text".to_string()
-        })
+        Err(BlockDecodeError::NotPayloadKind("link".to_string()))
     );
+    assert!(
+        !crate::PAYLOAD_BLOCK_KINDS.contains(&"link") && !crate::BLOCK_KINDS.contains(&"link")
+    );
+}
+
+/// The same for an image.
+#[test]
+fn image_payload_root_is_refused() {
+    let tree = NodeTree::element("image").with_attr("path", "p.jpg");
+    assert_eq!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::NotPayloadKind("image".to_string()))
+    );
+    assert!(
+        !crate::PAYLOAD_BLOCK_KINDS.contains(&"image") && !crate::BLOCK_KINDS.contains(&"image")
+    );
+}
+
+/// A store node of kind `link` or `image` is no block: nothing writes one.
+#[test]
+fn stored_link_and_image_nodes_do_not_decode() {
+    for kind in ["link", "image"] {
+        let mut store = NodeStore::new();
+        let id = make_element(&mut store, kind);
+        assert_eq!(
+            block_from_node(&store, id),
+            Err(BlockDecodeError::UnknownKind(kind.to_string()))
+        );
+    }
 }
 
 fn table() -> NodeTree {
@@ -316,11 +342,6 @@ fn tree_to_block_refuses_table_rows_that_are_not_rows() {
 fn tree_to_block_refuses_attributes_the_kind_does_not_take() {
     for tree in [
         NodeTree::element("paragraph").with_attr("level", "2").with_child(NodeTree::text("a")),
-        NodeTree::element("image").with_attr("path", "p.jpg").with_attr("href", "/x"),
-        NodeTree::element("link")
-            .with_attr("href", "/x")
-            .with_attr("alt", "a")
-            .with_child(NodeTree::text("t")),
         NodeTree::element("code-block")
             .with_attr("path", "x")
             .with_child(NodeTree::text("c")),
@@ -336,9 +357,9 @@ fn tree_to_block_refuses_attributes_the_kind_does_not_take() {
 #[test]
 fn tree_to_block_still_accepts_the_canonical_shapes() {
     assert!(tree_to_block(&table()).is_ok());
-    assert!(tree_to_block(
-        &NodeTree::element("image").with_attr("path", "p").with_attr("alt", "a")
-    )
+    assert!(tree_to_block(&NodeTree::element("paragraph").with_child(
+        NodeTree::element("inline-image").with_attr("src", "p").with_child(NodeTree::text("a"))
+    ))
     .is_ok());
     assert!(tree_to_block(
         &NodeTree::element("code-block")

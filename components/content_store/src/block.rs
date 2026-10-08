@@ -45,20 +45,6 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
             inlines_to_store(store, node, content);
             node
         }
-        ContentElement::Image { alt, path } => {
-            let node = make_element(store, "image");
-            add_text_attr(store, node, "path", path);
-            if let Some(alt_text) = alt.as_ref() {
-                add_text_attr(store, node, "alt", alt_text);
-            }
-            node
-        }
-        ContentElement::Link { text, href } => {
-            let node = make_element(store, "link");
-            add_child_text(store, node, text);
-            add_text_attr(store, node, "href", href);
-            node
-        }
         ContentElement::Separator => make_element(store, "separator"),
         ContentElement::CodeBlock { language, code } => {
             let node = make_element(store, "code-block");
@@ -224,7 +210,7 @@ pub fn decode_trivia(
 /// Element names of single-text blocks: exactly one `Text` child carries the
 /// block's text (see `ContentElement::text`). `html-block` also stores its
 /// source as one `Text` child, but cannot be text-edited (ADR-062 D4).
-pub const TEXT_BLOCK_KINDS: &[&str] = &["link", "blockquote", "list", "code-block"];
+pub const TEXT_BLOCK_KINDS: &[&str] = &["blockquote", "list", "code-block"];
 
 /// Element names of inline containers: their children are inline nodes
 /// (ADR-059 §6), at any depth. A Text node inside one is addressed through
@@ -245,8 +231,6 @@ pub fn inline_context_of(kind: &str) -> Option<InlineContext> {
 pub const BLOCK_KINDS: &[&str] = &[
     "heading",
     "paragraph",
-    "image",
-    "link",
     "separator",
     "code-block",
     "table",
@@ -257,17 +241,16 @@ pub const BLOCK_KINDS: &[&str] = &[
 ];
 
 /// Block kinds accepted as a suggestion tree payload root:
-/// [`TEXT_BLOCK_KINDS`] plus `"image"` and `"table"`. An HTML block can never
-/// be inserted through a payload (ADR-062 D4); nor can a separator or a link
-/// expression.
+/// [`TEXT_BLOCK_KINDS`] plus `"table"`. An HTML block can never be inserted
+/// through a payload (ADR-062 D4); nor can a separator or a link expression.
+/// A link or an image is `[:paragraph [:inline-link …]]` (ADR-059 §12), not a
+/// kind of its own.
 pub const PAYLOAD_BLOCK_KINDS: &[&str] = &[
     "heading",
     "paragraph",
-    "link",
     "blockquote",
     "list",
     "code-block",
-    "image",
     "table",
 ];
 
@@ -499,16 +482,6 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
             let content = inlines_from_store(store, id, InlineContext::Paragraph)?;
             Ok(ContentElement::Paragraph { content, marker })
         }
-        "image" => {
-            let path = try_attr_text(store, id, kind, "path")?;
-            let alt = find_attr_text(store, id, "alt");
-            Ok(ContentElement::Image { alt, path })
-        }
-        "link" => {
-            let text = try_child_text(store, id, kind)?;
-            let href = try_attr_text(store, id, kind, "href")?;
-            Ok(ContentElement::Link { text, href })
-        }
         "separator" => Ok(ContentElement::Separator),
         "code-block" => {
             let code = try_child_text(store, id, kind)?;
@@ -650,14 +623,8 @@ pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecode
             attr: attr.clone(),
         });
     }
-    match name.as_str() {
-        "image" => {
-            if let Some(child) = children.first() {
-                return Err(unexpected_child("image", child));
-            }
-        }
-        "table" => check_table_children(children)?,
-        _ => {}
+    if name == "table" {
+        check_table_children(children)?;
     }
     let mut scratch = NodeStore::new();
     let root = tree.clone().materialize(&mut scratch);
@@ -670,9 +637,7 @@ fn payload_attributes(kind: &str) -> &'static [&'static str] {
     match kind {
         "heading" => &["level", "marker"],
         "paragraph" => &["marker"],
-        "link" => &["href"],
         "code-block" => &["language"],
-        "image" => &["path", "alt"],
         _ => &[],
     }
 }

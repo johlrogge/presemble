@@ -178,14 +178,13 @@ fn body_element_kind(el: &content::ContentElement) -> Option<String> {
     Some(match el {
         Heading { .. } => "heading".to_string(),
         Paragraph { .. } => "paragraph".to_string(),
-        Image { .. } => "image".to_string(),
         CodeBlock { .. } => "code-block".to_string(),
         Table { .. } => "table".to_string(),
         Blockquote { .. } => "blockquote".to_string(),
         List { .. } => "list".to_string(),
         // An HTML block renders as a placeholder that is not a slot
         // (ADR-062 D2), so the browser has no element to anchor to.
-        Separator | Link { .. } | LinkExpression { .. } | HtmlBlock { .. } => return None,
+        Separator | LinkExpression { .. } | HtmlBlock { .. } => return None,
     })
 }
 
@@ -287,19 +286,37 @@ enum SlotShape {
 }
 
 /// One change to what the suggestion records mean (ADR-059): from some point
-/// on, a kind of block holds inline nodes, and a pending suggestion made
-/// before that point which touches such a block no longer means what it said.
+/// on, a kind of block means something else (holds inline nodes, or is no
+/// longer a block kind), and a pending suggestion made before that point which
+/// touches such a block no longer means what it said.
 struct ModelStep {
     /// What `.presemble/suggestions/ned/MODEL` holds once the step has run.
     name: &'static str,
-    /// The element kind the step is about.
-    kind: &'static str,
+    /// The element kinds the step is about.
+    kinds: &'static [&'static str],
+    /// Completes "made before …" in the log line for the step.
+    before: &'static str,
 }
 
 /// The steps in the order they were introduced.
 const MODEL_STEPS: &[ModelStep] = &[
-    ModelStep { name: "heading-inlines", kind: "heading" },
-    ModelStep { name: "paragraph-inlines", kind: "paragraph" },
+    ModelStep {
+        name: "heading-inlines",
+        kinds: &["heading"],
+        before: "headings stored inline nodes",
+    },
+    ModelStep {
+        name: "paragraph-inlines",
+        kinds: &["paragraph"],
+        before: "paragraphs stored inline nodes",
+    },
+    // A lone link or image became a paragraph (ADR-059 §12): a `link` or
+    // `image` block in a payload would be refused on accept.
+    ModelStep {
+        name: "link-image-paragraphs",
+        kinds: &["link", "image"],
+        before: "a lone link or image was a paragraph",
+    },
 ];
 
 /// The steps still to run when `recorded` is the last one applied (nothing
@@ -454,7 +471,7 @@ impl Conductor {
                 .collect();
             let mut discarded: Vec<String> = Vec::new();
             for suggestion in pending {
-                if !self.touches_kind(&suggestion, step.kind) {
+                if !step.kinds.iter().any(|kind| self.touches_kind(&suggestion, kind)) {
                     continue;
                 }
                 let file = dir.join(format!("{}.json", suggestion.id));
@@ -473,9 +490,9 @@ impl Conductor {
             if !discarded.is_empty() {
                 discarded.sort();
                 eprintln!(
-                    "conductor: discarded {} pending suggestion(s) made before {}s stored inline nodes: {}",
+                    "conductor: discarded {} pending suggestion(s) made before {}: {}",
                     discarded.len(),
-                    step.kind,
+                    step.before,
                     discarded.join(", ")
                 );
             }
@@ -6101,10 +6118,7 @@ mod creation_check_tests {
                 DocumentSlot {
                     name: SlotName::new("link-slot"),
                     elements: im::vector![Spanned {
-                        node: ContentElement::Link {
-                            text: "Click me".to_string(),
-                            href: "https://example.com".to_string(),
-                        },
+                        node: ContentElement::lone_link("Click me", "https://example.com"),
                         span: Span { start: 0, end: 0 },
                     }],
                 },
@@ -6366,10 +6380,7 @@ mod ned_suggestion_handler_tests {
                 DocumentSlot {
                     name: SlotName::new("link-slot"),
                     elements: im::vector![Spanned {
-                        node: ContentElement::Link {
-                            text: "Click me".to_string(),
-                            href: "https://example.com".to_string(),
-                        },
+                        node: ContentElement::lone_link("Click me", "https://example.com"),
                         span: Span { start: 0, end: 0 },
                     }],
                 },
@@ -11184,7 +11195,7 @@ mod model_migration_tests {
 
         assert!(!listed(&conductor).contains(&"sug-heading".to_string()), "not listed");
         assert!(!file_exists(&tmp, "sug-heading"), "its file is gone");
-        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"), "the last step is recorded");
+        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"), "the last step is recorded");
     }
 
     #[test]
@@ -11222,7 +11233,7 @@ mod model_migration_tests {
 
         assert_eq!(listed(&conductor), vec!["sug-code".to_string()]);
         assert!(file_exists(&tmp, "sug-code"));
-        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"), "marked all the same");
+        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"), "marked all the same");
     }
 
     /// The user's decision: every pending suggestion that touches a paragraph
@@ -11276,8 +11287,9 @@ mod model_migration_tests {
         assert!(file_exists(&tmp, "sug-code"));
     }
 
-    /// An absent `MODEL` runs both steps; `heading-inlines` runs only the
-    /// paragraph step; `paragraph-inlines` runs none. Each step runs once.
+    /// An absent `MODEL` runs every step; `heading-inlines` runs the two
+    /// after it; `paragraph-inlines` runs only the link and image step;
+    /// `link-image-paragraphs` runs none. Each step runs once.
     #[test]
     fn migration_runs_each_step_once_in_order() {
         let both = |tmp: &tempfile::TempDir| {
@@ -11297,11 +11309,11 @@ mod model_migration_tests {
             );
         };
 
-        // No MODEL: both steps run.
+        // No MODEL: the heading and paragraph steps run.
         let tmp = site();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), Vec::<String>::new());
-        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"));
+        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
 
         // heading-inlines: the paragraph step only; the heading suggestion
         // was made after headings held nodes.
@@ -11310,15 +11322,24 @@ mod model_migration_tests {
         std::fs::write(dir(&tmp).join("MODEL"), "heading-inlines").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"));
+        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
 
-        // paragraph-inlines: nothing runs.
+        // paragraph-inlines: only the link and image step runs; neither
+        // suggestion holds a link or an image.
         let tmp = site();
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "paragraph-inlines").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("paragraph-inlines"));
+        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
+
+        // link-image-paragraphs: nothing runs.
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "link-image-paragraphs").unwrap();
+        both(&tmp);
+        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
 
         // Once: a suggestion made after the migration survives the next start.
         let tmp = site();
@@ -11334,12 +11355,70 @@ mod model_migration_tests {
         let names = |recorded: Option<&str>| -> Vec<&'static str> {
             model_steps_after(recorded).iter().map(|step| step.name).collect()
         };
-        assert_eq!(names(None), vec!["heading-inlines", "paragraph-inlines"]);
-        assert_eq!(names(Some("heading-inlines")), vec!["paragraph-inlines"]);
-        assert!(names(Some("paragraph-inlines")).is_empty());
+        assert_eq!(
+            names(None),
+            vec!["heading-inlines", "paragraph-inlines", "link-image-paragraphs"]
+        );
+        assert_eq!(
+            names(Some("heading-inlines")),
+            vec!["paragraph-inlines", "link-image-paragraphs"]
+        );
+        assert_eq!(names(Some("paragraph-inlines")), vec!["link-image-paragraphs"]);
+        assert!(names(Some("link-image-paragraphs")).is_empty());
         // A name this conductor does not know was written by a newer one:
         // nothing runs.
         assert!(names(Some("something-newer")).is_empty());
+    }
+
+    /// A pending suggestion whose payload holds a `link` or `image` block is
+    /// discarded once (the kinds are gone, ADR-059 §12); a paragraph that
+    /// holds an inline link, other pending suggestions and history stay.
+    #[test]
+    fn pending_link_and_image_payloads_are_discarded() {
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "paragraph-inlines").unwrap();
+        let link = ned::NodeTree::element("link")
+            .with_attr("href", "/x")
+            .with_child(ned::NodeTree::text("t"));
+        let image = ned::NodeTree::element("image").with_attr("path", "p.jpg");
+        let nested = ned::NodeTree::element("blockquote").with_child(link.clone());
+        let inline_link_paragraph = ned::NodeTree::element("paragraph").with_child(
+            ned::NodeTree::element("inline-link")
+                .with_attr("href", "/x")
+                .with_child(ned::NodeTree::text("t")),
+        );
+        let pending = NedSuggestionStatus::Pending;
+        write_suggestion(&tmp, "sug-link", CODE_BLOCK, NedMutation::InsertAfter(vec![link.clone()]), pending.clone());
+        write_suggestion(&tmp, "sug-image", CODE_BLOCK, NedMutation::Replace(vec![image]), pending.clone());
+        write_suggestion(&tmp, "sug-nested", CODE_BLOCK, NedMutation::InsertAfter(vec![nested]), pending.clone());
+        write_suggestion(
+            &tmp,
+            "sug-inline-link",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![inline_link_paragraph]),
+            pending.clone(),
+        );
+        write_suggestion(&tmp, "sug-title", TITLE_TEXT, NedMutation::SetText("Renamed".to_string()), pending);
+        write_suggestion(
+            &tmp,
+            "sug-accepted-link",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![link]),
+            NedSuggestionStatus::Accepted,
+        );
+
+        let conductor = start(&tmp);
+
+        assert_eq!(
+            listed(&conductor),
+            vec!["sug-accepted-link".to_string(), "sug-inline-link".to_string(), "sug-title".to_string()]
+        );
+        for id in ["sug-link", "sug-image", "sug-nested"] {
+            assert!(!file_exists(&tmp, id), "{id}: its file is gone");
+        }
+        assert!(file_exists(&tmp, "sug-inline-link") && file_exists(&tmp, "sug-accepted-link"));
+        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
     }
 
     #[test]
@@ -11585,8 +11664,10 @@ mod emitted_address_tests {
                                 && s.iter().all(|n| {
                                     matches!(
                                         node_store_bridge::content_bridge::block_from_node(&store, n),
-                                        Ok(content::ContentElement::Link { .. }
-                                            | content::ContentElement::LinkExpression { .. })
+                                        Ok(ref el) if el.is_sole_link()
+                                    ) || matches!(
+                                        node_store_bridge::content_bridge::block_from_node(&store, n),
+                                        Ok(content::ContentElement::LinkExpression { .. })
                                     )
                                 })
                         });

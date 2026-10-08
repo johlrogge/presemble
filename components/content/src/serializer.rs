@@ -114,11 +114,6 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
             let source = crate::inline::paragraph_source_text(content, marker.as_ref());
             if reads_as_link_expression(&source) { format!("\\{source}") } else { source }
         }
-        ContentElement::Link { text, href } => format!("[{text}]({})", destination(href)),
-        ContentElement::Image { alt, path } => {
-            let alt_text = alt.as_deref().unwrap_or("");
-            format!("![{alt_text}]({})", destination(path))
-        }
         ContentElement::Separator => "----".to_string(),
         ContentElement::CodeBlock { language, code } => {
             serialize_code_block(language.as_deref(), code)
@@ -865,28 +860,19 @@ headings
 
     #[test]
     fn serialize_link() {
-        let d = doc_from_elements(vec![ContentElement::Link {
-            text: "Jo".to_string(),
-            href: "/author/jo".to_string(),
-        }]);
+        let d = doc_from_elements(vec![ContentElement::lone_link("Jo", "/author/jo")]);
         assert_eq!(serialize_document(&d), "[Jo](/author/jo)\n");
     }
 
     #[test]
     fn serialize_image() {
-        let d = doc_from_elements(vec![ContentElement::Image {
-            alt: Some("A photo".to_string()),
-            path: "img.jpg".to_string(),
-        }]);
+        let d = doc_from_elements(vec![ContentElement::lone_image("A photo", "img.jpg")]);
         assert_eq!(serialize_document(&d), "![A photo](img.jpg)\n");
     }
 
     #[test]
     fn serialize_image_without_alt() {
-        let d = doc_from_elements(vec![ContentElement::Image {
-            alt: None,
-            path: "img.jpg".to_string(),
-        }]);
+        let d = doc_from_elements(vec![ContentElement::lone_image("", "img.jpg")]);
         assert_eq!(serialize_document(&d), "![](img.jpg)\n");
     }
 
@@ -1161,7 +1147,7 @@ headings
 
     #[test]
     fn destinations_escape_only_what_the_parser_would_unescape() {
-        let link = |href: &str| ContentElement::Link { text: "t".to_string(), href: href.to_string() };
+        let link = |href: &str| ContentElement::lone_link("t", href);
         let cases = [
             ("/a&b", "[t](/a&b)"),
             ("/?a=1&b=2", "[t](/?a=1&b=2)"),
@@ -1491,7 +1477,7 @@ headings
 
     #[test]
     fn link_and_image_destinations_use_angle_form_when_needed() {
-        let link = |href: &str| ContentElement::Link { text: "t".to_string(), href: href.to_string() };
+        let link = |href: &str| ContentElement::lone_link("t", href);
         let cases = [
             ("/a/b", "[t](/a/b)"),
             ("/a b", "[t](</a b>)"),
@@ -1510,7 +1496,7 @@ headings
             assert_eq!(serialize_element(&lone_link_paragraph("t", href)), expected, "href {href:?}");
         }
 
-        let img = ContentElement::Image { alt: Some("A cat".to_string()), path: "my (cat).png".to_string() };
+        let img = ContentElement::lone_image("A cat", "my (cat).png");
         let out = serialize_element(&img);
         assert_eq!(out, "![A cat](<my (cat).png>)");
         let image = reparse_one(&out).sole_image().expect("a lone image");
@@ -1777,7 +1763,7 @@ headings
         assert_eq!(reparse_one("a [p](->> :post) b"), para("a [p](->> :post) b"));
 
         // L7: a plain link whose href starts with `:` reads back as a link expression.
-        let el = ContentElement::Link { text: "t".to_string(), href: ":x".to_string() };
+        let el = ContentElement::lone_link("t", ":x");
         assert!(matches!(
             reparse_one(&serialize_element(&el)),
             ContentElement::LinkExpression { .. }

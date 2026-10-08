@@ -783,7 +783,7 @@ fn suggest_ned_description() -> String {
          - The second body paragraph's text, with SetText or {{\"SearchReplace\": {{\"search\": \"old\", \"replace\": \"new\"}}}}: (ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path \"content/post/x.md\") \"body\")) \"paragraph\" 1))\n\
          - The paragraph after the heading \"Intro\", with Replace or InsertAfter: (ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path \"content/post/x.md\") \"body\")) \"Intro\") \"paragraph\" 0)\n\
          \n\
-         Replace, InsertBefore, InsertAfter and InsertChild take a non-empty list of NodeTree blocks, inserted in order. Example: {{\"InsertAfter\": [{NODE_TREE_PARAGRAPH_EXAMPLE}, {NODE_TREE_HEADING_EXAMPLE}]}}. Heading levels are strings in payloads (\"2\", not 2). Text blocks (heading, paragraph) have exactly one Text child. Delete is the plain string \"Delete\"."
+         Replace, InsertBefore, InsertAfter and InsertChild take a non-empty list of NodeTree blocks, inserted in order. Example: {{\"InsertAfter\": [{NODE_TREE_PARAGRAPH_EXAMPLE}, {NODE_TREE_HEADING_EXAMPLE}]}}. Heading levels are strings in payloads (\"2\", not 2). Text blocks (heading, paragraph) have exactly one Text child. A link or an image is a paragraph holding one inline-link (attribute href) or inline-image (attribute src) element; there is no link or image block kind. Delete is the plain string \"Delete\"."
     )
 }
 

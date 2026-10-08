@@ -1,0 +1,40 @@
+// The paragraphs the conservation tests (components/content/tests/conservation.rs)
+// and the stored-shape test (components/content_store,
+// `stored_shape_agrees_with_decoded_shape_over_the_corpus`) share.
+// Format: a line `# name` starts a section; a line starting with `//` is a
+// comment; every other non-blank line is one paragraph's markdown.
+
+# paragraphs
+Some words.
+Another paragraph here.
+x1 and 2024
+End.
+
+# links
+[a](/post/a)
+[Post b](/post/b)
+[ext](https://x.y/p)
+
+# images
+![c](i.jpg)
+![](images/x.png)
+![A cat](cat.jpg)
+
+# literal-marker-paragraphs
+Text ![i](x.png)
+text \{#x}
+`{#x}`
+text {#x} more
+see {#a} or {b}
+Text {#x} ![i](x.png)
+Text \{#x} ![i](x.png)
+`{#x}` ![i](x.png)
+
+# inline-paragraphs
+See ![c](c.png) here.
+[a](/x) trailing
+text [l](/post/l) more
+a ![i](i.jpg) b ![j](j.jpg) c
+*em* and [l](/x) and `code`
+[a](/x) and ![i](i.jpg)
+![i](i.jpg) caption

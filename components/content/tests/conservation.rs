@@ -114,9 +114,35 @@ fn grammars() -> Vec<(&'static str, Grammar)> {
 // ── Element pools ───────────────────────────────────────────────────────────
 
 const HEADINGS: &[&str] = &["# Home", "# A title", "## Aside", "### Third level"];
-const PARAGRAPHS: &[&str] = &["Some words.", "Another paragraph here.", "x1 and 2024", "End."];
-const LINKS: &[&str] = &["[a](/post/a)", "[Post b](/post/b)", "[ext](https://x.y/p)"];
-const IMAGES: &[&str] = &["![c](i.jpg)", "![](images/x.png)", "![A cat](cat.jpg)"];
+/// The paragraphs shared with the stored-shape test in `content_store`
+/// (`resources/test/paragraph-corpus.txt`): `# name` starts a section, `//` is
+/// a comment, every other non-blank line is one paragraph.
+const PARAGRAPH_CORPUS: &str = include_str!("../../../resources/test/paragraph-corpus.txt");
+
+fn corpus_section(name: &str) -> Vec<&'static str> {
+    let mut in_section = false;
+    let mut lines = Vec::new();
+    for line in PARAGRAPH_CORPUS.lines() {
+        if let Some(header) = line.strip_prefix("# ") {
+            in_section = header.trim() == name;
+        } else if in_section && !line.trim().is_empty() && !line.starts_with("//") {
+            lines.push(line);
+        }
+    }
+    assert!(!lines.is_empty(), "no section `{name}` in paragraph-corpus.txt");
+    lines
+}
+
+static PARAGRAPHS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| corpus_section("paragraphs"));
+static LINKS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| corpus_section("links"));
+static IMAGES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| corpus_section("images"));
+static LITERAL_MARKER_PARAGRAPHS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| corpus_section("literal-marker-paragraphs"));
+static INLINE_PARAGRAPHS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| corpus_section("inline-paragraphs"));
 const UNMARKED_EXPRESSIONS: &[&str] = &[
     "[Latest](->> :post (take 2))",
     "[posts](->> :post (sort-by :published :desc))",
@@ -164,30 +190,11 @@ const HTML_BLOCKS: &[&str] = &[
     "<!-- c --> <b>after</b>",
     "<hr/>",
 ];
-/// Paragraphs holding a literal `{#…}` that is not a trailing marker: they
-/// are normal paragraphs, also when an image splits them (the paragraph's
-/// text is then written with `\{#`).
-const LITERAL_MARKER_PARAGRAPHS: &[&str] = &[
-    "Text ![i](x.png)",
-    "text \\{#x}",
-    "`{#x}`",
-    "text {#x} more",
-    "see {#a} or {b}",
-    "Text {#x} ![i](x.png)",
-    "Text \\{#x} ![i](x.png)",
-    "`{#x}` ![i](x.png)",
-];
-/// Paragraphs with links and images inside their text (ADR-059 stage 5):
-/// each is one paragraph and keeps everything it has.
-const INLINE_PARAGRAPHS: &[&str] = &[
-    "See ![c](c.png) here.",
-    "[a](/x) trailing",
-    "text [l](/post/l) more",
-    "a ![i](i.jpg) b ![j](j.jpg) c",
-    "*em* and [l](/x) and `code`",
-    "[a](/x) and ![i](i.jpg)",
-    "![i](i.jpg) caption",
-];
+// `LITERAL_MARKER_PARAGRAPHS` (above, from the shared corpus): paragraphs
+// holding a literal `{#…}` that is not a trailing marker. They are normal
+// paragraphs, also when an image splits them (the text is then written with
+// `\{#`). `INLINE_PARAGRAPHS`: paragraphs with links and images inside their
+// text (ADR-059 stage 5); each is one paragraph and keeps everything it has.
 const BODY_HEADINGS: &[&str] = &["### Section", "#### Deeper", "## Too high"];
 
 /// HTML comments (trivia, ADR-062). Each is a complete comment-only block.
@@ -221,9 +228,9 @@ fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: b
 fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
     match rng.below(29) {
         0..=2 => rng.pick(HEADINGS).to_string(),
-        3..=5 => rng.pick(PARAGRAPHS).to_string(),
-        6..=7 => rng.pick(LINKS).to_string(),
-        8 => rng.pick(IMAGES).to_string(),
+        3..=5 => rng.pick(&PARAGRAPHS).to_string(),
+        6..=7 => rng.pick(&LINKS).to_string(),
+        8 => rng.pick(&IMAGES).to_string(),
         9..=10 => gen_list(rng, previous_ordered, after_comment),
         11..=12 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
         13..=14 => rng.pick(MARKED_FOR_LINK_SLOT).to_string(),
@@ -232,19 +239,19 @@ fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_
         17..=19 => rng.pick(MARKER_MISUSE).to_string(),
         20..=21 => rng.pick(OTHER_BLOCKS).to_string(),
         22..=23 => rng.pick(HTML_BLOCKS).to_string(),
-        24..=26 => rng.pick(INLINE_PARAGRAPHS).to_string(),
-        _ => rng.pick(LITERAL_MARKER_PARAGRAPHS).to_string(),
+        24..=26 => rng.pick(&INLINE_PARAGRAPHS).to_string(),
+        _ => rng.pick(&LITERAL_MARKER_PARAGRAPHS).to_string(),
     }
 }
 
 fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
     match rng.below(13) {
-        11 => rng.pick(INLINE_PARAGRAPHS).to_string(),
+        11 => rng.pick(&INLINE_PARAGRAPHS).to_string(),
         0..=1 => rng.pick(BODY_HEADINGS).to_string(),
-        2..=4 => rng.pick(PARAGRAPHS).to_string(),
+        2..=4 => rng.pick(&PARAGRAPHS).to_string(),
         5 => gen_list(rng, previous_ordered, after_comment),
         6 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
-        7 => rng.pick(LINKS).to_string(),
+        7 => rng.pick(&LINKS).to_string(),
         8 => rng.pick(HTML_BLOCKS).to_string(),
         _ => rng.pick(MARKER_MISUSE).to_string(),
     }
@@ -607,7 +614,7 @@ fn literal_markers_are_never_misuse() {
         m.contains("slot marker") || m.contains("on its own is not allowed")
     };
     let mut failures = Vec::new();
-    for p in LITERAL_MARKER_PARAGRAPHS {
+    for p in LITERAL_MARKER_PARAGRAPHS.iter() {
         for (where_, src) in [
             ("preamble", format!("# Home\n\n{p}\n\n----\n\nBody.\n")),
             ("body", format!("# Home\n\nOne.\n\n----\n\n{p}\n")),

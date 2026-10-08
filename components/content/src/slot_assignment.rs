@@ -391,10 +391,9 @@ pub(crate) fn element_matches_slot(element: &ContentElement, slot_element: &Elem
         Element::Heading { .. } => matches!(element, ContentElement::Heading { .. }),
         Element::Paragraph => element.is_text_paragraph(),
         Element::Link { .. } => {
-            element.sole_link().is_some()
-                || matches!(element, ContentElement::LinkExpression { .. })
+            element.is_sole_link() || matches!(element, ContentElement::LinkExpression { .. })
         }
-        Element::Image { .. } => element.sole_image().is_some(),
+        Element::Image { .. } => element.is_sole_image(),
         Element::List => matches!(element, ContentElement::List { .. }),
     }
 }
@@ -492,17 +491,11 @@ headings
     }
 
     fn link(text: &str, href: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::Link {
-            text: text.to_string(),
-            href: href.to_string(),
-        })
+        spanned(ContentElement::lone_link(text, href))
     }
 
     fn image(alt: Option<&str>, path: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::Image {
-            alt: alt.map(|s| s.to_string()),
-            path: path.to_string(),
-        })
+        spanned(ContentElement::lone_image(alt.unwrap_or(""), path))
     }
 
     fn separator() -> Spanned<ContentElement> {
@@ -691,7 +684,7 @@ headings
         let author_slot = &slotted.preamble[1];
         assert_eq!(author_slot.name.as_str(), "author");
         assert_eq!(author_slot.elements.len(), 1);
-        assert!(matches!(&author_slot.elements[0].node, ContentElement::Link { .. }));
+        assert!(author_slot.elements[0].node.is_sole_link());
     }
 
     #[test]
@@ -1195,6 +1188,6 @@ headings
         assert!(cover_slot.is_some(), "article grammar should have a cover slot");
         let cover_slot = cover_slot.unwrap();
         assert_eq!(cover_slot.elements.len(), 1);
-        assert!(matches!(&cover_slot.elements[0].node, ContentElement::Image { .. }));
+        assert!(cover_slot.elements[0].node.is_sole_image());
     }
 }

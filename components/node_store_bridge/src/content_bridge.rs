@@ -125,6 +125,14 @@ fn add_blocks_with_trivia(
     elements: &im::Vector<Spanned<ContentElement>>,
     comments: &[&AnchoredComment],
 ) {
+    // The common case: no comments, so no trivia to look up per block.
+    if comments.is_empty() {
+        for spanned in elements {
+            let id = content_element_to_store(&spanned.node, store);
+            store.add_edge(container_node, Edge::Child(id));
+        }
+        return;
+    }
     for (at, spanned) in elements.iter().enumerate() {
         let id = content_element_to_store(&spanned.node, store);
         store.add_edge(container_node, Edge::Child(id));
@@ -183,38 +191,22 @@ pub(crate) fn sole_link_paragraph_href(store: &NodeStore, node: NodeId) -> Optio
     }
 }
 
-/// The href of a plain link element: a lone-link paragraph, or (until stage
-/// 5b.2) a `link` block.
-fn plain_link_href(store: &NodeStore, node: NodeId) -> Option<String> {
-    if matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link") {
-        return find_attr_text(store, node, "href");
-    }
-    sole_link_paragraph_href(store, node)
-}
-
-/// Check if a node is a plain link element: a lone-link paragraph, or a
-/// `link` block (stored as Element("link"), until stage 5b.2).
-fn is_resolved_link(store: &NodeStore, node: NodeId) -> bool {
-    matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == "link")
-        || sole_link_paragraph_href(store, node).is_some()
-}
-
 /// What a link element in a preamble slot points at.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SlotElementTarget {
-    /// A `link` block or a `PathRef` link expression: one page, by its
+    /// A lone-link paragraph or a `PathRef` link expression: one page, by its
     /// normalised URL. `raw` is the destination as written (an href, or a
-    /// PathRef value). `plain_link` is true for a `link` block.
+    /// PathRef value). `plain_link` is true for a lone-link paragraph.
     Url { url: String, raw: String, plain_link: bool },
     /// A thread expression over the items of `source`.
     Thread { source: String, ops: Vec<LinkOp> },
 }
 
-/// The target of a link element (`link` or `link-expression`), or `None` for
-/// any other node. URLs are normalised (`store_pipeline::normalise_url`).
+/// The target of a link element (a lone-link paragraph or a
+/// `link-expression`), or `None` for any other node. URLs are normalised
+/// (`store_pipeline::normalise_url`).
 pub(crate) fn slot_element_target(store: &NodeStore, el: NodeId) -> Option<SlotElementTarget> {
-    if is_resolved_link(store, el) {
-        let href = plain_link_href(store, el)?;
+    if let Some(href) = sole_link_paragraph_href(store, el) {
         return Some(SlotElementTarget::Url {
             url: crate::store_pipeline::normalise_url(&href),
             raw: href,
@@ -405,7 +397,9 @@ pub fn fill_semantic_content(
                 let mut link_targets: Vec<NodeId> = Vec::new();
                 let mut has_link_exprs = false;
                 for &child in &children {
-                    if is_link_expression(store, child) || is_resolved_link(store, child) {
+                    if is_link_expression(store, child)
+                        || sole_link_paragraph_href(store, child).is_some()
+                    {
                         has_link_exprs = true;
                         // Link blocks skip self-references; thread expressions
                         // take every item here and are evaluated later
@@ -797,18 +791,9 @@ mod tests {
         let elements = vec![
             ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Section"),
             ContentElement::paragraph_from_markdown("Para text"),
-            ContentElement::Image {
-                alt: Some("alt text".to_string()),
-                path: "/img/photo.jpg".to_string(),
-            },
-            ContentElement::Image {
-                alt: None,
-                path: "/img/no-alt.jpg".to_string(),
-            },
-            ContentElement::Link {
-                text: "Click here".to_string(),
-                href: "https://example.com".to_string(),
-            },
+            ContentElement::lone_image("alt text", "/img/photo.jpg"),
+            ContentElement::lone_image("", "/img/no-alt.jpg"),
+            ContentElement::lone_link("Click here", "https://example.com"),
             ContentElement::Separator,
             ContentElement::CodeBlock {
                 language: Some("rust".to_string()),
@@ -983,9 +968,9 @@ mod tests {
             ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Aside"),
             ContentElement::paragraph_from_markdown("{#stray}"),
             ContentElement::paragraph_from_markdown("![c](i.jpg) {#cover}"),
-            ContentElement::Image { alt: Some("alt".to_string()), path: "/i.jpg".to_string() },
-            ContentElement::Image { alt: None, path: "/j.jpg".to_string() },
-            ContentElement::Link { text: "x".to_string(), href: "/x".to_string() },
+            ContentElement::lone_image("alt", "/i.jpg"),
+            ContentElement::lone_image("", "/j.jpg"),
+            ContentElement::lone_link("x", "/x"),
             ContentElement::Separator,
             ContentElement::CodeBlock { language: Some("rust".to_string()), code: "fn f() {}".to_string() },
             ContentElement::Table {
@@ -1839,17 +1824,13 @@ mod tests {
     }
 
     #[test]
-    fn tree_to_block_decodes_image() {
-        let tree = ned::NodeTree::element("image")
-            .with_attr("path", "/img/a.jpg")
-            .with_attr("alt", "A");
-        assert_eq!(
-            tree_to_block(&tree),
-            Ok(ContentElement::Image {
-                alt: Some("A".to_string()),
-                path: "/img/a.jpg".to_string()
-            })
+    fn tree_to_block_decodes_a_lone_image_paragraph() {
+        let tree = ned::NodeTree::element("paragraph").with_child(
+            ned::NodeTree::element("inline-image")
+                .with_attr("src", "/img/a.jpg")
+                .with_child(ned::NodeTree::text("A")),
         );
+        assert_eq!(tree_to_block(&tree), Ok(ContentElement::lone_image("A", "/img/a.jpg")));
     }
 
     #[test]
@@ -1937,8 +1918,8 @@ mod tests {
         let elements = vec![
             h(2, "Section"),
             ContentElement::paragraph_from_markdown("Para"),
-            ContentElement::Image { alt: None, path: "/i.jpg".to_string() },
-            ContentElement::Link { text: "L".to_string(), href: "/l".to_string() },
+            ContentElement::lone_image("", "/i.jpg"),
+            ContentElement::lone_link("L", "/l"),
             ContentElement::Separator,
             ContentElement::CodeBlock { language: Some("rust".to_string()), code: "x()".to_string() },
             ContentElement::Table {
@@ -1982,8 +1963,6 @@ mod tests {
         let samples = [
             h(1, "x"),
             ContentElement::paragraph_from_markdown("x"),
-            ContentElement::Image { alt: None, path: "p".to_string() },
-            ContentElement::Link { text: "x".to_string(), href: "h".to_string() },
             ContentElement::Separator,
             ContentElement::CodeBlock { language: None, code: "c".to_string() },
             ContentElement::Table { headers: vec![], rows: vec![] },
@@ -2022,7 +2001,6 @@ mod tests {
 
         let mut payload = content_store::INLINE_CONTAINER_KINDS.to_vec();
         payload.extend_from_slice(TEXT_BLOCK_KINDS);
-        payload.push("image");
         payload.push("table");
         assert_eq!(payload, PAYLOAD_BLOCK_KINDS);
     }
@@ -2080,14 +2058,8 @@ mod tests {
         let elements = vec![
             ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Section"),
             ContentElement::paragraph_from_markdown("Para text"),
-            ContentElement::Image {
-                alt: Some("alt text".to_string()),
-                path: "/img/photo.jpg".to_string(),
-            },
-            ContentElement::Link {
-                text: "Click here".to_string(),
-                href: "https://example.com".to_string(),
-            },
+            ContentElement::lone_image("alt text", "/img/photo.jpg"),
+            ContentElement::lone_link("Click here", "https://example.com"),
             ContentElement::Separator,
         ];
 

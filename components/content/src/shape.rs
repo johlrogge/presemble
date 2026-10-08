@@ -74,6 +74,39 @@ pub struct SoleImage {
 }
 
 impl ContentElement {
+    /// A paragraph that holds one link, whose text is the literal `text`
+    /// (shape `SoleLink`).
+    pub fn lone_link(text: &str, href: &str) -> ContentElement {
+        ContentElement::Paragraph {
+            content: Inlines::new(
+                vec![Inline::Link {
+                    destination: LinkDestination::new(href),
+                    title: None,
+                    text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+                }],
+                InlineContext::Paragraph,
+            ),
+            marker: None,
+        }
+    }
+
+    /// A paragraph that holds one image, whose alt is the literal `alt`, empty
+    /// for none (shape `SoleImage`).
+    pub fn lone_image(alt: &str, src: &str) -> ContentElement {
+        let alt = if alt.is_empty() { Vec::new() } else { vec![Inline::Text(alt.to_string())] };
+        ContentElement::Paragraph {
+            content: Inlines::new(
+                vec![Inline::Image {
+                    source: AssetRef::new(src),
+                    title: None,
+                    alt: Inlines::new(alt, InlineContext::Alt),
+                }],
+                InlineContext::Paragraph,
+            ),
+            marker: None,
+        }
+    }
+
     /// The paragraph content that decides this element's shape: a paragraph
     /// without a marker (a marker makes it misuse, ADR-060 P1, and it fills no
     /// slot).
@@ -87,49 +120,38 @@ impl ContentElement {
     /// The link this element is: a paragraph of shape `SoleLink`, or a `Link`
     /// block. `None` for anything else.
     pub fn sole_link(&self) -> Option<SoleLink> {
-        if let Some(content) = self.shaped_content() {
-            return match BlockShape::of(content) {
-                BlockShape::SoleLink(parts) => Some(SoleLink {
-                    destination: parts.destination.as_str().to_string(),
-                    title: parts.title.map(str::to_string),
-                    text: parts.text.clone(),
-                }),
-                _ => None,
-            };
-        }
-        // 5b.2: the `Link` block goes.
-        match self {
-            ContentElement::Link { text, href } => Some(SoleLink {
-                destination: href.clone(),
-                title: None,
-                text: Inlines::new(vec![Inline::Text(text.clone())], InlineContext::LinkText),
+        match BlockShape::of(self.shaped_content()?) {
+            BlockShape::SoleLink(parts) => Some(SoleLink {
+                destination: parts.destination.as_str().to_string(),
+                title: parts.title.map(str::to_string),
+                text: parts.text.clone(),
             }),
             _ => None,
         }
     }
 
+    /// Whether [`ContentElement::sole_link`] would be `Some`, without copying
+    /// the link.
+    pub fn is_sole_link(&self) -> bool {
+        self.shaped_content()
+            .is_some_and(|content| matches!(BlockShape::of(content), BlockShape::SoleLink(_)))
+    }
+
+    /// Whether [`ContentElement::sole_image`] would be `Some`, without copying
+    /// the image.
+    pub fn is_sole_image(&self) -> bool {
+        self.shaped_content()
+            .is_some_and(|content| matches!(BlockShape::of(content), BlockShape::SoleImage(_)))
+    }
+
     /// The image this element is: a paragraph of shape `SoleImage`, or an
     /// `Image` block. `None` for anything else.
     pub fn sole_image(&self) -> Option<SoleImage> {
-        if let Some(content) = self.shaped_content() {
-            return match BlockShape::of(content) {
-                BlockShape::SoleImage(parts) => Some(SoleImage {
-                    source: parts.source.as_str().to_string(),
-                    title: parts.title.map(str::to_string),
-                    alt: parts.alt.clone(),
-                }),
-                _ => None,
-            };
-        }
-        // 5b.2: the `Image` block goes.
-        match self {
-            ContentElement::Image { alt, path } => Some(SoleImage {
-                source: path.clone(),
-                title: None,
-                alt: Inlines::new(
-                    alt.iter().map(|a| Inline::Text(a.clone())).collect(),
-                    InlineContext::Alt,
-                ),
+        match BlockShape::of(self.shaped_content()?) {
+            BlockShape::SoleImage(parts) => Some(SoleImage {
+                source: parts.source.as_str().to_string(),
+                title: parts.title.map(str::to_string),
+                alt: parts.alt.clone(),
             }),
             _ => None,
         }
@@ -211,5 +233,30 @@ mod tests {
         let marked = ContentElement::paragraph_from_markdown("[a](/x) {#m}");
         assert!(marked.sole_link().is_none());
         assert!(marked.is_text_paragraph());
+    }
+
+    /// The non-copying predicates say what the adapters say.
+    #[test]
+    fn is_sole_link_and_is_sole_image_agree_with_the_adapters() {
+        for md in [
+            "[a](/x)",
+            "![c](c.png)",
+            "![](c.png)",
+            "[a](/x) and more",
+            "plain",
+            "",
+            "[a](/x) {#m}",
+            "![c](c.png) {#m}",
+            "[a](/x) <!-- c -->",
+            "[![c](c.png)](/x)",
+        ] {
+            let el = ContentElement::paragraph_from_markdown(md);
+            assert_eq!(el.is_sole_link(), el.sole_link().is_some(), "{md:?}");
+            assert_eq!(el.is_sole_image(), el.sole_image().is_some(), "{md:?}");
+        }
+        for el in [ContentElement::Separator, ContentElement::lone_link("a", "/x")] {
+            assert_eq!(el.is_sole_link(), el.sole_link().is_some());
+            assert_eq!(el.is_sole_image(), el.sole_image().is_some());
+        }
     }
 }

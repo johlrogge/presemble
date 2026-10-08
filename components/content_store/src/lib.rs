@@ -4,11 +4,6 @@
 //! This component sits below `template` and `node_store_bridge`, so both read
 //! blocks through the one decoder.
 
-// 5b.2: `ContentElement::Link` and `Image` are deprecated and removed in 5b.2;
-// until then the codec still reads and writes their `link` and `image` kinds.
-// 5b.2: remove this allow
-#![allow(deprecated)]
-
 mod access;
 mod block;
 #[cfg(test)]
@@ -201,19 +196,18 @@ mod tests {
     /// (`components/content/tests/conservation.rs`).
     #[test]
     fn stored_shape_agrees_with_decoded_shape_over_the_corpus() {
-        const CORPUS: &[&str] = &[
-            "Some words.", "Another paragraph here.", "x1 and 2024", "End.",
-            "[a](/post/a)", "[Post b](/post/b)", "[ext](https://x.y/p)",
-            "![c](i.jpg)", "![](images/x.png)", "![A cat](cat.jpg)",
-            "[a](/x) {#s}", "![c](i.jpg) {#cover}", "text {#x}", "Summary text {#summary}",
-            "[a](/x) trailing {#x}", "Text ![i](x.png)", "text \\{#x}", "`{#x}`",
-            "text {#x} more", "see {#a} or {b}", "Text {#x} ![i](x.png)",
-            "See ![c](c.png) here.", "[a](/x) trailing", "text [l](/post/l) more",
-            "a ![i](i.jpg) b ![j](j.jpg) c", "*em* and [l](/x) and `code`",
-            "[a](/x) and ![i](i.jpg)", "![i](i.jpg) caption",
-        ];
+        // `resources/test/paragraph-corpus.txt`, shared with
+        // `components/content/tests/conservation.rs`: `# name` starts a
+        // section, `//` is a comment, every other non-blank line is one
+        // paragraph.
+        const CORPUS: &str = include_str!("../../../resources/test/paragraph-corpus.txt");
+        let paragraphs: Vec<&str> = CORPUS
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with("//") && !l.starts_with("# "))
+            .collect();
+        assert!(paragraphs.len() > 20, "{} paragraphs", paragraphs.len());
         let mut seen = std::collections::BTreeSet::new();
-        for chunk in CORPUS {
+        for chunk in paragraphs {
             let el = ContentElement::paragraph_from_markdown(chunk);
             let mut store = NodeStore::new();
             let id = block_to_store(&el, &mut store);

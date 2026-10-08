@@ -226,11 +226,9 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
         Element::Paragraph => Ok(ContentElement::paragraph_from_markdown(new_value)),
         Element::Link { .. } => {
             // Parse "text|href" format.
+            // A lone link is a paragraph of shape SoleLink (ADR-059 §12).
             if let Some((text, href)) = new_value.split_once('|') {
-                Ok(ContentElement::Link {
-                    text: text.to_string(),
-                    href: href.to_string(),
-                })
+                Ok(ContentElement::lone_link(text, href))
             } else {
                 Err(format!(
                     "link slot value must be in 'text|href' format, got: {new_value:?}"
@@ -239,11 +237,9 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
         }
         Element::Image { .. } => {
             // Parse "alt|path" format.
+            // A lone image is a paragraph of shape SoleImage (ADR-059 §12).
             if let Some((alt, path)) = new_value.split_once('|') {
-                Ok(ContentElement::Image {
-                    alt: Some(alt.to_string()),
-                    path: path.to_string(),
-                })
+                Ok(ContentElement::lone_image(alt, path))
             } else {
                 Err(format!(
                     "image slot value must be in 'alt|path' format, got: {new_value:?}"
@@ -264,8 +260,6 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
 /// nodes (see `capitalize_first_text`).
 fn element_text_mut(element: &mut ContentElement) -> Option<&mut String> {
     match element {
-        ContentElement::Link { text, .. } => Some(text),
-        ContentElement::Image { alt: Some(alt), .. } => Some(alt),
         ContentElement::Blockquote { text } => Some(text),
         _ => None,
     }

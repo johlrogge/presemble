@@ -15,26 +15,6 @@ pub fn data_attributes(store: &NodeStore, id: NodeId) -> Vec<(Name, NodeId)> {
         .collect()
 }
 
-/// The name templates see for the data attribute `stored` of `id`. An image
-/// block stores its source as `path`; a template reads it as `src`, like the
-/// `<img>` attribute (stage 5b.0). The store attribute is renamed in 5b.2.
-pub fn data_key<'a>(store: &NodeStore, id: NodeId, stored: &'a str) -> &'a str {
-    if stored == "path" && node_is_element(store, id, "image") {
-        "src"
-    } else {
-        stored
-    }
-}
-
-/// The value node of the data attribute that templates call `key` on `id`
-/// (see [`data_key`]). On an image `path` is not a field.
-pub fn data_attribute(store: &NodeStore, id: NodeId, key: &str) -> Option<NodeId> {
-    data_attributes(store, id)
-        .into_iter()
-        .find(|(name, _)| data_key(store, id, store.resolve_name(*name)) == key)
-        .map(|(_, value)| value)
-}
-
 /// A field of a record, found in the store: a node that holds it, or a value
 /// that has no node of its own.
 pub(crate) enum FieldRef {
@@ -70,7 +50,8 @@ fn only_text_child(store: &NodeStore, id: NodeId) -> Option<NodeId> {
 ///
 /// - A lone-link paragraph is the record `{href, text}`, a lone-image
 ///   paragraph `{src, alt}`; `alt` is absent when it is empty.
-/// - Any other node has its data attributes as fields (see [`data_key`]).
+/// - Any other node has its data attributes as fields, under their stored
+///   names.
 pub(crate) fn record_field(store: &NodeStore, id: NodeId, key: &str) -> Option<FieldRef> {
     use content::AsPlainText;
     use content_store::StoredShape;
@@ -122,7 +103,10 @@ pub(crate) fn record_field(store: &NodeStore, id: NodeId, key: &str) -> Option<F
             _ => None,
         };
     }
-    data_attribute(store, id, key).map(FieldRef::Node)
+    data_attributes(store, id)
+        .into_iter()
+        .find(|(name, _)| store.resolve_name(*name) == key)
+        .map(|(_, value)| FieldRef::Node(value))
 }
 
 /// The node that holds field `key` of `id`'s record ([`record_field`]); `None`

@@ -122,6 +122,60 @@ fn find_preamble_insert_position(
     insert_pos
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content_bridge::{block_from_node, document_to_store};
+    use content::ContentElement;
+
+    const SCHEMA: &str = "# Title {#title}\noccurs\n: exactly once\n\n\
+         [Author](/author/<name>) {#author}\noccurs\n: exactly once\n\n\
+         ![Cover](images/*.jpg) {#cover}\noccurs\n: exactly once\n\n\
+         ----\n\nBody.\n";
+
+    /// The block the slot `name` holds after `modify_slot_in_store(value)`.
+    fn slot_block_after_edit(name: &str, value: &str) -> ContentElement {
+        let grammar = schema::parse_schema(SCHEMA).expect("schema parses");
+        let doc = content::parse_and_assign(
+            "# T\n\n[Jo](/author/jo)\n\n![A cat](images/cat.jpg)\n\n----\n\nBody.\n",
+            &grammar,
+        )
+        .expect("parses");
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        modify_slot_in_store(&mut store, root, &grammar, name, value).expect("edits");
+        let preamble = find_child_by_name(&store, root, "preamble").expect("preamble");
+        let slot = store
+            .children(preamble)
+            .into_iter()
+            .find(|s| find_attr_text(&store, *s, "name").as_deref() == Some(name))
+            .expect("slot");
+        let blocks = store.children(slot);
+        assert_eq!(blocks.len(), 1);
+        block_from_node(&store, blocks[0]).expect("a block")
+    }
+
+    /// The link picker's `text|href` edit stores a paragraph whose shape is a
+    /// lone link (ADR-059 §12), not a block kind of its own.
+    #[test]
+    fn link_picker_edit_stores_a_link_paragraph() {
+        let block = slot_block_after_edit("author", "Jo H|/author/jo");
+        assert!(matches!(block, ContentElement::Paragraph { .. }), "{block:?}");
+        let link = block.sole_link().expect("a lone link");
+        assert_eq!(link.destination, "/author/jo");
+        assert_eq!(content::AsPlainText::plain_text(&link.text), "Jo H");
+    }
+
+    /// The same for an image slot's `alt|path` edit.
+    #[test]
+    fn image_slot_edit_stores_an_image_paragraph() {
+        let block = slot_block_after_edit("cover", "A cat|images/cat.jpg");
+        assert!(matches!(block, ContentElement::Paragraph { .. }), "{block:?}");
+        let image = block.sole_image().expect("a lone image");
+        assert_eq!(image.source, "images/cat.jpg");
+    }
+}
+
 /// Set or replace a boolean attribute on a node.
 /// If an existing attribute with that name exists, replaces its value node in place;
 /// otherwise appends a new Attribute edge.

@@ -1,8 +1,3 @@
-// 5b.2: `ContentElement::Link` and `Image` are deprecated and removed in 5b.2;
-// until then the conductor's tests still build them.
-// 5b.2: remove this allow
-#![allow(deprecated)]
-
 mod client;
 mod conductor;
 mod dirty;

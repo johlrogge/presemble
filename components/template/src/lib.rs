@@ -1,8 +1,3 @@
-// 5b.2: `ContentElement::Link` and `Image` are deprecated and removed in 5b.2;
-// until then this crate still renders them (and its tests build them).
-// 5b.2: remove this allow
-#![allow(deprecated)]
-
 mod ast;
 pub mod constants;
 pub mod constraints;

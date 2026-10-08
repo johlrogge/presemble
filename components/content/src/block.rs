@@ -51,13 +51,10 @@ impl ContentElement {
             ContentElement::Paragraph { content, marker } => {
                 Some(Cow::Owned(crate::inline::paragraph_source_text(content, marker.as_ref())))
             }
-            ContentElement::Link { text, .. } | ContentElement::Blockquote { text } => {
-                Some(Cow::Borrowed(text))
-            }
+            ContentElement::Blockquote { text } => Some(Cow::Borrowed(text)),
             ContentElement::List { source } => Some(Cow::Borrowed(source)),
             ContentElement::CodeBlock { code, .. } => Some(Cow::Borrowed(code)),
-            ContentElement::Image { .. }
-            | ContentElement::Table { .. }
+            ContentElement::Table { .. }
             | ContentElement::Separator
             | ContentElement::HtmlBlock { .. }
             | ContentElement::LinkExpression { .. } => None,
@@ -74,18 +71,13 @@ impl ContentElement {
                 Some(ContentElement::heading_from_markdown(*level, &text))
             }
             ContentElement::Paragraph { .. } => Some(ContentElement::paragraph_from_markdown(&text)),
-            ContentElement::Link { href, .. } => Some(ContentElement::Link {
-                text,
-                href: href.clone(),
-            }),
             ContentElement::Blockquote { .. } => Some(ContentElement::Blockquote { text }),
             ContentElement::List { .. } => Some(ContentElement::List { source: text }),
             ContentElement::CodeBlock { language, .. } => Some(ContentElement::CodeBlock {
                 language: language.clone(),
                 code: text,
             }),
-            ContentElement::Image { .. }
-            | ContentElement::Table { .. }
+            ContentElement::Table { .. }
             | ContentElement::Separator
             | ContentElement::HtmlBlock { .. }
             | ContentElement::LinkExpression { .. } => None,
@@ -112,7 +104,7 @@ pub enum Projection {
 /// Images and tables have no single text value but do have markdown, so the
 /// editor can round-trip them; both projections give their canonical form.
 pub fn project_markdown(el: &ContentElement, p: Projection) -> Option<String> {
-    if !matches!(el, ContentElement::Image { .. } | ContentElement::Table { .. }) {
+    if !matches!(el, ContentElement::Table { .. }) {
         el.text()?;
     }
     let md = serialize_element(el);
@@ -302,8 +294,8 @@ mod tests {
     #[test]
     fn project_markdown_covers_tables_and_images() {
         let cases = [
-            ContentElement::Image { alt: None, path: "p.jpg".to_string() },
-            ContentElement::Image { alt: Some("a".to_string()), path: "p.jpg".to_string() },
+            ContentElement::lone_image("", "p.jpg"),
+            ContentElement::lone_image("a", "p.jpg"),
             ContentElement::Table {
                 headers: vec!["h1".to_string(), "h2".to_string()],
                 rows: vec![vec!["a".to_string(), "b".to_string()]],
@@ -378,22 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn with_text_keeps_link_href() {
-        let l = ContentElement::Link {
-            text: "Old".to_string(),
-            href: "/x/y".to_string(),
-        };
-        let new = l.with_text("New").expect("link has text");
-        assert_eq!(
-            new,
-            ContentElement::Link {
-                text: "New".to_string(),
-                href: "/x/y".to_string(),
-            }
-        );
-    }
-
-    #[test]
     fn with_text_keeps_code_language() {
         let c = ContentElement::CodeBlock {
             language: Some("rust".to_string()),
@@ -431,10 +407,6 @@ mod tests {
     #[test]
     fn with_text_and_text_none_for_non_text_kinds() {
         let cases = [
-            ContentElement::Image {
-                alt: Some("a".to_string()),
-                path: "p.jpg".to_string(),
-            },
             ContentElement::Table {
                 headers: vec!["h".to_string()],
                 rows: vec![vec!["c".to_string()]],
