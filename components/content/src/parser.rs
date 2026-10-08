@@ -34,11 +34,56 @@ fn align_of(alignment: pulldown_cmark::Alignment) -> Align {
     }
 }
 
+fn empty_cell() -> Inlines {
+    Inlines::new(Vec::new(), InlineContext::Cell)
+}
+
+/// A cell from its source between two pipes. Source that does not read as cell
+/// content is kept as literal text: a cell is never dropped.
+fn cell_from_source(source: &str) -> Inlines {
+    let source = source.trim();
+    crate::inline::parse_inlines(source, InlineContext::Cell).unwrap_or_else(|_| {
+        Inlines::new(vec![crate::inline::Inline::Text(source.to_string())], InlineContext::Cell)
+    })
+}
+
+/// The cell sources of a table row line: split at every `|` that is not
+/// escaped with `\` (a pipe inside a code span splits as well, as in GFM), with
+/// the pipe that opens and the pipe that closes the row left out.
+fn table_row_cells(row: &str) -> Vec<&str> {
+    let row = row.trim();
+    let mut cells = Vec::new();
+    let (mut start, mut escaped) = (0, false);
+    for (i, c) in row.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '|' {
+            cells.push(&row[start..i]);
+            start = i + 1;
+        }
+    }
+    cells.push(&row[start..]);
+    if row.starts_with('|') {
+        cells.remove(0);
+    }
+    // Nothing after the last pipe: it closed the row.
+    if cells.last().is_some_and(|last| last.is_empty()) {
+        cells.pop();
+    }
+    cells
+}
+
 /// A table from what was read: every row gets exactly one cell per column.
-/// Short rows are padded with empty cells; GFM already drops extra cells when
-/// it reads a row (ADR-062 L16).
+/// Short rows are padded with empty cells. A row wider than the header (GFM
+/// drops those cells, ADR-062 L16) widens the table: the header is padded with
+/// empty columns, so that no cell is lost. That is canonicalisation, like L19:
+/// the saved table has the extra columns.
 fn table_element(aligns: Vec<Align>, headers: Vec<Inlines>, rows: Vec<Vec<Inlines>>) -> ContentElement {
-    let width = headers.len();
+    let width = rows.iter().map(Vec::len).fold(headers.len(), usize::max);
+    let mut headers = headers;
+    headers.resize_with(width, empty_cell);
     let columns = headers
         .into_iter()
         .enumerate()
@@ -47,7 +92,7 @@ fn table_element(aligns: Vec<Align>, headers: Vec<Inlines>, rows: Vec<Vec<Inline
     let rows = rows
         .into_iter()
         .map(|mut row| {
-            row.resize_with(width, || Inlines::new(Vec::new(), InlineContext::Cell));
+            row.resize_with(width, empty_cell);
             row
         })
         .collect();
@@ -583,8 +628,18 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
             Event::End(TagEnd::TableRow) => {
-                if let State::Table { ref mut rows, ref mut current_row, .. } = state {
-                    let row = std::mem::take(current_row);
+                let depth = open.len();
+                if let State::Table { ref mut rows, ref mut current_row, ref headers, .. } = state {
+                    let mut row = std::mem::take(current_row);
+                    // GFM keeps no cell beyond the header's width: the rest
+                    // are read from the row's source (L16).
+                    let raw = input.get(range.clone()).unwrap_or_default();
+                    let source = unquoted(raw, depth);
+                    let cells = table_row_cells(&source);
+                    if cells.len() > headers.len() {
+                        row.resize_with(headers.len(), empty_cell);
+                        row.extend(cells[headers.len()..].iter().map(|cell| cell_from_source(cell)));
+                    }
                     rows.push(row);
                 }
             }
@@ -1873,13 +1928,68 @@ Body paragraph."#;
         );
     }
 
+    /// L16, read side (D6): GFM drops the cells beyond the header's column
+    /// count, so the header is padded with empty columns and every cell is
+    /// kept. An unescaped `|` inside a code span splits the cell, which makes
+    /// the row wider than the header.
     #[test]
-    fn excess_table_cells_are_dropped_l16() {
-        // GFM drops cells beyond the header's column count. An unescaped `|`
-        // inside a code span splits the cell, so content is lost on save
-        // (ADR-062 L16).
-        let (_, rows, _) = only_table("| A | B |\n|---|---|\n| `a|b` | c |\n");
-        assert_eq!(rows, vec![vec!["`a".to_string(), "b`".to_string()]]);
+    fn excess_table_cells_are_kept_l16() {
+        let (headers, rows, aligns) = only_table("| A | B |\n|---|---|\n| `a|b` | c |\n");
+        assert_eq!(headers, vec!["A".to_string(), "B".to_string(), String::new()]);
+        assert_eq!(rows, vec![vec!["`a".to_string(), "b`".to_string(), "c".to_string()]]);
+        assert_eq!(aligns, vec![Align::Default; 3]);
+
+        // Alignment of the columns that were there is kept; shorter rows are
+        // padded as before.
+        let (headers, rows, aligns) =
+            only_table("| A | B |\n|:--|--:|\n| 1 | 2 | 3 | 4 |\n| x |\n");
+        assert_eq!(headers, vec!["A", "B", "", ""]);
+        assert_eq!(rows, vec![vec!["1", "2", "3", "4"], vec!["x", "", "", ""]]);
+        assert_eq!(aligns, vec![Align::Left, Align::Right, Align::Default, Align::Default]);
+
+        // An escaped pipe is not a separator.
+        let (headers, rows, _) = only_table("| A | B |\n|---|---|\n| `a\\|b` | c |\n");
+        assert_eq!(headers, vec!["A", "B"]);
+        assert_eq!(rows, vec![vec!["`a\\|b`", "c"]]);
+    }
+
+    /// Guard: how a row line is split into cells.
+    #[test]
+    fn table_row_cells_split_at_unescaped_pipes() {
+        assert_eq!(table_row_cells("| a | b |"), vec![" a ", " b "]);
+        assert_eq!(table_row_cells("a | b"), vec!["a ", " b"]);
+        assert_eq!(table_row_cells("| a | b"), vec![" a ", " b"]);
+        assert_eq!(table_row_cells("| a |  |"), vec![" a ", "  "]);
+        assert_eq!(table_row_cells("| `a\\|b` | c |"), vec![" `a\\|b` ", " c "]);
+        // An escaped backslash does not escape the pipe after it.
+        assert_eq!(table_row_cells("| a\\\\| b |"), vec![" a\\\\", " b "]);
+        // A row that ends in an escaped pipe has not closed.
+        assert_eq!(table_row_cells("| a \\|"), vec![" a \\|"]);
+        assert_eq!(table_row_cells("|"), Vec::<&str>::new());
+    }
+
+    /// Every cell of a row wider than the header survives a save, at the top
+    /// level and in a quote, and the saved text is a fixed point.
+    #[test]
+    fn excess_cells_survive_a_save_l16() {
+        let top = "| A | B |\n|---|---|\n| 1 | 2 | 3 |\n| x | y |\n";
+        assert_eq!(
+            written(top),
+            "| A | B |  |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n| x | y |  |"
+        );
+        let quoted = "> | A | B |\n> |---|---|\n> | 1 | 2 | 3 |\n";
+        assert_eq!(written(quoted), "> | A | B |  |\n> | --- | --- | --- |\n> | 1 | 2 | 3 |");
+        for md in [top, quoted, "| A | B |\n|---|---|\n| `a|b` | c |\n"] {
+            let saved = written(md);
+            assert_eq!(written(&saved), saved, "a fixed point: {md:?}");
+            assert_eq!(nodes(&saved), nodes(md), "reads back as the same: {md:?}");
+        }
+        assert!(written("| A | B |\n|---|---|\n| `a|b` | c |\n").contains('c'));
+        // The padded header columns are written as `---`, and a second save
+        // is byte-identical.
+        let first = written(top);
+        assert_eq!(first.lines().nth(1), Some("| --- | --- | --- |"));
+        assert_eq!(written(&first), first);
     }
 
     // ── byte_to_position ─────────────────────────────────────────────────────

@@ -196,6 +196,10 @@ const OTHER_BLOCKS: &[&str] = &[
     "| a | b | c |\n|:-:|---|---|\n| 1 |\n| 2 | *e* | [l](/l) |",
     "| `a\\|b` | h |\n|---|---|\n| c | d |",
     "a | b\n--: | :--\n1 | 2",
+    // Rows wider than the header (L16): GFM drops those cells, so the header
+    // is padded and every cell is kept.
+    "| a | b |\n|---|---|\n| 1 | 2 | 3 |\n| x |",
+    "| a | b |\n|:--|--:|\n| `p|q` | c |\n| **x** | y | \\| | z |",
 ];
 /// HTML blocks (ADR-062): never slotted, always an Error, kept verbatim.
 /// Every type 1–5 block has its end condition (limit L14).
@@ -263,7 +267,7 @@ fn gen_quote_child(rng: &mut Rng, depth: usize, previous_ordered: &mut Option<bo
         4 => rng.pick(BODY_HEADINGS).to_string(),
         5 => rng.pick(&["```\nlet x = 1;\n\nlet y = 2;\n```", "````\n```\ninner\n```\n````", "~~~rust\nfn f() {}\n~~~"]).to_string(),
         6 => gen_list(rng, previous_ordered, false),
-        7 => rng.pick(&["| a | b |\n|:--|--:|\n| 1 | **2** |", "| `x\\|y` |\n|---|\n| [l](/l) |"]).to_string(),
+        7 => rng.pick(&["| a | b |\n|:--|--:|\n| 1 | **2** |", "| `x\\|y` |\n|---|\n| [l](/l) |", "| a | b |\n|---|---|\n| 1 | 2 | 3 |"]).to_string(),
         8 => rng.pick(HTML_BLOCKS).to_string(),
         9 => "----".to_string(),
         10 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
