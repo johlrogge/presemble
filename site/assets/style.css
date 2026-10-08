@@ -59,6 +59,7 @@ h2 { font-size: 1.7rem; }
 h3 { font-size: 1.25rem; color: var(--green); }
 
 p { margin: 0 0 1em; max-width: 65ch; }
+blockquote > :last-child { margin-bottom: 0; }
 
 a {
   color: var(--green);

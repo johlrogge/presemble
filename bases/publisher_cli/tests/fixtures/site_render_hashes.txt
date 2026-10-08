@@ -1,4 +1,4 @@
-site/assets/style.css 93a1169712cbe49e
+site/assets/style.css 17eb0b0fd5a5b593
 site/author/johlrogge/index.html 1e3c7da179429ee0
 site/docs/index.html 52424378a0cdf6ef
 site/feature/browser-editing/index.html df68cb456c6a7411

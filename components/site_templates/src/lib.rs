@@ -490,6 +490,10 @@ blockquote {\n\
   border-radius: 0 4px 4px 0;\n\
 }\n\
 \n\
+blockquote > :last-child {\n\
+  margin-bottom: 0;\n\
+}\n\
+\n\
 article {\n\
   border: 1px solid var(--color-border);\n\
   border-radius: 8px;\n\
@@ -1050,6 +1054,10 @@ mod tests {
         let css = generate_css(&config);
         assert!(css.contains("blockquote"), "Involved CSS should contain blockquote rule");
         assert!(css.contains("var(--color-accent-light)"), "blockquote should reference --color-accent-light");
+        assert!(
+            css.contains("blockquote > :last-child {\nmargin-bottom: 0;\n}"),
+            "blockquote should drop the bottom margin of its last block"
+        );
     }
 
     #[test]
