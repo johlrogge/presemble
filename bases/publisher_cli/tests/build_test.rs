@@ -85,7 +85,7 @@ fn build_produces_index_html() {
 
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let index_path = publisher_cli::output_dir(&site_dir).join("index.html");
+    let index_path = publisher_cli::editorial_output_dir(&site_dir).join("index.html");
     assert!(index_path.exists(), "output/index.html should be created");
 
     let content = fs::read_to_string(&index_path).unwrap();
@@ -107,7 +107,7 @@ fn build_site_articles_collection_has_url_field() {
     publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
     // The article HTML should exist and contain a URL to itself
-    let article_html = publisher_cli::output_dir(&site_dir).join("article/hello-world/index.html");
+    let article_html = publisher_cli::editorial_output_dir(&site_dir).join("article/hello-world/index.html");
     assert!(article_html.exists(), "article HTML should be built");
 }
 
@@ -117,7 +117,7 @@ fn build_site_copies_assets_to_output() {
 
     publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
 
-    let asset = publisher_cli::output_dir(&site_dir).join("assets/style.css");
+    let asset = publisher_cli::editorial_output_dir(&site_dir).join("assets/style.css");
     assert!(
         asset.exists(),
         "output/assets/style.css should be copied from assets/style.css"
@@ -202,7 +202,7 @@ fn template_call_inlines_header_and_footer_fragments() {
 
     // Verify article output contains header and footer content
     let article_html =
-        fs::read_to_string(publisher_cli::output_dir(&site).join("article/test-post/index.html")).unwrap();
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("article/test-post/index.html")).unwrap();
     assert!(
         article_html.contains("MySite"),
         "article output should contain header content from include: {article_html}"
@@ -217,7 +217,7 @@ fn template_call_inlines_header_and_footer_fragments() {
     );
 
     // Verify index output also inlines the fragments
-    let index_html = fs::read_to_string(publisher_cli::output_dir(&site).join("index.html")).unwrap();
+    let index_html = fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("index.html")).unwrap();
     assert!(
         index_html.contains("MySite"),
         "index output should contain header content from include: {index_html}"
@@ -237,7 +237,7 @@ fn cross_content_reference_resolves_author_data() {
     assert_eq!(outcome.files_failed, 0, "build should have no failures");
 
     // The hello-world article HTML should be built and contain author info
-    let article_html = publisher_cli::output_dir(&site_dir).join("article/hello-world/index.html");
+    let article_html = publisher_cli::editorial_output_dir(&site_dir).join("article/hello-world/index.html");
     assert!(article_html.exists(), "hello-world article should be built");
 }
 
@@ -249,7 +249,7 @@ fn invalid_post_is_rendered_with_html_output() {
         .expect("build should succeed");
 
     // The invalid-post should be rendered (conductor renders all content)
-    let invalid_post_output = publisher_cli::output_dir(&site_dir)
+    let invalid_post_output = publisher_cli::editorial_output_dir(&site_dir)
         .join("article/invalid-post/index.html");
     assert!(
         invalid_post_output.exists(),
@@ -326,7 +326,7 @@ fn index_content_is_rendered_into_index_page() {
     assert_eq!(outcome.files_failed, 0, "no pages should fail");
 
     let index_html =
-        fs::read_to_string(publisher_cli::output_dir(&site).join("index.html")).unwrap();
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("index.html")).unwrap();
 
     assert!(
         index_html.contains("My Awesome Site"),
@@ -418,7 +418,7 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
     );
 
     // The collection page should exist
-    let collection_output = publisher_cli::output_dir(&site).join("article/index.html");
+    let collection_output = publisher_cli::editorial_output_dir(&site).join("article/index.html");
     assert!(
         collection_output.exists(),
         "output/article/index.html should be created for the collection page"
@@ -483,7 +483,7 @@ fn collection_page_without_collection_content_is_skipped() {
     );
 
     // No collection page should exist
-    let collection_output = publisher_cli::output_dir(&site).join("article/index.html");
+    let collection_output = publisher_cli::editorial_output_dir(&site).join("article/index.html");
     assert!(
         !collection_output.exists(),
         "output/article/index.html should NOT exist when collection content is absent"
@@ -520,7 +520,7 @@ fn serve_renders_site_with_validation_errors() {
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
         .expect("serve build should succeed despite validation errors");
 
-    assert!(publisher_cli::output_dir(&site_dir).join("index.html").exists());
+    assert!(publisher_cli::editorial_output_dir(&site_dir).join("index.html").exists());
     assert!(
         outcome.validation.has_errors(),
         "the report should carry the fixture's validation errors"

@@ -363,8 +363,9 @@ impl Conductor {
         Self::load_with_repo(site_dir, repo)
     }
 
-    /// The same conductor, writing its rendered pages to `output_dir`. Used by
-    /// the editorial build, which must not write to the published directory.
+    /// The same conductor, writing its rendered pages to `output_dir` instead
+    /// of the editorial output directory. Used by the published build, which
+    /// renders the files on disk into a directory of its own.
     pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
         self.output_dir = output_dir;
         self
@@ -384,7 +385,9 @@ impl Conductor {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
 
-        let output_dir = site_index::output_dir(&site_dir);
+        // The conductor renders the working copy, unsaved edits included: it
+        // writes the editorial output and never the published directory.
+        let output_dir = site_index::editorial_output_dir(&site_dir);
 
         // Populate schema cache via repo
         let mut schema_cache = HashMap::new();
@@ -12026,10 +12029,11 @@ mod path_boundary_tests {
 
     // ── URL paths and schema stems (commit 2) ────────────────────────────────
 
-    /// Output layout of the world: `<tmp>/output/site/` is the output
-    /// directory; `<tmp>/output/` (its parent) is outside it.
+    /// Output layout of the world: `<tmp>/output-editorial/site/` is the
+    /// conductor's output directory; `<tmp>/output-editorial/` (its parent) is
+    /// outside it.
     fn write_output(w: &World, rel: &str, text: &str) {
-        let path = w.tmp.path().join("output").join(rel);
+        let path = w.tmp.path().join("output-editorial").join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
@@ -12067,7 +12071,7 @@ mod path_boundary_tests {
         let w = world();
         write_output(&w, "site/post/hello/index.html", "<p>hello</p>");
         std::fs::write(w.outside_dir().join("index.html"), "SECRET-LINK").unwrap();
-        std::os::unix::fs::symlink(w.outside_dir(), w.tmp.path().join("output/site/escape"))
+        std::os::unix::fs::symlink(w.outside_dir(), w.tmp.path().join("output-editorial/site/escape"))
             .expect("symlink");
         match render_view(&w, "/escape/") {
             Response::Error(_) => {}

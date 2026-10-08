@@ -65,11 +65,21 @@ pub struct BuildOutcome {
 /// Warnings are printed but do not fail the build.
 ///
 /// `_url_config` is not applied yet.
-pub fn build_for_publish(site_dir: &Path, _url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+pub fn build_for_publish(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+    let _ = url_config;
+    let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
+    build_published_into(&site_dir, &output_dir(&site_dir))
+}
+
+/// The `presemble build` pipeline with an explicit target directory: the
+/// publish gate over the whole site, then every page rendered from the files
+/// on disk (never from unsaved edits) as published output, without editor
+/// attributes. Nothing is written when the site fails the gate.
+pub fn build_published_into(site_dir: &Path, dir: &Path) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
     println!("Building site: {}", site_dir.display());
 
-    let conductor = load_conductor(&site_dir)?;
+    let conductor = load_conductor(&site_dir)?.with_output_dir(dir.to_path_buf());
     let report = conductor.validation_report();
     print_report(&report);
     if report.has_errors() {
@@ -79,14 +89,57 @@ pub fn build_for_publish(site_dir: &Path, _url_config: &UrlConfig) -> Result<Bui
         });
     }
 
-    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Published, &output_dir(&site_dir))?;
+    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Published, dir)?;
     if outcome.files_failed > 0 {
         return Err(CliError::PagesFailed(outcome.files_failed));
     }
     Ok(outcome)
 }
 
-/// Top-level entry point for development serve: the editorial preview.
+/// Publish the site into [`output_dir`] by building into a staging directory
+/// beside it and swapping that in. A site that fails the gate (or a page that
+/// fails to render) leaves the published output as it was: the last good
+/// output keeps being served.
+///
+/// The swap is two renames (the old output moves aside, the new one takes its
+/// place); a request in the instant between them finds no page.
+pub fn publish_with_swap(site_dir: &Path) -> Result<BuildOutcome, CliError> {
+    let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
+    let live = output_dir(&site_dir);
+    let sibling = |suffix: &str| {
+        let mut name = live.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        name.push(suffix);
+        live.with_file_name(name)
+    };
+    let (staging, aside) = (sibling(".publishing"), sibling(".replaced"));
+    let io = |what: &str, e: std::io::Error| CliError::Render(format!("{what}: {e}"));
+
+    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(&aside);
+    std::fs::create_dir_all(&staging).map_err(|e| io("cannot create the staging directory", e))?;
+    let outcome = match build_published_into(&site_dir, &staging) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if live.exists() {
+        std::fs::rename(&live, &aside).map_err(|e| io("cannot move the published output aside", e))?;
+    }
+    if let Err(e) = std::fs::rename(&staging, &live) {
+        // Put the last good output back.
+        if aside.exists() {
+            let _ = std::fs::rename(&aside, &live);
+        }
+        return Err(io("cannot put the new published output in place", e));
+    }
+    let _ = std::fs::remove_dir_all(&aside);
+    Ok(outcome)
+}
+
+/// Top-level entry point for development serve: the editorial preview, written
+/// to [`editorial_output_dir`] (never to the published output).
 ///
 /// Lenient: renders every page whatever its validation state, then prints
 /// the validation diagnostics.
@@ -94,9 +147,10 @@ pub fn build_for_serve(site_dir: &Path, _url_config: &UrlConfig) -> Result<Build
     let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
     println!("Building site: {}", site_dir.display());
 
-    let conductor = load_conductor(&site_dir)?;
+    let out = editorial_output_dir(&site_dir);
+    let conductor = load_conductor(&site_dir)?.with_output_dir(out.clone());
     let report = conductor.validation_report();
-    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial, &output_dir(&site_dir))?;
+    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial, &out)?;
     print_report(&outcome.validation);
     let files = report_file_count(&outcome.validation);
     if files > 0 {

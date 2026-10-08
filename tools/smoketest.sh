@@ -498,8 +498,12 @@ assert_curl_not_contains "editorial page carries no data-presemble-text" "/post/
 # after the scaffold.
 
 log "Testing reader vs editor script injection..."
+# Readers are served the published output (saved and valid), never the working
+# copy. The scaffolded site has not been published yet, so a reader gets a 404
+# with no page and no editor code; the reader script is asserted once the site
+# is published (after the serve restart at the end).
 READER_PAGE=$(curl -s "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
-assert_contains "anonymous page gets public live-reload socket" "$READER_PAGE" "/_presemble/ws"
+assert_status_anon "a page that was never published is a 404 for readers" GET "/post/hello-world" "404"
 assert_not_contains "anonymous page has no editorial socket" "$READER_PAGE" "editorial-ws"
 EDITOR_PAGE=$(acurl "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
 assert_contains "logged-in page gets editorial socket" "$EDITOR_PAGE" "editorial-ws"
@@ -947,6 +951,11 @@ assert_curl "duplicate post rejected" "/_presemble/create-content" POST '{"stem"
 # conductor daemon is reused.
 
 log "Restarting serve with editing disabled (closed editorial plane)..."
+# Readers get the published output, which exists only for a site that passes
+# the publish gate. The empty author and post created above (to test duplicate
+# prevention) are incomplete content, so they are removed before the restart:
+# the restart then publishes the saved site.
+rm -f "$SITE_DIR/content/author/alice.md" "$SITE_DIR/content/post/first-post.md"
 kill "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
 pkill -f "presemble serve $SITE_DIR" 2>/dev/null || true
@@ -984,6 +993,9 @@ else
         assert_not_contains "closed: no Login URL printed" "$CLOSED_LOG" "Login URL:"
 
         assert_status_anon "closed: published page still 200" GET "/post/hello-world" "200"
+        B=$(curl -s "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
+        assert_contains "anonymous page gets public live-reload socket" "$B" "/_presemble/ws"
+        assert_not_contains "published page carries no editor attributes" "$B" "data-presemble-address"
 
         EDIT_JSON="$BLOCK_EDIT_PROBE"
         R=$(http_with_status -X POST "http://127.0.0.1:$PORT/_presemble/block-edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")

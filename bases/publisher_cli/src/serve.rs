@@ -389,9 +389,39 @@ fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) 
     out
 }
 
+/// The initial builds of `serve`, before the first request:
+///
+/// - the editorial output (what the editors work on: unsaved edits, editor
+///   attributes and build-error pages included), and
+/// - the published output (what readers get): the `presemble build` pipeline
+///   over the files on disk, swapped in only when the whole site passes the
+///   publish gate. A site that fails the gate keeps the last good output.
+fn build_startup_outputs(site_dir: &Path, url_config: &UrlConfig) {
+    println!("Building site...");
+    match build_for_serve(site_dir, url_config) {
+        Ok(outcome) => {
+            if outcome.files_failed > 0 {
+                eprintln!("Build completed with {} error(s)", outcome.files_failed);
+            } else {
+                println!("Build complete ({} file(s))", outcome.files_built);
+            }
+        }
+        Err(e) => {
+            eprintln!("Build failed: {e}");
+        }
+    }
+    match crate::publish_with_swap(site_dir) {
+        Ok(outcome) => println!("Published output ready ({} file(s))", outcome.files_built),
+        Err(e) => eprintln!("Not published (readers keep the last published output, if any): {e}"),
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
-    output_dir: std::path::PathBuf,
+    /// What an editor is served: the working copy.
+    editorial_dir: std::path::PathBuf,
+    /// What everyone else is served: the saved, valid site.
+    published_dir: std::path::PathBuf,
     channels: BrowserChannels,
     site_dir: std::path::PathBuf,
     conductor: Arc<conductor::ConductorClient>,
@@ -420,28 +450,20 @@ async fn serve_async(
         .map_err(|e| CliError::Render(format!("cannot resolve site directory {}: {e}", site_dir.display())))?;
     let site_dir = site_dir.as_path();
 
-    let out_dir = crate::output_dir(site_dir);
+    let out_dir = crate::editorial_output_dir(site_dir);
+    let published_dir = crate::output_dir(site_dir);
 
     // If the source is empty, wipe any stale output from a previous run so the
     // welcome page is served rather than misleading stale HTML.
-    if crate::is_source_empty(site_dir) && out_dir.exists() {
-        std::fs::remove_dir_all(&out_dir).ok(); // best-effort
-    }
-
-    // Initial build — populate the output directory (conductor doesn't render HTML yet).
-    println!("Building site...");
-    match build_for_serve(site_dir, url_config) {
-        Ok(outcome) => {
-            if outcome.files_failed > 0 {
-                eprintln!("Build completed with {} error(s)", outcome.files_failed);
-            } else {
-                println!("Build complete ({} file(s))", outcome.files_built);
+    if crate::is_source_empty(site_dir) {
+        for stale in [&out_dir, &published_dir] {
+            if stale.exists() {
+                std::fs::remove_dir_all(stale).ok(); // best-effort
             }
         }
-        Err(e) => {
-            eprintln!("Build failed: {e}");
-        }
     }
+
+    build_startup_outputs(site_dir, url_config);
 
     let channels = BrowserChannels::new(256);
 
@@ -487,7 +509,8 @@ async fn serve_async(
     );
 
     let state = AppState {
-        output_dir: out_dir.clone(),
+        editorial_dir: out_dir.clone(),
+        published_dir,
         channels,
         site_dir: site_dir.to_path_buf(),
         conductor: conductor_client,
@@ -1269,7 +1292,7 @@ async fn scaffold_handler(
             let repo = site_repository::SiteRepository::builder()
                 .from_dir(&state.site_dir)
                 .build();
-            if let Err(e) = crate::copy_site_assets(&state.site_dir, &repo, &state.output_dir) {
+            if let Err(e) = crate::copy_site_assets(&state.site_dir, &repo, &state.editorial_dir) {
                 eprintln!("warning: post-scaffold asset copy failed: {e}");
             }
             axum::Json(EditResponse::ok_simple())
@@ -1768,9 +1791,15 @@ async fn file_handler(
     // Editors get the editorial UI; everyone else gets the reader reload script.
     let audience = audience_for(state.session_store.as_ref(), &headers);
 
-    // Check for build errors before attempting to serve from disk.
+    // Editors are served the working copy; everyone else the published
+    // output: what was saved and passed the publish gate.
+    let editor = audience == serve_ui::Audience::Editor;
+    let served_dir = if editor { &state.editorial_dir } else { &state.published_dir };
+
+    // Check for build errors before attempting to serve from disk: editors
+    // only. A reader gets the published page, or a plain 404.
     // Normalise: look up with and without trailing slash.
-    {
+    if editor {
         let errors: HashMap<String, Vec<String>> = match state.conductor.send(&conductor::Command::GetBuildErrors) {
             Ok(conductor::Response::BuildErrors(e)) => e,
             _ => HashMap::new(),
@@ -1794,12 +1823,12 @@ async fn file_handler(
     let relative = if relative.is_empty() { "index.html" } else { relative };
 
     let candidates = vec![
-        state.output_dir.join(relative),
-        state.output_dir.join(relative).join("index.html"),
+        served_dir.join(relative),
+        served_dir.join(relative).join("index.html"),
     ];
 
     for candidate in &candidates {
-        if editorial_types::ensure_within(&state.output_dir, candidate).is_err() {
+        if editorial_types::ensure_within(served_dir, candidate).is_err() {
             continue;
         }
         if candidate.is_file()
@@ -1824,10 +1853,14 @@ async fn file_handler(
     if path == "/" || path.is_empty() {
         let source_empty = crate::is_source_empty(&state.site_dir);
         let mut pages = Vec::new();
-        collect_html_files(&state.output_dir, &state.output_dir, &mut pages);
+        collect_html_files(served_dir, served_dir, &mut pages);
         let has_output = !pages.is_empty();
         if !source_empty && has_output {
-            return (HTML_PAGE_HEADERS, serve_auto_index(&state.output_dir)).into_response();
+            return (HTML_PAGE_HEADERS, serve_auto_index(served_dir)).into_response();
+        }
+        // A reader of a site with nothing published sees no page.
+        if !source_empty && !editor {
+            return (StatusCode::NOT_FOUND, "404 Not Found").into_response();
         }
         return (
             StatusCode::OK,
@@ -3388,8 +3421,6 @@ mod tests {
     /// The server thread shuts down when it receives a `Command::Shutdown`.
     #[cfg(test)]
     fn start_test_conductor() -> (conductor::ConductorClient, tempfile::TempDir) {
-        use std::sync::Arc;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
 
@@ -3408,6 +3439,15 @@ mod tests {
             root.join("content/test/doc.md"),
             "# Test Title\n",
         ).unwrap();
+
+        let client = start_conductor_for(root);
+        (client, tmp)
+    }
+
+    /// Serve a `Conductor` for the site at `root` over an in-process socket.
+    #[cfg(test)]
+    fn start_conductor_for(root: &std::path::Path) -> conductor::ConductorClient {
+        use std::sync::Arc;
 
         // Use Conductor::new so populate_node_store runs automatically.
         let c = Arc::new(
@@ -3461,8 +3501,7 @@ mod tests {
         // Give thread a moment to start
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let client = conductor::ConductorClient::connect(&url).expect("connect to test conductor");
-        (client, tmp)
+        conductor::ConductorClient::connect(&url).expect("connect to test conductor")
     }
 
     /// Test session key — fixed so tests can mint cookies in advance.
@@ -3489,7 +3528,8 @@ mod tests {
             accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
         let state = AppState {
-            output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
+            editorial_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
+            published_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
             channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: std::sync::Arc::new(client),
@@ -3934,7 +3974,8 @@ mod tests {
             accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
         ) as Arc<dyn SessionStore>;
         let state = AppState {
-            output_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
+            editorial_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
+            published_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
             channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: conductor.clone(),
@@ -4605,6 +4646,162 @@ mod tests {
         assert!(!text.contains("dirty-buffers"), "reader page must not get editor code");
     }
 
+    // ── Readers are served the published output, never the working copy ─────
+
+    /// A served site for the readers/editors tests: a `test` content type whose
+    /// template shows the title as an editable `h1`.
+    struct ServedSite {
+        app: axum::Router,
+        client: Arc<conductor::ConductorClient>,
+        root: std::path::PathBuf,
+        _tmp: tempfile::TempDir,
+    }
+
+    impl Drop for ServedSite {
+        fn drop(&mut self) {
+            // The output directories sit beside the temp dir.
+            let _ = std::fs::remove_dir_all(site_index::output_dir(&self.root));
+            let _ = std::fs::remove_dir_all(site_index::editorial_output_dir(&self.root));
+        }
+    }
+
+    const TITLE_TEMPLATE: &str = "[:main [:presemble/insert {:data input.title :as \"h1\"}]]";
+
+    /// The state `serve` builds for a site whose conductor is `client`.
+    fn served_state(root: &std::path::Path, client: Arc<conductor::ConductorClient>) -> AppState {
+        let session_store =
+            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))) as Arc<dyn SessionStore>;
+        AppState {
+            editorial_dir: site_index::editorial_output_dir(root),
+            published_dir: site_index::output_dir(root),
+            channels: BrowserChannels::new(4),
+            site_dir: root.to_path_buf(),
+            conductor: client,
+            session_store,
+        }
+    }
+
+    /// Write the site, run the start-up builds when `startup`, and serve it.
+    fn served_site(content: &str, template: &str, startup: bool) -> ServedSite {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("schemas/test")).unwrap();
+        std::fs::create_dir_all(root.join("content/test")).unwrap();
+        std::fs::create_dir_all(root.join("templates/test")).unwrap();
+        std::fs::write(root.join("schemas/test/item.md"), "# Title {#title}\noccurs\n: exactly once\n").unwrap();
+        std::fs::write(root.join("templates/test/item.hiccup"), template).unwrap();
+        std::fs::write(root.join("content/test/doc.md"), content).unwrap();
+        if startup {
+            build_startup_outputs(&root, &UrlConfig::default());
+        }
+        let client = Arc::new(start_conductor_for(&root));
+        ServedSite { app: app_router(served_state(&root, client.clone())), client, root, _tmp: tmp }
+    }
+
+    async fn get_page(site: &ServedSite, uri: &str, cookie: Option<&str>) -> (axum::http::StatusCode, String) {
+        let resp = oneshot_get(site.app.clone(), uri, cookie).await;
+        let status = resp.status();
+        (status, body_string(resp).await)
+    }
+
+    async fn apply_title_edit(site: &ServedSite, proposed: &str) {
+        let (status, val) = post_block_edit(
+            &site.app,
+            serde_json::json!({
+                "file": "content/test/doc.md",
+                "selection": TITLE_HEADING,
+                "base": { "markdown": "Test Title" },
+                "proposed": { "markdown": proposed },
+                "intent": "apply"
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "the edit is applied: {val}");
+    }
+
+    #[tokio::test]
+    async fn anonymous_page_has_no_editor_attributes() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        let (status, text) = get_page(&site, "/test/doc", None).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{text}");
+        assert!(text.contains("Test Title"), "{text}");
+        assert!(!text.contains("data-presemble-address"), "a reader's page carries no editor data: {text}");
+        assert!(!text.contains("data-presemble-md"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn anonymous_get_of_an_unpublishable_page_is_404() {
+        // No heading: the site fails the publish gate.
+        let site = served_site("Just a paragraph, no title.\n", TITLE_TEMPLATE, true);
+        let (status, text) = get_page(&site, "/test/doc", None).await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "{text}");
+    }
+
+    #[tokio::test]
+    async fn anonymous_readers_never_see_unsaved_edits() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        apply_title_edit(&site, "Edited Title").await;
+
+        // The editor sees the edit...
+        let (_, editor) = get_page(&site, "/test/doc", Some(&test_session_cookie())).await;
+        assert!(editor.contains("Edited Title"), "the edit reaches the editor's page: {editor}");
+        // ...a reader does not: the edit is not saved.
+        let (status, reader) = get_page(&site, "/test/doc", None).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{reader}");
+        assert!(!reader.contains("Edited Title"), "an unsaved edit leaked to a reader: {reader}");
+        assert!(reader.contains("Test Title"), "{reader}");
+    }
+
+    #[tokio::test]
+    async fn build_errors_are_shown_to_editors_only() {
+        // The template breaks after the site was up (a call of a template that
+        // does not exist); the next rebuild of the page fails.
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        let template = site.root.join("templates/test/item.hiccup");
+        std::fs::write(&template, "[:main (nosuchtemplate input)]").unwrap();
+        // What the file watcher tells the conductor.
+        let changed = editorial_types::SitePath::from_absolute(&site.root, &template).unwrap();
+        site.client
+            .send(&conductor::Command::FileChanged { paths: vec![changed] })
+            .expect("the conductor rebuilds");
+        let (status, text) = get_page(&site, "/test/doc", None).await;
+        assert_ne!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY, "a reader got the error page: {text}");
+        assert!(!text.contains("nosuchtemplate"), "a reader saw the build error: {text}");
+        let (status, text) = get_page(&site, "/test/doc", Some(&test_session_cookie())).await;
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+        assert!(text.contains("nosuchtemplate"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_conductor_never_writes_the_published_output_directory() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, false);
+        let published = site_index::output_dir(&site.root);
+        std::fs::create_dir_all(&published).unwrap();
+        std::fs::write(published.join("marker.html"), "<p>published</p>").unwrap();
+        let before = std::fs::metadata(&published).unwrap().modified().unwrap();
+
+        apply_title_edit(&site, "Edited Title").await;
+
+        let mut names: Vec<_> = std::fs::read_dir(&published)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["marker.html".to_string()], "the conductor wrote into the published directory");
+        assert_eq!(std::fs::metadata(&published).unwrap().modified().unwrap(), before);
+    }
+
+    /// GUARD: an editor's session gets the editorial page, with its editor data.
+    #[tokio::test]
+    async fn editor_session_gets_the_editorial_page() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        let (status, text) = get_page(&site, "/test/doc", Some(&test_session_cookie())).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{text}");
+        assert!(text.contains("data-presemble-address"), "{text}");
+        assert!(text.contains("editorial-ws"), "{text}");
+    }
+
     #[tokio::test]
     async fn published_page_for_editor_gets_editor_script() {
         let (client, tmp) = start_test_conductor();
@@ -4641,7 +4838,8 @@ mod tests {
         channels: BrowserChannels,
     ) -> AppState {
         AppState {
-            output_dir: out_dir,
+            editorial_dir: out_dir.clone(),
+            published_dir: out_dir,
             channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: std::sync::Arc::new(client),
