@@ -1367,6 +1367,28 @@ mod tests {
         assert_eq!(l.preview.base, pv(&base));
     }
 
+    /// A blockquote holds blocks, so it has no text of its own: any change to it
+    /// is a Replace (ADR-059 stage 8.2). Comments in the proposal are not part of
+    /// the payload (the old ones are relocated by the edit).
+    #[test]
+    fn lower_blockquote_change_is_replace() {
+        let quote = content::parse_document("> a\n>\n> b\n").unwrap().elements[0].node.clone();
+        let base = content::project_markdown(&quote, Projection::Block).unwrap();
+        for proposed in ["> a\n>\n> z", "> a\n>\n> b\n>\n> c", "> a\n>\n> <!-- n -->\n>\n> z"] {
+            let l = expect_lowered(lowered("body", &quote, &base, proposed));
+            assert_eq!(l.selection, SEL, "{proposed}");
+            match l.mutation {
+                NedMutation::Replace(trees) => {
+                    assert_eq!(trees.len(), 1);
+                    let rendered = format!("{:?}", trees[0]);
+                    assert!(!rendered.contains("trivia") && !rendered.contains("<!--"), "{rendered}");
+                }
+                other => panic!("a quote change replaces the block, got {other:?}"),
+            }
+            assert_eq!(l.preview.base, pv(&base));
+        }
+    }
+
     #[test]
     fn lower_refuses_a_block_outside_body_and_slot() {
         let err = lowered("section", &paragraph("x"), "x", "y").unwrap_err();

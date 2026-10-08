@@ -9319,6 +9319,63 @@ mod ned_program_plan_tests {
         assert_eq!(stored_table(&conductor), flat.elements[0].node.clone());
     }
 
+    const QUOTE: &str = r#"(ned/nth-of-kind (ned/blocks (ned/slot (ned/doc-by-path "content/test/quote.md") "body")) "blockquote" 0)"#;
+
+    /// `content/test/quote.md`: a body holding the quote `> a` / `> b` (two
+    /// paragraphs).
+    fn add_quote_doc(conductor: &Conductor) {
+        let quote = content::parse_document("> a\n>\n> b\n").expect("parses").elements[0].node.clone();
+        add_doc(
+            conductor,
+            "content/test/quote.md",
+            "/test/quote",
+            Document {
+                preamble: im::vector![title("Quote doc")],
+                body: im::vector![spanned(quote)],
+                has_separator: true,
+                separator_span: None,
+                unassigned: Default::default(),
+                comments: Default::default(),
+            },
+        );
+    }
+
+    /// The quote of `content/test/quote.md` as the store holds it.
+    fn stored_quote(conductor: &Conductor) -> ContentElement {
+        let value = evaluator::eval_str_with_root(
+            QUOTE,
+            &conductor.make_ned_query_root().expect("query root"),
+        )
+        .expect("selection evaluates");
+        let sel = evaluator::ned_primitives::extract_selection(&value).expect("a selection");
+        let id = sel.iter().next().expect("one quote");
+        let store = conductor.node_store.read().unwrap();
+        node_store_bridge::content_bridge::block_from_node(&store, id).expect("decodes")
+    }
+
+    /// The blocks of a quote are its children (`ned/nth-child` of the quote,
+    /// which `ned/blocks` also takes), and the text of one is addressed like any
+    /// block's (ADR-059 stage 8.2).
+    #[test]
+    fn text_inside_blockquote_is_addressable() {
+        let (conductor, _tmp) = make_conductor();
+        add_quote_doc(&conductor);
+
+        let program = format!(r#"(ned/set-text (ned/text-in (ned/nth-child {QUOTE} 1)) "x")"#);
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+        let expected = content::parse_document("> a\n>\n> x\n").unwrap().elements[0].node.clone();
+        assert_eq!(stored_quote(&conductor), expected);
+
+        // A block of the quote is a block target as well.
+        let program = format!(
+            r#"(ned/replace (ned/nth-child {QUOTE} 0) [(ned/with-child (ned/mk-element "paragraph") (ned/mk-text "y"))])"#
+        );
+        let result = conductor.apply_ned_program(&program);
+        let expected = content::parse_document("> y\n>\n> x\n").unwrap().elements[0].node.clone();
+        assert_eq!(applied(result), 1);
+        assert_eq!(stored_quote(&conductor), expected);
+    }
+
     #[test]
     fn apply_program_with_ambiguous_selection_applies_nothing() {
         let (conductor, _tmp) = make_conductor();

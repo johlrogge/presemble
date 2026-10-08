@@ -17,7 +17,7 @@ use ned::{NodeTree, Selection};
 use node_store::{Node, NodeId, NodeStore};
 
 use crate::block::{
-    BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, TEXT_BLOCK_KINDS, block_from_node,
+    BLOCK_CONTAINER_KINDS, BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, TEXT_BLOCK_KINDS, block_from_node,
     block_to_store, inline_context_of, tree_to_block,
 };
 use crate::inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store};
@@ -169,6 +169,11 @@ fn container_document(
             }
             let parent = single_parent(store, preamble, expected)?;
             live_document(store, parent)
+        }
+        // A block container is a block too: the document is that of the quote
+        // it sits in, so quotes nest (ADR-059 §13).
+        Some(name) if BLOCK_CONTAINER_KINDS.contains(&name) => {
+            block_context(store, id, expected).map(|(_, document)| document)
         }
         _ => Err(AddressError::WrongKind { expected, found: kind_label(store, id) }),
     }
@@ -715,6 +720,9 @@ fn write(store: &mut NodeStore, change: Change) {
                 ned::trivia::ATTR_TRIVIA_BEFORE,
                 ned::trivia::Placement::At(0),
             );
+            // The comments inside the block go too (D3), before the subtree is
+            // removed.
+            relocate_inner_trivia(store, block, InnerTrivia::Replaced { first });
             store.remove_child_edge(container, block);
             delete(store, block);
         }
@@ -739,47 +747,167 @@ fn element_parent(store: &NodeStore, id: NodeId) -> Option<NodeId> {
         .find(|p| matches!(store.get(*p), Some(Node::Element(_))))
 }
 
-/// Keep the leading comments of `block`, about to be removed with everything
-/// in `to_delete` (ADR-062 D5).
-///
-/// The comments move to the `_trivia-before` of the next element sibling that
-/// survives, after any comments already there; with no such sibling they are
-/// appended to the parent's `_trivia-end`. A block whose parent is removed too
-/// loses its comments with it.
-fn relocate_leading_trivia(store: &mut NodeStore, block: NodeId, to_delete: &Selection) {
-    use ned::trivia::{ATTR_TRIVIA_BEFORE, ATTR_TRIVIA_END, Placement, move_trivia, trivia_texts};
-    if trivia_texts(store, block, ATTR_TRIVIA_BEFORE).is_empty() {
-        return;
-    }
-    let Some(parent) = element_parent(store, block) else { return };
+/// Where the comments of `block` go when it is removed along with everything
+/// in `to_delete` (ADR-062 D5): the `_trivia-before` of the next element
+/// sibling that survives, else the parent's `_trivia-end`. `None` when the
+/// block has no parent, or its parent is removed too (the comments go with it).
+fn trivia_home(
+    store: &NodeStore,
+    block: NodeId,
+    to_delete: &Selection,
+) -> Option<(NodeId, &'static str)> {
+    use ned::trivia::{ATTR_TRIVIA_BEFORE, ATTR_TRIVIA_END};
+    let parent = element_parent(store, block)?;
     if to_delete.contains(parent) {
-        return;
+        return None;
     }
-    let Some(pos) = store.children(parent).iter().position(|&c| c == block) else {
-        return;
-    };
+    let pos = store.children(parent).iter().position(|&c| c == block)?;
     let next = store
         .children(parent)
         .into_iter()
         .skip(pos + 1)
         .find(|c| !to_delete.contains(*c) && matches!(store.get(*c), Some(Node::Element(_))));
-    match next {
-        Some(next) => {
-            move_trivia(store, block, ATTR_TRIVIA_BEFORE, next, ATTR_TRIVIA_BEFORE, Placement::At(0));
+    Some(match next {
+        Some(next) => (next, ATTR_TRIVIA_BEFORE),
+        None => (parent, ATTR_TRIVIA_END),
+    })
+}
+
+/// Where the comments inside a block go when the block is removed (ADR-059
+/// §13, D3: comments are relocated, never dropped).
+#[derive(Debug, Clone, Copy)]
+enum InnerTrivia {
+    /// The block is replaced and `first` is the first new block. When it is a
+    /// container of the same kind, each comment keeps its index path; one whose
+    /// place is gone goes to the `_trivia-end` of the deepest container on its
+    /// path that is still there. Otherwise all go to `first`'s
+    /// `_trivia-before`, after the comments already there.
+    Replaced { first: NodeId },
+    /// The block is deleted: all go to `attr` of `host`, from `placement`, in
+    /// document order (so after the block's own leading comments).
+    Deleted { host: NodeId, attr: &'static str, placement: ned::trivia::Placement },
+}
+
+/// A place a comment inside a container block sits in: before the block at
+/// `path`, or at the end of the container at `path`; `path` is the child index
+/// at each level below the container block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Spot {
+    Before(Vec<usize>),
+    End(Vec<usize>),
+}
+
+/// The comments inside the container block `block` (its blocks' leading
+/// comments and the ends of it and of the containers in it), in document order:
+/// where each sits and the node that holds it.
+fn inner_trivia(store: &NodeStore, block: NodeId) -> Vec<(Spot, NodeId, &'static str)> {
+    use ned::trivia::{ATTR_TRIVIA_BEFORE, ATTR_TRIVIA_END, trivia_texts};
+    fn walk(
+        store: &NodeStore,
+        container: NodeId,
+        path: &mut Vec<usize>,
+        out: &mut Vec<(Spot, NodeId, &'static str)>,
+    ) {
+        for (i, child) in store.children(container).into_iter().enumerate() {
+            path.push(i);
+            if !trivia_texts(store, child, ATTR_TRIVIA_BEFORE).is_empty() {
+                out.push((Spot::Before(path.clone()), child, ATTR_TRIVIA_BEFORE));
+            }
+            if is_block_container(store, child) {
+                walk(store, child, path, out);
+            }
+            path.pop();
         }
-        None => {
-            move_trivia(store, block, ATTR_TRIVIA_BEFORE, parent, ATTR_TRIVIA_END, Placement::End);
+        if !trivia_texts(store, container, ATTR_TRIVIA_END).is_empty() {
+            out.push((Spot::End(path.clone()), container, ATTR_TRIVIA_END));
+        }
+    }
+    let mut out = Vec::new();
+    if is_block_container(store, block) {
+        walk(store, block, &mut Vec::new(), &mut out);
+    }
+    out
+}
+
+fn is_block_container(store: &NodeStore, id: NodeId) -> bool {
+    element_name(store, id).is_some_and(|n| BLOCK_CONTAINER_KINDS.contains(&n))
+}
+
+/// Where `spot` of a replaced container is in `root`, the container that
+/// replaced it: the block it precedes or the container it ends if they are
+/// still there, else the end of the deepest container on its path that is.
+fn spot_in(store: &NodeStore, root: NodeId, spot: &Spot) -> (NodeId, &'static str) {
+    use ned::trivia::{ATTR_TRIVIA_BEFORE, ATTR_TRIVIA_END};
+    let (Spot::Before(path) | Spot::End(path)) = spot;
+    let mut container = root;
+    for (depth, &i) in path.iter().enumerate() {
+        let Some(child) = store.children(container).get(i).copied() else {
+            return (container, ATTR_TRIVIA_END);
+        };
+        if matches!(spot, Spot::Before(_)) && depth + 1 == path.len() {
+            return (child, ATTR_TRIVIA_BEFORE);
+        }
+        if !is_block_container(store, child) {
+            return (container, ATTR_TRIVIA_END);
+        }
+        container = child;
+    }
+    (container, ATTR_TRIVIA_END)
+}
+
+/// Move the comments inside the container block `block` out of it, before the
+/// subtree is removed. Comments are never dropped by an edit (ADR-062 D5,
+/// generalised by ADR-059 §13); `to` says where they go.
+fn relocate_inner_trivia(store: &mut NodeStore, block: NodeId, to: InnerTrivia) {
+    use ned::trivia::{ATTR_TRIVIA_BEFORE, Placement, move_trivia};
+    let inner = inner_trivia(store, block);
+    if inner.is_empty() {
+        return;
+    }
+    match to {
+        InnerTrivia::Replaced { first }
+            if element_name(store, first) == element_name(store, block) =>
+        {
+            for (spot, host, attr) in inner {
+                let (to_host, to_attr) = spot_in(store, first, &spot);
+                move_trivia(store, host, attr, to_host, to_attr, Placement::End);
+            }
+        }
+        InnerTrivia::Replaced { first } => {
+            for (_, host, attr) in inner {
+                move_trivia(store, host, attr, first, ATTR_TRIVIA_BEFORE, Placement::End);
+            }
+        }
+        InnerTrivia::Deleted { host: to_host, attr: to_attr, mut placement } => {
+            for (_, host, attr) in inner {
+                let moved = move_trivia(store, host, attr, to_host, to_attr, placement);
+                if let Placement::At(at) = &mut placement {
+                    *at += moved;
+                }
+            }
         }
     }
 }
 
 /// Delete `node` and all its descendants. Returns the number of nodes
-/// removed. Leading comments of the node move to the next surviving sibling,
-/// or to the parent's `_trivia-end` (ADR-062 D5).
+/// removed. The comments of the node move to the next surviving sibling, or to
+/// the parent's `_trivia-end`: its leading comments first, then those inside it
+/// (ADR-062 D5, ADR-059 §13).
 fn delete(store: &mut NodeStore, node: NodeId) -> usize {
+    use ned::trivia::{ATTR_TRIVIA_BEFORE, Placement, move_trivia, trivia_texts};
     let sel = Selection::single(node);
     let to_delete = sel.union(&sel.descendants(store));
-    relocate_leading_trivia(store, node, &to_delete);
+    // Only a block with comments of its own or a container can hold any.
+    let may_hold_comments = is_block_container(store, node)
+        || !trivia_texts(store, node, ATTR_TRIVIA_BEFORE).is_empty();
+    if may_hold_comments && let Some((host, attr)) = trivia_home(store, node, &to_delete) {
+        // In front of whatever the home holds: the block's comments come
+        // before the sibling's own, and before the container's end comments,
+        // as they did in the source.
+        let moved = move_trivia(store, node, ATTR_TRIVIA_BEFORE, host, attr, Placement::At(0));
+        let placement = Placement::At(moved);
+        relocate_inner_trivia(store, node, InnerTrivia::Deleted { host, attr, placement });
+    }
 
     let count_before = store.node_count();
     // store.remove_node handles edge cleanup, so order doesn't matter

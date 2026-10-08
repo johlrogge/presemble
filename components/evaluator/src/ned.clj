@@ -124,7 +124,7 @@
 ;; ── Text addressing (ADR-056: SetText/SearchReplace target one Text node) ──
 ;; ned/nth-text is a Rust builtin: (ned/nth-text sel idx).
 
-(def-doc! ned/blocks "(ned/blocks sel)" "The block elements of a slot or body: the children of each selected node.")
+(def-doc! ned/blocks "(ned/blocks sel)" "The block elements of a slot, body or blockquote: the children of each selected node. To address the i-th block of one container, use (ned/nth-child c i).")
 (defn ned/blocks [sel]
   (ned/children sel))
 

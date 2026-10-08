@@ -801,7 +801,8 @@ fn delete_of_the_last_block_moves_comments_to_the_container_end() {
             other => panic!("{other:?}"),
         })
         .collect();
-    assert_eq!(end, vec!["e0", "b1"]);
+    // The block's comments came before the end comments in the source.
+    assert_eq!(end, vec!["b1", "e0"]);
 }
 
 #[test]
@@ -1247,6 +1248,248 @@ fn commit_order_is_plan_order() {
     assert!(leading_comments(&f.store, blocks[0]).is_empty());
     assert_eq!(blocks[1], b);
     assert_eq!(leading_comments(&f.store, b), vec!["<!-- note -->"]);
+}
+
+// ── blocks inside a blockquote (ADR-059 stage 8.2) ──────────────────────────
+
+fn quote_md(md: &str) -> ContentElement {
+    content::parse_document(md).unwrap().elements[0].node.clone()
+}
+
+fn quote_tree(children: Vec<NodeTree>) -> NodeTree {
+    children.into_iter().fold(NodeTree::element("blockquote"), |q, c| q.with_child(c))
+}
+
+/// A quote read from `md`, appended to the body of the fixture.
+fn add_quote(f: &mut Fixture, md: &str) -> NodeId {
+    let body = f.body();
+    add_block(&mut f.store, body, &quote_md(md))
+}
+
+fn comments_of(store: &NodeStore, host: NodeId, attr: &str) -> Vec<String> {
+    ned::trivia::trivia_texts(store, host, attr)
+        .into_iter()
+        .map(|t| match store.get(t) {
+            Some(Node::Text(s)) => s.clone(),
+            other => panic!("expected a comment text, got {other:?}"),
+        })
+        .collect()
+}
+
+/// The quote `id` as it decodes now.
+fn decoded(f: &Fixture, id: NodeId) -> ContentElement {
+    block_from_node(&f.store, id).expect("decodes")
+}
+
+/// A block inside a quote resolves with the quote as its container, and a
+/// Replace of it changes the quote's child in place.
+#[test]
+fn block_inside_blockquote_is_replaceable() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, "> a\n>\n> b\n");
+    let second = f.store.children(quote)[1];
+    assert_eq!(
+        f.resolve(&[second], TargetKind::Block),
+        Ok(Target::Block { block: second, container: quote, document: f.doc })
+    );
+    f.run(second, &NedMutation::Replace(vec![para_tree("X")]));
+    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> X\n"));
+    assert!(f.store.get(second).is_none());
+}
+
+/// A nested quote resolves too: the document is that of the outer quote.
+#[test]
+fn block_inside_a_nested_blockquote_resolves() {
+    let mut f = fixture();
+    let outer = add_quote(&mut f, "> a\n>\n> > b\n");
+    let inner = f.store.children(outer)[1];
+    let b = f.store.children(inner)[0];
+    assert_eq!(
+        f.resolve(&[b], TargetKind::Block),
+        Ok(Target::Block { block: b, container: inner, document: f.doc })
+    );
+    assert_eq!(
+        f.resolve(&[inner], TargetKind::Container),
+        Ok(Target::Container { container: inner, document: f.doc })
+    );
+}
+
+/// The text of a paragraph in a quote is a text target, and the edit changes
+/// that paragraph only.
+#[test]
+fn text_inside_blockquote_resolves_and_edits() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, "> a\n>\n> b\n");
+    let first = f.store.children(quote)[0];
+    let text = f.text_of(first);
+    assert_eq!(
+        f.resolve(&[text], TargetKind::Text),
+        Ok(Target::Text { text, block: first, document: f.doc })
+    );
+    f.run(text, &NedMutation::SetText("x".to_string()));
+    assert_eq!(decoded(&f, quote), quote_md("> x\n>\n> b\n"));
+}
+
+#[test]
+fn insert_into_a_blockquote() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, "> a\n>\n> b\n");
+    assert_eq!(
+        f.resolve(&[quote], TargetKind::Container),
+        Ok(Target::Container { container: quote, document: f.doc })
+    );
+    f.run(quote, &NedMutation::InsertChild(vec![para_tree("X")]));
+    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> b\n>\n> X\n"));
+    // Before and after a child.
+    let first = f.store.children(quote)[0];
+    f.run(first, &NedMutation::InsertAfter(vec![para_tree("Y")]));
+    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> Y\n>\n> b\n>\n> X\n"));
+}
+
+/// D2: deleting the last block leaves an empty quote, not a refusal.
+#[test]
+fn deleting_the_last_block_of_a_blockquote_leaves_it_empty() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, "> a\n");
+    let only = f.store.children(quote)[0];
+    f.run(only, &NedMutation::Delete);
+    assert!(f.store.children(quote).is_empty());
+    assert_eq!(decoded(&f, quote), quote_md(">\n"));
+}
+
+const QUOTE_WITH_COMMENTS: &str = "> a\n>\n> <!-- c1 -->\n>\n> b\n>\n> <!-- end -->\n";
+
+/// D3, same shape: each comment keeps its place in the new quote.
+#[test]
+fn replacing_a_blockquote_keeps_the_comments_inside_it() {
+    // The same shape, and every child still there.
+    let mut f = fixture();
+    let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
+    f.run(quote, &NedMutation::Replace(vec![quote_tree(vec![para_tree("x"), para_tree("y")])]));
+    let new = f.body_blocks()[2];
+    assert_eq!(decoded(&f, new), quote_md("> x\n>\n> <!-- c1 -->\n>\n> y\n>\n> <!-- end -->\n"));
+
+    // A child is gone: its comments fall back to the quote's end, in order.
+    let mut f = fixture();
+    let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
+    f.run(quote, &NedMutation::Replace(vec![quote_tree(vec![para_tree("x")])]));
+    let new = f.body_blocks()[2];
+    assert_eq!(decoded(&f, new), quote_md("> x\n>\n> <!-- c1 -->\n>\n> <!-- end -->\n"));
+
+    // Nested quotes: the path goes down, and falls back to the deepest
+    // container that is still there.
+    let nested = "> a\n>\n> > <!-- n -->\n> >\n> > b\n> >\n> > <!-- ne -->\n";
+    let mut f = fixture();
+    let quote = add_quote(&mut f, nested);
+    let both = quote_tree(vec![para_tree("a"), quote_tree(vec![para_tree("b")])]);
+    f.run(quote, &NedMutation::Replace(vec![both]));
+    let new = f.body_blocks()[2];
+    assert_eq!(decoded(&f, new), quote_md(nested));
+
+    let mut f = fixture();
+    let quote = add_quote(&mut f, nested);
+    let emptied = quote_tree(vec![para_tree("a"), quote_tree(vec![])]);
+    f.run(quote, &NedMutation::Replace(vec![emptied]));
+    let new = f.body_blocks()[2];
+    assert_eq!(decoded(&f, new), quote_md("> a\n>\n> > <!-- n -->\n> >\n> > <!-- ne -->\n"));
+
+    let mut f = fixture();
+    let quote = add_quote(&mut f, nested);
+    f.run(quote, &NedMutation::Replace(vec![quote_tree(vec![para_tree("a"), para_tree("b")])]));
+    let new = f.body_blocks()[2];
+    assert_eq!(decoded(&f, new), quote_md("> a\n>\n> b\n>\n> <!-- n -->\n>\n> <!-- ne -->\n"));
+}
+
+/// D3, another shape: the comments go after the replaced block's own leading
+/// comments, on the first new block.
+#[test]
+fn replacing_a_blockquote_with_another_shape_keeps_the_comments_in_order() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
+    add_trivia(&mut f.store, quote, BEFORE, &["<!-- lead -->"]);
+    f.run(quote, &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]));
+    let blocks = f.body_blocks();
+    assert_eq!(f.body_texts()[2..], ["X", "Y"]);
+    assert_eq!(
+        leading_comments(&f.store, blocks[2]),
+        vec!["<!-- lead -->", "<!-- c1 -->", "<!-- end -->"]
+    );
+    assert!(leading_comments(&f.store, blocks[3]).is_empty());
+}
+
+/// D3, delete: the comments follow the quote's leading comments to the next
+/// block, before its own.
+#[test]
+fn deleting_a_blockquote_keeps_the_comments_inside_it() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
+    let body = f.body();
+    let after = add_block(&mut f.store, body, &para("after"));
+    add_trivia(&mut f.store, quote, BEFORE, &["<!-- lead -->"]);
+    add_trivia(&mut f.store, after, BEFORE, &["<!-- own -->"]);
+    f.run(quote, &NedMutation::Delete);
+    assert_eq!(f.body_blocks()[2], after);
+    assert_eq!(
+        leading_comments(&f.store, after),
+        vec!["<!-- lead -->", "<!-- c1 -->", "<!-- end -->", "<!-- own -->"]
+    );
+
+    // With nothing after it, they go to the end of the container.
+    let mut f = fixture();
+    let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
+    add_trivia(&mut f.store, quote, BEFORE, &["<!-- lead -->"]);
+    f.run(quote, &NedMutation::Delete);
+    assert_eq!(
+        comments_of(&f.store, f.body(), END),
+        vec!["<!-- lead -->", "<!-- c1 -->", "<!-- end -->"]
+    );
+}
+
+/// The comments of a deleted last block come before the container's existing
+/// end comments, as they did in the source.
+#[test]
+fn deleting_the_last_block_keeps_its_comments_before_the_container_end() {
+    // In a quote.
+    let mut f = fixture();
+    let quote = add_quote(&mut f, "> a\n>\n> <!-- c -->\n>\n> b\n>\n> <!-- end -->\n");
+    let last = f.store.children(quote)[1];
+    f.run(last, &NedMutation::Delete);
+    assert_eq!(comments_of(&f.store, quote, END), vec!["<!-- c -->", "<!-- end -->"]);
+    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> <!-- c -->\n>\n> <!-- end -->\n"));
+
+    // At the top level.
+    let mut f = fixture();
+    let (body, b) = (f.body(), f.body_blocks()[1]);
+    add_trivia(&mut f.store, b, BEFORE, &["<!-- c -->"]);
+    add_trivia(&mut f.store, body, END, &["<!-- end -->"]);
+    f.run(b, &NedMutation::Delete);
+    assert_eq!(comments_of(&f.store, body, END), vec!["<!-- c -->", "<!-- end -->"]);
+}
+
+/// A nested quote deleted from a quote: its comments go to the outer quote.
+#[test]
+fn deleting_a_nested_blockquote_keeps_its_comments_in_the_outer_quote() {
+    let mut f = fixture();
+    let outer = add_quote(&mut f, "> a\n>\n> > <!-- n -->\n> >\n> > b\n");
+    let inner = f.store.children(outer)[1];
+    f.run(inner, &NedMutation::Delete);
+    assert_eq!(decoded(&f, outer), quote_md("> a\n>\n> <!-- n -->\n"));
+}
+
+/// Guard: Replace of a quote and an edit inside it change the same thing.
+#[test]
+fn plan_replacing_a_blockquote_and_editing_inside_it_is_rejected() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, "> a\n>\n> b\n");
+    let first = f.store.children(quote)[0];
+    let plan: Plan = [
+        step(&[quote], NedMutation::Replace(vec![quote_tree(vec![para_tree("X")])]), "ned/replace"),
+        set_text(f.text_of(first), "y"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(execute(&mut f.store, plan), Err(overlap(1, "ned/set-text", 0, "ned/replace")));
+    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> b\n"));
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────

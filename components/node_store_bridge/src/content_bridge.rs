@@ -918,6 +918,31 @@ mod tests {
         assert_eq!(content::serialize_document(&back), src);
     }
 
+    /// ADR-059 stage 8.2: a block edit inside a quote is saved inside it, and
+    /// the quote's comments stay where they were.
+    #[test]
+    fn an_edit_inside_a_blockquote_is_saved_inside_it() {
+        use content_store::edit::{NedMutation, TargetKind, commit, prepare, resolve};
+        let src = "# Title\n\nSummary.\n\n----\n\n> a\n>\n> <!-- c -->\n>\n> b\n\nAfter.\n";
+        let doc = trivia_doc(src);
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let quote = store.children(body)[0];
+        let second = store.children(quote)[1];
+
+        let replace = NedMutation::Replace(vec![ned::NodeTree::element("paragraph")
+            .with_child(ned::NodeTree::text("X"))]);
+        let target = resolve(&store, &ned::Selection::single(second), TargetKind::Block).unwrap();
+        let edit = prepare(&store, &target, &replace).unwrap();
+        commit(&mut store, vec![edit]);
+
+        let saved = serialize_from_store(&store, root).unwrap();
+        assert_eq!(saved, src.replace("> b", "> X"));
+        let reloaded = trivia_doc(&saved);
+        assert_eq!(reloaded.body.len(), 2, "{saved}");
+    }
+
     #[test]
     fn trivia_that_is_not_a_comment_is_malformed() {
         let doc = trivia_doc("# Title\n\nSummary.\n\n----\n\n<!-- c -->\n\nOne.\n");
