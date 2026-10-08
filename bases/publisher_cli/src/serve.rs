@@ -1795,6 +1795,12 @@ async fn file_handler(
         }
     }
 
+    // The path is public input: plain names only, and whatever it names must
+    // stay inside the output directory (a symlink out of it does not count).
+    if editorial_types::plain_url_segments(path).is_err() {
+        return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], b"not found".to_vec())
+            .into_response();
+    }
     let relative = path.trim_start_matches('/');
     let relative = if relative.is_empty() { "index.html" } else { relative };
 
@@ -1804,6 +1810,9 @@ async fn file_handler(
     ];
 
     for candidate in &candidates {
+        if editorial_types::ensure_within(&state.output_dir, candidate).is_err() {
+            continue;
+        }
         if candidate.is_file()
             && let Ok(bytes) = std::fs::read(candidate)
         {
@@ -4568,6 +4577,30 @@ mod tests {
         std::fs::create_dir_all(&out_dir).unwrap();
         std::fs::write(out_dir.join("index.html"), b"<html><body>Hello</body></html>").unwrap();
         test_app_full(client, out_dir)
+    }
+
+    /// The published site is public: a request path with `..` must not reach
+    /// a file beside the output directory.
+    #[tokio::test]
+    async fn file_handler_with_a_traversal_path_reads_nothing_outside_output() {
+        let (client, tmp) = start_test_conductor();
+        let app = full_app_with_index(&tmp, client);
+        std::fs::write(tmp.path().join("secret.txt"), "SECRET-FILE").unwrap();
+
+        // Control: the plain path is served.
+        let ok = oneshot_get(app.clone(), "/", None).await;
+        assert_eq!(ok.status(), axum::http::StatusCode::OK);
+
+        // The first two were red before the fix. The percent-encoded form is a
+        // GUARD: nothing decodes the path, so `%2e%2e` is a literal name that
+        // does not exist, before and after the fix.
+        for uri in ["/../secret.txt", "/a/../../secret.txt", "/%2e%2e/secret.txt"] {
+            let resp = oneshot_get(app.clone(), uri, None).await;
+            let status = resp.status();
+            let text = body_string(resp).await;
+            assert!(!text.contains("SECRET-FILE"), "{uri} served a file outside the output: {text}");
+            assert_ne!(status, axum::http::StatusCode::OK, "{uri}");
+        }
     }
 
     #[tokio::test]

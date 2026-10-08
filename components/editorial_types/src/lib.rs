@@ -3,7 +3,9 @@ use ned::NodeTree;
 mod ned_program;
 mod paths;
 pub use ned_program::clj_str_literal;
-pub use paths::{canonical_deepest, ContentPath, PathError, SitePath};
+pub use paths::{
+    canonical_deepest, ensure_within, plain_url_segments, ContentPath, PathError, SitePath,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

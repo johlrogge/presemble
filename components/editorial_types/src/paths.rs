@@ -68,6 +68,36 @@ pub fn canonical_deepest(path: &Path) -> Result<PathBuf, PathError> {
     }
 }
 
+/// The names of a URL path (`/post/hello`, `/post/`), each a plain name.
+///
+/// Empty segments (a leading, trailing or doubled `/`) are skipped. `.` and
+/// `..`, a NUL byte and a backslash are refused: a URL segment becomes a
+/// directory or file name, and none of those is one. Nothing is
+/// percent-decoded here or anywhere after.
+pub fn plain_url_segments(url: &str) -> Result<Vec<&str>, PathError> {
+    let mut names = Vec::new();
+    for segment in url.split('/').filter(|s| !s.is_empty()) {
+        if segment == "." || segment == ".." {
+            return Err(PathError::NotNormal { component: segment.to_string() });
+        }
+        if segment.contains('\0') {
+            return Err(PathError::Nul);
+        }
+        if segment.contains('\\') {
+            return Err(PathError::NotNormal { component: segment.to_string() });
+        }
+        names.push(segment);
+    }
+    Ok(names)
+}
+
+/// `path` lies inside `base` once symlinks are resolved (as far as it exists).
+pub fn ensure_within(base: &Path, path: &Path) -> Result<(), PathError> {
+    let base = canonical_deepest(base)?;
+    let target = canonical_deepest(path)?;
+    if target.starts_with(&base) { Ok(()) } else { Err(PathError::OutsideSite) }
+}
+
 /// A path inside the site directory, written relative to it.
 ///
 /// Never URL-decoded: `%2e%2e` is a file name like any other.
@@ -309,6 +339,37 @@ mod tests {
                 "{outside}"
             );
         }
+    }
+
+    #[test]
+    fn plain_url_segments_keep_names_and_refuse_the_rest() {
+        assert_eq!(plain_url_segments("/post/hello"), Ok(vec!["post", "hello"]));
+        assert_eq!(plain_url_segments("/post/"), Ok(vec!["post"]));
+        assert_eq!(plain_url_segments("/"), Ok(vec![]));
+        for bad in ["/../../outside", "/post/./x", "/post/..", "/a\\b", "/a\0b"] {
+            assert!(plain_url_segments(bad).is_err(), "{bad:?} must be refused");
+        }
+        // Nothing is decoded: this is a plain (odd) name.
+        assert_eq!(plain_url_segments("/%2e%2e/x"), Ok(vec!["%2e%2e", "x"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_within_refuses_a_symlink_out_of_the_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("out");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(tmp.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("elsewhere"), base.join("escape")).unwrap();
+        assert!(ensure_within(&base, &base.join("post/x/index.html")).is_ok());
+        assert_eq!(
+            ensure_within(&base, &base.join("escape/index.html")),
+            Err(PathError::OutsideSite)
+        );
+        assert_eq!(
+            ensure_within(&base, &base.join("../elsewhere/index.html")),
+            Err(PathError::OutsideSite)
+        );
     }
 
     #[test]
