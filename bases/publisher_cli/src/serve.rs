@@ -1280,17 +1280,6 @@ async fn scaffold_handler(
     }
 }
 
-/// Test helper — delegates to content_editor. Used only in serve.rs tests.
-#[cfg(test)]
-fn apply_edit(
-    site_dir: &std::path::Path,
-    file: &str,
-    slot: &str,
-    value: &str,
-) -> Result<(), String> {
-    content_editor::apply_slot_edit(site_dir, file, slot, value)
-}
-
 #[derive(serde::Deserialize)]
 struct LinksQuery {
     schema: String,
@@ -2981,52 +2970,6 @@ mod tests {
     fn render_error_page_for_editor_includes_editorial_script() {
         let html = render_error_page("/article/foo", &["some error".to_string()], serve_ui::Audience::Editor);
         assert!(html.contains("/_presemble/editorial-ws"), "should include editor script");
-    }
-
-    // --- edit endpoint tests ---
-
-    #[test]
-    fn apply_edit_rejects_non_content_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = apply_edit(dir.path(), "templates/foo.md", "title", "x").unwrap_err();
-        assert!(err.contains("must start with 'content/'"), "got: {err}");
-    }
-
-    #[test]
-    fn apply_edit_rejects_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = apply_edit(dir.path(), "content/../etc/passwd", "title", "x").unwrap_err();
-        assert!(err.contains("traversal"), "got: {err}");
-    }
-
-    #[test]
-    fn apply_edit_writes_to_content_file() {
-        let dir = tempfile::tempdir().unwrap();
-        use site_index::{DIR_CONTENT, DIR_SCHEMAS};
-        let schemas_dir = dir.path().join(DIR_SCHEMAS);
-        std::fs::create_dir_all(&schemas_dir).unwrap();
-        std::fs::create_dir_all(dir.path().join(DIR_CONTENT).join("article")).unwrap();
-
-        std::fs::write(
-            schemas_dir.join("article.md"),
-            "# Article Title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n",
-        ).unwrap();
-
-        let content_path = dir.path().join(DIR_CONTENT).join("article").join("hello.md");
-        std::fs::write(&content_path, "# Old Title\n").unwrap();
-
-        apply_edit(dir.path(), "content/article/hello.md", "title", "New Title").unwrap();
-
-        let result = std::fs::read_to_string(&content_path).unwrap();
-        assert!(result.contains("New Title"), "got: {result}");
-        assert!(!result.contains("Old Title"), "got: {result}");
-    }
-
-    #[test]
-    fn apply_edit_missing_file_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = apply_edit(dir.path(), "content/article/nope.md", "title", "x").unwrap_err();
-        assert!(err.contains("not found"), "got: {err}");
     }
 
     // ── derive_anchor tests ──────────────────────────────────────────────────

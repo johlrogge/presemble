@@ -416,7 +416,6 @@ name = "content_editor"
 version = "0.35.0"
 dependencies = [
  "content",
- "lsp_capabilities",
  "mem_site_repository",
  "schema",
  "serde",
@@ -1948,7 +1947,6 @@ dependencies = [
  "clap",
  "conductor",
  "content",
- "content_editor",
  "criterion",
  "dep_graph",
  "editor_server",

@@ -11,7 +11,6 @@ content = { workspace = true }
 schema = { workspace = true }
 site_repository = { workspace = true }
 site_index = { workspace = true }
-lsp_capabilities = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

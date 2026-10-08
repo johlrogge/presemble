@@ -23,7 +23,6 @@ site_index = { workspace = true }
 template_registry = { workspace = true }
 validation = { workspace = true }
 lsp_capabilities = { workspace = true }
-content_editor = { workspace = true }
 lsp_service = { workspace = true }
 stylesheet = { workspace = true }
 site_templates = { workspace = true }

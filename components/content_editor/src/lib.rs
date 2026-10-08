@@ -5,80 +5,6 @@ pub struct LinkOption {
     pub value: String,
 }
 
-/// Validate a content-relative path, returning the absolute path if safe.
-///
-/// Requires:
-/// - path starts with "content/"
-/// - path ends with ".md"
-/// - no ".." components
-/// - canonical path is under site_dir
-pub fn validate_content_path(
-    site_dir: &std::path::Path,
-    file: &str,
-) -> Result<std::path::PathBuf, String> {
-    if !file.starts_with("content/") {
-        return Err(format!("file must start with 'content/': {file}"));
-    }
-    if file.contains("..") {
-        return Err(format!("path traversal detected: {file}"));
-    }
-    if !file.ends_with(".md") {
-        return Err(format!("file must end with '.md': {file}"));
-    }
-
-    let abs = site_dir.join(file);
-    if !abs.exists() {
-        return Err(format!("content file not found: {file}"));
-    }
-
-    let canonical = abs
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
-    let site_canonical = site_dir
-        .join("content")
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve content dir: {e}"))?;
-
-    if !canonical.starts_with(&site_canonical) {
-        return Err("path traversal detected".into());
-    }
-
-    Ok(abs)
-}
-
-/// Apply a slot edit to a content file.
-///
-/// Validates the path, loads the schema grammar, and writes the new value via
-/// `lsp_capabilities::write_slot_to_file`.
-pub fn apply_slot_edit(
-    site_dir: &std::path::Path,
-    file: &str,
-    slot: &str,
-    value: &str,
-) -> Result<(), String> {
-    let abs_path = validate_content_path(site_dir, file)?;
-
-    // Derive schema stem from file path: "content/post/building-presemble.md" → "post"
-    let stem = std::path::Path::new(file)
-        .components()
-        .nth(1)
-        .and_then(|c| c.as_os_str().to_str())
-        .ok_or_else(|| format!("cannot derive schema stem from: {file}"))?;
-
-    // Load grammar
-    let schema_path = site_dir.join("schemas").join(format!("{stem}.md"));
-    let schema_src = std::fs::read_to_string(&schema_path)
-        .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
-    let grammar = schema::parse_schema(&schema_src)
-        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
-
-    // Write slot
-    let canonical = abs_path
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
-    lsp_capabilities::write_slot_to_file(&canonical, slot, &grammar, value)
-}
-
 /// Collect valid link targets for a link-type slot.
 ///
 /// Returns a sorted list of `LinkOption` values. The `_repo` parameter is
@@ -352,24 +278,4 @@ mod tests {
         assert!(result.unwrap_err().contains("content already exists"));
     }
 
-    #[test]
-    fn validate_content_path_rejects_no_content_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = validate_content_path(dir.path(), "schemas/bad.md").unwrap_err();
-        assert!(err.contains("must start with 'content/'"), "got: {err}");
-    }
-
-    #[test]
-    fn validate_content_path_rejects_non_md() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = validate_content_path(dir.path(), "content/post/bad.txt").unwrap_err();
-        assert!(err.contains("must end with '.md'"), "got: {err}");
-    }
-
-    #[test]
-    fn validate_content_path_rejects_dotdot() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = validate_content_path(dir.path(), "content/../etc/passwd.md").unwrap_err();
-        assert!(err.contains("traversal"), "got: {err}");
-    }
 }

@@ -881,39 +881,16 @@ pub fn validate_schema_with_positions(src: &str) -> Vec<PositionedDiagnostic> {
 }
 
 
-/// Edit a content file by writing a new value to a named schema slot.
+/// Write a new value to a named schema slot of a document held as a string.
 ///
 /// If the slot already exists in the document, the existing element is replaced
 /// in-place. If the slot is missing, the new element is inserted at the
 /// schema-order-correct position (reusing `find_schema_ordered_insert_position`).
 ///
-/// The function reads and writes `file_path` directly.
-///
 /// # Errors
 /// Returns `Err(String)` if:
-/// - The file cannot be read or written
 /// - `slot_name` does not exist in `grammar.preamble`
 /// - The document source cannot be parsed
-pub fn write_slot_to_file(
-    file_path: &std::path::Path,
-    slot_name: &str,
-    grammar: &Grammar,
-    new_value: &str,
-) -> Result<(), String> {
-    let src = std::fs::read_to_string(file_path)
-        .map_err(|e| format!("failed to read {}: {e}", file_path.display()))?;
-
-    let new_src = write_slot_to_string(&src, slot_name, grammar, new_value)?;
-
-    std::fs::write(file_path, &new_src)
-        .map_err(|e| format!("failed to write {}: {e}", file_path.display()))?;
-
-    Ok(())
-}
-
-/// Core logic for `write_slot_to_file` operating on a string.
-///
-/// Exposed for testing without filesystem access.
 pub fn write_slot_to_string(
     src: &str,
     slot_name: &str,

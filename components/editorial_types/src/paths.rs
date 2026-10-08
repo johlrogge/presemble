@@ -377,7 +377,11 @@ mod tests {
         assert!(ContentPath::parse("content/post/hello.md").is_ok());
         assert_eq!(ContentPath::parse("schemas/bad.md"), Err(PathError::NotContent));
         assert_eq!(ContentPath::parse("content/post/bad.txt"), Err(PathError::NotMarkdown));
-        assert!(ContentPath::parse("content/../etc/passwd.md").is_err());
+        // Ported from content_editor::validate_content_path (`..` rule).
+        assert!(matches!(
+            ContentPath::parse("content/../etc/passwd.md"),
+            Err(PathError::NotNormal { .. })
+        ));
         assert!(ContentPath::parse("/content/post/a.md").is_err());
         assert_eq!(ContentPath::parse("contents/a.md"), Err(PathError::NotContent));
     }
