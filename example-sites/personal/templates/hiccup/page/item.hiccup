@@ -6,7 +6,7 @@
     [:presemble/insert {:data input.title :as "h1"}]
     [:template {:data-slot input.description}
       [:p {:class "description"}
-        [:presemble/insert {:data input.description}]]]
+        [:presemble/insert {:data input.description :as "span"}]]]
     [:presemble/insert {:data input.body}]]]
 
 [:html {:lang "en"}

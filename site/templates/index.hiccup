@@ -22,7 +22,7 @@
         [:template {:data-each input.highlight}
           [:li {:class "feature-card"}
             [:presemble/insert {:data item.title :as "h3"}]
-            [:presemble/insert {:data item.tagline}]
+            [:presemble/insert {:data item.tagline :as "span"}]
             [:presemble/insert {:data item.description :as "p"}]
             [:presemble/insert {:data item.link}]
           ]
@@ -38,7 +38,7 @@
         [:template {:data-each input.post}
           [:li {:class "post-card"}
             [:presemble/insert {:data item.title :as "h3"}]
-            [:presemble/insert {:data item.summary}]
+            [:presemble/insert {:data item.summary :as "span"}]
             [:presemble/insert {:data item.link}]
           ]
         ]

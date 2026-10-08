@@ -32,7 +32,7 @@ fn render_schema_derived_slot_emits_constraint_attributes() {
     let mut context = template::DataGraph::new();
     context.insert("input", template::Value::Record(slot_graph));
 
-    let template_src = r#"<h1><presemble:insert data="(ref input.title)" /></h1>"#;
+    let template_src = r#"<h1><presemble:insert data="(ref input.title)" as="span" /></h1>"#;
     let html = template::render_template(template_src, &context, template::OutputMode::Editorial)
         .expect("render should succeed");
 

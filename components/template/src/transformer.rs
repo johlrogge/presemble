@@ -220,6 +220,43 @@ fn evaluate_attributes(
     Ok(evaluated_attrs)
 }
 
+/// How an insert places the value it renders (ADR-067): without `as` the
+/// value is placed as it is in its parent; with `as` it becomes an element of
+/// that tag, with its semantic class and, in editorial output, its editor
+/// attributes.
+#[derive(Clone, Copy)]
+enum Placement<'a> {
+    AsIs,
+    /// The `as` tag.
+    Element(&'a str),
+}
+
+impl<'a> Placement<'a> {
+    fn of(as_tag: Option<&'a str>) -> Self {
+        as_tag.map_or(Placement::AsIs, Placement::Element)
+    }
+
+    /// The `as` tag, for the values that are elements by nature (a link, an
+    /// image, a suggestion placeholder): they render their own element under
+    /// either placement, `as` only renames it.
+    fn tag(self) -> Option<&'a str> {
+        match self {
+            Placement::AsIs => None,
+            Placement::Element(tag) => Some(tag),
+        }
+    }
+
+    /// Place `children`: as they are, or as the element `tag` with `attrs`.
+    fn place(self, attrs: Vec<(String, Form)>, children: Vec<Node>) -> Vec<Node> {
+        match self {
+            Placement::AsIs => children,
+            Placement::Element(tag) => {
+                vec![Node::Element(Element { name: tag.to_string(), attrs, children })]
+            }
+        }
+    }
+}
+
 /// Render a `presemble:insert`: its `data` is an expression.
 fn render_insert_node(
     el: &Element,
@@ -264,7 +301,7 @@ fn render_insert_expression(
     }) else {
         return Ok(Vec::new());
     };
-    let tag = el.attr("as").unwrap_or("span").to_string();
+    let placement = Placement::of(el.attr("as"));
     let mut attrs = Vec::new();
     if let Some(subject) = expression.subject() {
         let editorial = ctx.output == OutputMode::Editorial;
@@ -288,7 +325,7 @@ fn render_insert_expression(
         }
         attrs.extend(resolve_slot_constraint_form_attrs(&data_path, graph));
     }
-    Ok(vec![Node::Element(Element { name: tag, attrs, children: vec![Node::Text(text)] })])
+    Ok(placement.place(attrs, vec![Node::Text(text)]))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +383,7 @@ fn render_insert(
     let path_segments: Vec<&str> = data_path.split('.').collect();
     let class = semantic_class(data_path);
     let as_tag = el.attr("as");
+    let placement = Placement::of(as_tag);
 
     // Resolve the content file path for browser editing.
     // Each page's graph carries _presemble_file. For "index.tagline", look in graph["index"]["_presemble_file"].
@@ -375,7 +413,7 @@ fn render_insert(
     // Try the fast NodeId path first (avoids Value materialization).
     // Falls back to the Value path for unhandled node types (e.g. body).
     if let Some(ref resolved) = graph.resolve_node(&path_segments)
-        && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs, editor_mode)?
+        && let Some(nodes) = render_insert_native(resolved, placement, &class, data_path, &presemble_file, &constraint_attrs, editor_mode)?
     {
         return Ok(nodes);
     }
@@ -388,7 +426,6 @@ fn render_insert(
         None | Some(Value::Absent) => Ok(Vec::new()),
 
         Some(Value::Text(text)) => {
-            let tag = as_tag.unwrap_or("span").to_string();
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
@@ -398,18 +435,12 @@ fn render_insert(
                 attrs.extend(resolve_editor_attrs(data_path, graph, &presemble_file));
             }
             attrs.extend(constraint_attrs.iter().cloned());
-            let element = Element {
-                name: tag,
-                attrs,
-                children: vec![Node::Text(text)],
-            };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(attrs, vec![Node::Text(text)]))
         }
 
         // Inline content (a heading slot) is the content of the element the
         // template asks for, like text is: always wrapped, even when empty.
         Some(Value::Inlines(nodes)) => {
-            let tag = as_tag.unwrap_or("span").to_string();
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
@@ -419,7 +450,7 @@ fn render_insert(
                 attrs.extend(resolve_editor_attrs(data_path, graph, &presemble_file));
             }
             attrs.extend(constraint_attrs.iter().cloned());
-            Ok(vec![Node::Element(Element { name: tag, attrs, children: nodes.to_vec() })])
+            Ok(placement.place(attrs, nodes.to_vec()))
         }
 
         // Block nodes (the body) are slot elements already.
@@ -440,7 +471,6 @@ fn render_insert(
         }
 
         Some(Value::List(items)) => {
-            let tag = as_tag.unwrap_or("span");
             let slot = slot_name_from_path(data_path);
             let editors = if editorial {
                 resolve_editor_list(data_path, graph, &presemble_file)
@@ -450,7 +480,7 @@ fn render_insert(
             let mut result = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let editor = editors.get(i).map(Vec::as_slice).unwrap_or_default();
-                let mut rendered = render_list_item(item, tag, &class, &slot, &presemble_file, editorial, editor)?;
+                let mut rendered = render_list_item(item, placement, &class, &slot, &presemble_file, editorial, editor)?;
                 result.append(&mut rendered);
             }
             Ok(result)
@@ -466,7 +496,9 @@ fn render_insert(
             };
             let combined_class = format!("{sem_class} presemble-suggestion{body_class}");
 
-            // Determine the tag: `as` attribute takes priority, else derive from element_kind.
+            // A placeholder is an element by nature: it renders as one under
+            // either placement. `as` renames it; without `as` its tag follows
+            // the kind of the slot it stands for.
             let tag: String = if let Some(t) = as_tag {
                 t.to_string()
             } else {
@@ -517,27 +549,23 @@ fn render_insert(
         Some(Value::LinkExpression { .. }) => Ok(Vec::new()),
 
         Some(Value::Integer(n)) => {
-            let tag = as_tag.unwrap_or("span").to_string();
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
             ];
             attrs.extend(constraint_attrs.iter().cloned());
-            let element = Element { name: tag, attrs, children: vec![Node::Text(n.to_string())] };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(attrs, vec![Node::Text(n.to_string())]))
         }
 
         Some(Value::Bool(b)) => {
-            let tag = as_tag.unwrap_or("span").to_string();
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
             ];
             attrs.extend(constraint_attrs.iter().cloned());
-            let element = Element { name: tag, attrs, children: vec![Node::Text(b.to_string())] };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(attrs, vec![Node::Text(b.to_string())]))
         }
 
         Some(Value::Keyword { namespace, name }) => {
@@ -545,28 +573,24 @@ fn render_insert(
                 Some(ns) => format!(":{ns}/{name}"),
                 None => format!(":{name}"),
             };
-            let tag = as_tag.unwrap_or("span").to_string();
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
             ];
             attrs.extend(constraint_attrs.iter().cloned());
-            let element = Element { name: tag, attrs, children: vec![Node::Text(text)] };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(attrs, vec![Node::Text(text)]))
         }
 
         Some(Value::Fn(c)) => {
             let text = format!("#<fn {}>", c.name().unwrap_or("anonymous"));
-            let tag = as_tag.unwrap_or("span").to_string();
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                 (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
             ];
             attrs.extend(constraint_attrs);
-            let element = Element { name: tag, attrs, children: vec![Node::Text(text)] };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(attrs, vec![Node::Text(text)]))
         }
 
         Some(Value::Opaque(_)) => Ok(Vec::new()),
@@ -595,13 +619,16 @@ enum EditorAttrs {
 /// Called when `graph.resolve_node()` returns `Some` — the fast path for NodeStore-backed graphs.
 fn render_insert_native(
     resolved: &ResolvedNode<'_>,
-    as_tag: Option<&str>,
+    placement: Placement<'_>,
     class: &str,
     data_path: &str,
     presemble_file: &str,
     constraint_attrs: &[(String, Form)],
     editor: EditorAttrs,
 ) -> Result<Option<Vec<Node>>, RenderError> {
+    // Links, images and suggestion placeholders are elements by nature: `as`
+    // only renames them.
+    let as_tag = placement.tag();
     let store = resolved.store;
     let id = resolved.id;
     let editorial = !matches!(editor, EditorAttrs::Published);
@@ -616,76 +643,30 @@ fn render_insert_native(
     match store.get(id) {
         None => Ok(Some(Vec::new())),
         Some(node) => match node {
-            node_store::Node::Text(text) => {
-                let tag = as_tag.unwrap_or("span").to_string();
+            node_store::Node::Text(_)
+            | node_store::Node::Integer(_)
+            | node_store::Node::Boolean(_)
+            | node_store::Node::Keyword(_) => {
+                let text = match node {
+                    node_store::Node::Text(text) => text.clone(),
+                    node_store::Node::Integer(n) => n.to_string(),
+                    node_store::Node::Boolean(b) => b.to_string(),
+                    node_store::Node::Keyword(name) => format!(":{}", store.resolve_name(*name)),
+                    _ => unreachable!("matched above"),
+                };
                 let mut attrs = vec![
                     ("class".to_string(), Form::Str(class.to_string())),
                     (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
                     (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
                 ];
                 attrs.extend(constraint_attrs.iter().cloned());
-                let element = Element {
-                    name: tag,
-                    attrs,
-                    children: vec![Node::Text(text.clone())],
-                };
-                Ok(Some(vec![Node::Element(element)]))
-            }
-
-            node_store::Node::Integer(n) => {
-                let tag = as_tag.unwrap_or("span").to_string();
-                let mut attrs = vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                ];
-                attrs.extend(constraint_attrs.iter().cloned());
-                let element = Element {
-                    name: tag,
-                    attrs,
-                    children: vec![Node::Text(n.to_string())],
-                };
-                Ok(Some(vec![Node::Element(element)]))
-            }
-
-            node_store::Node::Boolean(b) => {
-                let tag = as_tag.unwrap_or("span").to_string();
-                let mut attrs = vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                ];
-                attrs.extend(constraint_attrs.iter().cloned());
-                let element = Element {
-                    name: tag,
-                    attrs,
-                    children: vec![Node::Text(b.to_string())],
-                };
-                Ok(Some(vec![Node::Element(element)]))
-            }
-
-            node_store::Node::Keyword(name) => {
-                let text = format!(":{}", store.resolve_name(*name));
-                let tag = as_tag.unwrap_or("span").to_string();
-                let mut attrs = vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
-                ];
-                attrs.extend(constraint_attrs.iter().cloned());
-                let element = Element {
-                    name: tag,
-                    attrs,
-                    children: vec![Node::Text(text)],
-                };
-                Ok(Some(vec![Node::Element(element)]))
+                Ok(Some(placement.place(attrs, vec![Node::Text(text)])))
             }
 
             node_store::Node::Nil | node_store::Node::Opaque(_) => Ok(Some(Vec::new())),
 
             node_store::Node::Collection => {
                 // List of items — render each child natively
-                let tag = as_tag.unwrap_or("span");
                 let mut result = Vec::new();
                 let child_editor_mode = if editorial {
                     EditorAttrs::Computed { page: None }
@@ -694,7 +675,7 @@ fn render_insert_native(
                 };
                 for child_id in store.children(id) {
                     let child_resolved = ResolvedNode { id: child_id, store };
-                    if let Some(mut rendered) = render_insert_native(&child_resolved, Some(tag), class, data_path, presemble_file, &[], child_editor_mode)? {
+                    if let Some(mut rendered) = render_insert_native(&child_resolved, placement, class, data_path, presemble_file, &[], child_editor_mode)? {
                         result.append(&mut rendered);
                     }
                 }
@@ -775,7 +756,6 @@ fn render_insert_native(
                     let shown: Option<Vec<Node>> =
                         content.map(|content| crate::inline_nodes::inline_nodes(&content));
                     if let Some(shown) = shown {
-                        let tag = as_tag.unwrap_or("span").to_string();
                         let mut elem_attrs = vec![
                             ("class".to_string(), Form::Str(class.to_string())),
                             (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
@@ -783,12 +763,7 @@ fn render_insert_native(
                         ];
                         elem_attrs.extend(editor_here());
                         elem_attrs.extend(constraint_attrs.iter().cloned());
-                        let element = Element {
-                            name: tag,
-                            attrs: elem_attrs,
-                            children: shown,
-                        };
-                        return Ok(Some(vec![Node::Element(element)]));
+                        return Ok(Some(placement.place(elem_attrs, shown)));
                     }
                     return Ok(Some(Vec::new()));
                 }
@@ -1426,27 +1401,26 @@ fn render_record(
 /// Render a single list item.
 fn render_list_item(
     item: &Value,
-    tag: &str,
+    placement: Placement<'_>,
     class: &str,
     slot: &str,
     file: &str,
     editorial: bool,
     editor: &[(String, Form)],
 ) -> Result<Vec<Node>, RenderError> {
+    // The slot attributes of a plain value placed as an element.
+    let slot_attrs = || {
+        vec![
+            ("class".to_string(), Form::Str(class.to_string())),
+            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
+            (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+        ]
+    };
     match item {
         Value::Text(text) => {
-            let mut attrs = vec![
-                ("class".to_string(), Form::Str(class.to_string())),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
-            ];
+            let mut attrs = slot_attrs();
             attrs.extend(editor.iter().cloned());
-            let element = Element {
-                name: tag.to_string(),
-                attrs,
-                children: vec![Node::Text(text.clone())],
-            };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(attrs, vec![Node::Text(text.clone())]))
         }
 
         Value::Nodes(nodes) => {
@@ -1457,21 +1431,13 @@ fn render_list_item(
 
         // The inline content of one element, in a list: wrapped in the tag.
         Value::Inlines(nodes) => {
-            let mut attrs = vec![
-                ("class".to_string(), Form::Str(class.to_string())),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
-            ];
+            let mut attrs = slot_attrs();
             attrs.extend(editor.iter().cloned());
-            Ok(vec![Node::Element(Element {
-                name: tag.to_string(),
-                attrs,
-                children: nodes.to_vec(),
-            })])
+            Ok(placement.place(attrs, nodes.to_vec()))
         }
 
         Value::Record(sub_graph) => {
-            render_record(sub_graph, Some(tag), class, slot, file, editorial, editor)
+            render_record(sub_graph, placement.tag(), class, slot, file, editorial, editor)
         }
 
         Value::Absent => Ok(Vec::new()),
@@ -1482,61 +1448,21 @@ fn render_list_item(
 
         Value::LinkExpression { .. } => Ok(Vec::new()),
 
-        Value::Integer(n) => {
-            let element = Element {
-                name: tag.to_string(),
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
-                ],
-                children: vec![Node::Text(n.to_string())],
-            };
-            Ok(vec![Node::Element(element)])
-        }
+        Value::Integer(n) => Ok(placement.place(slot_attrs(), vec![Node::Text(n.to_string())])),
 
-        Value::Bool(b) => {
-            let element = Element {
-                name: tag.to_string(),
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
-                ],
-                children: vec![Node::Text(b.to_string())],
-            };
-            Ok(vec![Node::Element(element)])
-        }
+        Value::Bool(b) => Ok(placement.place(slot_attrs(), vec![Node::Text(b.to_string())])),
 
         Value::Keyword { namespace, name } => {
             let text = match namespace {
                 Some(ns) => format!(":{ns}/{name}"),
                 None => format!(":{name}"),
             };
-            let element = Element {
-                name: tag.to_string(),
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
-                ],
-                children: vec![Node::Text(text)],
-            };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(slot_attrs(), vec![Node::Text(text)]))
         }
 
         Value::Fn(c) => {
             let text = format!("#<fn {}>", c.name().unwrap_or("anonymous"));
-            let element = Element {
-                name: tag.to_string(),
-                attrs: vec![
-                    ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
-                ],
-                children: vec![Node::Text(text)],
-            };
-            Ok(vec![Node::Element(element)])
+            Ok(placement.place(slot_attrs(), vec![Node::Text(text)]))
         }
 
         Value::Opaque(_) => Ok(Vec::new()),

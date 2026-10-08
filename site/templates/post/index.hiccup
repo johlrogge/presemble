@@ -6,7 +6,7 @@
       [:template {:data-each input.post}
         [:li {:class "post-card"}
           [:presemble/insert {:data item.title :as "h2"}]
-          [:presemble/insert {:data item.summary}]
+          [:presemble/insert {:data item.summary :as "span"}]
           [:presemble/insert {:data item.link}]
         ]
       ]

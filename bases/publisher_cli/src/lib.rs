@@ -620,7 +620,7 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
 
     std::fs::write(
         site_dir.join("templates/note/item.html"),
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\" />\n  <presemble:insert data=\"(text input.title)\" as=\"title\" />\n  <link rel=\"stylesheet\" href=\"/assets/style.css\" />\n</head>\n<body>\n  <a href=\"/\">\u{2190} Home</a>\n  <presemble:insert data=\"(ref input.title)\" as=\"h1\" />\n  <presemble:insert data=\"(ref input.body)\" />\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\" />\n  <title><presemble:insert data=\"(text input.title)\" /></title>\n  <link rel=\"stylesheet\" href=\"/assets/style.css\" />\n</head>\n<body>\n  <a href=\"/\">\u{2190} Home</a>\n  <presemble:insert data=\"(ref input.title)\" as=\"h1\" />\n  <presemble:insert data=\"(ref input.body)\" />\n</body>\n</html>\n",
     )?;
 
     std::fs::write(
@@ -1127,6 +1127,7 @@ mod tests {
         };
         let title = between("<title", "</title>").unwrap_or_default();
         let h1 = between("<h1", "</h1>").unwrap_or_default();
+        assert!(page.contains("<title>Hello, World!</title>"), "title should be exactly the note's title: {page}");
         assert!(title.contains("Hello, World!"), "title should hold the note's title: {page}");
         assert!(h1.contains("Hello, World!"), "h1 should hold the note's title: {page}");
     }

@@ -682,6 +682,55 @@ mod rendering_tests {
         render_nodes(graph, parse_template_xml(src).expect("html"), &none)
     }
 
+    // ── An insert without :as places the value as it is ────────────────────
+
+    #[test]
+    fn insert_without_as_places_text_as_is() {
+        let g = graph();
+        assert_eq!(hiccup(&g, "[:h1 [:presemble/insert {:data article.title}]]").unwrap(), "<h1>Hello</h1>");
+        assert_eq!(hiccup(&g, "[:h1 [:presemble/insert {:data (text article.title)}]]").unwrap(), "<h1>Hello</h1>");
+        assert_eq!(
+            html(&g, r#"<h1><presemble:insert data="(ref article.title)" /></h1>"#).unwrap(),
+            "<h1>Hello</h1>"
+        );
+    }
+
+    #[test]
+    fn child_call_places_text_as_is() {
+        let g = graph();
+        assert_eq!(hiccup(&g, "[:title (text article.title)]").unwrap(), "<title>Hello</title>");
+    }
+
+    #[test]
+    fn insert_without_as_places_nothing_for_an_absent_value() {
+        let g = graph();
+        assert_eq!(hiccup(&g, "[:p [:presemble/insert {:data article.nothing}]]").unwrap(), "<p></p>");
+        assert_eq!(hiccup(&g, "[:p (text article.nothing)]").unwrap(), "<p></p>");
+    }
+
+    /// GUARD: with :as the value is its own element, with class and editor data.
+    #[test]
+    fn insert_with_as_keeps_editor_attributes() {
+        let g = graph();
+        assert_eq!(
+            hiccup(&g, r#"[:presemble/insert {:data article.title :as "h1"}]"#).unwrap(),
+            r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello</h1>"#
+        );
+        assert_eq!(
+            hiccup(&g, r#"[:presemble/insert {:data (text article.title) :as "h1"}]"#).unwrap(),
+            r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello</h1>"#
+        );
+    }
+
+    /// GUARD: a record is its own element (an anchor), whatever `as` says.
+    #[test]
+    fn record_without_as_is_its_own_element() {
+        let g = graph();
+        let html = hiccup(&g, "[:p [:presemble/insert {:data article.author}]]").unwrap();
+        assert!(html.starts_with(r#"<p><a href="/authors/jo""#) && html.ends_with(">Jo</a></p>"), "{html}");
+        assert!(!html.contains("<span"), "{html}");
+    }
+
     #[test]
     fn attribute_expression_references_the_input() {
         let g = graph();

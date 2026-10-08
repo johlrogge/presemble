@@ -987,7 +987,7 @@ mod tests {
         let store_view = NodeStoreView::new(&store, root);
         let prefixed = PrefixedGraphView::new("input".to_string(), store_view);
 
-        let template_src = r#"<h1><presemble:insert data="(ref input.title)" /></h1>"#;
+        let template_src = r#"<h1><presemble:insert data="(ref input.title)" as="span" /></h1>"#;
         let nodes = template::parse_template_xml(template_src).expect("template parse");
         let reg = template::NullRegistry;
         let ctx = template::RenderContext::editorial(&reg);
