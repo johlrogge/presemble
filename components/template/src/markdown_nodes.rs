@@ -89,68 +89,6 @@ pub(crate) fn inline_children(src: &str) -> Vec<Node> {
     nodes
 }
 
-/// Nodes for a table cell's markdown source, read exactly as a GFM table
-/// cell (see [`single_body_cell`]). A source that does not read back as one
-/// cell becomes a single text node.
-///
-/// The source is parsed inside a one-column wrapper table
-/// (`| x |\n| - |\n| {src} |\n`), so block markers (`-`, `#`, `1.`, `>`,
-/// `***`) stay text and `\|` is a pipe, also inside code spans.
-pub(crate) fn table_cell_nodes(src: &str) -> Vec<Node> {
-    let wrapper = format!("| x |\n| - |\n| {src} |\n");
-    match single_body_cell(&wrapper) {
-        Some(events) => events_to_nodes(events),
-        None => vec![Node::Text(src.to_string())],
-    }
-}
-
-/// The events inside the one body cell of a one-column wrapper table, or
-/// `None` unless the input is exactly one table with one body row of one cell
-/// that runs to the wrapper's closing pipe.
-///
-/// GFM silently drops cells beyond the header's column count, so a source
-/// with an unescaped `|` would still read as one cell. The cell's range must
-/// therefore end right before the wrapper's final `|`.
-fn single_body_cell(wrapper: &str) -> Option<Vec<Event<'_>>> {
-    if wrapper.matches(['\n', '\r']).count() != 3 {
-        return None;
-    }
-    let mut events = Parser::new_ext(wrapper, MARKDOWN_OPTIONS).into_offset_iter();
-    if !matches!(events.next(), Some((Event::Start(Tag::Table(_)), _))) {
-        return None;
-    }
-    // Skip the header.
-    for (event, _) in events.by_ref() {
-        if matches!(event, Event::End(TagEnd::TableHead)) {
-            break;
-        }
-    }
-    if !matches!(events.next(), Some((Event::Start(Tag::TableRow), _))) {
-        return None;
-    }
-    if !matches!(events.next(), Some((Event::Start(Tag::TableCell), _))) {
-        return None;
-    }
-    let mut cell = Vec::new();
-    let mut cell_end = None;
-    for (event, range) in events.by_ref() {
-        match event {
-            Event::End(TagEnd::TableCell) => {
-                cell_end = Some(range.end);
-                break;
-            }
-            other => cell.push(other),
-        }
-    }
-    let rest: Vec<_> = events.map(|(event, _)| event).collect();
-    let closes_row = matches!(
-        rest.as_slice(),
-        [Event::End(TagEnd::TableRow), Event::End(TagEnd::Table)]
-    );
-    let runs_to_last_pipe = cell_end.is_some_and(|end| wrapper[end..].trim() == "|");
-    (closes_row && runs_to_last_pipe).then_some(cell)
-}
-
 /// The concatenated text of every `Text` node, in document order.
 pub(crate) fn text_content(nodes: &[Node]) -> String {
     fn walk(nodes: &[Node], out: &mut String) {
@@ -934,14 +872,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn table_cell_nodes_read_the_source_as_one_cell() {
-        assert_eq!(table_cell_nodes("`a\\|b`"), vec![elem("code", vec![text("a|b")])]);
-        assert_eq!(table_cell_nodes("- x"), vec![text("- x")]);
-        assert_eq!(table_cell_nodes("a | b"), vec![text("a | b")]);
-        assert_eq!(table_cell_nodes("a\n<b>"), vec![text("a\n<b>")]);
-    }
-
-    #[test]
     fn text_content_concatenates_text_nodes() {
         let tree = vec![
             Node::Text("a ".into()),
@@ -1123,23 +1053,6 @@ pub(crate) mod tests {
         "![a](i) and ![b](j)\n",
     ];
 
-    /// Table cell sources rendered today through `safe_table_cell_html`.
-    const CELL_CORPUS: &[&str] = &[
-        "",
-        "-",
-        "1.",
-        "> q",
-        "***",
-        "**b**",
-        "`a\\|b`",
-        "\\<script>",
-        "<b>x</b>",
-        "a <!-- c --> b",
-        "a &amp; b",
-        "![a](i)",
-        "[l](/a)",
-    ];
-
     fn push_html(md: &str) -> String {
         let mut html = String::new();
         pulldown_cmark::html::push_html(
@@ -1185,17 +1098,4 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn parity_with_safe_table_cell_html() {
-        for src in CELL_CORPUS {
-            let wrapper = format!("| x |\n| - |\n| {src} |\n");
-            let cell = single_body_cell(&wrapper)
-                .unwrap_or_else(|| panic!("one cell expected: {src:?}"));
-            let mut html = String::new();
-            pulldown_cmark::html::push_html(&mut html, neutralise_html(cell.clone()).into_iter());
-            let expected = reference(&html);
-            let got = ours(&events_to_nodes(cell));
-            assert_eq!(got, expected, "source: {src:?}");
-        }
-    }
 }

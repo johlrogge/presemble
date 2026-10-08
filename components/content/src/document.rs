@@ -188,24 +188,14 @@ pub enum Align {
 }
 
 impl Align {
-    /// The name the alignment is stored under.
-    pub fn name(self) -> &'static str {
+    /// The name the alignment is stored under; the default is stored as no
+    /// name at all.
+    pub fn name(self) -> Option<&'static str> {
         match self {
-            Align::Default => "default",
-            Align::Left => "left",
-            Align::Center => "center",
-            Align::Right => "right",
-        }
-    }
-
-    /// The alignment stored under `name`.
-    pub fn from_name(name: &str) -> Option<Align> {
-        match name {
-            "default" => Some(Align::Default),
-            "left" => Some(Align::Left),
-            "center" => Some(Align::Center),
-            "right" => Some(Align::Right),
-            _ => None,
+            Align::Default => None,
+            Align::Left => Some("left"),
+            Align::Center => Some("center"),
+            Align::Right => Some("right"),
         }
     }
 
@@ -226,59 +216,6 @@ pub struct Column {
     /// Inline content in the [`crate::inline::InlineContext::Cell`] context.
     pub header: crate::inline::Inlines,
     pub align: Align,
-}
-
-impl ContentElement {
-    /// The header and cell sources of a table, as canonical markdown, or
-    /// `None` for any other element.
-    ///
-    /// A temporary adapter for readers that still work on cell sources; they
-    /// move to the inline nodes in stage 6.3.
-    #[deprecated(note = "stage 6.3: read the cells as inline nodes")]
-    pub fn table_cell_sources(&self) -> Option<(Vec<String>, Vec<Vec<String>>)> {
-        use crate::inline::{serialize_inlines, InlineContext};
-        let ContentElement::Table { columns, rows } = self else { return None };
-        let source = |cell: &crate::inline::Inlines| serialize_inlines(cell, InlineContext::Cell);
-        Some((
-            columns.iter().map(|c| source(&c.header)).collect(),
-            rows.iter().map(|row| row.iter().map(source).collect()).collect(),
-        ))
-    }
-
-    /// A table from header and cell sources (markdown), with every column's
-    /// alignment from `aligns` (missing ones are [`Align::Default`]). A source
-    /// that is not inline content of a cell is kept as literal text. Rows are
-    /// padded or cut to the number of columns.
-    ///
-    /// A temporary adapter for writers that still produce cell sources; they
-    /// move to the inline nodes in stage 6.3.
-    #[deprecated(note = "stage 6.3: build the table from inline nodes")]
-    pub fn table_from_sources(
-        headers: &[String],
-        aligns: &[Align],
-        rows: &[Vec<String>],
-    ) -> ContentElement {
-        use crate::inline::{parse_inlines, Inline, InlineContext, Inlines};
-        let cell = |source: &String| {
-            parse_inlines(source, InlineContext::Cell).unwrap_or_else(|_| {
-                Inlines::new(vec![Inline::Text(source.clone())], InlineContext::Cell)
-            })
-        };
-        let columns: Vec<Column> = headers
-            .iter()
-            .enumerate()
-            .map(|(i, h)| Column { header: cell(h), align: aligns.get(i).copied().unwrap_or_default() })
-            .collect();
-        let rows = rows
-            .iter()
-            .map(|row| {
-                (0..columns.len())
-                    .map(|i| row.get(i).map(cell).unwrap_or_default())
-                    .collect()
-            })
-            .collect();
-        ContentElement::Table { columns, rows }
-    }
 }
 
 /// A table from cell sources, for tests: default alignment, cells read as

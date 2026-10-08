@@ -1508,11 +1508,10 @@ mod tests {
     }
 
     fn render_table(headers: &[&str], rows: &[&[&str]]) -> String {
-        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-        let rows: Vec<Vec<String>> =
-            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
-        #[allow(deprecated)] // stage 6.3
-        let table = spanned(ContentElement::table_from_sources(&headers, &[], &rows));
+        let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
+        let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
+        md.extend(rows.iter().map(|r| line(r)));
+        let table = spanned(content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone());
         body_html(&im::vector![table], false)
     }
 
@@ -1539,9 +1538,17 @@ mod tests {
         assert!(!html.contains("<script") && !html.contains("<b>"), "got: {html}");
     }
 
+    /// A pipe in a cell's text is text: the cell is nodes, not a source to
+    /// split.
     #[test]
-    fn body_table_cell_with_unescaped_pipe_renders_in_full() {
-        let html = render_table(&["a | b"], &[&["a | b"]]);
+    fn body_table_cell_text_with_a_pipe_renders_in_full() {
+        use content::inline::{Inline, InlineContext, Inlines};
+        let cell = Inlines::new(vec![Inline::Text("a | b".into())], InlineContext::Cell);
+        let table = spanned(ContentElement::Table {
+            columns: vec![content::Column { header: cell.clone(), align: content::Align::Default }],
+            rows: vec![vec![cell]],
+        });
+        let html = body_html(&im::vector![table], false);
         assert!(html.contains("<th>a | b</th>"), "got: {html}");
         assert!(html.contains("<td>a | b</td>"), "got: {html}");
     }

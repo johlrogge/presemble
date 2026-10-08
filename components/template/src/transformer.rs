@@ -3822,9 +3822,9 @@ mod tests {
             store.add_edge(host, node_store::Edge::Attribute { name, value });
         }
         let block = match el {
-            ContentElement::Heading { .. } | ContentElement::Paragraph { .. } => {
-                content_store::block_to_store(el, store)
-            }
+            ContentElement::Heading { .. }
+            | ContentElement::Paragraph { .. }
+            | ContentElement::Table { .. } => content_store::block_to_store(el, store),
             ContentElement::Blockquote { text } => {
                 let b = element(store, "blockquote");
                 text_child(store, b, text);
@@ -3849,26 +3849,6 @@ mod tests {
                 b
             }
             ContentElement::Separator => element(store, "separator"),
-            ContentElement::Table { .. } => {
-                #[allow(deprecated)] // stage 6.3
-                let (headers, rows) = el.table_cell_sources().expect("a table");
-                let b = element(store, "table");
-                let h = element(store, "headers");
-                store.add_edge(b, node_store::Edge::Child(h));
-                for header in &headers {
-                    text_child(store, h, header);
-                }
-                let r = element(store, "rows");
-                store.add_edge(b, node_store::Edge::Child(r));
-                for row in &rows {
-                    let row_node = element(store, "row");
-                    store.add_edge(r, node_store::Edge::Child(row_node));
-                    for cell in row {
-                        text_child(store, row_node, cell);
-                    }
-                }
-                b
-            }
             // Encoded without children: the native path renders nothing for it.
             ContentElement::LinkExpression { .. } => element(store, "link-expression"),
         };
@@ -3897,12 +3877,11 @@ mod tests {
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
     }
 
-    #[allow(deprecated)] // stage 6.3
     fn table_of(headers: &[&str], rows: &[&[&str]]) -> content::ContentElement {
-        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-        let rows: Vec<Vec<String>> =
-            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
-        content::ContentElement::table_from_sources(&headers, &[], &rows)
+        let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
+        let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
+        md.extend(rows.iter().map(|r| line(r)));
+        content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone()
     }
 
     /// Every block kind, including the ones whose output the two paths used to
@@ -4094,6 +4073,33 @@ mod tests {
             "block heading keeps its markers: {html}"
         );
         assert!(!html.contains(r#"data-presemble-md="""#), "no empty md attr: {html}");
+    }
+
+    /// A column's alignment renders on its `<th>` and `<td>` cells through
+    /// both body paths: the native one, from the store, and the data one.
+    #[test]
+    fn aligned_column_renders_its_alignment() {
+        let md = "| a | b | c |\n|:--|--:|---|\n| 1 | 2 | 3 |\n";
+        let table = content::parse_document(md).unwrap().elements[0].node.clone();
+        let spanned: im::Vector<_> = im::vector![schema::Spanned {
+            node: table.clone(),
+            span: schema::Span { start: 0, end: 0 },
+        }];
+        for (path, html) in [
+            ("native", native_body_html(std::slice::from_ref(&table))),
+            ("data", legacy_body_html(&spanned)),
+        ] {
+            for cell in [
+                "<th style=\"text-align: left\">a</th>",
+                "<th style=\"text-align: right\">b</th>",
+                "<td style=\"text-align: left\">1</td>",
+                "<td style=\"text-align: right\">2</td>",
+                "<th>c</th>",
+                "<td>3</td>",
+            ] {
+                assert!(html.contains(cell), "{path}: {cell} in {html}");
+            }
+        }
     }
 
     #[test]
@@ -4905,35 +4911,19 @@ mod tests {
     }
 
     /// Render a body with one table through the native NodeStore path, using
-    /// the store shape `content_bridge` builds: `table > headers > Text*` and
-    /// `table > rows > row > Text*`.
+    /// the store shape `content_store` writes: `table > head > cell*` and
+    /// `table > rows > row > cell*`, every cell holding inline nodes.
     fn render_native_table(headers: &[&str], rows: &[&[&str]]) -> String {
+        render_native_table_element(table_of(headers, rows))
+    }
+
+    fn render_native_table_element(table: content::ContentElement) -> String {
         let mut store = node_store::NodeStore::new();
         let root_name = store.intern("page");
         let root = store.add_node(node_store::Node::Element(root_name));
         let body_name = store.intern("body");
         let body = store.add_node(node_store::Node::Element(body_name));
-        let table_name = store.intern("table");
-        let table = store.add_node(node_store::Node::Element(table_name));
-        let headers_name = store.intern("headers");
-        let headers_node = store.add_node(node_store::Node::Element(headers_name));
-        store.add_edge(table, node_store::Edge::Child(headers_node));
-        for h in headers {
-            let t = store.add_node(node_store::Node::Text((*h).into()));
-            store.add_edge(headers_node, node_store::Edge::Child(t));
-        }
-        let rows_name = store.intern("rows");
-        let rows_node = store.add_node(node_store::Node::Element(rows_name));
-        store.add_edge(table, node_store::Edge::Child(rows_node));
-        let row_name = store.intern("row");
-        for row in rows {
-            let row_node = store.add_node(node_store::Node::Element(row_name));
-            store.add_edge(rows_node, node_store::Edge::Child(row_node));
-            for cell in *row {
-                let t = store.add_node(node_store::Node::Text((*cell).into()));
-                store.add_edge(row_node, node_store::Edge::Child(t));
-            }
-        }
+        let table = content_store::block_to_store(&table, &mut store);
         store.add_edge(body, node_store::Edge::Child(table));
         let body_co_name = store.intern("body");
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
@@ -4978,9 +4968,17 @@ mod tests {
         assert!(!html.contains("<script") && !html.contains("<b>"), "got: {html}");
     }
 
+    /// A pipe in a cell's text is text: the cell is nodes, not a source to
+    /// split.
     #[test]
-    fn native_table_cell_with_unescaped_pipe_renders_in_full() {
-        let html = render_native_table(&["a | b"], &[&["a | b"]]);
+    fn native_table_cell_text_with_a_pipe_renders_in_full() {
+        use content::inline::{Inline, InlineContext, Inlines};
+        let cell = Inlines::new(vec![Inline::Text("a | b".into())], InlineContext::Cell);
+        let table = content::ContentElement::Table {
+            columns: vec![content::Column { header: cell.clone(), align: content::Align::Default }],
+            rows: vec![vec![cell]],
+        };
+        let html = render_native_table_element(table);
         assert!(html.contains("<th>a | b</th>"), "got: {html}");
         assert!(html.contains("<td>a | b</td>"), "got: {html}");
     }

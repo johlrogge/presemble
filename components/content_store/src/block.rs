@@ -3,16 +3,16 @@
 
 use crate::access::{
     add_child_element, add_child_text, add_int_attr, add_text_attr, child_text,
-    children_by_name, element_name_of, find_attr_int, find_attr_node, find_attr_text,
+    element_name_of, find_attr_int, find_attr_node, find_attr_text,
     find_child_by_name, make_element,
 };
 use crate::inline_store::{inlines_from_store, inlines_to_store};
 use content::inline::InlineContext;
 use content::{
-    Align, Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
+    Align, Column, Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
     SortDirection,
 };
-use node_store::{Edge, Node, NodeId, NodeStore};
+use node_store::{Node, NodeId, NodeStore};
 use schema::HeadingLevel;
 
 // ── content element encoding ──────────────────────────────────────────────────
@@ -54,30 +54,25 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
             }
             node
         }
-        // Cells are stored as canonical sources until stage 6.3; the column
-        // alignment is kept in an `align` attribute, written only when some
-        // column is aligned.
-        ContentElement::Table { columns, .. } => {
-            #[allow(deprecated)] // stage 6.3
-            let (headers, rows) = element.table_cell_sources().expect("a table");
+        // `table > head > cell*` and `table > rows > row > cell*` (ADR-059
+        // §6). Every cell is an inline container; a head cell carries its
+        // column's `align` unless it is the default.
+        ContentElement::Table { columns, rows } => {
             let node = make_element(store, "table");
-            if columns.iter().any(|c| c.align != Align::Default) {
-                let names: Vec<&str> = columns.iter().map(|c| c.align.name()).collect();
-                add_text_attr(store, node, "align", &names.join(" "));
-            }
-            let headers_node = add_child_element(store, node, "headers");
-            for header in &headers {
-                let s: String = header.clone();
-                let text_node = store.add_node(Node::Text(s));
-                store.add_edge(headers_node, Edge::Child(text_node));
+            let head = add_child_element(store, node, "head");
+            for column in columns {
+                let cell = add_child_element(store, head, "cell");
+                if let Some(align) = column.align.name() {
+                    add_text_attr(store, cell, "align", align);
+                }
+                inlines_to_store(store, cell, &column.header);
             }
             let rows_node = add_child_element(store, node, "rows");
-            for row in &rows {
+            for row in rows {
                 let row_node = add_child_element(store, rows_node, "row");
-                for cell in row {
-                    let s: String = cell.clone();
-                    let text_node = store.add_node(Node::Text(s));
-                    store.add_edge(row_node, Edge::Child(text_node));
+                for content in row {
+                    let cell = add_child_element(store, row_node, "cell");
+                    inlines_to_store(store, cell, content);
                 }
             }
             node
@@ -224,7 +219,7 @@ pub const TEXT_BLOCK_KINDS: &[&str] = &["blockquote", "list", "code-block"];
 /// Element names of inline containers: their children are inline nodes
 /// (ADR-059 §6), at any depth. A Text node inside one is addressed through
 /// the container, not as the block's only text.
-pub const INLINE_CONTAINER_KINDS: &[&str] = &["heading", "paragraph"];
+pub const INLINE_CONTAINER_KINDS: &[&str] = &["heading", "paragraph", "cell"];
 
 /// The inline context of the children of a container of kind `kind`; `None`
 /// when `kind` is not in [`INLINE_CONTAINER_KINDS`].
@@ -232,6 +227,7 @@ pub fn inline_context_of(kind: &str) -> Option<InlineContext> {
     match kind {
         "heading" => Some(InlineContext::Heading),
         "paragraph" => Some(InlineContext::Paragraph),
+        "cell" => Some(InlineContext::Cell),
         _ => None,
     }
 }
@@ -293,6 +289,8 @@ pub enum BlockDecodeError {
     UnexpectedChild { kind: String, child: String },
     /// A tree payload has an attribute its kind does not take.
     UnexpectedAttribute { kind: String, attr: String },
+    /// A table row does not have one cell per column.
+    RowWidth { expected: usize, found: usize },
     /// Comment trivia (ADR-062) holding something that is not a comment.
     InvalidComment(String),
     /// An inline container holds an element that is not an inline kind.
@@ -350,6 +348,9 @@ impl std::fmt::Display for BlockDecodeError {
             }
             BlockDecodeError::UnexpectedAttribute { kind, attr } => {
                 write!(f, "{kind} does not take a '{attr}' attribute")
+            }
+            BlockDecodeError::RowWidth { expected, found } => {
+                write!(f, "a table row has {found} cell(s); the table has {expected} column(s)")
             }
             BlockDecodeError::InvalidComment(text) => {
                 write!(f, "comment trivia holds something that is not an HTML comment: {text}")
@@ -417,13 +418,34 @@ pub(crate) fn try_child_by_name(
     })
 }
 
-fn text_children(store: &NodeStore, node: NodeId, kind: &str) -> Result<Vec<String>, BlockDecodeError> {
+/// The children of `parent` (a table's `head` or a `row`), all `cell`
+/// elements: nothing else sits there.
+fn cells_of(store: &NodeStore, parent: NodeId, kind: &str) -> Result<Vec<NodeId>, BlockDecodeError> {
+    elements_named(store, parent, kind, "cell")
+}
+
+/// The children of a table's `rows` element, all `row` elements.
+fn rows_of(store: &NodeStore, rows: NodeId) -> Result<Vec<NodeId>, BlockDecodeError> {
+    elements_named(store, rows, "rows", "row")
+}
+
+/// The children of `parent`, each an element named `name`; any other child is
+/// [`BlockDecodeError::UnexpectedChild`].
+fn elements_named(
+    store: &NodeStore,
+    parent: NodeId,
+    kind: &str,
+    name: &str,
+) -> Result<Vec<NodeId>, BlockDecodeError> {
     store
-        .children(node)
-        .iter()
-        .map(|&cid| match store.get(cid) {
-            Some(Node::Text(s)) => Ok(s.clone()),
-            _ => Err(BlockDecodeError::NonTextChild { kind: kind.to_string() }),
+        .children(parent)
+        .into_iter()
+        .map(|child| match element_name_of(store, child) {
+            Some(found) if found == name => Ok(child),
+            other => Err(BlockDecodeError::UnexpectedChild {
+                kind: kind.to_string(),
+                child: other.unwrap_or_else(|| "text".to_string()),
+            }),
         })
         .collect()
 }
@@ -498,19 +520,51 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
             Ok(ContentElement::CodeBlock { language, code })
         }
         "table" => {
-            let headers_node = try_child_by_name(store, id, kind, "headers")?;
-            let headers = text_children(store, headers_node, "table header")?;
+            let head = try_child_by_name(store, id, kind, "head")?;
+            let columns = cells_of(store, head, "head")?
+                .into_iter()
+                .map(|cell| {
+                    let align = match find_attr_text(store, cell, "align").as_deref() {
+                        None => Align::Default,
+                        Some("left") => Align::Left,
+                        Some("center") => Align::Center,
+                        Some("right") => Align::Right,
+                        Some(other) => {
+                            return Err(BlockDecodeError::InvalidAttribute {
+                                kind: "cell".to_string(),
+                                attr: "align".to_string(),
+                                value: other.to_string(),
+                            });
+                        }
+                    };
+                    let header = inlines_from_store(store, cell, InlineContext::Cell)?;
+                    Ok(Column { header, align })
+                })
+                .collect::<Result<Vec<_>, BlockDecodeError>>()?;
             let rows_node = try_child_by_name(store, id, kind, "rows")?;
-            let rows = children_by_name(store, rows_node, "row")
-                .iter()
-                .map(|&row_id| text_children(store, row_id, "table row"))
-                .collect::<Result<Vec<_>, _>>()?;
-            let aligns: Vec<Align> = find_attr_text(store, id, "align")
-                .map(|names| names.split(' ').filter_map(Align::from_name).collect())
-                .unwrap_or_default();
-            #[allow(deprecated)] // stage 6.3
-            let table = ContentElement::table_from_sources(&headers, &aligns, &rows);
-            Ok(table)
+            let mut rows = Vec::new();
+            for row in rows_of(store, rows_node)? {
+                let cells = cells_of(store, row, "row")?;
+                if cells.len() != columns.len() {
+                    return Err(BlockDecodeError::RowWidth {
+                        expected: columns.len(),
+                        found: cells.len(),
+                    });
+                }
+                let mut contents = Vec::with_capacity(cells.len());
+                for cell in cells {
+                    if find_attr_text(store, cell, "align").is_some() {
+                        return Err(BlockDecodeError::InvalidAttribute {
+                            kind: "cell".to_string(),
+                            attr: "align".to_string(),
+                            value: "only head cells carry align".to_string(),
+                        });
+                    }
+                    contents.push(inlines_from_store(store, cell, InlineContext::Cell)?);
+                }
+                rows.push(contents);
+            }
+            Ok(ContentElement::Table { columns, rows })
         }
         "html-block" => Ok(ContentElement::HtmlBlock {
             source: try_child_text(store, id, kind)?,
@@ -668,34 +722,62 @@ fn unexpected_child(kind: &str, child: &ned::NodeTree) -> BlockDecodeError {
     }
 }
 
-/// A table payload is exactly `headers` then `rows`, and `rows` holds only
-/// `row` elements: the decoder reads nothing else.
+/// An attribute `kind` does not take.
+fn unexpected_attribute(kind: &str, attr: &str) -> BlockDecodeError {
+    BlockDecodeError::UnexpectedAttribute { kind: kind.to_string(), attr: attr.to_string() }
+}
+
+/// A table payload is exactly `head` then `rows`; `head` holds only `cell`
+/// elements and `rows` only `row` elements, which hold only `cell` elements.
+/// Only head cells take an attribute (`align`). The cells' inline children are
+/// checked by the decoder. The decoder reads nothing else, so nothing else is
+/// accepted.
 fn check_table_children(children: &[ned::NodeTree]) -> Result<(), BlockDecodeError> {
-    let unexpected = |child: &ned::NodeTree| unexpected_child("table", child);
-    let mut seen_headers = false;
+    use ned::NodeTree as T;
+    let unexpected = |child: &T| unexpected_child("table", child);
+    // Each cell: an element named `cell`; attributes only where `allowed`.
+    fn check_cells(
+        kind: &str,
+        cells: &[T],
+        allowed: &[&str],
+    ) -> Result<(), BlockDecodeError> {
+        for cell in cells {
+            match cell {
+                T::Element { name, attrs, .. } if name == "cell" => {
+                    if let Some((attr, _)) = attrs.iter().find(|(a, _)| !allowed.contains(&a.as_str())) {
+                        return Err(unexpected_attribute("cell", attr));
+                    }
+                }
+                other => return Err(unexpected_child(kind, other)),
+            }
+        }
+        Ok(())
+    }
+    let mut seen_head = false;
     let mut seen_rows = false;
     for child in children {
         match child {
-            ned::NodeTree::Element { name, children: inner, .. }
-                if name == "headers" && !seen_headers =>
-            {
-                seen_headers = true;
-                if let Some(bad) = inner.iter().find(|c| !matches!(c, ned::NodeTree::Text(_))) {
-                    return Err(unexpected(bad));
+            T::Element { name, attrs, children: cells } if name == "head" && !seen_head && !seen_rows => {
+                seen_head = true;
+                if let Some((attr, _)) = attrs.first() {
+                    return Err(unexpected_attribute("head", attr));
                 }
+                check_cells("head", cells, &["align"])?;
             }
-            ned::NodeTree::Element { name, children: rows, .. } if name == "rows" && !seen_rows => {
+            T::Element { name, attrs, children: rows } if name == "rows" && seen_head && !seen_rows => {
                 seen_rows = true;
+                if let Some((attr, _)) = attrs.first() {
+                    return Err(unexpected_attribute("rows", attr));
+                }
                 for row in rows {
                     match row {
-                        ned::NodeTree::Element { name, children: cells, .. } if name == "row" => {
-                            if let Some(bad) =
-                                cells.iter().find(|c| !matches!(c, ned::NodeTree::Text(_)))
-                            {
-                                return Err(unexpected(bad));
+                        T::Element { name, attrs, children: cells } if name == "row" => {
+                            if let Some((attr, _)) = attrs.first() {
+                                return Err(unexpected_attribute("row", attr));
                             }
+                            check_cells("row", cells, &[])?;
                         }
-                        other => return Err(unexpected(other)),
+                        other => return Err(unexpected_child("rows", other)),
                     }
                 }
             }

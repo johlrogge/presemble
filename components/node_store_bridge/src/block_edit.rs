@@ -1345,12 +1345,11 @@ mod tests {
         assert_eq!(err.cause, BlockEditCause::NotEditable);
     }
 
-    #[allow(deprecated)] // stage 6.3
     fn table_of(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
-        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-        let rows: Vec<Vec<String>> =
-            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
-        ContentElement::table_from_sources(&headers, &[], &rows)
+        let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
+        let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
+        md.extend(rows.iter().map(|r| line(r)));
+        content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone()
     }
 
     #[test]

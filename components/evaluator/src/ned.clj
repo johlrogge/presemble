@@ -128,6 +128,23 @@
 (defn ned/blocks [sel]
   (ned/children sel))
 
+;; ── Table cells (ADR-059 stage 6): every cell is an inline container ─────────
+
+(def-doc! ned/header-cell "(ned/header-cell table c)" "The header cell of column c (zero-based) of each selected table. A cell is an inline container: address its text with ned/text-in.")
+(defn ned/header-cell [table c]
+  (-> table
+      (ned/children)
+      (ned/filter :kind "head")
+      (ned/nth-child c)))
+
+(def-doc! ned/cell "(ned/cell table r c)" "The body cell at row r, column c (both zero-based) of each selected table. A cell is an inline container: address its text with ned/text-in.")
+(defn ned/cell [table r c]
+  (-> table
+      (ned/children)
+      (ned/filter :kind "rows")
+      (ned/nth-child r)
+      (ned/nth-child c)))
+
 (def-doc! ned/text-in "(ned/text-in sel)" "Every Text node, at any depth, under each selected block: \"the\" text of a block. A formatted heading (Hello *World*) has several Text nodes, so a SetText on it is ambiguous; address one node, or search the whole heading with SearchReplace.")
 (defn ned/text-in [sel]
   (-> sel ned/descendants ned/texts))

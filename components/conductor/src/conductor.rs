@@ -333,6 +333,14 @@ const MODEL_STEPS: &[ModelStep] = &[
         kinds: &["link", "image"],
         before: "a lone link or image was a paragraph",
     },
+    // Table cells became inline containers (ADR-059 §6): a payload holding a
+    // table in the old shape (`headers`, cells as text) would be refused on
+    // accept.
+    ModelStep {
+        name: "table-cells",
+        kinds: &["table"],
+        before: "table cells stored inline nodes",
+    },
 ];
 
 /// The steps still to run when `recorded` is the last one applied (nothing
@@ -9249,6 +9257,68 @@ mod ned_program_plan_tests {
         assert_eq!(title, vec!["Test Title"]);
     }
 
+    const TABLE: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/test/tbl.md") "body")) "table" 0)"#;
+
+    /// `content/test/tbl.md`: a body holding one table
+    /// `| a | b |` / `| 1 | 2 |` / `| 3 | **4** |`.
+    fn add_table_doc(conductor: &Conductor) {
+        let table = content::parse_document("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | **4** |\n")
+            .expect("parses")
+            .elements[0]
+            .node
+            .clone();
+        add_doc(
+            conductor,
+            "content/test/tbl.md",
+            "/test/tbl",
+            Document {
+                preamble: im::vector![title("Table doc")],
+                body: im::vector![spanned(table)],
+                has_separator: true,
+                separator_span: None,
+                unassigned: Default::default(),
+                comments: Default::default(),
+            },
+        );
+    }
+
+    /// The table of `content/test/tbl.md` as the store holds it.
+    fn stored_table(conductor: &Conductor) -> ContentElement {
+        let value = evaluator::eval_str_with_root(
+            TABLE,
+            &conductor.make_ned_query_root().expect("query root"),
+        )
+        .expect("selection evaluates");
+        let sel = evaluator::ned_primitives::extract_selection(&value).expect("a selection");
+        let id = sel.iter().next().expect("one table");
+        let store = conductor.node_store.read().unwrap();
+        node_store_bridge::content_bridge::block_from_node(&store, id).expect("decodes")
+    }
+
+    /// A cell is an inline container: its text is addressed like a heading's,
+    /// and an edit changes exactly that cell (ADR-059 stage 6).
+    #[test]
+    fn table_cell_text_is_addressable() {
+        let (conductor, _tmp) = make_conductor();
+        add_table_doc(&conductor);
+        let before = stored_table(&conductor);
+
+        let program = format!(r#"(ned/set-text (ned/text-in (ned/cell {TABLE} 0 1)) "x")"#);
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+
+        let flat = content::parse_document("| a | b |\n|---|---|\n| 1 | x |\n| 3 | **4** |\n").unwrap();
+        assert_eq!(stored_table(&conductor), flat.elements[0].node.clone());
+        assert_ne!(before, stored_table(&conductor));
+
+        // The header cell, and a formatted cell's inner text.
+        let program = format!(r#"(ned/set-text (ned/text-in (ned/header-cell {TABLE} 0)) "H")"#);
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+        let program = format!(r#"(ned/set-text (ned/text-in (ned/cell {TABLE} 1 1)) "5")"#);
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+        let flat = content::parse_document("| H | b |\n|---|---|\n| 1 | x |\n| 3 | **5** |\n").unwrap();
+        assert_eq!(stored_table(&conductor), flat.elements[0].node.clone());
+    }
+
     #[test]
     fn apply_program_with_ambiguous_selection_applies_nothing() {
         let (conductor, _tmp) = make_conductor();
@@ -11001,7 +11071,7 @@ mod model_migration_tests {
 
         assert!(!listed(&conductor).contains(&"sug-heading".to_string()), "not listed");
         assert!(!file_exists(&tmp, "sug-heading"), "its file is gone");
-        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"), "the last step is recorded");
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"), "the last step is recorded");
     }
 
     #[test]
@@ -11039,7 +11109,7 @@ mod model_migration_tests {
 
         assert_eq!(listed(&conductor), vec!["sug-code".to_string()]);
         assert!(file_exists(&tmp, "sug-code"));
-        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"), "marked all the same");
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"), "marked all the same");
     }
 
     /// The user's decision: every pending suggestion that touches a paragraph
@@ -11095,7 +11165,8 @@ mod model_migration_tests {
 
     /// An absent `MODEL` runs every step; `heading-inlines` runs the two
     /// after it; `paragraph-inlines` runs only the link and image step;
-    /// `link-image-paragraphs` runs none. Each step runs once.
+    /// `link-image-paragraphs` runs only the table step; `table-cells` runs
+    /// none. Each step runs once.
     #[test]
     fn migration_runs_each_step_once_in_order() {
         let both = |tmp: &tempfile::TempDir| {
@@ -11119,7 +11190,7 @@ mod model_migration_tests {
         let tmp = site();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), Vec::<String>::new());
-        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"));
 
         // heading-inlines: the paragraph step only; the heading suggestion
         // was made after headings held nodes.
@@ -11128,7 +11199,7 @@ mod model_migration_tests {
         std::fs::write(dir(&tmp).join("MODEL"), "heading-inlines").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"));
 
         // paragraph-inlines: only the link and image step runs; neither
         // suggestion holds a link or an image.
@@ -11137,15 +11208,24 @@ mod model_migration_tests {
         std::fs::write(dir(&tmp).join("MODEL"), "paragraph-inlines").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"));
 
-        // link-image-paragraphs: nothing runs.
+        // link-image-paragraphs: only the table step runs; neither
+        // suggestion holds a table.
         let tmp = site();
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "link-image-paragraphs").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"));
+
+        // table-cells: nothing runs.
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "table-cells").unwrap();
+        both(&tmp);
+        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"));
 
         // Once: a suggestion made after the migration survives the next start.
         let tmp = site();
@@ -11163,14 +11243,18 @@ mod model_migration_tests {
         };
         assert_eq!(
             names(None),
-            vec!["heading-inlines", "paragraph-inlines", "link-image-paragraphs"]
+            vec!["heading-inlines", "paragraph-inlines", "link-image-paragraphs", "table-cells"]
         );
         assert_eq!(
             names(Some("heading-inlines")),
-            vec!["paragraph-inlines", "link-image-paragraphs"]
+            vec!["paragraph-inlines", "link-image-paragraphs", "table-cells"]
         );
-        assert_eq!(names(Some("paragraph-inlines")), vec!["link-image-paragraphs"]);
-        assert!(names(Some("link-image-paragraphs")).is_empty());
+        assert_eq!(
+            names(Some("paragraph-inlines")),
+            vec!["link-image-paragraphs", "table-cells"]
+        );
+        assert_eq!(names(Some("link-image-paragraphs")), vec!["table-cells"]);
+        assert!(names(Some("table-cells")).is_empty());
         // A name this conductor does not know was written by a newer one:
         // nothing runs.
         assert!(names(Some("something-newer")).is_empty());
@@ -11224,7 +11308,54 @@ mod model_migration_tests {
             assert!(!file_exists(&tmp, id), "{id}: its file is gone");
         }
         assert!(file_exists(&tmp, "sug-inline-link") && file_exists(&tmp, "sug-accepted-link"));
-        assert_eq!(marker(&tmp).as_deref(), Some("link-image-paragraphs"));
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"));
+    }
+
+    /// Table cells became inline containers (ADR-059 stage 6): a pending
+    /// suggestion whose payload holds a table, in the old shape or not, is
+    /// discarded once. Other payloads, other pending suggestions and history
+    /// stay.
+    #[test]
+    fn pending_table_payloads_are_discarded() {
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "link-image-paragraphs").unwrap();
+        let old_table = ned::NodeTree::element("table")
+            .with_child(ned::NodeTree::element("headers").with_child(ned::NodeTree::text("h")))
+            .with_child(
+                ned::NodeTree::element("rows")
+                    .with_child(ned::NodeTree::element("row").with_child(ned::NodeTree::text("a"))),
+            );
+        let new_table = ned::NodeTree::element("table")
+            .with_child(ned::NodeTree::element("head").with_child(
+                ned::NodeTree::element("cell").with_child(ned::NodeTree::text("h")),
+            ))
+            .with_child(ned::NodeTree::element("rows"));
+        let nested = ned::NodeTree::element("blockquote").with_child(old_table.clone());
+        let pending = NedSuggestionStatus::Pending;
+        write_suggestion(&tmp, "sug-old", CODE_BLOCK, NedMutation::InsertAfter(vec![old_table.clone()]), pending.clone());
+        write_suggestion(&tmp, "sug-new", CODE_BLOCK, NedMutation::Replace(vec![new_table]), pending.clone());
+        write_suggestion(&tmp, "sug-nested", CODE_BLOCK, NedMutation::InsertAfter(vec![nested]), pending.clone());
+        write_suggestion(&tmp, "sug-title", TITLE_TEXT, NedMutation::SetText("Renamed".to_string()), pending);
+        write_suggestion(
+            &tmp,
+            "sug-accepted-table",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![old_table]),
+            NedSuggestionStatus::Accepted,
+        );
+
+        let conductor = start(&tmp);
+
+        assert_eq!(
+            listed(&conductor),
+            vec!["sug-accepted-table".to_string(), "sug-title".to_string()]
+        );
+        for id in ["sug-old", "sug-new", "sug-nested"] {
+            assert!(!file_exists(&tmp, id), "{id}: its file is gone");
+        }
+        assert!(file_exists(&tmp, "sug-title") && file_exists(&tmp, "sug-accepted-table"));
+        assert_eq!(marker(&tmp).as_deref(), Some("table-cells"));
     }
 
     #[test]

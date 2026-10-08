@@ -1813,12 +1813,14 @@ mod tests {
         ContentElement::heading_from_markdown(HeadingLevel::new(level).unwrap(), text)
     }
 
-    #[allow(deprecated)] // stage 6.3
     fn table_of(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
-        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-        let rows: Vec<Vec<String>> =
-            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
-        ContentElement::table_from_sources(&headers, &[], &rows)
+        if headers.is_empty() {
+            return ContentElement::Table { columns: vec![], rows: vec![] };
+        }
+        let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
+        let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
+        md.extend(rows.iter().map(|r| line(r)));
+        content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone()
     }
 
     #[test]
@@ -1863,7 +1865,7 @@ mod tests {
     fn tree_to_block_accepts_table() {
         // Tables are a payload kind (ADR-059 §10): a block edit may write one.
         let tree = ned::NodeTree::element("table")
-            .with_child(ned::NodeTree::element("headers"))
+            .with_child(ned::NodeTree::element("head"))
             .with_child(ned::NodeTree::element("rows"));
         assert_eq!(
             tree_to_block(&tree),
@@ -1961,8 +1963,7 @@ mod tests {
         assert_eq!(block_from_node(&store, id), Ok(decoded));
     }
 
-    /// Until cells are stored as nodes (stage 6.3) the store keeps their
-    /// sources; the column alignment is kept beside them.
+    /// A column's alignment is stored on its head cell.
     #[test]
     fn table_alignment_survives_the_store() {
         let flat = content::parse_document("| a | b | c |\n|:--|--:|---|\n| 1 | 2 | 3 |\n").unwrap();
@@ -2005,15 +2006,21 @@ mod tests {
             .filter(|(el, _)| el.text().is_some())
             .map(|(_, name)| name.as_str())
             .collect();
-        // Single-text blocks, and the inline containers (headings) whose text
-        // is nodes.
+        // Single-text blocks, and the inline containers that are blocks
+        // (headings, paragraphs) whose text is nodes. A cell is an inline
+        // container inside a table, not a block.
+        let block_containers: Vec<&str> = content_store::INLINE_CONTAINER_KINDS
+            .iter()
+            .copied()
+            .filter(|kind| *kind != "cell")
+            .collect();
         let mut expected_text = TEXT_BLOCK_KINDS.to_vec();
-        expected_text.extend_from_slice(content_store::INLINE_CONTAINER_KINDS);
+        expected_text.extend_from_slice(&block_containers);
         text_kinds.sort_unstable();
         expected_text.sort_unstable();
         assert_eq!(text_kinds, expected_text);
 
-        let mut payload = content_store::INLINE_CONTAINER_KINDS.to_vec();
+        let mut payload = block_containers;
         payload.extend_from_slice(TEXT_BLOCK_KINDS);
         payload.push("table");
         assert_eq!(payload, PAYLOAD_BLOCK_KINDS);

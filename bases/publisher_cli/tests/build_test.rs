@@ -35,6 +35,49 @@ fn copy_dir_excluding(src: &Path, dest: &Path, exclude: &str) {
     }
 }
 
+/// A column that declares an alignment publishes it on its header and body
+/// cells (ADR-059 stage 6); a default column publishes no `style`.
+#[test]
+fn an_aligned_table_renders_its_alignment_when_built() {
+    let tmp = TempDir::new().expect("temp dir");
+    let site = tmp.path().join("site");
+    for dir in ["schemas/guide", "templates/guide", "content/guide"] {
+        fs::create_dir_all(site.join(dir)).unwrap();
+    }
+    fs::write(
+        site.join("schemas/guide/item.md"),
+        "# Guide title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\n\nBody content.\nheadings\n: h2..h6\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/guide/item.hiccup"),
+        "[:main [:presemble/insert {:data input.title :as \"h1\"}] [:presemble/insert {:data input.body}]]",
+    )
+    .unwrap();
+    fs::write(
+        site.join("content/guide/g.md"),
+        "# The guide\n\n----\n\n| a | b | c |\n|:--|--:|---|\n| 1 | 2 | 3 |\n",
+    )
+    .unwrap();
+
+    publisher_cli::build_for_publish(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds");
+
+    let html = fs::read_to_string(publisher_cli::output_dir(&site).join("guide/g/index.html"))
+        .expect("the published page");
+    for cell in [
+        "<th style=\"text-align: left\">a</th>",
+        "<th style=\"text-align: right\">b</th>",
+        "<td style=\"text-align: left\">1</td>",
+        "<td style=\"text-align: right\">2</td>",
+        "<th>c</th>",
+        "<td>3</td>",
+    ] {
+        assert!(html.contains(cell), "{cell} in {html}");
+    }
+    assert_eq!(html.matches("style=").count(), 4, "only the aligned cells have a style: {html}");
+}
+
 // ── Read-only validation tests (never call build) ────────────────────────────
 
 #[test]

@@ -8,8 +8,9 @@
 
 use crate::constants::{ATTR_ADDRESS, ATTR_FILE, ATTR_MD, ATTR_SLOT, CLASS_HTML_REMOVED, MSG_HTML_REMOVED};
 use crate::dom::{Element, Form, Node};
-use crate::markdown_nodes::{inline_children, table_cell_nodes};
-use content::{BlockShape, ContentElement};
+use crate::markdown_nodes::inline_children;
+use content::inline::Inlines;
+use content::{Align, BlockShape, ContentElement};
 use schema::Spanned;
 
 /// Per-block rendering context.
@@ -113,15 +114,31 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             vec![el("div", slot_attrs(ctx), inline_children(source))]
         }
         ContentElement::LinkExpression { .. } => Vec::new(),
-        ContentElement::Table { .. } => {
-            // Cells render through their canonical source until stage 6.3.
-            #[allow(deprecated)] // stage 6.3
-            let (headers, rows) = element.table_cell_sources().expect("a table");
-            let cells = |name: &str, row: &[String]| -> Vec<Node> {
-                row.iter().map(|c| el(name, Vec::new(), table_cell_nodes(c))).collect()
+        // Cells render through their inline nodes; a column that declares an
+        // alignment renders it on its `<th>` and `<td>` cells.
+        ContentElement::Table { columns, rows } => {
+            let cell = |name: &str, content: &Inlines, align: Align| -> Node {
+                let attrs = match align {
+                    Align::Default => Vec::new(),
+                    Align::Left => vec![attr("style", "text-align: left")],
+                    Align::Center => vec![attr("style", "text-align: center")],
+                    Align::Right => vec![attr("style", "text-align: right")],
+                };
+                el(name, attrs, crate::inline_nodes::inline_nodes(content))
             };
-            let head = el("thead", Vec::new(), vec![el("tr", Vec::new(), cells("th", &headers))]);
-            let body_rows = rows.iter().map(|r| el("tr", Vec::new(), cells("td", r))).collect();
+            let header_cells = columns.iter().map(|c| cell("th", &c.header, c.align)).collect();
+            let head = el("thead", Vec::new(), vec![el("tr", Vec::new(), header_cells)]);
+            let body_rows = rows
+                .iter()
+                .map(|row| {
+                    let cells = row
+                        .iter()
+                        .zip(columns)
+                        .map(|(content, column)| cell("td", content, column.align))
+                        .collect();
+                    el("tr", Vec::new(), cells)
+                })
+                .collect();
             let body = el("tbody", Vec::new(), body_rows);
             vec![el("table", slot_attrs(ctx), vec![head, body])]
         }
@@ -226,6 +243,26 @@ mod tests {
         assert!(nodes.is_empty(), "{nodes:?}");
     }
 
+    /// A column that declares an alignment renders it on its `<th>` and
+    /// `<td>` cells; the default renders nothing.
+    #[test]
+    fn aligned_column_renders_its_alignment() {
+        let flat = content::parse_document("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |\n").unwrap();
+        let html = render(flat.elements[0].node.clone());
+        for (tag, cell, align) in [
+            ("th", "a", "left"),
+            ("th", "b", "center"),
+            ("th", "c", "right"),
+            ("td", "1", "left"),
+            ("td", "2", "center"),
+            ("td", "3", "right"),
+        ] {
+            let expected = format!("<{tag} style=\"text-align: {align}\">{cell}</{tag}>");
+            assert!(html.contains(&expected), "{expected} in {html}");
+        }
+        assert!(html.contains("<th>d</th>") && html.contains("<td>4</td>"), "{html}");
+    }
+
     #[test]
     fn separator_is_a_hidden_body_marker() {
         assert_eq!(render(ContentElement::Separator), r#"<span data-presemble-slot="body" hidden=""></span>"#);
@@ -233,8 +270,7 @@ mod tests {
 
     #[test]
     fn table_always_has_a_tbody() {
-        #[allow(deprecated)] // stage 6.3
-        let table = ContentElement::table_from_sources(&["h".to_string()], &[], &[]);
+        let table = content::parse_document("| h |\n| --- |").unwrap().elements[0].node.clone();
         let html = render(table);
         assert!(html.contains("<thead><tr><th>h</th></tr></thead><tbody></tbody>"), "{html}");
     }

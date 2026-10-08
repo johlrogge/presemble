@@ -1702,14 +1702,16 @@ Body paragraph."#;
 
     /// The header and cell sources of the one table in `input`, as canonical
     /// markdown, and its column alignments.
-    #[allow(deprecated)] // stage 6.3
     fn only_table(input: &str) -> (Vec<String>, Vec<Vec<String>>, Vec<Align>) {
+        use crate::inline::serialize_inlines;
+        let source = |cell: &Inlines| serialize_inlines(cell, InlineContext::Cell);
         let doc = parse_document(input).expect("table markdown should parse");
         match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
-            [table @ ContentElement::Table { columns, .. }] => {
-                let (headers, rows) = table.table_cell_sources().expect("a table");
-                (headers, rows, columns.iter().map(|c| c.align).collect())
-            }
+            [ContentElement::Table { columns, rows }] => (
+                columns.iter().map(|c| source(&c.header)).collect(),
+                rows.iter().map(|row| row.iter().map(source).collect()).collect(),
+                columns.iter().map(|c| c.align).collect(),
+            ),
             other => panic!("expected exactly one Table, got {other:?}"),
         }
     }

@@ -309,13 +309,129 @@ fn stored_link_and_image_nodes_do_not_decode() {
     }
 }
 
-fn table() -> NodeTree {
-    NodeTree::element("table")
+/// A table cell is an inline container (ADR-059 §6): its children are inline
+/// nodes (`**b**` is a `strong`), and a head cell carries its column's
+/// alignment.
+#[test]
+fn table_cell_is_inline_container() {
+    use crate::access::{children_by_name, element_name_of};
+    let flat = content::parse_document("| a | **b** |\n|:--|---|\n| 1 | 2 |\n").unwrap();
+    let el = flat.elements[0].node.clone();
+    let mut store = NodeStore::new();
+    let table = block_to_store(&el, &mut store);
+
+    let head = try_child_by_name(&store, table, "table", "head").expect("a head");
+    let head_cells = children_by_name(&store, head, "cell");
+    assert_eq!(head_cells.len(), 2);
+    assert_eq!(find_attr_text(&store, head_cells[0], "align").as_deref(), Some("left"));
+    assert_eq!(find_attr_text(&store, head_cells[1], "align"), None, "default: no attribute");
+    let strong = store.children(head_cells[1]);
+    assert_eq!(strong.len(), 1);
+    assert_eq!(element_name_of(&store, strong[0]).as_deref(), Some("strong"));
+    assert!(matches!(store.get(store.children(strong[0])[0]), Some(Node::Text(t)) if t == "b"));
+
+    let rows = try_child_by_name(&store, table, "table", "rows").expect("rows");
+    let row = children_by_name(&store, rows, "row");
+    assert_eq!(row.len(), 1);
+    let cells = children_by_name(&store, row[0], "cell");
+    assert_eq!(cells.len(), 2);
+    assert_eq!(find_attr_text(&store, cells[0], "align"), None, "only head cells carry align");
+    assert!(matches!(store.get(store.children(cells[1])[0]), Some(Node::Text(t)) if t == "2"));
+    assert!(find_attr_text(&store, table, "align").is_none(), "no table-level align");
+
+    assert_eq!(block_from_node(&store, table), Ok(el));
+}
+
+/// The `headers` shape (cells as bare text) is gone: a payload in it is
+/// refused, and so is text directly under a row or an `align` anywhere but on
+/// a head cell.
+#[test]
+fn old_table_payload_shape_is_refused() {
+    let cell = |t: &str| NodeTree::element("cell").with_child(NodeTree::text(t));
+    let good = NodeTree::element("table")
+        .with_child(NodeTree::element("head").with_child(cell("h")))
+        .with_child(
+            NodeTree::element("rows")
+                .with_child(NodeTree::element("row").with_child(cell("a"))),
+        );
+    assert!(tree_to_block(&good).is_ok(), "{:?}", tree_to_block(&good));
+
+    let old = NodeTree::element("table")
         .with_child(NodeTree::element("headers").with_child(NodeTree::text("h")))
         .with_child(
             NodeTree::element("rows")
                 .with_child(NodeTree::element("row").with_child(NodeTree::text("a"))),
-        )
+        );
+    let text_in_row = NodeTree::element("table")
+        .with_child(NodeTree::element("head").with_child(cell("h")))
+        .with_child(
+            NodeTree::element("rows")
+                .with_child(NodeTree::element("row").with_child(NodeTree::text("a"))),
+        );
+    let align_on_body_cell = NodeTree::element("table")
+        .with_child(NodeTree::element("head").with_child(cell("h")))
+        .with_child(NodeTree::element("rows").with_child(
+            NodeTree::element("row").with_child(cell("a").with_attr("align", "left")),
+        ));
+    for (label, tree) in [("headers", old), ("text in a row", text_in_row)] {
+        assert!(
+            matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedChild { .. })),
+            "{label}: {:?}",
+            tree_to_block(&tree)
+        );
+    }
+    assert!(
+        matches!(
+            tree_to_block(&align_on_body_cell),
+            Err(BlockDecodeError::UnexpectedAttribute { .. })
+        ),
+        "{:?}",
+        tree_to_block(&align_on_body_cell)
+    );
+}
+
+/// Every row has one cell per column: a short or a long row is refused with
+/// the two widths, by the payload decoder and by the store decoder.
+#[test]
+fn a_row_of_the_wrong_width_is_a_row_width_error() {
+    let cell = |t: &str| NodeTree::element("cell").with_child(NodeTree::text(t));
+    let table = |row: Vec<NodeTree>| {
+        let mut r = NodeTree::element("row");
+        for c in row {
+            r = r.with_child(c);
+        }
+        NodeTree::element("table")
+            .with_child(NodeTree::element("head").with_child(cell("a")).with_child(cell("b")))
+            .with_child(NodeTree::element("rows").with_child(r))
+    };
+    assert_eq!(
+        tree_to_block(&table(vec![cell("1")])),
+        Err(BlockDecodeError::RowWidth { expected: 2, found: 1 })
+    );
+    assert_eq!(
+        tree_to_block(&table(vec![cell("1"), cell("2"), cell("3")])),
+        Err(BlockDecodeError::RowWidth { expected: 2, found: 3 })
+    );
+    assert!(tree_to_block(&table(vec![cell("1"), cell("2")])).is_ok());
+
+    // The store decoder says the same of a stored table.
+    let mut store = NodeStore::new();
+    let id = tree_to_store(&table(vec![cell("1")]), &mut store);
+    assert_eq!(
+        block_from_node(&store, id),
+        Err(BlockDecodeError::RowWidth { expected: 2, found: 1 })
+    );
+}
+
+fn tree_to_store(tree: &NodeTree, store: &mut NodeStore) -> NodeId {
+    tree.clone().materialize(store)
+}
+
+fn table() -> NodeTree {
+    let cell = |t: &str| NodeTree::element("cell").with_child(NodeTree::text(t));
+    NodeTree::element("table")
+        .with_child(NodeTree::element("head").with_child(cell("h")))
+        .with_child(NodeTree::element("rows").with_child(NodeTree::element("row").with_child(cell("a"))))
 }
 
 #[test]
@@ -330,7 +446,7 @@ fn tree_to_block_refuses_table_with_extra_child() {
 #[test]
 fn tree_to_block_refuses_table_rows_that_are_not_rows() {
     let tree = NodeTree::element("table")
-        .with_child(NodeTree::element("headers"))
+        .with_child(NodeTree::element("head"))
         .with_child(NodeTree::element("rows").with_child(NodeTree::element("wibble")));
     assert!(matches!(
         tree_to_block(&tree),

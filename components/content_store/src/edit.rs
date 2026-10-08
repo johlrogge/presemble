@@ -30,6 +30,9 @@ const INLINE_TEXT_PARENTS: &[&str] = &["emph", "strong", "inline-link"];
 /// therefore not addressable.
 pub const DOCUMENT_KIND: &str = "document";
 
+const CELL_KIND: &str = "cell";
+const TABLE_KIND: &str = "table";
+
 // ── Addressing ──────────────────────────────────────────────────────────────
 
 /// Why a selection does not address exactly one node of the required kind.
@@ -214,8 +217,33 @@ fn resolve_text(
     if !in_text_block && !in_inline_container {
         return Err(wrong());
     }
-    let (_container, document) = block_context(store, block, expected)?;
+    let document = text_owner_document(store, block, expected)?;
     Ok(Target::Text { text: id, block, document })
+}
+
+/// The live document of an inline container: of the block itself, or, for a
+/// table cell, of the table the cell is in. The cell is the "block" of a text
+/// edit (its footprint and its scope); the table is the block of the document.
+fn text_owner_document(
+    store: &NodeStore,
+    owner: NodeId,
+    expected: TargetKind,
+) -> Result<NodeId, AddressError> {
+    let mut block = owner;
+    if element_name(store, owner) == Some(CELL_KIND) {
+        // cell > (head | row) > (table | rows) [> table]
+        for _ in 0..3 {
+            block = single_parent(store, block, expected)?;
+            if element_name(store, block) == Some(TABLE_KIND) {
+                break;
+            }
+        }
+        if element_name(store, block) != Some(TABLE_KIND) {
+            return Err(AddressError::WrongKind { expected, found: kind_label(store, owner) });
+        }
+    }
+    let (_container, document) = block_context(store, block, expected)?;
+    Ok(document)
 }
 
 /// Exactly one node of `kind`, inside a live document.
@@ -239,7 +267,7 @@ pub fn resolve(
         TargetKind::Text => resolve_text(store, id, kind),
         TargetKind::TextScope => {
             if element_name(store, id).is_some_and(|n| INLINE_CONTAINER_KINDS.contains(&n)) {
-                let (_container, document) = block_context(store, id, kind)?;
+                let document = text_owner_document(store, id, kind)?;
                 Ok(Target::TextScope { block: id, document })
             } else {
                 // A Text node is a scope too: the search runs inside it.

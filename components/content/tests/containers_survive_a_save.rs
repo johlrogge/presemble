@@ -1,6 +1,7 @@
 //! A table or list that holds a link or an image is not lost on save
 //! (ADR-059): parse, serialize, parse again, and the block is still there.
 
+use content::inline::{serialize_inlines, InlineContext, Inlines};
 use content::{parse_document, serialize_document, assign_slots, ContentElement};
 use schema::Grammar;
 
@@ -22,8 +23,14 @@ fn body_after_save(src: &str) -> (Vec<ContentElement>, String) {
 fn a_table_with_a_link_survives_a_save() {
     let src = "# T\n\n----\n\n## Fns\n\n| Function | Meaning |\n| --- | --- |\n| `juxt` | see [Template composition](#template-composition) |\n| `pipe` | plain |\n";
     let (body, saved) = body_after_save(src);
-    #[allow(deprecated)] // stage 6.3
-    let table = body.iter().find_map(|e| e.table_cell_sources());
+    let source = |cell: &Inlines| serialize_inlines(cell, InlineContext::Cell);
+    let table = body.iter().find_map(|e| match e {
+        ContentElement::Table { columns, rows } => Some((
+            columns.iter().map(|c| source(&c.header)).collect::<Vec<_>>(),
+            rows.iter().map(|row| row.iter().map(source).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        )),
+        _ => None,
+    });
     let (headers, rows) = table.unwrap_or_else(|| panic!("the table was lost; saved:\n{saved}\n{body:#?}"));
     assert_eq!(headers, vec!["Function".to_string(), "Meaning".to_string()]);
     assert_eq!(rows.len(), 2, "{rows:?}");
