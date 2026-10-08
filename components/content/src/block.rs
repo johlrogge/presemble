@@ -194,7 +194,7 @@ pub fn check_block_round_trip(el: &ContentElement) -> Result<(), RoundTripError>
 mod tests {
     use super::*;
     use crate::inline::AsPlainText;
-    use crate::document::{LinkOp, LinkTarget, LinkText, RefsToTarget};
+    use crate::document::{table, LinkOp, LinkTarget, LinkText, RefsToTarget};
     use schema::HeadingLevel;
 
     /// Parse markdown that must produce exactly one block, and return it.
@@ -296,10 +296,7 @@ mod tests {
         let cases = [
             ContentElement::lone_image("", "p.jpg"),
             ContentElement::lone_image("a", "p.jpg"),
-            ContentElement::Table {
-                headers: vec!["h1".to_string(), "h2".to_string()],
-                rows: vec![vec!["a".to_string(), "b".to_string()]],
-            },
+            table(&["h1", "h2"], &[&["a", "b"]]),
         ];
         for el in cases {
             for p in [Projection::Block, Projection::Content] {
@@ -407,10 +404,7 @@ mod tests {
     #[test]
     fn with_text_and_text_none_for_non_text_kinds() {
         let cases = [
-            ContentElement::Table {
-                headers: vec!["h".to_string()],
-                rows: vec![vec!["c".to_string()]],
-            },
+            table(&["h"], &[&["c"]]),
             ContentElement::Separator,
             ContentElement::LinkExpression {
                 text: LinkText::Empty,

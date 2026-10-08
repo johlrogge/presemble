@@ -23,7 +23,7 @@ pub use address::{block_addresses, clj_str, AddressContainer};
 pub use block::{check_block_round_trip, parse_markdown_projection, project_markdown, Projection, RoundTripError};
 pub use diff::{diff, Change, DocumentDiff};
 pub use document::{
-    AnchoredComment, Comment, CommentAnchor, Container, ContentElement, Document, DocumentSlot,
+    Align, AnchoredComment, Column, Comment, CommentAnchor, Container, ContentElement, Document, DocumentSlot,
     FlatDocument, Keyword, KeywordError, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
     SortDirection,
 };

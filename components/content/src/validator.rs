@@ -291,8 +291,8 @@ fn validate_html(
     }
 }
 
-/// One error per paragraph, list or heading that holds inline HTML (ADR-062
-/// D3): the kinds stored as markdown source (headings since ADR-063). HTML
+/// One error per paragraph, list, heading or table that holds inline HTML
+/// (ADR-062 D3): the kinds stored as markdown source or inline nodes. HTML
 /// blocks have their own error ([`validate_html`]); comment-only HTML, code
 /// spans and `\<` are never reported. Elements of a slot are reported against
 /// the slot.
@@ -311,6 +311,12 @@ fn validate_inline_html(
             ContentElement::Heading { content, .. } | ContentElement::Paragraph { content, .. } => {
                 first_html_node(content.as_slice())
             }
+            // A table cell's HTML is in its nodes.
+            ContentElement::Table { columns, rows } => columns
+                .iter()
+                .map(|c| &c.header)
+                .chain(rows.iter().flatten())
+                .find_map(|cell| first_html_node(cell.as_slice())),
             _ => continue,
         };
         let Some(html) = html else {
@@ -1632,6 +1638,21 @@ mod tests {
         let d = body_diagnostics("- item <span>s</span>");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert!(d[0].message.contains("inline HTML `<span>`"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn inline_html_in_a_table_cell_is_an_error() {
+        for table in [
+            "| a | b |\n|---|---|\n| x <b>y</b> | z |",
+            "| a <i>h</i> | b |\n|---|---|\n| x | z |",
+        ] {
+            let d = body_diagnostics(table);
+            assert_eq!(d.len(), 1, "{table:?}: {d:#?}");
+            assert_eq!(d[0].severity, Severity::Error);
+            assert!(d[0].message.contains("inline HTML"), "{}", d[0].message);
+        }
+        // Code spans and escaped tags are not HTML.
+        assert!(body_diagnostics("| a |\n|---|\n| `<b>` \\<i> |").is_empty());
     }
 
     /// L13 resolved for headings (ADR-063): a bare tag in a heading's source

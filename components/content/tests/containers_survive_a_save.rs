@@ -22,10 +22,8 @@ fn body_after_save(src: &str) -> (Vec<ContentElement>, String) {
 fn a_table_with_a_link_survives_a_save() {
     let src = "# T\n\n----\n\n## Fns\n\n| Function | Meaning |\n| --- | --- |\n| `juxt` | see [Template composition](#template-composition) |\n| `pipe` | plain |\n";
     let (body, saved) = body_after_save(src);
-    let table = body.iter().find_map(|e| match e {
-        ContentElement::Table { headers, rows } => Some((headers.clone(), rows.clone())),
-        _ => None,
-    });
+    #[allow(deprecated)] // stage 6.3
+    let table = body.iter().find_map(|e| e.table_cell_sources());
     let (headers, rows) = table.unwrap_or_else(|| panic!("the table was lost; saved:\n{saved}\n{body:#?}"));
     assert_eq!(headers, vec!["Function".to_string(), "Meaning".to_string()]);
     assert_eq!(rows.len(), 2, "{rows:?}");

@@ -3849,16 +3849,18 @@ mod tests {
                 b
             }
             ContentElement::Separator => element(store, "separator"),
-            ContentElement::Table { headers, rows } => {
+            ContentElement::Table { .. } => {
+                #[allow(deprecated)] // stage 6.3
+                let (headers, rows) = el.table_cell_sources().expect("a table");
                 let b = element(store, "table");
                 let h = element(store, "headers");
                 store.add_edge(b, node_store::Edge::Child(h));
-                for header in headers {
+                for header in &headers {
                     text_child(store, h, header);
                 }
                 let r = element(store, "rows");
                 store.add_edge(b, node_store::Edge::Child(r));
-                for row in rows {
+                for row in &rows {
                     let row_node = element(store, "row");
                     store.add_edge(r, node_store::Edge::Child(row_node));
                     for cell in row {
@@ -3895,6 +3897,14 @@ mod tests {
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
     }
 
+    #[allow(deprecated)] // stage 6.3
+    fn table_of(headers: &[&str], rows: &[&[&str]]) -> content::ContentElement {
+        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+        let rows: Vec<Vec<String>> =
+            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
+        content::ContentElement::table_from_sources(&headers, &[], &rows)
+    }
+
     /// Every block kind, including the ones whose output the two paths used to
     /// disagree on (separator, table with no rows, image without alt).
     fn every_block_kind() -> Vec<content::ContentElement> {
@@ -3907,11 +3917,8 @@ mod tests {
             C::lone_link("A link", "/a?x=1&y=2"),
             C::lone_image("An image", "/i.png"),
             C::lone_image("", "/j.png"),
-            C::Table {
-                headers: vec!["`a|b`".to_string(), "**H**".to_string()],
-                rows: vec![vec!["x".to_string(), "<i>y</i>".to_string()], vec!["-".to_string(), "".to_string()]],
-            },
-            C::Table { headers: vec!["only".to_string()], rows: vec![] },
+            table_of(&["`a\\|b`", "**H**"], &[&["x", "<i>y</i>"], &["-", ""]]),
+            table_of(&["only"], &[]),
             C::List { source: "- one\n- **two**\n\n3. x\n".to_string() },
             C::Blockquote { text: "> quoted *x*\n> more\n".to_string() },
             C::CodeBlock { language: Some("rust".to_string()), code: "fn x() { 1 < 2 }\n".to_string() },
@@ -4093,10 +4100,7 @@ mod tests {
     fn table_and_image_body_blocks_carry_md() {
         let elements = vec![
             content::ContentElement::lone_image("a", "/i.png"),
-            content::ContentElement::Table {
-                headers: vec!["h1".to_string(), "h2".to_string()],
-                rows: vec![vec!["a".to_string(), "b".to_string()]],
-            },
+            table_of(&["h1", "h2"], &[&["a", "b"]]),
         ];
         let spanned: im::Vector<_> = elements
             .iter()

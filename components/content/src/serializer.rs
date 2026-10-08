@@ -118,22 +118,17 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
         ContentElement::CodeBlock { language, code } => {
             serialize_code_block(language.as_deref(), code)
         }
-        ContentElement::Table { headers, rows } => {
-            let header_line = format!("| {} |", headers.join(" | "));
-            let separator = format!(
-                "| {} |",
-                headers
-                    .iter()
-                    .map(|_| "---")
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            );
-            let row_lines: Vec<String> = rows
-                .iter()
-                .map(|row| format!("| {} |", row.join(" | ")))
-                .collect();
-            let mut lines = vec![header_line, separator];
-            lines.extend(row_lines);
+        // Cells are canonical inlines (`|` escaped, code spans included); the
+        // delimiter row writes each column's alignment (ADR-059 stage 6.2).
+        ContentElement::Table { columns, rows } => {
+            use crate::inline::{serialize_inlines, InlineContext};
+            let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
+            let cell = |inlines: &crate::inline::Inlines| serialize_inlines(inlines, InlineContext::Cell);
+            let mut lines = vec![
+                line(columns.iter().map(|c| cell(&c.header)).collect()),
+                line(columns.iter().map(|c| c.align.delimiter().to_string()).collect()),
+            ];
+            lines.extend(rows.iter().map(|row| line(row.iter().map(cell).collect())));
             lines.join("\n")
         }
         // Verbatim (ADR-062); the `"\n\n"` join supplies the blank lines.
@@ -1340,23 +1335,48 @@ headings
         assert_eq!(blocks("x\n[a]: /y"), vec![para("x\n[a]: /y")]);
     }
 
-    /// L23: table column alignment is not stored; saving writes `---` for every
-    /// column. Cell content is kept. Resolved by ADR-059 stage 6.
+    /// L23, resolved by ADR-059 stage 6.2: a column keeps its alignment on
+    /// save.
     #[test]
-    fn table_alignment_is_lost_on_save_l23() {
-        let src = "| a | b |\n|:--|--:|\n| 1 | 2 |\n";
+    fn table_alignment_survives_a_save_l23() {
+        let src = "| a | b | c | d |\n|:--|--:|:-:|---|\n| 1 | 2 | 3 | 4 |\n";
         let flat = crate::parser::parse_document(src).expect("parses");
         let saved = serialize_elements(&flat.elements);
-        assert_eq!(saved, "| a | b |\n| --- | --- |\n| 1 | 2 |");
-        assert!(!saved.contains(':'), "alignment markers are lost: {saved:?}");
-        // Content survives; only alignment is lost.
-        assert_eq!(
-            reparse_one(&saved),
-            ContentElement::Table {
-                headers: vec!["a".to_string(), "b".to_string()],
-                rows: vec![vec!["1".to_string(), "2".to_string()]],
-            }
-        );
+        assert_eq!(saved, "| a | b | c | d |\n| :--- | ---: | :---: | --- |\n| 1 | 2 | 3 | 4 |");
+        assert_eq!(reparse_one(&saved), flat.elements[0].node);
+    }
+
+    /// L16 (write side): a pipe inside a code span in a cell is written
+    /// escaped, so the cell reads back as itself.
+    #[test]
+    fn pipe_in_cell_code_span_is_escaped_on_write_l16() {
+        let src = "| h |\n|---|\n| `a\\|b` |\n";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        let saved = serialize_elements(&flat.elements);
+        assert_eq!(saved, "| h |\n| --- |\n| `a\\|b` |");
+        assert_eq!(reparse_one(&saved), flat.elements[0].node);
+    }
+
+    #[test]
+    fn table_cell_formatting_survives_a_save() {
+        let src = "| **h** | *i* |\n|---|---|\n| **b** and [l](/x) | `c` ![i](a.png) |\n";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        let saved = serialize_elements(&flat.elements);
+        assert_eq!(saved, "| **h** | *i* |\n| --- | --- |\n| **b** and [l](/x) | `c` ![i](a.png) |");
+        assert_eq!(reparse_one(&saved), flat.elements[0].node);
+    }
+
+    #[test]
+    fn short_rows_are_padded_to_the_columns() {
+        let src = "| a | b | c |\n|---|---|---|\n| 1 |\n| 2 | 3 | 4 |\n";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        let ContentElement::Table { columns, rows } = &flat.elements[0].node else {
+            panic!("a table: {:?}", flat.elements);
+        };
+        assert!(rows.iter().all(|r| r.len() == columns.len()), "{rows:?}");
+        let saved = serialize_elements(&flat.elements);
+        assert_eq!(saved, "| a | b | c |\n| --- | --- | --- |\n| 1 |  |  |\n| 2 | 3 | 4 |");
+        assert_eq!(reparse_one(&saved), flat.elements[0].node);
     }
 
     /// L24 (stage 5): reference links are resolved when the file is read, so a

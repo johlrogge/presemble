@@ -974,10 +974,7 @@ mod tests {
             ContentElement::lone_link("x", "/x"),
             ContentElement::Separator,
             ContentElement::CodeBlock { language: Some("rust".to_string()), code: "fn f() {}".to_string() },
-            ContentElement::Table {
-                headers: vec!["a".to_string()],
-                rows: vec![vec!["1".to_string()]],
-            },
+            table_of(&["a"], &[&["1"]]),
             ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
             ContentElement::Blockquote { text: "q".to_string() },
             ContentElement::List { source: "- a".to_string() },
@@ -1186,21 +1183,10 @@ mod tests {
     fn round_trip_table() {
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::Table {
-                headers: vec![
-                    "Name".to_string(),
-                    "Age".to_string(),
-                    "City".to_string(),
-                ],
-                rows: vec![
-                    vec![
-                        "Alice".to_string(),
-                        "30".to_string(),
-                        "Berlin".to_string(),
-                    ],
-                    vec!["Bob".to_string(), "25".to_string(), "Paris".to_string()],
-                ],
-            })],
+            body: im::vector![zero_spanned(table_of(
+                &["Name", "Age", "City"],
+                &[&["Alice", "30", "Berlin"], &["Bob", "25", "Paris"]],
+            ))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1827,6 +1813,14 @@ mod tests {
         ContentElement::heading_from_markdown(HeadingLevel::new(level).unwrap(), text)
     }
 
+    #[allow(deprecated)] // stage 6.3
+    fn table_of(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
+        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+        let rows: Vec<Vec<String>> =
+            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
+        ContentElement::table_from_sources(&headers, &[], &rows)
+    }
+
     #[test]
     fn tree_to_block_decodes_heading_with_text_level() {
         let tree = ned::NodeTree::element("heading")
@@ -1873,7 +1867,7 @@ mod tests {
             .with_child(ned::NodeTree::element("rows"));
         assert_eq!(
             tree_to_block(&tree),
-            Ok(ContentElement::Table { headers: vec![], rows: vec![] })
+            Ok(table_of(&[], &[]))
         );
     }
 
@@ -1934,10 +1928,7 @@ mod tests {
             ContentElement::lone_link("L", "/l"),
             ContentElement::Separator,
             ContentElement::CodeBlock { language: Some("rust".to_string()), code: "x()".to_string() },
-            ContentElement::Table {
-                headers: vec!["A".to_string()],
-                rows: vec![vec!["1".to_string()]],
-            },
+            table_of(&["A"], &[&["1"]]),
             ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
             ContentElement::Blockquote { text: "Q".to_string() },
             ContentElement::List { source: "- a".to_string() },
@@ -1970,6 +1961,17 @@ mod tests {
         assert_eq!(block_from_node(&store, id), Ok(decoded));
     }
 
+    /// Until cells are stored as nodes (stage 6.3) the store keeps their
+    /// sources; the column alignment is kept beside them.
+    #[test]
+    fn table_alignment_survives_the_store() {
+        let flat = content::parse_document("| a | b | c |\n|:--|--:|---|\n| 1 | 2 | 3 |\n").unwrap();
+        let el = flat.elements[0].node.clone();
+        let mut store = NodeStore::new();
+        let id = block_to_store(&el, &mut store);
+        assert_eq!(block_from_node(&store, id), Ok(el));
+    }
+
     #[test]
     fn block_kinds_match_encoder_output() {
         let samples = [
@@ -1977,7 +1979,7 @@ mod tests {
             ContentElement::paragraph_from_markdown("x"),
             ContentElement::Separator,
             ContentElement::CodeBlock { language: None, code: "c".to_string() },
-            ContentElement::Table { headers: vec![], rows: vec![] },
+            table_of(&[], &[]),
             ContentElement::HtmlBlock { source: "h".to_string() },
             ContentElement::Blockquote { text: "q".to_string() },
             ContentElement::List { source: "- a".to_string() },

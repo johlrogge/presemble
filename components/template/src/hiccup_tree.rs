@@ -80,6 +80,14 @@ mod tests {
         ContentElement::paragraph_from_markdown(text)
     }
 
+    #[allow(deprecated)] // stage 6.3
+    fn table_of(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
+        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+        let rows: Vec<Vec<String>> =
+            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
+        ContentElement::table_from_sources(&headers, &[], &rows)
+    }
+
     #[test]
     fn block_hiccup_round_trips_every_payload_kind() {
         let samples = vec![
@@ -95,13 +103,7 @@ mod tests {
             ContentElement::CodeBlock { language: None, code: "x".to_string() },
             ContentElement::lone_image("a", "p.jpg"),
             ContentElement::lone_image("", "p.jpg"),
-            ContentElement::Table {
-                headers: vec!["h1".to_string(), "h2".to_string()],
-                rows: vec![
-                    vec!["a".to_string(), "b".to_string()],
-                    vec!["c".to_string(), "d".to_string()],
-                ],
-            },
+            table_of(&["h1", "h2"], &[&["a", "b"], &["c", "d"]]),
         ];
         let mut kinds = std::collections::BTreeSet::new();
         for el in &samples {

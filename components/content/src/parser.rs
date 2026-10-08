@@ -1,7 +1,8 @@
 use crate::document::{
-    Comment, ContentElement, Document, FlatDocument, Keyword, LinkTarget, LinkText,
+    Align, Column, Comment, ContentElement, Document, FlatDocument, Keyword, LinkTarget, LinkText,
 };
 use crate::error::ContentError;
+use crate::inline::{inlines_from_events, InlineContext, Inlines};
 use crate::link_expression::{
     bare_marker, parse_destination, recognise_paragraph, split_marker, LinkExpressionDiagnostic,
 };
@@ -20,6 +21,35 @@ pub fn byte_to_position(src: &str, byte_offset: usize) -> (u32, u32) {
     // UTF-16 code unit count as required by LSP spec
     let character = line_prefix.encode_utf16().count() as u32;
     (line, character)
+}
+
+fn align_of(alignment: pulldown_cmark::Alignment) -> Align {
+    match alignment {
+        pulldown_cmark::Alignment::None => Align::Default,
+        pulldown_cmark::Alignment::Left => Align::Left,
+        pulldown_cmark::Alignment::Center => Align::Center,
+        pulldown_cmark::Alignment::Right => Align::Right,
+    }
+}
+
+/// A table from what was read: every row gets exactly one cell per column.
+/// Short rows are padded with empty cells; GFM already drops extra cells when
+/// it reads a row (ADR-062 L16).
+fn table_element(aligns: Vec<Align>, headers: Vec<Inlines>, rows: Vec<Vec<Inlines>>) -> ContentElement {
+    let width = headers.len();
+    let columns = headers
+        .into_iter()
+        .enumerate()
+        .map(|(i, header)| Column { header, align: aligns.get(i).copied().unwrap_or_default() })
+        .collect();
+    let rows = rows
+        .into_iter()
+        .map(|mut row| {
+            row.resize_with(width, || Inlines::new(Vec::new(), InlineContext::Cell));
+            row
+        })
+        .collect();
+    ContentElement::Table { columns, rows }
 }
 
 /// The pulldown-cmark options content documents are parsed with.
@@ -270,12 +300,16 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             code: String,
             byte_range: std::ops::Range<usize>,
         },
-        /// Cells keep their trimmed markdown source (ADR-062); header cells
-        /// sit directly in `TableHead`, with no `TableRow`.
+        /// Cells are read as inline nodes from the events between their start
+        /// and end (ADR-059 stage 6.2); header cells sit directly in
+        /// `TableHead`, with no `TableRow`.
         Table {
-            headers: Vec<String>,
-            rows: Vec<Vec<String>>,
-            current_row: Vec<String>,
+            aligns: Vec<Align>,
+            headers: Vec<Inlines>,
+            rows: Vec<Vec<Inlines>>,
+            current_row: Vec<Inlines>,
+            /// The events of the cell being read.
+            cell_events: Vec<Event<'static>>,
             byte_range: std::ops::Range<usize>,
         },
         Blockquote {
@@ -345,6 +379,21 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
                 state = State::Idle;
             }
+            continue;
+        }
+
+        // A table cell collects its inline events up to the cell's end; the
+        // table's own structure events are handled below.
+        if let State::Table { cell_events, .. } = &mut state
+            && !matches!(
+                event,
+                Event::Start(Tag::Table(_) | Tag::TableHead | Tag::TableRow | Tag::TableCell)
+                    | Event::End(
+                        TagEnd::Table | TagEnd::TableHead | TagEnd::TableRow | TagEnd::TableCell
+                    )
+            )
+        {
+            cell_events.push(event.into_static());
             continue;
         }
 
@@ -536,11 +585,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
 
-            Event::Start(Tag::Table(_)) => {
+            Event::Start(Tag::Table(alignments)) => {
                 state = State::Table {
+                    aligns: alignments.iter().map(|a| align_of(*a)).collect(),
                     headers: Vec::new(),
                     rows: Vec::new(),
                     current_row: Vec::new(),
+                    cell_events: Vec::new(),
                     byte_range: range,
                 };
             }
@@ -552,10 +603,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::Start(Tag::TableRow) | Event::Start(Tag::TableCell) => {}
             Event::End(TagEnd::TableCell) => {
-                // The cell's range covers its padding but not the pipes.
-                if let State::Table { ref mut current_row, .. } = state {
-                    let cell = input.get(range).map(|s| s.trim().to_string()).unwrap_or_default();
-                    current_row.push(cell);
+                if let State::Table { ref mut current_row, ref mut cell_events, .. } = state {
+                    // Reading a cell cannot fail: the events are inline.
+                    let events = std::mem::take(cell_events);
+                    current_row.push(inlines_from_events(events, InlineContext::Cell));
                 }
             }
             Event::End(TagEnd::TableRow) => {
@@ -565,9 +616,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
             Event::End(TagEnd::Table) => {
-                if let State::Table { headers, rows, byte_range, .. } = state {
+                if let State::Table { aligns, headers, rows, byte_range, .. } = state {
                     elements.push_back(Spanned {
-                        node: ContentElement::Table { headers, rows },
+                        node: table_element(aligns, headers, rows),
                         span: Span::from(byte_range),
                     });
                     state = State::Idle;
@@ -1422,19 +1473,15 @@ mod tests {
     // A link or an image starts a block only at the top level; inside a table
     // cell, list item, blockquote or heading it is inline content.
 
-    fn strings(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn a_link_in_a_table_cell_keeps_the_whole_table() {
         let els = nodes("| a [h](/h) | b |\n|---|---|\n| [x](/x) | c |\n| d | e [y](/y) f |\n");
         assert_eq!(
             els,
-            vec![ContentElement::Table {
-                headers: strings(&["a [h](/h)", "b"]),
-                rows: vec![strings(&["[x](/x)", "c"]), strings(&["d", "e [y](/y) f"])],
-            }]
+            vec![crate::document::table(
+                &["a [h](/h)", "b"],
+                &[&["[x](/x)", "c"], &["d", "e [y](/y) f"]],
+            )]
         );
     }
 
@@ -1443,10 +1490,7 @@ mod tests {
         let els = nodes("| ![i](a.png) | b |\n|---|---|\n| c | ![j](b.png) |\n");
         assert_eq!(
             els,
-            vec![ContentElement::Table {
-                headers: strings(&["![i](a.png)", "b"]),
-                rows: vec![strings(&["c", "![j](b.png)"])],
-            }]
+            vec![crate::document::table(&["![i](a.png)", "b"], &[&["c", "![j](b.png)"]])]
         );
     }
 
@@ -1635,15 +1679,10 @@ Body paragraph."#;
             .iter()
             .find(|e| matches!(e.node, ContentElement::Table { .. }))
             .expect("expected a Table element");
-        match &table.node {
-            ContentElement::Table { headers, rows } => {
-                assert_eq!(headers, &["Name", "Value"], "headers should match column names");
-                assert_eq!(rows.len(), 2, "expected two body rows");
-                assert_eq!(rows[0], vec!["Alpha".to_string(), "1".to_string()]);
-                assert_eq!(rows[1], vec!["Beta".to_string(), "2".to_string()]);
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(
+            table.node,
+            crate::document::table(&["Name", "Value"], &[&["Alpha", "1"], &["Beta", "2"]])
+        );
     }
 
     #[test]
@@ -1655,31 +1694,39 @@ Body paragraph."#;
             .iter()
             .find(|e| matches!(e.node, ContentElement::Table { .. }))
             .expect("expected a Table element");
-        match &table.node {
-            ContentElement::Table { headers: _, rows } => {
-                assert_eq!(rows.len(), 1, "expected one body row");
-                // Cells keep their trimmed markdown source (ADR-062).
-                assert_eq!(rows[0], vec!["`cargo test`".to_string(), "Run tests".to_string()]);
-            }
-            _ => unreachable!(),
-        }
+        let ContentElement::Table { rows, .. } = &table.node else { unreachable!() };
+        assert_eq!(rows.len(), 1, "expected one body row");
+        assert_eq!(rows[0][0].as_slice(), [Inline::Code("cargo test".to_string())]);
+        assert_eq!(rows[0][1].as_slice(), [Inline::Text("Run tests".to_string())]);
     }
 
-    fn only_table(input: &str) -> (Vec<String>, Vec<Vec<String>>) {
+    /// The header and cell sources of the one table in `input`, as canonical
+    /// markdown, and its column alignments.
+    #[allow(deprecated)] // stage 6.3
+    fn only_table(input: &str) -> (Vec<String>, Vec<Vec<String>>, Vec<Align>) {
         let doc = parse_document(input).expect("table markdown should parse");
         match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
-            [ContentElement::Table { headers, rows }] => (headers.clone(), rows.clone()),
+            [table @ ContentElement::Table { columns, .. }] => {
+                let (headers, rows) = table.table_cell_sources().expect("a table");
+                (headers, rows, columns.iter().map(|c| c.align).collect())
+            }
             other => panic!("expected exactly one Table, got {other:?}"),
         }
     }
 
     #[test]
-    fn table_cells_store_trimmed_markdown_source() {
-        let (headers, rows) = only_table(
+    fn table_cells_are_read_as_inline_nodes() {
+        let (headers, rows, _) = only_table(
             "| **H** | `a\\|b` |\n|---|---|\n|  \\<x>  | <b>y</b> &amp; _z_ |\n",
         );
         assert_eq!(headers, vec!["**H**".to_string(), "`a\\|b`".to_string()]);
-        assert_eq!(rows, vec![vec!["\\<x>".to_string(), "<b>y</b> &amp; _z_".to_string()]]);
+        assert_eq!(rows, vec![vec!["\\<x>".to_string(), "<b>y</b> & *z*".to_string()]]);
+    }
+
+    #[test]
+    fn table_alignment_is_read_from_the_delimiter_row() {
+        let (_, _, aligns) = only_table("| a | b | c | d |\n|---|:--|:-:|--:|\n| 1 | 2 | 3 | 4 |\n");
+        assert_eq!(aligns, vec![Align::Default, Align::Left, Align::Center, Align::Right]);
     }
 
     #[test]
@@ -1724,7 +1771,7 @@ Body paragraph."#;
         // GFM drops cells beyond the header's column count. An unescaped `|`
         // inside a code span splits the cell, so content is lost on save
         // (ADR-062 L16).
-        let (_, rows) = only_table("| A | B |\n|---|---|\n| `a|b` | c |\n");
+        let (_, rows, _) = only_table("| A | B |\n|---|---|\n| `a|b` | c |\n");
         assert_eq!(rows, vec![vec!["`a".to_string(), "b`".to_string()]]);
     }
 

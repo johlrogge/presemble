@@ -113,11 +113,14 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             vec![el("div", slot_attrs(ctx), inline_children(source))]
         }
         ContentElement::LinkExpression { .. } => Vec::new(),
-        ContentElement::Table { headers, rows } => {
+        ContentElement::Table { .. } => {
+            // Cells render through their canonical source until stage 6.3.
+            #[allow(deprecated)] // stage 6.3
+            let (headers, rows) = element.table_cell_sources().expect("a table");
             let cells = |name: &str, row: &[String]| -> Vec<Node> {
                 row.iter().map(|c| el(name, Vec::new(), table_cell_nodes(c))).collect()
             };
-            let head = el("thead", Vec::new(), vec![el("tr", Vec::new(), cells("th", headers))]);
+            let head = el("thead", Vec::new(), vec![el("tr", Vec::new(), cells("th", &headers))]);
             let body_rows = rows.iter().map(|r| el("tr", Vec::new(), cells("td", r))).collect();
             let body = el("tbody", Vec::new(), body_rows);
             vec![el("table", slot_attrs(ctx), vec![head, body])]
@@ -230,7 +233,9 @@ mod tests {
 
     #[test]
     fn table_always_has_a_tbody() {
-        let html = render(ContentElement::Table { headers: vec!["h".to_string()], rows: vec![] });
+        #[allow(deprecated)] // stage 6.3
+        let table = ContentElement::table_from_sources(&["h".to_string()], &[], &[]);
+        let html = render(table);
         assert!(html.contains("<thead><tr><th>h</th></tr></thead><tbody></tbody>"), "{html}");
     }
 

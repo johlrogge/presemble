@@ -1508,10 +1508,11 @@ mod tests {
     }
 
     fn render_table(headers: &[&str], rows: &[&[&str]]) -> String {
-        let table = spanned(ContentElement::Table {
-            headers: headers.iter().map(|s| s.to_string()).collect(),
-            rows: rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect(),
-        });
+        let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+        let rows: Vec<Vec<String>> =
+            rows.iter().map(|r| r.iter().map(|s| s.to_string()).collect()).collect();
+        #[allow(deprecated)] // stage 6.3
+        let table = spanned(ContentElement::table_from_sources(&headers, &[], &rows));
         body_html(&im::vector![table], false)
     }
 

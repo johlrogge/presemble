@@ -48,6 +48,9 @@
 //! - L14: HTML blocks of types 1–5 always have their end condition, so none
 //!   runs to the end of the file;
 //!
+//! Tables hold alignment, formatted cells, pipes inside code spans and short
+//! rows (`OTHER_BLOCKS`).
+//!
 //! Containers (table cells, list items, blockquotes) hold links and images:
 //! those stay inside their container (`OTHER_BLOCKS`, `gen_list`).
 //!
@@ -187,6 +190,12 @@ const OTHER_BLOCKS: &[&str] = &[
     "| ![i](a.png) | b |\n|---|---|\n| c | see [y](/y) now |",
     "> see [a](/a) here",
     "> a ![i](a.png) b",
+    // Tables (ADR-059 stage 6.2): alignment, formatted cells, pipes inside
+    // code spans, short rows.
+    "| a | b |\n|:--|--:|\n| **x** | `p\\|q` |",
+    "| a | b | c |\n|:-:|---|---|\n| 1 |\n| 2 | *e* | [l](/l) |",
+    "| `a\\|b` | h |\n|---|---|\n| c | d |",
+    "a | b\n--: | :--\n1 | 2",
 ];
 /// HTML blocks (ADR-062): never slotted, always an Error, kept verbatim.
 /// Every type 1–5 block has its end condition (limit L14).

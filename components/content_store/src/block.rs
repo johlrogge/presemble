@@ -9,7 +9,7 @@ use crate::access::{
 use crate::inline_store::{inlines_from_store, inlines_to_store};
 use content::inline::InlineContext;
 use content::{
-    Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
+    Align, Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
     SortDirection,
 };
 use node_store::{Edge, Node, NodeId, NodeStore};
@@ -54,16 +54,25 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
             }
             node
         }
-        ContentElement::Table { headers, rows } => {
+        // Cells are stored as canonical sources until stage 6.3; the column
+        // alignment is kept in an `align` attribute, written only when some
+        // column is aligned.
+        ContentElement::Table { columns, .. } => {
+            #[allow(deprecated)] // stage 6.3
+            let (headers, rows) = element.table_cell_sources().expect("a table");
             let node = make_element(store, "table");
+            if columns.iter().any(|c| c.align != Align::Default) {
+                let names: Vec<&str> = columns.iter().map(|c| c.align.name()).collect();
+                add_text_attr(store, node, "align", &names.join(" "));
+            }
             let headers_node = add_child_element(store, node, "headers");
-            for header in headers {
+            for header in &headers {
                 let s: String = header.clone();
                 let text_node = store.add_node(Node::Text(s));
                 store.add_edge(headers_node, Edge::Child(text_node));
             }
             let rows_node = add_child_element(store, node, "rows");
-            for row in rows {
+            for row in &rows {
                 let row_node = add_child_element(store, rows_node, "row");
                 for cell in row {
                     let s: String = cell.clone();
@@ -496,7 +505,12 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
                 .iter()
                 .map(|&row_id| text_children(store, row_id, "table row"))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(ContentElement::Table { headers, rows })
+            let aligns: Vec<Align> = find_attr_text(store, id, "align")
+                .map(|names| names.split(' ').filter_map(Align::from_name).collect())
+                .unwrap_or_default();
+            #[allow(deprecated)] // stage 6.3
+            let table = ContentElement::table_from_sources(&headers, &aligns, &rows);
+            Ok(table)
         }
         "html-block" => Ok(ContentElement::HtmlBlock {
             source: try_child_text(store, id, kind)?,
