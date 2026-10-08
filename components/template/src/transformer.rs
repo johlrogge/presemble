@@ -3824,12 +3824,8 @@ mod tests {
         let block = match el {
             ContentElement::Heading { .. }
             | ContentElement::Paragraph { .. }
-            | ContentElement::Table { .. } => content_store::block_to_store(el, store),
-            ContentElement::Blockquote { text } => {
-                let b = element(store, "blockquote");
-                text_child(store, b, text);
-                b
-            }
+            | ContentElement::Table { .. }
+            | ContentElement::Blockquote { .. } => content_store::block_to_store(el, store),
             ContentElement::List { source } => {
                 let b = element(store, "list");
                 text_child(store, b, source);
@@ -3899,7 +3895,7 @@ mod tests {
             table_of(&["`a\\|b`", "**H**"], &[&["x", "<i>y</i>"], &["-", ""]]),
             table_of(&["only"], &[]),
             C::List { source: "- one\n- **two**\n\n3. x\n".to_string() },
-            C::Blockquote { text: "> quoted *x*\n> more\n".to_string() },
+            content::parse_document("> quoted *x*\n> more\n").unwrap().elements[0].node.clone(),
             C::CodeBlock { language: Some("rust".to_string()), code: "fn x() { 1 < 2 }\n".to_string() },
             C::CodeBlock { language: None, code: "plain\n".to_string() },
             C::LinkExpression {
@@ -4793,6 +4789,11 @@ mod tests {
                 &content::ContentElement::paragraph_from_markdown(text),
                 &mut store,
             )
+        } else if kind == "blockquote" {
+            // A quote as the store holds it: blocks (ADR-059 §13); `text` is
+            // the quote's markdown, markers included.
+            let quote = content::parse_document(text).unwrap().elements[0].node.clone();
+            content_store::block_to_store(&quote, &mut store)
         } else {
             let kind_name = store.intern(kind);
             let block = store.add_node(node_store::Node::Element(kind_name));
@@ -4987,7 +4988,7 @@ mod tests {
     fn native_literal_angle_brackets_in_headings_and_blockquotes_render_escaped() {
         let html = render_native_body_block("heading", "The <div> element", Some(2));
         assert!(html.contains("The &lt;div&gt; element") && !html.contains("<div"), "{html}");
-        let html = render_native_body_block("blockquote", "a <b>", None);
+        let html = render_native_body_block("blockquote", "> a \\<b>", None);
         assert!(html.contains("a &lt;b&gt;") && !html.contains("<b>"), "{html}");
     }
 
@@ -5060,12 +5061,33 @@ mod tests {
         );
     }
 
+    /// ADR-059 §13: a quote renders its blocks, once: no nested `<blockquote>`
+    /// from re-reading its markdown.
     #[test]
     fn characterise_native_blockquote() {
         assert_renders_as(
             &render_native_body_block("blockquote", "> quoted *x*\n> more\n", None),
-            "<blockquote data-presemble-slot=\"body\"><blockquote>\n<p>quoted <em>x</em>\nmore</p>\n</blockquote></blockquote>",
+            "<blockquote data-presemble-slot=\"body\"><p>quoted <em>x</em>\nmore</p></blockquote>",
         );
+    }
+
+    /// A quote's blocks render as the body renders them, without any editor
+    /// data of their own (the whole quote is the editable block); native and
+    /// data paths agree.
+    #[test]
+    fn blockquote_renders_its_blocks() {
+        let quote = content::parse_document("> a\n>\n> b\n>\n> # H\n").unwrap().elements[0].node.clone();
+        let spanned: im::Vector<_> = im::vector![schema::Spanned {
+            node: quote.clone(),
+            span: schema::Span { start: 0, end: 0 },
+        }];
+        let native = native_body_html(std::slice::from_ref(&quote));
+        let data = legacy_body_html(&spanned);
+        assert_eq!(native, data, "native and data paths render the same");
+        let (head, tail) = native.split_once('>').expect("a start tag");
+        assert!(head.starts_with("<blockquote data-presemble-slot=\"body\""), "{native}");
+        assert_eq!(head.matches("data-presemble-").count(), 4, "slot, md, address and file: {native}");
+        assert_eq!(tail, "<p>a</p><p>b</p><h1>H</h1></blockquote>", "no editor data on the children");
     }
 
     #[test]

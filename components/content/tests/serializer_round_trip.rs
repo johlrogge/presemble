@@ -433,10 +433,13 @@ fn gen_block(rng: &mut Rng, previous_list: Option<bool>) -> ContentElement {
         0 => gen_heading(rng),
         1 => literal_paragraph(&gen_paragraph_line(rng)),
         7 => gen_multiline_paragraph(rng),
-        // Blockquote text is trimmed by the parser, so leading whitespace is
-        // outside the lossless domain (ADR-057 open questions 5/6).
+        // A quote of one literal paragraph; its text is trimmed by the parser,
+        // so leading whitespace is outside the lossless domain (ADR-057 open
+        // questions 5/6).
         2 => ContentElement::Blockquote {
-            text: gen_opener_text(rng, false).trim_start().to_string(),
+            blocks: content::Blocks::from_elements(im::vector![spanned(literal_paragraph(
+                gen_opener_text(rng, false).trim_start(),
+            ))]),
         },
         3 => gen_code(rng),
         4 => lone_link(&gen_words(rng, 1, 3), rng.pick(DOMAIN.hrefs)),

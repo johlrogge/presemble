@@ -9,11 +9,11 @@ use crate::access::{
 use crate::inline_store::{inlines_from_store, inlines_to_store};
 use content::inline::InlineContext;
 use content::{
-    Align, Column, Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SlotMarker,
-    SortDirection,
+    Align, Blocks, Column, Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget,
+    SlotMarker, SortDirection,
 };
-use node_store::{Node, NodeId, NodeStore};
-use schema::HeadingLevel;
+use node_store::{Edge, Node, NodeId, NodeStore};
+use schema::{HeadingLevel, Span, Spanned};
 
 // ── content element encoding ──────────────────────────────────────────────────
 
@@ -82,9 +82,30 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
             add_child_text(store, node, source);
             node
         }
-        ContentElement::Blockquote { text } => {
+        // A quote is its blocks (ADR-059 §13), each with its leading comments
+        // as `_trivia-before` (ADR-062); the comments after the last block
+        // are the quote's own `_trivia-end`. Comments are not payload content:
+        // `block_to_tree` leaves them out.
+        ContentElement::Blockquote { blocks } => {
             let node = make_element(store, "blockquote");
-            add_child_text(store, node, text);
+            for (at, spanned) in blocks.elements.iter().enumerate() {
+                let child = content_element_to_store(&spanned.node, store);
+                store.add_edge(node, Edge::Child(child));
+                let before: Vec<&str> = blocks
+                    .comments
+                    .iter()
+                    .filter(|(index, _)| *index == at)
+                    .map(|(_, comment)| comment.node.as_str())
+                    .collect();
+                add_trivia(store, child, ned::trivia::ATTR_TRIVIA_BEFORE, &before);
+            }
+            let end: Vec<&str> = blocks
+                .comments
+                .iter()
+                .filter(|(index, _)| *index >= blocks.elements.len())
+                .map(|(_, comment)| comment.node.as_str())
+                .collect();
+            add_trivia(store, node, ned::trivia::ATTR_TRIVIA_END, &end);
             node
         }
         ContentElement::List { source } => {
@@ -214,7 +235,11 @@ pub fn decode_trivia(
 /// Element names of single-text blocks: exactly one `Text` child carries the
 /// block's text (see `ContentElement::text`). `html-block` also stores its
 /// source as one `Text` child, but cannot be text-edited (ADR-062 D4).
-pub const TEXT_BLOCK_KINDS: &[&str] = &["blockquote", "list", "code-block"];
+pub const TEXT_BLOCK_KINDS: &[&str] = &["list", "code-block"];
+
+/// Element names of block containers: their children are blocks, each with
+/// its leading comments as trivia (ADR-059 §13). Stage 9 adds list items.
+pub const BLOCK_CONTAINER_KINDS: &[&str] = &["blockquote"];
 
 /// Element names of inline containers: their children are inline nodes
 /// (ADR-059 §6), at any depth. A Text node inside one is addressed through
@@ -569,9 +594,32 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
         "html-block" => Ok(ContentElement::HtmlBlock {
             source: try_child_text(store, id, kind)?,
         }),
-        "blockquote" => Ok(ContentElement::Blockquote {
-            text: try_child_text(store, id, kind)?,
-        }),
+        // The quote's children, all blocks, each with its leading comments;
+        // the old shape (one Text child) and any other child is refused.
+        "blockquote" => {
+            let zero = Span { start: 0, end: 0 };
+            let mut blocks = Blocks::default();
+            for child in store.children(id) {
+                match element_name_of(store, child) {
+                    Some(name) if BLOCK_KINDS.contains(&name.as_str()) => {}
+                    other => {
+                        return Err(BlockDecodeError::UnexpectedChild {
+                            kind: kind.to_string(),
+                            child: other.unwrap_or_else(|| "text".to_string()),
+                        });
+                    }
+                }
+                for comment in decode_trivia(store, child, ned::trivia::ATTR_TRIVIA_BEFORE)? {
+                    blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
+                }
+                let node = block_from_node(store, child)?;
+                blocks.elements.push_back(Spanned { node, span: zero });
+            }
+            for comment in decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_END)? {
+                blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
+            }
+            Ok(ContentElement::Blockquote { blocks })
+        }
         "list" => Ok(ContentElement::List {
             source: try_child_text(store, id, kind)?,
         }),
@@ -603,7 +651,7 @@ pub fn block_to_store(el: &ContentElement, store: &mut NodeStore) -> NodeId {
 /// text (an integer or boolean value is written as its text, which the block
 /// decoder reads back). The tree has no `Existing` nodes. A block of any other
 /// kind (separator, html-block, link-expression) is refused with
-/// [`BlockDecodeError::NotPayloadKind`].
+/// [`BlockDecodeError::NotPayloadKind`], and so is a quote holding one.
 pub fn block_to_tree(el: &ContentElement) -> Result<ned::NodeTree, BlockDecodeError> {
     let mut scratch = NodeStore::new();
     let root = block_to_store(el, &mut scratch);
@@ -611,7 +659,11 @@ pub fn block_to_tree(el: &ContentElement) -> Result<ned::NodeTree, BlockDecodeEr
     if !PAYLOAD_BLOCK_KINDS.contains(&kind.as_str()) {
         return Err(BlockDecodeError::NotPayloadKind(kind));
     }
-    Ok(node_to_tree(&scratch, root))
+    let tree = node_to_tree(&scratch, root);
+    // A quote's blocks must be payload kinds too, or an edit built from this
+    // tree would fail late and stay Stale instead of being refused here.
+    check_payload_tree(&tree)?;
+    Ok(tree)
 }
 
 pub(crate) fn node_to_tree(store: &NodeStore, id: NodeId) -> ned::NodeTree {
@@ -661,12 +713,26 @@ pub(crate) fn tree_contains_existing(tree: &ned::NodeTree) -> bool {
 /// [`PAYLOAD_BLOCK_KINDS`], and single-text kinds without exactly one `Text`
 /// child. Children or attributes the decoder would ignore (an image's
 /// children, a table's extra children, an attribute the kind does not take)
-/// are refused, not dropped. The tree is materialised into a scratch store and decoded with
-/// [`block_from_node`].
+/// are refused, not dropped. A blockquote's children are payload blocks
+/// themselves (a nested separator, HTML block or link expression is
+/// [`BlockDecodeError::NotPayloadKind`], as at the top level). The tree is
+/// materialised into a scratch store and decoded with [`block_from_node`].
+///
+/// Comments are not payload content: a `NodeTree` attribute holds a string,
+/// not trivia, so a payload quote carries none.
 pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecodeError> {
     if tree_contains_existing(tree) {
         return Err(BlockDecodeError::ExistingNode);
     }
+    check_payload_tree(tree)?;
+    let mut scratch = NodeStore::new();
+    let root = tree.clone().materialize(&mut scratch);
+    block_from_node(&scratch, root)
+}
+
+/// What the decoder would drop or misread in the payload block `tree`, refused
+/// instead; a quote's children are checked as payload blocks themselves.
+fn check_payload_tree(tree: &ned::NodeTree) -> Result<(), BlockDecodeError> {
     let ned::NodeTree::Element { name, attrs, children } = tree else {
         return Err(BlockDecodeError::NotAnElement);
     };
@@ -694,9 +760,15 @@ pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecode
     if name == "table" {
         check_table_children(children)?;
     }
-    let mut scratch = NodeStore::new();
-    let root = tree.clone().materialize(&mut scratch);
-    block_from_node(&scratch, root)
+    if BLOCK_CONTAINER_KINDS.contains(&name.as_str()) {
+        for child in children {
+            match child {
+                ned::NodeTree::Element { .. } => check_payload_tree(child)?,
+                other => return Err(unexpected_child(name, other)),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The attributes a payload block of `kind` takes; the decoder reads these and

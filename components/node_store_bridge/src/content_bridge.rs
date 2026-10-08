@@ -805,7 +805,7 @@ mod tests {
                 code: "plain code".to_string(),
             },
             ContentElement::HtmlBlock { source: "<b>bold</b>".to_string() },
-            ContentElement::Blockquote { text: "A quote".to_string() },
+            quote_of("A quote"),
             ContentElement::List { source: "- item one\n- item two".to_string() },
         ];
 
@@ -903,6 +903,21 @@ mod tests {
         assert_eq!(back.comments.len(), 4);
     }
 
+    /// ADR-059 §13: a quote's blocks and their comments live in the store; a
+    /// save from the store writes the file back byte for byte.
+    #[test]
+    fn blockquote_with_comments_round_trips_through_the_store_and_a_save() {
+        let src = "# Title\n\nSummary.\n\n----\n\n> a\n>\n> <!-- c -->\n>\n> ## H\n>\n> - l\n>\n> > n\n>\n> <!-- end -->\n\nAfter.\n";
+        let doc = trivia_doc(src);
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        assert_eq!(serialize_from_store(&store, root).unwrap(), src);
+        let back = store_to_document(&store, root).unwrap();
+        assert_eq!(back.body.len(), 2);
+        assert!(back.comments.is_empty(), "the quote's comments are not the document's");
+        assert_eq!(content::serialize_document(&back), src);
+    }
+
     #[test]
     fn trivia_that_is_not_a_comment_is_malformed() {
         let doc = trivia_doc("# Title\n\nSummary.\n\n----\n\n<!-- c -->\n\nOne.\n");
@@ -976,7 +991,7 @@ mod tests {
             ContentElement::CodeBlock { language: Some("rust".to_string()), code: "fn f() {}".to_string() },
             table_of(&["a"], &[&["1"]]),
             ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
-            ContentElement::Blockquote { text: "q".to_string() },
+            quote_of("q"),
             ContentElement::List { source: "- a".to_string() },
             ContentElement::LinkExpression {
                 text: LinkText::Label("N".to_string()),
@@ -1813,6 +1828,11 @@ mod tests {
         ContentElement::heading_from_markdown(HeadingLevel::new(level).unwrap(), text)
     }
 
+    /// A quote of one paragraph, as markdown `text` reads.
+    fn quote_of(text: &str) -> ContentElement {
+        content::parse_document(&format!("> {text}\n")).unwrap().elements[0].node.clone()
+    }
+
     fn table_of(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
         if headers.is_empty() {
             return ContentElement::Table { columns: vec![], rows: vec![] };
@@ -1885,13 +1905,13 @@ mod tests {
 
     #[test]
     fn tree_to_block_rejects_text_kind_with_two_children() {
-        let tree = ned::NodeTree::element("blockquote")
+        let tree = ned::NodeTree::element("list")
             .with_child(ned::NodeTree::text("a"))
             .with_child(ned::NodeTree::text("b"));
         assert_eq!(
             tree_to_block(&tree),
             Err(BlockDecodeError::TextChildCount {
-                kind: "blockquote".to_string(),
+                kind: "list".to_string(),
                 found: 2
             })
         );
@@ -1899,11 +1919,23 @@ mod tests {
 
     #[test]
     fn tree_to_block_rejects_text_kind_with_element_child() {
-        let tree = ned::NodeTree::element("blockquote").with_child(ned::NodeTree::element("span"));
+        let tree = ned::NodeTree::element("list").with_child(ned::NodeTree::element("span"));
         assert!(matches!(
             tree_to_block(&tree),
             Err(BlockDecodeError::TextChildCount { .. })
         ));
+    }
+
+    /// A blockquote holds blocks (ADR-059 §13): text children and unknown
+    /// elements are refused, not read as text.
+    #[test]
+    fn tree_to_block_rejects_a_blockquote_that_does_not_hold_blocks() {
+        let tree = ned::NodeTree::element("blockquote")
+            .with_child(ned::NodeTree::text("a"))
+            .with_child(ned::NodeTree::text("b"));
+        assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedChild { .. })));
+        let tree = ned::NodeTree::element("blockquote").with_child(ned::NodeTree::element("span"));
+        assert_eq!(tree_to_block(&tree), Err(BlockDecodeError::NotPayloadKind("span".to_string())));
     }
 
     /// A paragraph's children are inline nodes: two adjacent texts are not in
@@ -1932,7 +1964,7 @@ mod tests {
             ContentElement::CodeBlock { language: Some("rust".to_string()), code: "x()".to_string() },
             table_of(&["A"], &[&["1"]]),
             ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
-            ContentElement::Blockquote { text: "Q".to_string() },
+            quote_of("Q"),
             ContentElement::List { source: "- a".to_string() },
             ContentElement::LinkExpression {
                 text: LinkText::Label("posts".to_string()),
@@ -1982,7 +2014,7 @@ mod tests {
             ContentElement::CodeBlock { language: None, code: "c".to_string() },
             table_of(&[], &[]),
             ContentElement::HtmlBlock { source: "h".to_string() },
-            ContentElement::Blockquote { text: "q".to_string() },
+            quote_of("q"),
             ContentElement::List { source: "- a".to_string() },
             ContentElement::LinkExpression {
                 text: LinkText::Empty,
@@ -2020,7 +2052,10 @@ mod tests {
         expected_text.sort_unstable();
         assert_eq!(text_kinds, expected_text);
 
+        // The payload kinds: the inline containers that are blocks, the block
+        // containers, the single-text kinds and the table.
         let mut payload = block_containers;
+        payload.extend_from_slice(content_store::BLOCK_CONTAINER_KINDS);
         payload.extend_from_slice(TEXT_BLOCK_KINDS);
         payload.push("table");
         assert_eq!(payload, PAYLOAD_BLOCK_KINDS);

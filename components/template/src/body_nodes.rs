@@ -13,14 +13,25 @@ use content::inline::Inlines;
 use content::{Align, BlockShape, ContentElement};
 use schema::Spanned;
 
-/// Per-block rendering context.
-pub(crate) struct BlockCtx<'a> {
-    /// The canonical markdown of the block, emitted as `data-presemble-md`.
-    /// Editorial output only.
-    pub md: Option<&'a str>,
-    /// The block's address, emitted as `data-presemble-address`. Editorial
-    /// output only; built without a file (see [`stamp_file`]).
-    pub address: Option<&'a str>,
+/// What a block is in the page: a block directly under the body, which is a
+/// body slot element, or a block nested in a blockquote, which is not (the
+/// whole quote is the editable block, ADR-059 §13).
+pub(crate) enum BlockRole<'a> {
+    BodySlot {
+        /// The canonical markdown of the block, emitted as `data-presemble-md`.
+        /// Editorial output only.
+        md: Option<&'a str>,
+        /// The block's address, emitted as `data-presemble-address`. Editorial
+        /// output only; built without a file (see [`stamp_file`]).
+        address: Option<&'a str>,
+    },
+    /// Carries no `data-presemble-*` attribute.
+    Nested,
+}
+
+impl BlockRole<'_> {
+    /// A body slot element without editor data (published output).
+    const PLAIN: BlockRole<'static> = BlockRole::BodySlot { md: None, address: None };
 }
 
 fn attr(name: &str, value: impl Into<String>) -> (String, Form) {
@@ -32,14 +43,17 @@ fn el(name: &str, attrs: Vec<(String, Form)>, children: Vec<Node>) -> Node {
 }
 
 /// The attributes that make an element the `body` slot: the slot marker, then
-/// the editor attributes when there are any.
-fn slot_attrs(ctx: &BlockCtx) -> Vec<(String, Form)> {
+/// the editor attributes when there are any. A nested block has none.
+fn slot_attrs(role: &BlockRole) -> Vec<(String, Form)> {
+    let BlockRole::BodySlot { md, address } = role else {
+        return Vec::new();
+    };
     let mut attrs = vec![attr(ATTR_SLOT, "body")];
-    if let Some(md) = ctx.md {
-        attrs.push(attr(ATTR_MD, md));
+    if let Some(md) = md {
+        attrs.push(attr(ATTR_MD, *md));
     }
-    if let Some(address) = ctx.address {
-        attrs.push(attr(ATTR_ADDRESS, address));
+    if let Some(address) = address {
+        attrs.push(attr(ATTR_ADDRESS, *address));
     }
     attrs
 }
@@ -50,13 +64,13 @@ fn slot_attrs(ctx: &BlockCtx) -> Vec<(String, Form)> {
 ///   slot element.
 /// - A link expression renders nothing (ADR-058 section 4: ignored in the
 ///   body, with a diagnostic).
-pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node> {
+pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Node> {
     match element {
         // The heading's inline nodes: nothing is parsed, so text that looks
         // like block syntax (`1. Intro`) stays text.
         ContentElement::Heading { level, content, .. } => vec![el(
             &format!("h{}", level.value()),
-            slot_attrs(ctx),
+            slot_attrs(role),
             crate::inline_nodes::inline_nodes(content),
         )],
         // A paragraph renders by its shape (ADR-059 §12): a lone link is an
@@ -65,7 +79,7 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
         // misuse and is text.
         ContentElement::Paragraph { content, marker } => match BlockShape::of(content) {
             BlockShape::SoleLink(parts) if marker.is_none() => {
-                let mut attrs = slot_attrs(ctx);
+                let mut attrs = slot_attrs(role);
                 attrs.push(attr("href", parts.destination.as_str()));
                 if let Some(title) = parts.title.filter(|t| !t.is_empty()) {
                     attrs.push(attr("title", title));
@@ -74,7 +88,7 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             }
             BlockShape::SoleImage(parts) if marker.is_none() => {
                 use content::AsPlainText;
-                let mut attrs = slot_attrs(ctx);
+                let mut attrs = slot_attrs(role);
                 attrs.push(attr("src", parts.source.as_str()));
                 attrs.push(attr("alt", parts.alt.plain_text()));
                 if let Some(title) = parts.title.filter(|t| !t.is_empty()) {
@@ -82,7 +96,7 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
                 }
                 vec![el("img", attrs, Vec::new())]
             }
-            _ => vec![el("p", slot_attrs(ctx), crate::inline_nodes::inline_nodes(content))],
+            _ => vec![el("p", slot_attrs(role), crate::inline_nodes::inline_nodes(content))],
         },
         ContentElement::CodeBlock { language, code } => {
             let code_attrs = language
@@ -91,13 +105,13 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
                 .unwrap_or_default();
             vec![el(
                 "pre",
-                slot_attrs(ctx),
+                slot_attrs(role),
                 vec![el("code", code_attrs, vec![Node::Text(code.clone())])],
             )]
         }
         // A marker, not content: hidden, but addressable as a body slot.
         ContentElement::Separator => {
-            let mut attrs = slot_attrs(ctx);
+            let mut attrs = slot_attrs(role);
             attrs.push(attr("hidden", ""));
             vec![el("span", attrs, Vec::new())]
         }
@@ -107,11 +121,19 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
             vec![attr("class", CLASS_HTML_REMOVED)],
             vec![Node::Text(MSG_HTML_REMOVED.to_string())],
         )],
-        ContentElement::Blockquote { text } => {
-            vec![el("blockquote", slot_attrs(ctx), inline_children(text))]
-        }
+        // A quote renders its blocks, none of them a slot (the whole quote is
+        // the editable block). Comments are never rendered.
+        ContentElement::Blockquote { blocks } => vec![el(
+            "blockquote",
+            slot_attrs(role),
+            blocks
+                .elements
+                .iter()
+                .flat_map(|block| block_nodes(&block.node, &BlockRole::Nested))
+                .collect(),
+        )],
         ContentElement::List { source } => {
-            vec![el("div", slot_attrs(ctx), inline_children(source))]
+            vec![el("div", slot_attrs(role), inline_children(source))]
         }
         ContentElement::LinkExpression { .. } => Vec::new(),
         // Cells render through their inline nodes; a column that declares an
@@ -140,7 +162,7 @@ pub(crate) fn block_nodes(element: &ContentElement, ctx: &BlockCtx) -> Vec<Node>
                 })
                 .collect();
             let body = el("tbody", Vec::new(), body_rows);
-            vec![el("table", slot_attrs(ctx), vec![head, body])]
+            vec![el("table", slot_attrs(role), vec![head, body])]
         }
     }
 }
@@ -157,10 +179,10 @@ pub(crate) fn body_block_nodes(
     address: Option<&str>,
 ) -> Vec<Node> {
     if !editorial {
-        return block_nodes(element, &BlockCtx { md: None, address: None });
+        return block_nodes(element, &BlockRole::PLAIN);
     }
     let md = content::project_markdown(element, content::Projection::Block);
-    block_nodes(element, &BlockCtx { md: md.as_deref(), address })
+    block_nodes(element, &BlockRole::BodySlot { md: md.as_deref(), address })
 }
 
 /// The editor addresses of body blocks, one per block, built without a file.
@@ -227,7 +249,7 @@ mod tests {
     }
 
     fn render(el: ContentElement) -> String {
-        serialize_nodes(&block_nodes(&el, &BlockCtx { md: None, address: None }))
+        serialize_nodes(&block_nodes(&el, &BlockRole::PLAIN))
     }
 
     #[test]
@@ -238,7 +260,7 @@ mod tests {
                 target: LinkTarget::PathRef("post".to_string()),
                 slot: None,
             },
-            &BlockCtx { md: None, address: None },
+            &BlockRole::PLAIN,
         );
         assert!(nodes.is_empty(), "{nodes:?}");
     }

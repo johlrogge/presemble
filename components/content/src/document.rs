@@ -1,25 +1,50 @@
 use schema::{HeadingLevel, Span, SlotName, Spanned};
 
-/// A parsed content document: an ordered sequence of spanned content elements.
+/// A sequence of blocks with the comments between them (ADR-062): the top
+/// level of a document, or the inside of a blockquote (ADR-059 §13).
 ///
 /// This is the low-level flat representation returned by the parser before
-/// slot assignment. Use [`FlatDocument`] when working directly with the parser
-/// output, and [`Document`] (the slotted form) as the canonical structured type.
+/// slot assignment ([`FlatDocument`]). Use [`Document`] (the slotted form) as
+/// the canonical structured type.
+///
+/// Child spans are byte offsets in the original input; they are not remapped
+/// when a block is nested.
 #[derive(Debug, Clone, Default)]
-pub struct FlatDocument {
+pub struct Blocks {
     pub elements: im::Vector<Spanned<ContentElement>>,
     /// HTML comments (ADR-062), each with the index in `elements` of the
-    /// element it precedes; `elements.len()` for comments at the end of the
-    /// file. In source order.
+    /// block it precedes; `elements.len()` for comments after the last block.
+    /// In source order.
     pub comments: im::Vector<(usize, Spanned<Comment>)>,
 }
 
-impl FlatDocument {
-    /// A flat document with no comments.
-    pub fn from_elements(elements: im::Vector<Spanned<ContentElement>>) -> Self {
-        FlatDocument { elements, comments: im::Vector::new() }
+/// Equality is by content: the blocks in order, and each comment with the
+/// index of the block it precedes. Spans are positions in some input, not
+/// content, which is how `ContentElement` equality is used everywhere
+/// (`again.elements[0].node == doc.elements[0].node`).
+impl PartialEq for Blocks {
+    fn eq(&self, other: &Self) -> bool {
+        self.elements.len() == other.elements.len()
+            && self.elements.iter().zip(other.elements.iter()).all(|(a, b)| a.node == b.node)
+            && self.comments.len() == other.comments.len()
+            && self
+                .comments
+                .iter()
+                .zip(other.comments.iter())
+                .all(|((i, a), (j, b))| i == j && a.node == b.node)
     }
 }
+
+impl Blocks {
+    /// Blocks with no comments.
+    pub fn from_elements(elements: im::Vector<Spanned<ContentElement>>) -> Self {
+        Blocks { elements, comments: im::Vector::new() }
+    }
+}
+
+/// The top level of a document is the same shape as the inside of a
+/// blockquote.
+pub type FlatDocument = Blocks;
 
 /// An HTML comment kept as trivia (ADR-062): its trimmed source, one or more
 /// `<!-- … -->` separated only by whitespace. Never content, never rendered,
@@ -163,8 +188,10 @@ pub enum ContentElement {
     /// A CommonMark HTML block, kept verbatim (trimmed source), never
     /// rendered, always an Error (ADR-062).
     HtmlBlock { source: String },
-    /// A blockquote element containing quoted text.
-    Blockquote { text: String },
+    /// A blockquote (ADR-059 §13): a container of any blocks, nested
+    /// blockquotes included, with the comments between them. An empty quote
+    /// is kept.
+    Blockquote { blocks: Blocks },
     /// A list (ordered or unordered) stored as raw markdown source.
     List { source: String },
     /// A link expression: `[text](target)`, optionally followed by a slot

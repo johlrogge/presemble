@@ -1403,7 +1403,7 @@ mod tests {
             ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "A *title*"),
             paragraph("Some **text**."),
             ContentElement::lone_link("t", "/x"),
-            ContentElement::Blockquote { text: "q".to_string() },
+            content::parse_document("> q\n").unwrap().elements[0].node.clone(),
             ContentElement::List { source: "- a\n- b".to_string() },
             ContentElement::CodeBlock {
                 language: Some("rust".to_string()),

@@ -20,7 +20,8 @@ pub use access::{
     find_attr_bool, find_attr_int, find_attr_text, find_child_by_name,
 };
 pub use block::{
-    BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS,
+    BLOCK_CONTAINER_KINDS, BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS,
+    PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS,
     add_trivia,
     block_from_node, block_to_store, block_to_tree, content_element_to_store, decode_trivia,
     inline_context_of, link_target_from_node, tree_to_block,

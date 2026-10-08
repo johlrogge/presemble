@@ -127,22 +127,6 @@ pub(crate) fn capitalize_slot(
         });
     }
 
-    // Capitalize the first element's text.
-    if let Some(first) = doc_slot.elements.front_mut()
-        && let Some(text) = element_text_mut(&mut first.node)
-    {
-        let first_char = match text.chars().next() {
-            Some(c) => c,
-            None => return Ok(false),
-        };
-        if first_char.is_uppercase() {
-            return Ok(false);
-        }
-        let upper: String = first_char.to_uppercase().collect();
-        text.replace_range(..first_char.len_utf8(), &upper);
-        return Ok(true);
-    }
-
     Ok(false)
 }
 
@@ -255,15 +239,6 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
-
-/// The literal text of a non-heading element. A heading's text is its inline
-/// nodes (see `capitalize_first_text`).
-fn element_text_mut(element: &mut ContentElement) -> Option<&mut String> {
-    match element {
-        ContentElement::Blockquote { text } => Some(text),
-        _ => None,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests

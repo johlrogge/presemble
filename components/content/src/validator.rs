@@ -153,6 +153,23 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     ValidationResult { diagnostics }
 }
 
+/// `elements` and every block nested in a blockquote among them, in document
+/// order (a quote before its children). The validator reads quoted blocks
+/// exactly as top-level ones (ADR-059 §13).
+fn walk(elements: &im::Vector<Spanned<ContentElement>>) -> Vec<&Spanned<ContentElement>> {
+    fn collect<'a>(elements: &'a im::Vector<Spanned<ContentElement>>, out: &mut Vec<&'a Spanned<ContentElement>>) {
+        for spanned in elements {
+            out.push(spanned);
+            if let ContentElement::Blockquote { blocks } = &spanned.node {
+                collect(&blocks.elements, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    collect(elements, &mut out);
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Slot markers on headings
 // ---------------------------------------------------------------------------
@@ -165,7 +182,7 @@ fn validate_heading_markers(
     slot: Option<&SlotName>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for spanned in elements {
+    for spanned in walk(elements) {
         let ContentElement::Heading { marker: Some(name), .. } = &spanned.node else {
             continue;
         };
@@ -278,7 +295,7 @@ fn validate_html(
     elements: &im::Vector<Spanned<ContentElement>>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for spanned in elements {
+    for spanned in walk(elements) {
         if matches!(spanned.node, ContentElement::HtmlBlock { .. }) {
             diagnostics.push(ValidationDiagnostic {
                 severity: Severity::Error,
@@ -295,16 +312,13 @@ fn validate_html(
 /// (ADR-062 D3): the kinds stored as markdown source or inline nodes. HTML
 /// blocks have their own error ([`validate_html`]); comment-only HTML, code
 /// spans and `\<` are never reported. Elements of a slot are reported against
-/// the slot.
-///
-/// Blockquotes still store literal text: HTML in them is shown escaped,
-/// written escaped on save and not reported (limit L13, until package Q).
+/// the slot. Blocks inside a blockquote are read like any other (L13).
 fn validate_inline_html(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: Option<&SlotName>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for spanned in elements {
+    for spanned in walk(elements) {
         let html = match &spanned.node {
             ContentElement::List { source } => crate::html::first_inline_html(source),
             // A heading's or paragraph's HTML is in its nodes.
@@ -439,7 +453,7 @@ fn validate_link_expressions(
         };
         diagnostics.push(ValidationDiagnostic { severity, message, slot: slot.cloned(), span: None });
     };
-    for spanned in elements {
+    for spanned in walk(elements) {
         match &spanned.node {
             // Marker misuse is an error in any section (ADR-060 P1).
             ContentElement::Paragraph { content, marker: Some(marker) } => {
@@ -1495,25 +1509,64 @@ mod tests {
         assert!(d.is_empty(), "{d:#?}");
     }
 
-    /// Lists and blockquotes ending in `{#name}` are not covered by marker
-    /// misuse; see ADR-060 open questions.
+    /// Lists ending in `{#name}` are not covered by marker misuse; see ADR-060
+    /// open questions. (A blockquote reads its paragraphs as the top level
+    /// does: see `markers_and_link_expressions_in_a_blockquote_read_as_at_top_level`.)
     #[test]
-    fn lists_and_blockquotes_ending_in_a_marker_are_not_marker_misuse() {
+    fn lists_ending_in_a_marker_are_not_marker_misuse() {
         let g = summary_grammar(true);
-        for (md, is_kind) in [
-            ("- a {#tags}", (|e: &ContentElement| matches!(e, ContentElement::List { .. })) as fn(&ContentElement) -> bool),
-            ("> q {#x}", |e: &ContentElement| matches!(e, ContentElement::Blockquote { .. })),
-        ] {
+        let md = "- a {#tags}";
+        let src = format!("# Title\n\nOne.\n\n----\n\n{md}\n");
+        let doc = parse_and_assign(&src, &g).expect("parses");
+        assert_eq!(doc.body.len(), 1, "{md:?}: {doc:#?}");
+        assert!(matches!(doc.body[0].node, ContentElement::List { .. }), "{md:?}: {:?}", doc.body[0].node);
+        let d = validate(&doc, &g).diagnostics;
+        assert!(!d.iter().any(|d| d.message.contains("slot marker")), "{md:?}: {d:#?}");
+    }
+
+    /// D1: a quote's paragraphs are read exactly as at the top level. A
+    /// marker is the paragraph's structure, misuse is an Error; a link
+    /// expression in a body quote gets the body warning.
+    #[test]
+    fn markers_and_link_expressions_in_a_blockquote_read_as_at_top_level() {
+        let g = summary_grammar(true);
+        let body_diagnostics = |md: &str| {
             let src = format!("# Title\n\nOne.\n\n----\n\n{md}\n");
-            let doc = parse_and_assign(&src, &g).expect("parses");
-            assert_eq!(doc.body.len(), 1, "{md:?}: {doc:#?}");
-            assert!(is_kind(&doc.body[0].node), "{md:?}: {:?}", doc.body[0].node);
-            let d = validate(&doc, &g).diagnostics;
-            assert!(
-                !d.iter().any(|d| d.message.contains("slot marker")),
-                "{md:?}: {d:#?}"
-            );
-        }
+            validate(&parse_and_assign(&src, &g).expect("parses"), &g).diagnostics
+        };
+        let top = body_diagnostics("q {#x}");
+        let quoted = body_diagnostics("> q {#x}");
+        assert_eq!(top.len(), 1, "{top:#?}");
+        assert_eq!(quoted.len(), 1, "{quoted:#?}");
+        assert_eq!(top[0].severity, Severity::Error);
+        assert_eq!(quoted[0].severity, Severity::Error);
+        assert_eq!(top[0].message, quoted[0].message);
+
+        let top = body_diagnostics("[posts](:post)");
+        let quoted = body_diagnostics("> [posts](:post)");
+        assert_eq!(top.len(), 1, "{top:#?}");
+        assert_eq!(quoted.len(), 1, "{quoted:#?}");
+        assert_eq!(quoted[0].severity, Severity::Warning);
+        assert_eq!(top[0].message, quoted[0].message);
+    }
+
+    /// L13 (flipped): HTML inside a quote is kept and reported, as in a
+    /// paragraph, whether it is inline or a block.
+    #[test]
+    fn html_inside_a_blockquote_is_kept_and_reported_l13() {
+        let d = body_diagnostics("> <div>\n> x\n> </div>");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.starts_with("HTML block"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn inline_html_in_a_blockquote_is_an_error_l13() {
+        let d = body_diagnostics("> q <i>y</i>");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.starts_with("paragraph"), "{}", d[0].message);
+        assert!(d[0].message.contains("inline HTML `<i>`"), "{}", d[0].message);
     }
 
     #[test]
@@ -1690,7 +1743,6 @@ mod tests {
             "### The `<div>` element",
             "### Using `Vec<T>`",
             "### Use \\<div>",
-            "> q <i>y</i>",
             "> a \\<b>",
             "![i](a.png) a \\<b>",
         ] {

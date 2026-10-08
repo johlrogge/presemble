@@ -1,6 +1,8 @@
 use crate::document::{
-    Align, Column, Comment, ContentElement, Document, FlatDocument, Keyword, LinkTarget, LinkText,
+    Align, Blocks, Column, Comment, ContentElement, Document, FlatDocument, Keyword, LinkTarget,
+    LinkText,
 };
+use std::borrow::Cow;
 use crate::error::ContentError;
 use crate::inline::{inlines_from_events, InlineContext, Inlines};
 use crate::link_expression::{
@@ -267,10 +269,14 @@ fn read_pulldown_link_expression(expr: &str) -> Option<(LinkText, LinkTarget)> {
 /// For the structured slotted form, use [`parse_and_assign`] instead.
 pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     let event_iter = Parser::new_ext(input, MARKDOWN_OPTIONS).into_offset_iter();
-    let mut elements: im::Vector<Spanned<ContentElement>> = im::Vector::new();
-    let mut comments: im::Vector<(usize, Spanned<Comment>)> = im::Vector::new();
+    // The blocks read so far at the top level, and the open blockquotes
+    // (innermost last) with the range of their opening: blocks go to the
+    // innermost open container (ADR-059 §13).
+    let mut root = Blocks::default();
+    let mut open: Vec<(Blocks, std::ops::Range<usize>)> = Vec::new();
 
     enum State {
+        /// Between blocks of the innermost open container.
         Idle,
         /// A heading keeps its source (ADR-063): every event inside it is
         /// consumed at the top of the loop; only its range is needed.
@@ -278,21 +284,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             level: HeadingLevel,
             byte_range: std::ops::Range<usize>,
         },
-        /// A top-level paragraph keeps its events (with their source ranges)
+        /// A paragraph, at the top level or directly in a blockquote, keeps its events (with their source ranges)
         /// until it ends: its content is read from them, and nothing is
         /// extracted or dropped (ADR-059 §5).
         Paragraph {
             events: Vec<(Event<'static>, std::ops::Range<usize>)>,
-            byte_range: std::ops::Range<usize>,
-        },
-        Image {
-            alt: String,
-            path: String,
-            image_range: std::ops::Range<usize>,
-        },
-        Link {
-            text: String,
-            href: String,
             byte_range: std::ops::Range<usize>,
         },
         CodeBlock {
@@ -312,12 +308,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             cell_events: Vec<Event<'static>>,
             byte_range: std::ops::Range<usize>,
         },
-        Blockquote {
-            text: String,
-            byte_range: std::ops::Range<usize>,
-        },
-        /// A top-level HTML block (ADR-062); its `Html` events are ignored
-        /// and its trimmed source is kept.
+        /// An HTML block (ADR-062); its `Html` events are ignored and its
+        /// trimmed source is kept.
         HtmlBlock {
             byte_range: std::ops::Range<usize>,
         },
@@ -325,7 +317,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             byte_range: std::ops::Range<usize>,
             depth: u32,
         },
-        /// A whole top-level paragraph recognised from its source as a link
+        /// A whole paragraph (top level or directly in a blockquote) recognised from its source as a link
         /// expression (ADR-058); every event up to its end is ignored.
         LinkExpression {
             text: LinkText,
@@ -346,7 +338,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 && let State::LinkExpression { text, target, slot, byte_range } =
                     std::mem::replace(&mut state, State::Idle)
             {
-                elements.push_back(Spanned {
+                current(&mut root, &mut open).elements.push_back(Spanned {
                     node: ContentElement::LinkExpression { text, target, slot },
                     span: Span::from(byte_range),
                 });
@@ -365,14 +357,16 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             };
             let closed = capture_closes(depth, nesting);
             if closed {
-                // Extract raw markdown source for the list block.
+                // Extract raw markdown source for the list block (without the
+                // quote markers of the quotes it sits in).
                 let start = byte_range.start;
                 let end = range.end;
-                let source = input.get(start..end)
-                    .map(|s| s.trim().to_string())
+                let source = input
+                    .get(start..end)
+                    .map(|s| unquoted(s, open.len()).trim().to_string())
                     .unwrap_or_default();
                 if !source.is_empty() {
-                    elements.push_back(Spanned {
+                    current(&mut root, &mut open).elements.push_back(Spanned {
                         node: ContentElement::List { source },
                         span: Span { start, end },
                     });
@@ -403,7 +397,14 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 if let State::Paragraph { events, byte_range } =
                     std::mem::replace(&mut state, State::Idle)
                 {
-                    finish_paragraph(input, events, byte_range, &mut elements);
+                    let depth = open.len();
+                    finish_paragraph(
+                        input,
+                        events,
+                        byte_range,
+                        depth,
+                        &mut current(&mut root, &mut open).elements,
+                    );
                 }
             } else {
                 events.push((event.into_static(), range));
@@ -415,7 +416,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         // links, images, HTML, breaks) are consumed here.
         if let State::Heading { level, byte_range } = &state {
             if matches!(event, Event::End(TagEnd::Heading(_))) {
-                let source = heading_source(input.get(byte_range.clone()).unwrap_or_default());
+                let raw = input.get(byte_range.clone()).unwrap_or_default();
+                let source = heading_source(&unquoted(raw, open.len()));
                 // The heading's own line read as one heading's content: a
                 // failure here is a bug in the reading, not a parse error.
                 // Disk input must never take the server down, so release
@@ -432,7 +434,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                         log_unreadable_heading(&source, line);
                         crate::inline::literal_heading_content(&source)
                     });
-                elements.push_back(Spanned {
+                current(&mut root, &mut open).elements.push_back(Spanned {
                     node: ContentElement::Heading { level: *level, content, marker },
                     span: Span::from(byte_range.clone()),
                 });
@@ -451,99 +453,70 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Start(Tag::Paragraph) => {
-                // A top-level paragraph whose whole source is a link
-                // expression (ADR-058). If it does not parse it stays a
-                // paragraph; the validator reports it.
-                let top_level_source = matches!(state, State::Idle)
-                    .then(|| input.get(range.clone()))
-                    .flatten();
-                let link_expression = top_level_source.and_then(read_link_expression_paragraph);
+                // A paragraph whose whole source is a link expression
+                // (ADR-058), at the top level or directly in a blockquote
+                // (the quote markers are not part of the source). If it does
+                // not parse it stays a paragraph; the validator reports it.
+                let link_expression = input
+                    .get(range.clone())
+                    .and_then(|raw| read_link_expression_paragraph(&unquoted(raw, open.len())));
                 if let Some((text, target, slot)) = link_expression {
                     state = State::LinkExpression { text, target, slot, byte_range: range };
-                } else if !matches!(state, State::Blockquote { .. }) {
-                    // Inside a blockquote the inner paragraph events are
-                    // suppressed: its raw source captures the content.
+                } else {
                     state = State::Paragraph { events: Vec::new(), byte_range: range };
                 }
             }
 
-            // A link or an image starts a block only where a block can start,
-            // at the top level. Anywhere else it is inline content of what is
-            // being read (a table cell, a blockquote, ...) and must not
-            // replace that state.
-            Event::Start(Tag::Image { dest_url, .. }) if matches!(state, State::Idle) => {
-                state = State::Image {
-                    alt: String::new(),
-                    path: dest_url.to_string(),
-                    image_range: range,
-                };
-            }
-            Event::End(TagEnd::Image) => {
-                if let State::Image { alt, path, image_range } = state {
-                    elements.push_back(Spanned {
-                        node: image_element(alt, path),
-                        span: Span::from(image_range),
-                    });
-                    state = State::Idle;
-                }
-            }
-
-            Event::Start(Tag::Link { dest_url, .. }) if matches!(state, State::Idle) => {
-                state = State::Link {
-                    text: String::new(),
-                    href: dest_url.to_string(),
-                    byte_range: range,
-                };
-            }
-            Event::End(TagEnd::Link) => {
-                if let State::Link { text, href, byte_range } = state {
-                    elements.push_back(Spanned {
-                        node: link_element(text, href),
-                        span: Span::from(byte_range),
-                    });
-                    state = State::Idle;
-                }
-                // Anywhere else the link was inline and its end is a no-op.
+            // Inline content is captured by the block that holds it (a
+            // paragraph, heading, table cell or list item), so a link or an
+            // image never reaches here: there is no block of its own to start.
+            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
+                debug_assert!(
+                    false,
+                    "invariant: inline content is captured by the block that holds it"
+                );
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
-                state = State::Blockquote {
-                    text: String::new(),
-                    byte_range: range,
-                };
+                debug_assert!(
+                    matches!(state, State::Idle),
+                    "invariant: a blockquote starts between blocks"
+                );
+                open.push((Blocks::default(), range));
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                if let State::Blockquote { text, byte_range } = state {
-                    let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        elements.push_back(Spanned {
-                            node: ContentElement::Blockquote { text: trimmed },
-                            span: Span::from(byte_range),
-                        });
-                    }
-                    state = State::Idle;
+                debug_assert!(
+                    matches!(state, State::Idle),
+                    "invariant: a blockquote ends between blocks"
+                );
+                if let Some((blocks, opened)) = open.pop() {
+                    // An empty quote is kept (ADR-059 §13).
+                    current(&mut root, &mut open).elements.push_back(Spanned {
+                        node: ContentElement::Blockquote { blocks },
+                        span: Span::from(opened),
+                    });
                 }
             }
 
-            // Only a top-level HTML block becomes an element. Inside a
-            // blockquote the HTML is kept in the quote's text as literal text,
-            // which the serializer writes escaped (limit L13); lists and link
-            // expressions consume
-            // their events at the top of the loop.
+            // An HTML block becomes an element at any depth; lists and link
+            // expressions consume their events at the top of the loop.
             Event::Start(Tag::HtmlBlock) if matches!(state, State::Idle) => {
                 state = State::HtmlBlock { byte_range: range };
             }
             Event::End(TagEnd::HtmlBlock) => {
                 if let State::HtmlBlock { byte_range } = state {
-                    let source = input.get(byte_range.clone()).map(str::trim).unwrap_or_default();
+                    let raw = input.get(byte_range.clone()).unwrap_or_default();
+                    let source = unquoted(raw, open.len());
+                    let source = source.trim();
                     // Comment-only HTML is trivia of the element that follows
                     // it (ADR-062 D1), not content.
+                    let container = current(&mut root, &mut open);
                     match Comment::new(source) {
-                        Some(comment) => comments.push_back((
-                            elements.len(),
+                        Some(comment) => container.comments.push_back((
+                            container.elements.len(),
                             Spanned { node: comment, span: Span::from(byte_range) },
                         )),
-                        None => elements.push_back(Spanned {
+                        None => container.elements.push_back(Spanned {
                             node: ContentElement::HtmlBlock { source: source.to_string() },
                             span: Span::from(byte_range),
                         }),
@@ -577,7 +550,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     } else if code.ends_with('\n') {
                         code.truncate(code.len() - 1);
                     }
-                    elements.push_back(Spanned {
+                    current(&mut root, &mut open).elements.push_back(Spanned {
                         node: ContentElement::CodeBlock { language, code },
                         span: Span::from(byte_range),
                     });
@@ -617,7 +590,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::End(TagEnd::Table) => {
                 if let State::Table { aligns, headers, rows, byte_range, .. } = state {
-                    elements.push_back(Spanned {
+                    current(&mut root, &mut open).elements.push_back(Spanned {
                         node: table_element(aligns, headers, rows),
                         span: Span::from(byte_range),
                     });
@@ -626,68 +599,18 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Rule => {
-                elements.push_back(Spanned {
+                current(&mut root, &mut open).elements.push_back(Spanned {
                     node: ContentElement::Separator,
                     span: Span::from(range),
                 });
                 state = State::Idle;
             }
 
-            Event::Text(text) => {
-                let s = text.as_ref();
-                match &mut state {
-                    State::Image { alt, .. } => alt.push_str(s),
-                    State::Link { text: buf, .. } => buf.push_str(s),
-                    State::CodeBlock { code, .. } => code.push_str(s),
-                    State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    // Table cells, HTML blocks and headings are read from
-                    // their source range. Paragraph, list, link-expression
-                    // and heading events never reach here (consumed at the
-                    // top of the loop).
-                    State::Table { .. }
-                    | State::Paragraph { .. }
-                    | State::HtmlBlock { .. }
-                    | State::Heading { .. }
-                    | State::List { .. }
-                    | State::LinkExpression { .. }
-                    | State::Idle => {}
-                }
-            }
-            Event::Code(text) => {
-                let s = text.as_ref();
-                match &mut state {
-                    State::Image { alt, .. } => alt.push_str(s),
-                    State::Link { text: buf, .. } => buf.push_str(s),
-                    State::CodeBlock { code, .. } => code.push_str(s),
-                    State::Blockquote { text: buf, .. } => buf.push_str(s),
-                    State::Table { .. }
-                    | State::Paragraph { .. }
-                    | State::HtmlBlock { .. }
-                    | State::Heading { .. }
-                    | State::List { .. }
-                    | State::LinkExpression { .. }
-                    | State::Idle => {}
-                }
-            }
-
-            Event::SoftBreak | Event::HardBreak => {
-                if let State::Blockquote { text, .. } = &mut state {
-                    text.push(' ');
-                }
-            }
-
-            // Inline HTML in blockquote text is kept as literal text:
-            // rendered escaped, not reported, written as `\<` (limit L13).
-            Event::InlineHtml(s) => {
-                if let State::Blockquote { text, .. } = &mut state {
-                    text.push_str(&s);
-                }
-            }
-            // An HTML block inside a blockquote is kept as text (limit L13);
-            // a top-level one is captured by `State::HtmlBlock`.
-            Event::Html(s) => {
-                if let State::Blockquote { text, .. } = &mut state {
-                    text.push_str(&s);
+            // Only a fenced or indented code block reads text at this level;
+            // every other block captures its own events (or reads its source).
+            Event::Text(text) | Event::Code(text) => {
+                if let State::CodeBlock { code, .. } = &mut state {
+                    code.push_str(&text);
                 }
             }
 
@@ -695,7 +618,48 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         }
     }
 
-    Ok(FlatDocument { elements, comments })
+    debug_assert!(open.is_empty(), "invariant: every blockquote was closed");
+    Ok(root)
+}
+
+/// The container blocks are being added to: the innermost open blockquote, or
+/// the top level.
+fn current<'a>(root: &'a mut Blocks, open: &'a mut [(Blocks, std::ops::Range<usize>)]) -> &'a mut Blocks {
+    match open.last_mut() {
+        Some((blocks, _)) => blocks,
+        None => root,
+    }
+}
+
+/// `raw` (the source range of a block nested in `depth` blockquotes) with the
+/// quote markers of every line but the first removed: per level, up to three
+/// spaces, `>`, and one optional space. A line without the marker (a lazy
+/// continuation) is kept from where the markers stop. The first line starts
+/// where the block does, so it has none.
+///
+/// Tabs are not expanded: a tab after `>` stays (CommonMark would count part
+/// of it as the marker's space), which is pinned by a test.
+pub(crate) fn unquoted(raw: &str, depth: usize) -> Cow<'_, str> {
+    if depth == 0 {
+        return Cow::Borrowed(raw);
+    }
+    let mut out = String::with_capacity(raw.len());
+    for (i, line) in raw.split_inclusive('\n').enumerate() {
+        if i == 0 {
+            out.push_str(line);
+            continue;
+        }
+        let mut rest = line;
+        for _ in 0..depth {
+            let spaces = rest.bytes().take_while(|b| *b == b' ').count().min(3);
+            match rest[spaces..].strip_prefix('>') {
+                Some(after) => rest = after.strip_prefix(' ').unwrap_or(after),
+                None => break,
+            }
+        }
+        out.push_str(rest);
+    }
+    Cow::Owned(out)
 }
 
 /// Parse a markdown content document and assign its elements to grammar slots.
@@ -802,20 +766,6 @@ fn link_element(text: String, href: String) -> ContentElement {
     ContentElement::Paragraph { content, marker: None }
 }
 
-/// The paragraph that holds one image (ADR-059 §12).
-fn image_element(alt: String, path: String) -> ContentElement {
-    use crate::inline::{AssetRef, Inline, InlineContext, Inlines};
-    let content = Inlines::new(
-        vec![Inline::Image {
-            source: AssetRef::new(path),
-            title: None,
-            alt: Inlines::new(vec![Inline::Text(alt)], InlineContext::Alt),
-        }],
-        InlineContext::Paragraph,
-    );
-    ContentElement::Paragraph { content, marker: None }
-}
-
 type ParagraphEvents = Vec<(Event<'static>, std::ops::Range<usize>)>;
 
 /// A paragraph that is exactly one link, ignoring comments and whitespace,
@@ -893,19 +843,22 @@ fn without_marker(events: ParagraphEvents, cut: usize, literal: &str) -> Option<
     Some(out)
 }
 
-/// A finished top-level paragraph: a paragraph of all its inline content and
-/// its trailing marker (ADR-059 §5), or a link expression when it is exactly
-/// one link written in a legacy spelling. Nothing is dropped. A paragraph that
-/// holds only a link or only an image is a paragraph like any other; its shape
-/// decides what it is for (ADR-059 §12).
+/// A finished paragraph, at the top level or directly in a blockquote: a
+/// paragraph of all its inline content and its trailing marker (ADR-059 §5), or
+/// a link expression when it is exactly one link written in a legacy spelling.
+/// Nothing is dropped. A paragraph that holds only a link or only an image is a
+/// paragraph like any other; its shape decides what it is for (ADR-059 §12).
 fn finish_paragraph(
     input: &str,
     events: ParagraphEvents,
     byte_range: std::ops::Range<usize>,
+    depth: usize,
     elements: &mut im::Vector<Spanned<ContentElement>>,
 ) {
     use crate::inline::{inlines_from_events, InlineContext};
-    let source = input.get(byte_range.clone()).unwrap_or_default();
+    let raw = input.get(byte_range.clone()).unwrap_or_default();
+    // Inside blockquotes the quote markers of later lines are not content.
+    let source = unquoted(raw, depth);
     let trimmed = source.trim();
     if trimmed.is_empty() {
         return;
@@ -924,8 +877,14 @@ fn finish_paragraph(
             (content, None)
         }
         Some(found) => {
-            let lead = source.len() - source.trim_start().len();
-            let cut = byte_range.start + lead + found.start;
+            // The marker is the end of the last line, which is the same in the
+            // raw and the unquoted source: cut from the end.
+            let marker_len = trimmed.len() - found.start;
+            let cut = byte_range.start + raw.trim_end().len() - marker_len;
+            debug_assert!(
+                input[cut..].starts_with("{#"),
+                "invariant: the marker starts at the cut"
+            );
             let literal = format!("{{#{}}}", found.marker);
             let content = match without_marker(events, cut, &literal) {
                 Some(kept) => inlines_from_events(kept, InlineContext::Paragraph),
@@ -1097,32 +1056,26 @@ mod tests {
         assert_eq!(doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1]);
     }
 
-    /// Limit L13: HTML in headings and blockquotes is read as literal text:
-    /// shown escaped, not reported, and written with every `<` as `\<`.
-    ///
-    /// A blockquote's text is decoded and its soft breaks are joined on the
-    /// next load, so the first save keeps the lines and the second joins them;
-    /// the output is stable from the second save on.
+    /// L13 (flipped, ADR-059 stage 8): HTML inside a blockquote is kept, as in
+    /// the body: an HTML block is a block of the quote, written back
+    /// verbatim behind the quote markers (the validator reports it).
     #[test]
-    fn html_inside_a_blockquote_is_literal_text_l13() {
+    fn html_inside_a_blockquote_is_kept_and_reported_l13() {
         let doc = parse_document("> <div>\n> x\n> </div>\n").unwrap();
-        let text = match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
-            [ContentElement::Blockquote { text }] => text.clone(),
+        let blocks = match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
+            [ContentElement::Blockquote { blocks }] => blocks.clone(),
             other => panic!("{other:#?}"),
         };
-        assert_eq!(text, "<div>\nx\n</div>");
+        assert_eq!(
+            blocks.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            vec![ContentElement::HtmlBlock { source: "<div>\nx\n</div>".to_string() }]
+        );
 
         let first = crate::serializer::serialize_elements(&doc.elements);
-        assert_eq!(first, "> \\<div>\n> x\n> \\</div>");
-        assert!(crate::html::first_inline_html(&first).is_none(), "literal after a save");
-
+        assert_eq!(first, "> <div>\n> x\n> </div>");
         let second =
             crate::serializer::serialize_elements(&parse_document(&first).unwrap().elements);
-        assert_eq!(second, "> \\<div> x \\</div>");
-        assert!(crate::html::first_inline_html(&second).is_none(), "still literal");
-        let third =
-            crate::serializer::serialize_elements(&parse_document(&second).unwrap().elements);
-        assert_eq!(third, second, "stable from the second save on");
+        assert_eq!(second, first, "a fixed point from the first save");
     }
 
     /// Headings store their markdown source (ADR-063): raw inline HTML is
@@ -1253,9 +1206,18 @@ mod tests {
             doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
             vec![
                 ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "a <b>x</b>"),
-                ContentElement::Blockquote { text: "q <i>y</i> z".to_string() },
+                quote(vec![ContentElement::paragraph_from_markdown("q <i>y</i> z")]),
             ]
         );
+    }
+
+    /// A blockquote of `children` (spans do not matter for equality).
+    fn quote(children: Vec<ContentElement>) -> ContentElement {
+        ContentElement::Blockquote {
+            blocks: Blocks::from_elements(
+                children.into_iter().map(|node| Spanned { node, span: Span { start: 0, end: 0 } }).collect(),
+            ),
+        }
     }
 
     /// A paragraph of only inline HTML has no text events; it is kept.
@@ -1518,15 +1480,158 @@ mod tests {
     #[test]
     fn a_link_in_a_blockquote_stays_in_the_blockquote() {
         let els = nodes("> see [a](/a) here\n");
-        assert_eq!(els.len(), 1, "{els:?}");
-        assert!(matches!(&els[0], ContentElement::Blockquote { text } if text.contains("here")), "{els:?}");
+        assert_eq!(els, vec![quote(vec![ContentElement::paragraph_from_markdown("see [a](/a) here")])]);
     }
 
     #[test]
     fn an_image_in_a_blockquote_stays_in_the_blockquote() {
         let els = nodes("> see ![i](a.png) here\n");
+        assert_eq!(els, vec![quote(vec![ContentElement::paragraph_from_markdown("see ![i](a.png) here")])]);
+    }
+
+    // ── Blockquotes hold blocks (ADR-059 stage 8.1) ──────────────────────────
+
+    fn quote_children(el: &ContentElement) -> Vec<ContentElement> {
+        match el {
+            ContentElement::Blockquote { blocks } => {
+                blocks.elements.iter().map(|e| e.node.clone()).collect()
+            }
+            other => panic!("expected a blockquote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_quote_holds_every_kind_of_block() {
+        let els = nodes("> a\n>\n> # H\n>\n> - l\n>\n> ---\n>\n> > n\n");
         assert_eq!(els.len(), 1, "{els:?}");
-        assert!(matches!(&els[0], ContentElement::Blockquote { text } if text.contains("here")), "{els:?}");
+        assert_eq!(
+            quote_children(&els[0]),
+            vec![
+                ContentElement::paragraph_from_markdown("a"),
+                ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "H"),
+                ContentElement::List { source: "- l".to_string() },
+                ContentElement::Separator,
+                quote(vec![ContentElement::paragraph_from_markdown("n")]),
+            ]
+        );
+    }
+
+    /// The list source is the list as written, without the quote markers.
+    #[test]
+    fn list_inside_a_blockquote_keeps_its_source_without_quote_markers() {
+        let els = nodes("> - a\n>   b\n> - c\n");
+        assert_eq!(
+            quote_children(&els[0]),
+            vec![ContentElement::List { source: "- a\n  b\n- c".to_string() }]
+        );
+        let els = nodes("> > 1. a\n> >    b\n> > 2. c\n");
+        assert_eq!(
+            quote_children(&quote_children(&els[0])[0]),
+            vec![ContentElement::List { source: "1. a\n   b\n2. c".to_string() }]
+        );
+    }
+
+    /// A code block inside a quote keeps its code, without the markers.
+    #[test]
+    fn code_block_inside_a_blockquote_keeps_its_code() {
+        let els = nodes("> ```rust\n> let x = 1;\n>\n> let y = 2;\n> ```\n");
+        assert_eq!(
+            quote_children(&els[0]),
+            vec![ContentElement::CodeBlock {
+                language: Some("rust".to_string()),
+                code: "let x = 1;\n\nlet y = 2;".to_string()
+            }]
+        );
+    }
+
+    /// D1: a quote's paragraphs are read as at the top level.
+    #[test]
+    fn markers_and_link_expressions_in_a_blockquote_read_as_at_top_level() {
+        let els = nodes("> q {#x}\n>\n> a\n> b {#y}\n>\n> [posts](:post)\n>\n> [t](->> :post (take 2)) {#news}\n");
+        let children = quote_children(&els[0]);
+        assert_eq!(children.len(), 4, "{children:?}");
+        let marker = |c: &ContentElement| match c {
+            ContentElement::Paragraph { marker, .. } => marker.as_ref().map(|m| m.as_str().to_string()),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(marker(&children[0]).as_deref(), Some("x"));
+        assert_eq!(marker(&children[1]).as_deref(), Some("y"));
+        assert!(matches!(children[2], ContentElement::LinkExpression { slot: None, .. }), "{:?}", children[2]);
+        assert!(matches!(children[3], ContentElement::LinkExpression { slot: Some(_), .. }), "{:?}", children[3]);
+        // The same source at the top level reads the same.
+        let top = nodes("q {#x}\n\na\nb {#y}\n\n[posts](:post)\n\n[t](->> :post (take 2)) {#news}\n");
+        assert_eq!(top, children);
+    }
+
+    /// D2: an empty quote is kept.
+    #[test]
+    fn empty_blockquote_is_kept() {
+        assert_eq!(nodes(">\n"), vec![quote(vec![])]);
+        assert_eq!(written(">\n"), ">");
+        assert_eq!(nodes("> a\n>\n> >\n"), vec![quote(vec![
+            ContentElement::paragraph_from_markdown("a"),
+            quote(vec![]),
+        ])]);
+    }
+
+    /// Paragraphs inside a quote are blocks of the quote: the document has the
+    /// quote and the paragraph after it, and the quote holds its two paragraphs.
+    #[test]
+    fn body_numbering_ignores_blocks_inside_a_blockquote() {
+        let els = nodes("> a\n>\n> b\n\nc\n");
+        assert_eq!(els.len(), 2, "{els:?}");
+        assert_eq!(quote_children(&els[0]).len(), 2);
+        assert_eq!(els[1], ContentElement::paragraph_from_markdown("c"));
+    }
+
+    /// Comments inside a quote are the quote's trivia, with the index of the
+    /// block they precede; the document's comments are not touched.
+    #[test]
+    fn comment_inside_blockquote_is_trivia() {
+        let doc = parse_document("> a\n>\n> <!-- c -->\n>\n> b\n>\n> <!-- end -->\n").unwrap();
+        assert!(doc.comments.is_empty(), "{:?}", doc.comments);
+        let ContentElement::Blockquote { blocks } = &doc.elements[0].node else { panic!() };
+        let comments: Vec<_> = blocks.comments.iter().map(|(i, c)| (*i, c.node.as_str().to_string())).collect();
+        assert_eq!(comments, vec![(1, "<!-- c -->".to_string()), (2, "<!-- end -->".to_string())]);
+        assert_eq!(blocks.elements.len(), 2);
+    }
+
+    #[test]
+    fn unquoted_strips_the_markers_of_every_line_but_the_first() {
+        // Depth 0 borrows.
+        assert!(matches!(unquoted("a\n> b", 0), Cow::Borrowed(_)));
+        assert_eq!(unquoted("a\n> b\n>   c\n>d\n", 1), "a\nb\n  c\nd\n");
+        // Up to three spaces before the marker; four make it text.
+        assert_eq!(unquoted("a\n   > b\n    > c", 1), "a\nb\n    > c");
+        // Two levels, and a line that stops at the first.
+        assert_eq!(unquoted("a\n> > b\n> c\nd", 2), "a\nb\nc\nd");
+        // A lazy line has no marker and is kept.
+        assert_eq!(unquoted("a\nlazy", 1), "a\nlazy");
+    }
+
+    /// A tab after `>` is not expanded, so the quoted line keeps it (CommonMark
+    /// would count part of it as the marker's space). A save only normalises
+    /// the whitespace; see the document-level test below.
+    #[test]
+    fn a_tab_after_the_quote_marker_is_kept_as_it_is() {
+        assert_eq!(unquoted("a\n>\tb", 1), "a\n\tb");
+    }
+
+    /// Document level: a list in a quote whose second line is `>\t  b`. The
+    /// tab is kept in the list's source; a save writes the quote's canonical
+    /// `> ` prefix, so the only change is the space after the marker, and the
+    /// saved text reads back as the same quote.
+    #[test]
+    fn a_tab_after_the_quote_marker_only_gets_the_canonical_prefix_on_save() {
+        let md = "> - a\n>\t  b\n";
+        assert_eq!(
+            nodes(md),
+            vec![quote(vec![ContentElement::List { source: "- a\n\t  b".to_string() }])]
+        );
+        let saved = written(md);
+        assert_eq!(saved, "> - a\n> \t  b");
+        assert_eq!(nodes(&saved), nodes(md));
+        assert_eq!(written(&saved), saved);
     }
 
     #[test]
@@ -1910,7 +2015,8 @@ headings
             .collect();
         assert!(!body_elements.is_empty(), "expected body elements after separator");
         match &body_elements[0].node {
-            ContentElement::Blockquote { text } => {
+            ContentElement::Blockquote { blocks } => {
+                let text = crate::serializer::serialize_blocks(blocks);
                 assert!(
                     text.contains("quoted"),
                     "expected 'quoted' in blockquote text, got: {text}"
@@ -1923,7 +2029,7 @@ headings
     #[test]
     fn blockquote_serializes_with_gt_prefix() {
         use crate::serializer::serialize_element;
-        let elem = ContentElement::Blockquote { text: "A quoted text.".to_string() };
+        let elem = quote(vec![ContentElement::paragraph_from_markdown("A quoted text.")]);
         let serialized = serialize_element(&elem);
         assert!(
             serialized.starts_with("> "),

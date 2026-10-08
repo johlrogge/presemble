@@ -38,11 +38,13 @@ impl ContentElement {
     /// exactly one editable text value (Image, Table, Separator,
     /// LinkExpression, and HtmlBlock, which cannot be text-edited: ADR-062 D4).
     ///
-    /// - Paragraph, Link, Blockquote → `text`
+    /// - Paragraph, Link → `text`
     /// - Heading → its markdown source (canonical inlines plus ` {#marker}`;
     ///   stage 4e replaces this with node edits)
     /// - List → `source`
     /// - CodeBlock → `code`
+    ///
+    /// A blockquote holds blocks (ADR-059 §13), not a text.
     pub fn text(&self) -> Option<Cow<'_, str>> {
         match self {
             ContentElement::Heading { content, marker, .. } => {
@@ -51,13 +53,30 @@ impl ContentElement {
             ContentElement::Paragraph { content, marker } => {
                 Some(Cow::Owned(crate::inline::paragraph_source_text(content, marker.as_ref())))
             }
-            ContentElement::Blockquote { text } => Some(Cow::Borrowed(text)),
             ContentElement::List { source } => Some(Cow::Borrowed(source)),
             ContentElement::CodeBlock { code, .. } => Some(Cow::Borrowed(code)),
-            ContentElement::Table { .. }
+            ContentElement::Blockquote { .. }
+            | ContentElement::Table { .. }
             | ContentElement::Separator
             | ContentElement::HtmlBlock { .. }
             | ContentElement::LinkExpression { .. } => None,
+        }
+    }
+
+    /// Whether the block has canonical markdown an editor can work on:
+    /// every kind but those that cannot be edited as markdown (a separator,
+    /// an HTML block and a link expression).
+    pub fn has_markdown(&self) -> bool {
+        match self {
+            ContentElement::Heading { .. }
+            | ContentElement::Paragraph { .. }
+            | ContentElement::CodeBlock { .. }
+            | ContentElement::Table { .. }
+            | ContentElement::Blockquote { .. }
+            | ContentElement::List { .. } => true,
+            ContentElement::Separator
+            | ContentElement::HtmlBlock { .. }
+            | ContentElement::LinkExpression { .. } => false,
         }
     }
 
@@ -71,13 +90,13 @@ impl ContentElement {
                 Some(ContentElement::heading_from_markdown(*level, &text))
             }
             ContentElement::Paragraph { .. } => Some(ContentElement::paragraph_from_markdown(&text)),
-            ContentElement::Blockquote { .. } => Some(ContentElement::Blockquote { text }),
             ContentElement::List { .. } => Some(ContentElement::List { source: text }),
             ContentElement::CodeBlock { language, .. } => Some(ContentElement::CodeBlock {
                 language: language.clone(),
                 code: text,
             }),
-            ContentElement::Table { .. }
+            ContentElement::Blockquote { .. }
+            | ContentElement::Table { .. }
             | ContentElement::Separator
             | ContentElement::HtmlBlock { .. }
             | ContentElement::LinkExpression { .. } => None,
@@ -104,8 +123,8 @@ pub enum Projection {
 /// Images and tables have no single text value but do have markdown, so the
 /// editor can round-trip them; both projections give their canonical form.
 pub fn project_markdown(el: &ContentElement, p: Projection) -> Option<String> {
-    if !matches!(el, ContentElement::Table { .. }) {
-        el.text()?;
+    if !el.has_markdown() {
+        return None;
     }
     let md = serialize_element(el);
     match (p, el) {
@@ -383,14 +402,21 @@ mod tests {
         assert_eq!(new.text().as_deref(), Some("new()"));
     }
 
+    /// A quote of the single literal paragraph `text`.
+    fn quote_of_text(text: &str) -> ContentElement {
+        ContentElement::Blockquote {
+            blocks: crate::document::Blocks::from_elements(im::vector![schema::Spanned {
+                node: paragraph(text),
+                span: schema::Span { start: 0, end: 0 },
+            }]),
+        }
+    }
+
     #[test]
-    fn text_and_with_text_cover_list_blockquote_paragraph() {
+    fn text_and_with_text_cover_list_and_paragraph() {
         let cases = [
             ContentElement::List {
                 source: "- a".to_string(),
-            },
-            ContentElement::Blockquote {
-                text: "q".to_string(),
             },
             paragraph("p"),
         ];
@@ -405,6 +431,8 @@ mod tests {
     fn with_text_and_text_none_for_non_text_kinds() {
         let cases = [
             table(&["h"], &[&["c"]]),
+            // A quote holds blocks, not a text (ADR-059 §13).
+            quote_of_text("q"),
             ContentElement::Separator,
             ContentElement::LinkExpression {
                 text: LinkText::Empty,
@@ -560,15 +588,9 @@ mod tests {
     fn escaped_literal_text_blocks_round_trip() {
         let cases = [
             ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "Sharp \\##"),
-            ContentElement::Blockquote {
-                text: "# not a heading".to_string(),
-            },
-            ContentElement::Blockquote {
-                text: "1. not a list".to_string(),
-            },
-            ContentElement::Blockquote {
-                text: "[a]: /not-a-definition".to_string(),
-            },
+            quote_of_text("# not a heading"),
+            quote_of_text("1. not a list"),
+            quote_of_text("[a]: /not-a-definition"),
             lone_link("t", "/a&amp;b\\*c"),
             ContentElement::CodeBlock {
                 language: Some("a&b&amp;c\\d\\*".to_string()),

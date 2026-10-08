@@ -66,7 +66,7 @@ use content::{
 use schema::Grammar;
 
 /// Fixed seed list. Each seed produces one source per grammar.
-const SEEDS: std::ops::Range<u64> = 0..1000;
+const SEEDS: std::ops::Range<u64> = 0..1500;
 
 // ── Deterministic PRNG (splitmix64) ─────────────────────────────────────────
 
@@ -242,8 +242,66 @@ fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: b
         .join("\n")
 }
 
+/// Prefix every line of `block` as a blockquote line: `> text`, or `>` for a
+/// blank line.
+fn quote_lines(block: &str) -> String {
+    block
+        .split('\n')
+        .map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The children a quote is built from (ADR-059 stage 8): paragraphs, inline
+/// paragraphs, headings, code (also with a backtick run in it), lists, tables,
+/// HTML blocks, rules, link expressions, marker misuse and, below `depth`,
+/// nested quotes.
+fn gen_quote_child(rng: &mut Rng, depth: usize, previous_ordered: &mut Option<bool>) -> String {
+    match rng.below(if depth < 2 { 14 } else { 13 }) {
+        0..=2 => rng.pick(&PARAGRAPHS).to_string(),
+        3 => rng.pick(&INLINE_PARAGRAPHS).to_string(),
+        4 => rng.pick(BODY_HEADINGS).to_string(),
+        5 => rng.pick(&["```\nlet x = 1;\n\nlet y = 2;\n```", "````\n```\ninner\n```\n````", "~~~rust\nfn f() {}\n~~~"]).to_string(),
+        6 => gen_list(rng, previous_ordered, false),
+        7 => rng.pick(&["| a | b |\n|:--|--:|\n| 1 | **2** |", "| `x\\|y` |\n|---|\n| [l](/l) |"]).to_string(),
+        8 => rng.pick(HTML_BLOCKS).to_string(),
+        9 => "----".to_string(),
+        10 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
+        11 => rng.pick(MARKER_MISUSE).to_string(),
+        12 => rng.pick(&LITERAL_MARKER_PARAGRAPHS).to_string(),
+        _ => gen_blockquote(rng, depth + 1),
+    }
+}
+
+/// A blockquote of 0 to 3 children (an empty quote is kept, D2), comments
+/// between its children and at its end, and occasionally a lazy paragraph
+/// continuation. `depth` is how many quotes are open around it.
+fn gen_blockquote(rng: &mut Rng, depth: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut previous_ordered = None;
+    for _ in 0..rng.below(4) {
+        if rng.chance(15) {
+            parts.push(rng.pick(COMMENTS).to_string());
+        }
+        parts.push(gen_quote_child(rng, depth, &mut previous_ordered));
+    }
+    if rng.chance(15) {
+        parts.push(rng.pick(COMMENTS).to_string());
+    }
+    if parts.is_empty() {
+        return ">".to_string();
+    }
+    let mut quoted = quote_lines(&parts.join("\n\n"));
+    // A lazy continuation: the last line of a plain paragraph child, unmarked.
+    if rng.chance(10) && parts.len() == 1 && !parts[0].contains('\n') && parts[0].chars().all(|c| c.is_ascii_alphabetic() || c == ' ') {
+        quoted.push_str("\nlazy continuation");
+    }
+    quoted
+}
+
 fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
-    match rng.below(29) {
+    match rng.below(31) {
+        29..=30 => gen_blockquote(rng, 1),
         0..=2 => rng.pick(HEADINGS).to_string(),
         3..=5 => rng.pick(&PARAGRAPHS).to_string(),
         6..=7 => rng.pick(&LINKS).to_string(),
@@ -262,7 +320,8 @@ fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_
 }
 
 fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
-    match rng.below(13) {
+    match rng.below(15) {
+        13..=14 => gen_blockquote(rng, 1),
         11 => rng.pick(&INLINE_PARAGRAPHS).to_string(),
         0..=1 => rng.pick(BODY_HEADINGS).to_string(),
         2..=4 => rng.pick(&PARAGRAPHS).to_string(),
@@ -520,7 +579,9 @@ fn generator_exercises_unassigned_bound_and_body() {
     let mut end_unassigned = 0;
     let mut end_body = 0;
     let mut commented_adjacent_lists = 0;
-    let is_html = |e: &schema::Spanned<ContentElement>| matches!(e.node, ContentElement::HtmlBlock { .. });
+    let (mut quote_count, mut empty_quotes, mut quote_comments) = (0, 0, 0);
+    let (mut multi_block_quotes, mut quoted_non_paragraphs, mut nested_quotes) = (0, 0, 0);
+    let is_html =|e: &schema::Spanned<ContentElement>| matches!(e.node, ContentElement::HtmlBlock { .. });
     for seed in SEEDS {
         let src = gen_source(seed);
         let doc = assign(&src, &grammar);
@@ -552,6 +613,36 @@ fn generator_exercises_unassigned_bound_and_body() {
                     commented_adjacent_lists += 1;
                 }
             }
+        }
+        // Quotes, wherever they are (ADR-059 stage 8).
+        fn quotes<'a>(
+            elements: impl Iterator<Item = &'a schema::Spanned<ContentElement>>,
+            out: &mut Vec<&'a content::Blocks>,
+        ) {
+            for e in elements {
+                if let ContentElement::Blockquote { blocks } = &e.node {
+                    out.push(blocks);
+                    quotes(blocks.elements.iter(), out);
+                }
+            }
+        }
+        let mut all_quotes: Vec<&content::Blocks> = Vec::new();
+        quotes(doc.unassigned.iter().chain(doc.body.iter()), &mut all_quotes);
+        for q in &all_quotes {
+            quote_count += 1;
+            empty_quotes += usize::from(q.elements.is_empty() && q.comments.is_empty());
+            quote_comments += q.comments.len();
+            multi_block_quotes += usize::from(q.elements.len() > 1);
+            quoted_non_paragraphs += q
+                .elements
+                .iter()
+                .filter(|e| !matches!(e.node, ContentElement::Paragraph { .. } | ContentElement::Blockquote { .. }))
+                .count();
+            nested_quotes += q
+                .elements
+                .iter()
+                .filter(|e| matches!(e.node, ContentElement::Blockquote { .. }))
+                .count();
         }
         unassigned += doc.unassigned.len();
         unassigned_html += doc.unassigned.iter().filter(|e| is_html(e)).count();
@@ -618,6 +709,13 @@ fn generator_exercises_unassigned_bound_and_body() {
         commented_adjacent_lists > 2,
         "too few same-kind lists kept apart by a comment: {commented_adjacent_lists}"
     );
+    // The quote domain (ADR-059 stage 8).
+    assert!(quote_count > 300, "too few quotes: {quote_count}");
+    assert!(empty_quotes > 10, "too few empty quotes: {empty_quotes}");
+    assert!(quote_comments > 20, "too few comments inside quotes: {quote_comments}");
+    assert!(multi_block_quotes > 100, "too few quotes of several blocks: {multi_block_quotes}");
+    assert!(quoted_non_paragraphs > 200, "too few non-paragraph blocks in quotes: {quoted_non_paragraphs}");
+    assert!(nested_quotes > 30, "too few nested quotes: {nested_quotes}");
 }
 
 /// A literal marker is never marker misuse: in section 0 every

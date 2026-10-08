@@ -1421,7 +1421,7 @@ mod tests {
 
     #[test]
     fn body_blockquote_renders_as_blockquote_tag() {
-        let bq = spanned(ContentElement::Blockquote { text: "A wise quote.".to_string() });
+        let bq = spanned(content::parse_document("> A wise quote.\n").unwrap().elements[0].node.clone());
         let html = body_html(&im::vector![bq], false);
         assert!(
             html.contains("<blockquote"),

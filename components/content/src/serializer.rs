@@ -1,5 +1,5 @@
 use crate::document::{
-    CommentAnchor, Container, ContentElement, Document, LinkOp, LinkTarget, LinkText,
+    Blocks, CommentAnchor, Container, ContentElement, Document, LinkOp, LinkTarget, LinkText,
     RefsToTarget, SortDirection,
 };
 use crate::parser::read_link_expression_paragraph;
@@ -88,6 +88,28 @@ fn write_container(
     });
 }
 
+/// The blocks of a container as markdown: each block preceded by the comments
+/// that precede it, the comments after the last block at the end, all joined
+/// by blank lines (ADR-062). A comment is never dropped: one anchored past the
+/// end is written at the end.
+pub(crate) fn serialize_blocks(blocks: &Blocks) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (at, spanned) in blocks.elements.iter().enumerate() {
+        for (index, comment) in &blocks.comments {
+            if *index == at {
+                parts.push(comment.node.as_str().to_string());
+            }
+        }
+        parts.push(serialize_element(&spanned.node));
+    }
+    for (index, comment) in &blocks.comments {
+        if *index >= blocks.elements.len() {
+            parts.push(comment.node.as_str().to_string());
+        }
+    }
+    parts.join("\n\n")
+}
+
 pub(crate) fn serialize_elements(elements: &im::Vector<Spanned<ContentElement>>) -> String {
     elements.iter()
         .map(|s| serialize_element(&s.node))
@@ -133,11 +155,22 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
         }
         // Verbatim (ADR-062); the `"\n\n"` join supplies the blank lines.
         ContentElement::HtmlBlock { source } => source.clone(),
-        ContentElement::Blockquote { text } => escape_block_lines(&escape_angle_brackets(text))
-            .iter()
-            .map(|l| format!("> {l}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        // A quote writes its blocks, every line behind `>`: no line is ever
+        // a lazy continuation, and the blocks inside need only their own
+        // (context-free) escaping, since each line after `> ` is a line start
+        // again. An empty quote is `>`.
+        ContentElement::Blockquote { blocks } => {
+            let inner = serialize_blocks(blocks);
+            if inner.is_empty() {
+                ">".to_string()
+            } else {
+                inner
+                    .split('\n')
+                    .map(|line| if line.is_empty() { ">".to_string() } else { format!("> {line}") })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
         ContentElement::List { source } => source.clone(),
         ContentElement::LinkExpression { text, target, slot } => {
             let text_part = match text {
@@ -177,8 +210,10 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
 ///   scope (no escaping inside `[...]`).
 /// - L7: a plain `Link` whose href starts with `:`, `->` or `(->` reads back
 ///   as a `LinkExpression` (`is_link_expression`).
-/// - L8: link expressions are only recognised as whole top-level paragraphs;
-///   a link expression elsewhere (inline, in a list or blockquote) is text.
+/// - L8: link expressions are only recognised as whole paragraphs, at the top
+///   level or directly in a blockquote (stage 8, D1: a quote's paragraphs are
+///   read as the top level reads them); a link expression elsewhere (inline,
+///   in a list) is text.
 ///
 /// (L1, `->` read as `->>`, is gone: `->` is rejected. L3, strings that did
 /// not round-trip, is gone: strings are escaped. L4, sources and fields that
@@ -233,8 +268,8 @@ fn quote(s: &str) -> String {
 
 // ── Lossless block-level escaping (ADR-057) ─────────────────────────────────
 //
-// The parser stores literal text for headings, blockquotes, link text and
-// image alt (pulldown-cmark Text events arrive unescaped). The serializer must
+// The parser stores literal text for link-expression labels and literal Text
+// nodes (pulldown-cmark Text events arrive unescaped). The serializer must
 // therefore escape anything that would make the written line parse as a
 // different block. Escapes are inserted only where the line WOULD otherwise
 // change meaning, so markdown read from disk keeps its exact source.
@@ -681,13 +716,6 @@ fn parse_closing_tag(b: &[u8]) -> Option<usize> {
     (b.get(i) == Some(&b'>')).then_some(i + 1)
 }
 
-/// Write every `<` of literal text as `\<`, so blockquotes never write raw
-/// HTML (ADR-062, limit L13): what was read as text is written as text.
-/// Headings store their source (ADR-063) and do not use this.
-fn escape_angle_brackets(text: &str) -> String {
-    text.replace('<', "\\<")
-}
-
 /// Escape a trailing run of `#` that would read as a closing ATX sequence.
 /// Used by [`crate::inline::heading_markdown`].
 pub(crate) fn escape_closing_hashes(text: &str) -> String {
@@ -1054,14 +1082,23 @@ headings
             ("- x", "> \\- x"),
             ("1. x", "> 1\\. x"),
             ("---", "> \\---"),
-            ("```", "> \\```"),
+            ("```", "> \\`\\``"),
             ("<div> x", "> \\<div> x"),
             ("[a]: /x", "> \\[a]: /x"),
         ];
         for (text, expected) in cases {
-            let el = ContentElement::Blockquote { text: text.to_string() };
+            let el = quote_of(vec![para(text)]);
             assert_eq!(serialize_element(&el), expected, "blockquote {text:?}");
             assert_eq!(reparse_one(expected), el, "blockquote {text:?}");
+        }
+    }
+
+    /// A quote holding exactly `children`.
+    fn quote_of(children: Vec<ContentElement>) -> ContentElement {
+        ContentElement::Blockquote {
+            blocks: crate::document::Blocks::from_elements(
+                children.into_iter().map(|node| Spanned { node, span: Span { start: 0, end: 0 } }).collect(),
+            ),
         }
     }
 
@@ -1072,13 +1109,110 @@ headings
             ("\t- x", "> \\- x", "- x"),
             ("    code", "> code", "code"),
         ] {
-            let el = ContentElement::Blockquote { text: text.to_string() };
+            let el = quote_of(vec![para(text)]);
             let out = serialize_element(&el);
             assert_eq!(out, expected, "blockquote {text:?}");
-            let back = ContentElement::Blockquote { text: back.to_string() };
+            let back = quote_of(vec![para(back)]);
             assert_eq!(reparse_one(&out), back, "blockquote {text:?}");
             assert_eq!(serialize_element(&back), out, "blockquote {text:?} is not a fixed point");
         }
+    }
+
+    // ── Blockquotes hold blocks (ADR-059 stage 8.1) ──────────────────────────
+
+    /// Parse `md` and write its blocks back.
+    fn saved(md: &str) -> String {
+        serialize_elements(&crate::parser::parse_document(md).expect("parses").elements)
+    }
+
+    /// The top-level blocks `md` reads as.
+    fn top_level(md: &str) -> Vec<ContentElement> {
+        crate::parser::parse_document(md)
+            .expect("parses")
+            .elements
+            .iter()
+            .map(|e| e.node.clone())
+            .collect()
+    }
+
+    /// Two paragraphs in a quote stay two, and are written back as written.
+    #[test]
+    fn multi_paragraph_blockquote_round_trips() {
+        let src = "> a\n>\n> b\n";
+        assert_eq!(top_level(src).len(), 1);
+        assert_eq!(saved(src), "> a\n>\n> b");
+        assert_eq!(saved(&saved(src)), "> a\n>\n> b");
+    }
+
+    /// L17: a code span in a quote keeps its backticks.
+    #[test]
+    fn blockquote_code_span_keeps_backticks_l17() {
+        assert_eq!(saved("> The `<div>` element\n"), "> The `<div>` element");
+    }
+
+    /// L13: HTML in a quote is kept, as in a paragraph (it is reported by the
+    /// validator).
+    #[test]
+    fn html_inside_a_blockquote_is_kept_l13() {
+        assert_eq!(saved("> <div>\n> x\n> </div>\n"), "> <div>\n> x\n> </div>");
+        assert_eq!(saved("> q <i>y</i>\n"), "> q <i>y</i>");
+    }
+
+    /// A comment inside a quote is trivia of the quote, written back in place.
+    #[test]
+    fn comment_inside_blockquote_is_trivia() {
+        let src = "> a\n>\n> <!-- c -->\n>\n> b\n";
+        let grammar = schema::Grammar { preamble: vec![], body: None };
+        let doc = crate::parser::parse_and_assign(src, &grammar).expect("parses");
+        assert!(doc.comments.is_empty(), "the comment is not the document's: {:?}", doc.comments);
+        assert_eq!(serialize_document(&doc), format!("{}\n", src.trim_end()));
+    }
+
+    /// A block other than a paragraph inside a quote keeps the quote: one
+    /// top-level block, and the text before it survives.
+    #[test]
+    fn blocks_inside_a_blockquote_keep_the_quote() {
+        let cases = [
+            ("> a\n>\n> # H\n", "> a\n>\n> # H"),
+            ("> a\n>\n> ```\n> x\n> ```\n", "> a\n>\n> ```\n> x\n> ```"),
+            ("> a\n>\n> ````\n> ```\n> ````\n", "> a\n>\n> ````\n> ```\n> ````"),
+            ("> a\n>\n> - l\n", "> a\n>\n> - l"),
+            ("> a\n>\n> | x |\n> | --- |\n> | y |\n", "> a\n>\n> | x |\n> | --- |\n> | y |"),
+            ("> a\n>\n> ---\n", "> a\n>\n> ----"),
+            ("> a\n>\n> <div>x</div>\n", "> a\n>\n> <div>x</div>"),
+            ("> a\n>\n> > n\n", "> a\n>\n> > n"),
+        ];
+        for (src, expected) in cases {
+            let blocks = top_level(src);
+            assert_eq!(blocks.len(), 1, "{src:?}: {blocks:?}");
+            assert!(matches!(blocks[0], ContentElement::Blockquote { .. }), "{src:?}: {blocks:?}");
+            assert_eq!(saved(src), expected, "{src:?}");
+            assert_eq!(saved(expected), expected, "{src:?} is not a fixed point");
+        }
+    }
+
+    /// A rule inside a quote is a block of the quote, not the body separator.
+    #[test]
+    fn a_rule_inside_a_blockquote_is_not_the_body_separator() {
+        let grammar =
+            schema::parse_schema("# Title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n").unwrap();
+        let doc = crate::parser::parse_and_assign("# T\n\n> ---\n\nbody\n", &grammar).unwrap();
+        assert!(!doc.has_separator, "the body starts at a quoted rule: {doc:#?}");
+    }
+
+    #[test]
+    fn nested_blockquotes_round_trip() {
+        let src = "> a\n>\n> > b\n>\n> > > c\n";
+        assert_eq!(top_level(src).len(), 1);
+        assert_eq!(saved(src), "> a\n>\n> > b\n>\n> > > c");
+    }
+
+    /// A line without the marker continues the quote's paragraph (lazy
+    /// continuation); a setext underline cannot continue it that way.
+    #[test]
+    fn lazy_continuation_reads_as_the_quote() {
+        assert_eq!(saved("> a\nb\n"), "> a\n> b");
+        assert_eq!(saved("> foo\n===\n"), "> foo\n> \\===");
     }
 
     #[test]
@@ -1448,7 +1582,7 @@ headings
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
-        let quote = ContentElement::Blockquote { text: "a | b\n--- | ---".to_string() };
+        let quote = quote_of(vec![para("a | b\n--- | ---")]);
         let out = serialize_element(&quote);
         assert_eq!(out, "> a | b\n> \\--- | ---");
         assert!(matches!(reparse_one(&out), ContentElement::Blockquote { .. }));
@@ -1801,7 +1935,8 @@ headings
             link_expr(label("x"), LinkTarget::PathRef("p".to_string()))
         );
 
-        // L8: only a whole top-level paragraph is a link expression.
+        // L8: only a whole paragraph (top level or in a quote) is a link
+        // expression.
         assert_eq!(reparse_one("a [p](->> :post) b"), para("a [p](->> :post) b"));
 
         // L7: a plain link whose href starts with `:` reads back as a link expression.

@@ -250,13 +250,152 @@ fn non_element_is_error() {
 #[test]
 fn missing_text_child_is_error() {
     let mut store = NodeStore::new();
-    let id = make_element(&mut store, "blockquote");
+    let id = make_element(&mut store, "list");
     assert_eq!(
         block_from_node(&store, id),
         Err(BlockDecodeError::MissingTextChild {
-            kind: "blockquote".to_string()
+            kind: "list".to_string()
         })
     );
+}
+
+// ── Blockquotes hold blocks (ADR-059 §13, stage 8.1) ─────────────────────────
+
+fn quote(md: &str) -> ContentElement {
+    content::parse_document(md).unwrap().elements[0].node.clone()
+}
+
+#[test]
+fn blockquote_holds_blocks_in_the_store() {
+    use crate::access::element_name_of;
+    let el = quote("> a\n>\n> <!-- c -->\n>\n> # H\n>\n> <!-- end -->\n");
+    let mut store = NodeStore::new();
+    let id = block_to_store(&el, &mut store);
+    let children = store.children(id);
+    let names: Vec<_> = children.iter().map(|c| element_name_of(&store, *c).unwrap()).collect();
+    assert_eq!(names, vec!["paragraph", "heading"]);
+    // The comment before the heading is the heading's trivia; the one after
+    // the last block is the quote's.
+    let texts = |host, attr| -> Vec<String> {
+        ned::trivia::trivia_texts(&store, host, attr)
+            .into_iter()
+            .map(|t| match store.get(t) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(texts(children[1], ned::trivia::ATTR_TRIVIA_BEFORE), vec!["<!-- c -->"]);
+    assert_eq!(texts(children[0], ned::trivia::ATTR_TRIVIA_BEFORE), Vec::<String>::new());
+    assert_eq!(texts(id, ned::trivia::ATTR_TRIVIA_END), vec!["<!-- end -->"]);
+    assert_eq!(block_from_node(&store, id), Ok(el));
+}
+
+/// D2: an empty quote is stored as a childless element and decodes as an empty
+/// quote.
+#[test]
+fn empty_blockquote_is_stored_and_decoded() {
+    let el = quote(">\n");
+    let mut store = NodeStore::new();
+    let id = block_to_store(&el, &mut store);
+    assert!(store.children(id).is_empty());
+    assert_eq!(block_from_node(&store, id), Ok(el));
+}
+
+/// Quotes nest: a quote's child may be a quote, with its own trivia.
+#[test]
+fn nested_blockquotes_round_trip_through_the_store() {
+    let el = quote("> a\n>\n> > b\n> >\n> > <!-- c -->\n> >\n> > d\n");
+    let mut store = NodeStore::new();
+    let id = block_to_store(&el, &mut store);
+    assert_eq!(block_from_node(&store, id), Ok(el));
+}
+
+/// The old shape, one Text child holding the quote's text, is refused.
+#[test]
+fn old_text_blockquote_is_refused() {
+    let mut store = NodeStore::new();
+    let id = make_element(&mut store, "blockquote");
+    add_child_text(&mut store, id, "q");
+    assert_eq!(
+        block_from_node(&store, id),
+        Err(BlockDecodeError::UnexpectedChild { kind: "blockquote".to_string(), child: "text".to_string() })
+    );
+    let tree = NodeTree::element("blockquote").with_child(NodeTree::text("q"));
+    assert_eq!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedChild { kind: "blockquote".to_string(), child: "text".to_string() })
+    );
+}
+
+/// A quote's payload takes payload kinds only, as the top level does: no
+/// separator, HTML block or link expression (ADR-062 D4), nothing unknown.
+#[test]
+fn nested_non_payload_kinds_are_refused() {
+    for kind in ["separator", "html-block", "link-expression", "span"] {
+        let tree = NodeTree::element("blockquote").with_child(NodeTree::element(kind));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind(kind.to_string())),
+            "{kind}"
+        );
+        // Also two levels down.
+        let tree = NodeTree::element("blockquote")
+            .with_child(NodeTree::element("blockquote").with_child(NodeTree::element(kind)));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind(kind.to_string())),
+            "{kind} nested"
+        );
+    }
+}
+
+/// A quote holding a block that is not a payload kind is not describable as a
+/// tree: `block_to_tree` refuses it (ADR-062 D4) rather than building a tree
+/// whose edit would fail late and stay Stale.
+#[test]
+fn block_to_tree_refuses_a_quote_holding_a_non_payload_block() {
+    let spanned = |node| schema::Spanned { node, span: (0..0).into() };
+    let nested = [
+        ("html-block", ContentElement::HtmlBlock { source: "<div>x</div>".to_string() }),
+        ("separator", ContentElement::Separator),
+        (
+            "link-expression",
+            ContentElement::LinkExpression {
+                text: LinkText::Label("posts".to_string()),
+                target: LinkTarget::PathRef("p".to_string()),
+                slot: None,
+            },
+        ),
+    ];
+    for (kind, block) in nested {
+        let quote = ContentElement::Blockquote {
+            blocks: content::Blocks::from_elements(std::iter::once(spanned(block)).collect()),
+        };
+        assert_eq!(
+            crate::block::block_to_tree(&quote),
+            Err(BlockDecodeError::NotPayloadKind(kind.to_string())),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn blockquote_payload_attribute_is_refused() {
+    let tree = NodeTree::element("blockquote").with_attr("x", "y");
+    assert_eq!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedAttribute { kind: "blockquote".to_string(), attr: "x".to_string() })
+    );
+}
+
+/// A payload quote of blocks decodes to the quote the markdown reads as.
+#[test]
+fn blockquote_payload_decodes_its_blocks() {
+    let tree = NodeTree::element("blockquote")
+        .with_child(NodeTree::element("paragraph").with_child(NodeTree::text("a")))
+        .with_child(NodeTree::element("list").with_child(NodeTree::text("- l")));
+    assert_eq!(tree_to_block(&tree), Ok(quote("> a\n>\n> - l\n")));
 }
 
 /// A paragraph with no children is an empty paragraph (a marker-only one is
