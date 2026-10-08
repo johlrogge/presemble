@@ -601,16 +601,16 @@ mod tests {
     }
 
     #[test]
-    fn list_link_options_returns_empty_for_unknown_stem() {
+    fn list_link_options_is_an_error_for_unknown_stem() {
         let conductor = empty_conductor();
         let result = conductor.handle_command(Command::ListLinkOptions {
             stem: "nonexistent".to_string(),
         });
         match result.response {
-            Response::LinkOptions(opts) => {
-                assert!(opts.is_empty(), "expected empty options for unknown stem");
+            Response::Error(message) => {
+                assert!(message.contains("unknown schema stem"), "{message}");
             }
-            other => panic!("expected LinkOptions, got {other:?}"),
+            other => panic!("expected an error for an unknown stem, got {other:?}"),
         }
     }
 
@@ -733,49 +733,6 @@ mod tests {
                 assert_eq!(stem, "author");
             }
             other => panic!("expected LinkTargetStem(Some(\"author\")), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_link_returns_false_for_nonexistent_path() {
-        let conductor = empty_conductor();
-        let result = conductor.handle_command(Command::ResolveLink {
-            path: "/nonexistent/path/that/does/not/exist.md".to_string(),
-        });
-        match result.response {
-            Response::Exists(false) => {}
-            other => panic!("expected Exists(false), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_template_returns_false_for_missing_stem() {
-        let conductor = empty_conductor();
-        let result = conductor.handle_command(Command::ResolveTemplate {
-            stem: "nonexistent_stem_xyz".to_string(),
-        });
-        match result.response {
-            Response::Exists(false) => {}
-            other => panic!("expected Exists(false), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn resolve_template_returns_true_when_template_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let tpl_dir = dir.path().join("templates/post");
-        std::fs::create_dir_all(&tpl_dir).unwrap();
-        std::fs::write(tpl_dir.join("item.html"), "<html></html>").unwrap();
-
-        let repo = site_repository::SiteRepository::builder().build();
-        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
-
-        let result = conductor.handle_command(Command::ResolveTemplate {
-            stem: "post".to_string(),
-        });
-        match result.response {
-            Response::Exists(true) => {}
-            other => panic!("expected Exists(true), got {other:?}"),
         }
     }
 

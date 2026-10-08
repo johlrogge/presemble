@@ -110,10 +110,6 @@ pub enum Command {
     ListSchemas,
     /// List all link options for a given schema stem (for completions).
     ListLinkOptions { stem: String },
-    /// Resolve a link path: check whether it exists in the site.
-    ResolveLink { path: String },
-    /// Resolve a template stem: check whether a template exists for it.
-    ResolveTemplate { stem: String },
     /// List all files that depend on a given schema stem.
     ListDependents { stem: String },
     /// List all content file paths.
@@ -196,8 +192,6 @@ pub enum Response {
     SchemaList(Vec<(String, String)>),
     /// List of link options for completions.
     LinkOptions(Vec<LinkOption>),
-    /// Whether a path or template exists.
-    Exists(bool),
     /// List of files that depend on a schema stem.
     Dependents(Vec<DependentFile>),
     /// List of all content file paths (site-relative).

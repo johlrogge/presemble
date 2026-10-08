@@ -111,24 +111,6 @@ impl ConductorClient {
         }
     }
 
-    /// Resolve a link path: check whether it exists in the site.
-    pub fn resolve_link(&self, path: &str) -> Result<bool, String> {
-        match self.send(&Command::ResolveLink { path: path.to_string() })? {
-            Response::Exists(b) => Ok(b),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
-        }
-    }
-
-    /// Resolve a template stem: check whether a template exists for it.
-    pub fn resolve_template(&self, stem: &str) -> Result<bool, String> {
-        match self.send(&Command::ResolveTemplate { stem: stem.to_string() })? {
-            Response::Exists(b) => Ok(b),
-            Response::Error(e) => Err(e),
-            other => Err(format!("unexpected response: {other:?}")),
-        }
-    }
-
     /// List files that depend on a given schema stem.
     pub fn list_dependents(&self, stem: &str) -> Result<Vec<DependentFile>, String> {
         match self.send(&Command::ListDependents { stem: stem.to_string() })? {

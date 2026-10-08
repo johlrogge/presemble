@@ -1996,6 +1996,19 @@ impl Conductor {
     }
 
     /// List all schema stems known to the conductor (excludes collection schemas).
+    /// Whether `stem` names a schema of this site (`""` is the root
+    /// collection). A stem from a client is checked here before it is used
+    /// to build anything.
+    pub fn is_known_stem(&self, stem: &str) -> bool {
+        stem.is_empty()
+            || self
+                .schema_cache
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .keys()
+                .any(|key| key.split('/').next() == Some(stem))
+    }
+
     pub fn list_schemas(&self) -> Vec<String> {
         let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
         let mut stems: Vec<String> = cache.keys()
@@ -3336,6 +3349,10 @@ impl Conductor {
     fn render_page(&self, url_path: &str, mode: &RenderMode) -> Result<String, String> {
         match mode {
             RenderMode::View => {
+                // A URL segment becomes a directory name below the output
+                // directory: only plain names, and the file must stay inside.
+                editorial_types::plain_url_segments(url_path)
+                    .map_err(|e| format!("not a page URL: {url_path}: {e}"))?;
                 let stem = Self::stem_from_url_path(url_path);
                 let slug = if url_path.ends_with('/') || url_path == "/" {
                     "index".to_string()
@@ -3343,11 +3360,16 @@ impl Conductor {
                     url_path.rsplit('/').next().unwrap_or("index").to_string()
                 };
                 let out = site_index::output_path_for_stem_slug(&self.output_dir, &stem, &slug);
+                editorial_types::ensure_within(&self.output_dir, &out)
+                    .map_err(|e| format!("not a page URL: {url_path}: {e}"))?;
                 std::fs::read_to_string(&out).map_err(|e| format!("no output for {url_path}: {e}"))
             }
             RenderMode::Schema => {
                 let (stem, kind) = site_index::parse_schema_url(url_path)
                     .ok_or_else(|| format!("not a schema URL: {url_path}"))?;
+                if !self.is_known_stem(&stem) {
+                    return Err(format!("unknown schema stem: {stem}"));
+                }
                 let grammar_key = match kind {
                     schema::SchemaKind::Index => site_index::schema_cache_key(&stem, "index"),
                     schema::SchemaKind::Item => {
@@ -4004,28 +4026,15 @@ impl Conductor {
                 CommandResult::with_response(Response::SchemaList(result))
             }
             Command::ListLinkOptions { stem } => {
+                if !self.is_known_stem(&stem) {
+                    return CommandResult::error(format!("unknown schema stem: {stem}"));
+                }
                 let options = self.list_link_options(&stem);
                 CommandResult::with_response(Response::LinkOptions(options))
             }
             Command::ResolveLinkTargetStem { source_stem, slot } => {
                 let target = self.resolve_link_target_stem(&source_stem, &slot);
                 CommandResult::with_response(Response::LinkTargetStem(target))
-            }
-            Command::ResolveLink { path } => {
-                let abs_path = if std::path::Path::new(&path).is_absolute() {
-                    std::path::PathBuf::from(&path)
-                } else {
-                    self.site_dir.join(&path)
-                };
-                CommandResult::with_response(Response::Exists(abs_path.exists()))
-            }
-            Command::ResolveTemplate { stem } => {
-                let templates_dir = self.site_dir.join("templates");
-                let exists = templates_dir.join(&stem).join("item.hiccup").exists()
-                    || templates_dir.join(&stem).join("item.html").exists()
-                    || templates_dir.join(format!("{stem}.hiccup")).exists()
-                    || templates_dir.join(format!("{stem}.html")).exists();
-                CommandResult::with_response(Response::Exists(exists))
             }
             Command::ListDependents { stem } => {
                 let site_files = self.site_index.read().unwrap_or_else(|e| e.into_inner()).dependents_of_schema(&stem);
@@ -11980,6 +11989,120 @@ mod path_boundary_tests {
         });
         assert!(response_is_error(&result.response), "{:?}", result.response);
         assert_eq!(w.outside_bytes(), OUTSIDE.as_bytes());
+    }
+
+    // ── URL paths and schema stems (commit 2) ────────────────────────────────
+
+    /// Output layout of the world: `<tmp>/output/site/` is the output
+    /// directory; `<tmp>/output/` (its parent) is outside it.
+    fn write_output(w: &World, rel: &str, text: &str) {
+        let path = w.tmp.path().join("output").join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn render_view(w: &World, url: &str) -> Response {
+        w.conductor
+            .handle_command(Command::RenderPage { path: url.to_string(), mode: RenderMode::View })
+            .response
+    }
+
+    #[test]
+    fn render_with_a_traversal_url_reads_nothing_outside_output() {
+        let w = world();
+        write_output(&w, "site/post/hello/index.html", "<p>hello</p>");
+        // Beside the output directory, reached by `..` as the first segment.
+        write_output(&w, "outside/index.html", "SECRET-PAGE");
+        write_output(&w, "index.html", "SECRET-ROOT");
+
+        // Control: a plain URL still renders.
+        assert!(
+            matches!(render_view(&w, "/post/hello"), Response::PageRendered { ref html } if html == "<p>hello</p>"),
+            "the plain URL must still render"
+        );
+        for url in ["/../../outside", "/../outside/", "/../x/../outside", "/post/../../outside"] {
+            match render_view(&w, url) {
+                Response::Error(_) => {}
+                other => panic!("{url} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn render_through_a_symlink_out_of_output_reads_nothing() {
+        let w = world();
+        write_output(&w, "site/post/hello/index.html", "<p>hello</p>");
+        std::fs::write(w.outside_dir().join("index.html"), "SECRET-LINK").unwrap();
+        std::os::unix::fs::symlink(w.outside_dir(), w.tmp.path().join("output/site/escape"))
+            .expect("symlink");
+        match render_view(&w, "/escape/") {
+            Response::Error(_) => {}
+            other => panic!("/escape/ must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn links_with_a_traversal_stem_reads_nothing() {
+        let w = world();
+        // Control: a known stem answers.
+        let known = w.conductor.handle_command(Command::ListLinkOptions { stem: "post".to_string() });
+        assert!(matches!(known.response, Response::LinkOptions(_)), "{:?}", known.response);
+        for stem in ["../../x", "../templates/post", "/etc", "nope", "post/../x"] {
+            let result = w.conductor.handle_command(Command::ListLinkOptions { stem: stem.to_string() });
+            assert!(
+                response_is_error(&result.response),
+                "stem {stem:?} must be refused: {:?}",
+                result.response
+            );
+        }
+    }
+
+    /// GUARD: `GetGrammar` only looks the stem up in the schema cache; no path
+    /// is built from it, and an unknown stem already answers "not found".
+    #[test]
+    fn grammar_with_an_unknown_stem_is_an_error() {
+        let w = world();
+        for stem in ["../../x", "../schemas/post/item", "/etc/passwd", "nope"] {
+            let result = w.conductor.handle_command(Command::GetGrammar { stem: stem.to_string() });
+            assert!(
+                matches!(result.response, Response::SchemaSource(None)),
+                "stem {stem:?} must be not found: {:?}",
+                result.response
+            );
+        }
+        let known = w.conductor.handle_command(Command::GetGrammar { stem: "post".to_string() });
+        assert!(matches!(known.response, Response::SchemaSource(Some(_))));
+    }
+
+    /// GUARD: the schema render only gets as far as the template files for a
+    /// stem that has a schema; a traversal stem has none.
+    #[test]
+    fn schema_render_with_a_traversal_stem_is_an_error() {
+        let w = world();
+        for url in ["/_schema/../item", "/_schema/../index", "/_schema/nope/item"] {
+            let result = w.conductor.handle_command(Command::RenderPage {
+                path: url.to_string(),
+                mode: RenderMode::Schema,
+            });
+            assert!(response_is_error(&result.response), "{url}: {:?}", result.response);
+        }
+    }
+
+    /// GUARD: both are lookups in maps built from the site.
+    #[test]
+    fn schema_for_and_page_for_with_traversal_input_answer_none() {
+        let w = world();
+        let page = w.conductor.handle_command(Command::SchemaUrlForPage {
+            page_url: "/../../outside".to_string(),
+        });
+        assert!(matches!(page.response, Response::SchemaUrl(None)), "{:?}", page.response);
+        for schema_url in ["/_schema/../item", "/_schema/../../x/item", "/_schema/nope/item"] {
+            let result = w.conductor.handle_command(Command::PageUrlForSchema {
+                schema_url: schema_url.to_string(),
+            });
+            assert!(matches!(result.response, Response::PageUrl(None)), "{schema_url}: {:?}", result.response);
+        }
     }
 
     /// GUARD: a slug is a name, never a path.
