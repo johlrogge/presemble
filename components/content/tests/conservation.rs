@@ -48,6 +48,9 @@
 //! - L14: HTML blocks of types 1–5 always have their end condition, so none
 //!   runs to the end of the file;
 //!
+//! Containers (table cells, list items, blockquotes) hold links and images:
+//! those stay inside their container (`OTHER_BLOCKS`, `gen_list`).
+//!
 //! Paragraphs hold inline nodes (ADR-059 stage 5), so the domain has inline
 //! pools: images and links inside text, a leading link followed by text, and
 //! several images in one paragraph. They are one paragraph each, and nothing
@@ -179,6 +182,11 @@ const OTHER_BLOCKS: &[&str] = &[
     "```\nlet x = 1;\n```",
     "| a | b |\n|---|---|\n| 1 | 2 |",
     "> A quote.",
+    // Links and images inside containers stay inside them.
+    "| a [h](/h) | b |\n|---|---|\n| [x](/x) | c ![i](a.png) |",
+    "| ![i](a.png) | b |\n|---|---|\n| c | see [y](/y) now |",
+    "> see [a](/a) here",
+    "> a ![i](a.png) b",
 ];
 /// HTML blocks (ADR-062): never slotted, always an Error, kept verbatim.
 /// Every type 1–5 block has its end condition (limit L14).
@@ -218,7 +226,7 @@ fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: b
     let n = 1 + rng.below(3);
     (0..n)
         .map(|i| {
-            let item = rng.pick(&["a", "b c", "[l](/post/l)", "`code`"]);
+            let item = rng.pick(&["a", "b c", "[l](/post/l)", "`code`", "![i](a.png)", "see [l](/post/l) now"]);
             if ordered { format!("{}. {item}", i + 1) } else { format!("- {item}") }
         })
         .collect::<Vec<_>>()

@@ -11691,6 +11691,66 @@ mod emitted_address_tests {
         assert!(seen.len() >= 4, "only {seen:?}");
     }
 
+    /// The user guide's original `juxt` row: a table cell that ends in a link.
+    /// (The guide had to avoid it: the emitted addresses did not resolve.)
+    #[test]
+    fn a_link_alone_in_a_table_cell_has_an_address_that_resolves() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in ["schemas/guide", "templates/guide", "content/guide"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(
+            root.join("schemas/guide/item.md"),
+            "# Guide title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\n\nBody content.\nheadings\n: h2..h6\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("templates/guide/item.hiccup"),
+            "[:main [:presemble/insert {:data input.title :as \"h1\"}] [:presemble/insert {:data input.body}]]",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("content/guide/g.md"),
+            "# The guide\n\n----\n\n## Template composition\n\nText.\n\n## Functions\n\n| Function | Meaning |\n| --- | --- |\n| `juxt` | Several templates side by side, used as `((juxt a b) input)`, see [Template composition](#template-composition) |\n| `pipe` | Plain text |\n\nAfter.\n",
+        )
+        .unwrap();
+        let repo = site_repository::SiteRepository::builder().from_dir(root).build();
+        let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
+        let html = conductor.render_page("/guide/g", &RenderMode::View).expect("page");
+
+        let mut checked = 0;
+        let mut saw_table = false;
+        for chunk in html.split('<').skip(1) {
+            let Some(tag) = chunk.split('>').next() else { continue };
+            saw_table |= tag.starts_with("table");
+            let Some(address) = attr(tag, "data-presemble-address") else { continue };
+            checked += 1;
+            let selection = conductor
+                .eval_selection(&address)
+                .unwrap_or_else(|e| panic!("<{tag}>: {address} does not evaluate: {e:?}"));
+            assert_eq!(selection.len(), 1, "<{tag}>: {address} resolves to {} nodes", selection.len());
+            let store = conductor.node_store.read().unwrap();
+            let element = node_store_bridge::content_bridge::block_from_node(&store, selection.iter().next().unwrap())
+                .unwrap_or_else(|e| panic!("<{tag}>: {address} is not a block: {e}"));
+            let kind = content::address::kind_name(&element);
+            let rendered = if attr(tag, "data-presemble-slot").as_deref() == Some("body") { kind_of(tag) } else { "" };
+            assert!(rendered.is_empty() || rendered == kind, "<{tag}> resolves to a {kind}: {address}");
+            let projection = if address.contains("\"body\"))") {
+                content::Projection::Block
+            } else {
+                content::Projection::Content
+            };
+            assert_eq!(
+                content::project_markdown(&element, projection),
+                attr(tag, "data-presemble-md"),
+                "md of <{tag}>"
+            );
+        }
+        assert!(saw_table, "{html}");
+        assert!(checked >= 5, "only {checked} addresses emitted: {html}");
+    }
+
     #[test]
     fn every_emitted_address_resolves_to_its_block() {
         let tmp = example_site();

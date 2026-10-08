@@ -418,7 +418,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
 
-            Event::Start(Tag::Image { dest_url, .. }) => {
+            // A link or an image starts a block only where a block can start,
+            // at the top level. Anywhere else it is inline content of what is
+            // being read (a table cell, a blockquote, ...) and must not
+            // replace that state.
+            Event::Start(Tag::Image { dest_url, .. }) if matches!(state, State::Idle) => {
                 state = State::Image {
                     alt: String::new(),
                     path: dest_url.to_string(),
@@ -435,18 +439,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
 
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                // Inside a blockquote the link is inline: its raw source
-                // captures it.
-                let is_inline = matches!(&state, State::Blockquote { .. });
-                if !is_inline {
-                    let href = dest_url.to_string();
-                    state = State::Link {
-                        text: String::new(),
-                        href,
-                        byte_range: range,
-                    };
-                }
+            Event::Start(Tag::Link { dest_url, .. }) if matches!(state, State::Idle) => {
+                state = State::Link {
+                    text: String::new(),
+                    href: dest_url.to_string(),
+                    byte_range: range,
+                };
             }
             Event::End(TagEnd::Link) => {
                 if let State::Link { text, href, byte_range } = state {
@@ -456,8 +454,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     });
                     state = State::Idle;
                 }
-                // In a blockquote the link end is a no-op: the text was
-                // accumulated normally.
+                // Anywhere else the link was inline and its end is a no-op.
             }
 
             Event::Start(Tag::BlockQuote(_)) => {
@@ -1419,6 +1416,80 @@ mod tests {
         let link = doc.elements[0].node.sole_link().expect("a lone link");
         assert!(matches!(link.text.as_slice()[0], Inline::Strong(_)), "{:?}", link.text);
         assert_eq!(link.title.as_deref(), Some("t"));
+    }
+
+    // ── Links and images inside containers ───────────────────────────────────
+    // A link or an image starts a block only at the top level; inside a table
+    // cell, list item, blockquote or heading it is inline content.
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_link_in_a_table_cell_keeps_the_whole_table() {
+        let els = nodes("| a [h](/h) | b |\n|---|---|\n| [x](/x) | c |\n| d | e [y](/y) f |\n");
+        assert_eq!(
+            els,
+            vec![ContentElement::Table {
+                headers: strings(&["a [h](/h)", "b"]),
+                rows: vec![strings(&["[x](/x)", "c"]), strings(&["d", "e [y](/y) f"])],
+            }]
+        );
+    }
+
+    #[test]
+    fn an_image_in_a_table_cell_keeps_the_whole_table() {
+        let els = nodes("| ![i](a.png) | b |\n|---|---|\n| c | ![j](b.png) |\n");
+        assert_eq!(
+            els,
+            vec![ContentElement::Table {
+                headers: strings(&["![i](a.png)", "b"]),
+                rows: vec![strings(&["c", "![j](b.png)"])],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_link_in_a_list_item_keeps_the_whole_list() {
+        let els = nodes("- [a](/a)\n- b\n- see [c](/c)\n");
+        assert_eq!(els.len(), 1, "{els:?}");
+        assert!(matches!(&els[0], ContentElement::List { source } if source == "- [a](/a)\n- b\n- see [c](/c)"), "{els:?}");
+    }
+
+    #[test]
+    fn an_image_in_a_list_item_keeps_the_whole_list() {
+        let els = nodes("1. ![i](a.png)\n2. b\n");
+        assert_eq!(els.len(), 1, "{els:?}");
+        assert!(matches!(&els[0], ContentElement::List { source } if source == "1. ![i](a.png)\n2. b"), "{els:?}");
+    }
+
+    #[test]
+    fn a_link_in_a_nested_list_item_keeps_the_list() {
+        let els = nodes("- a\n  - [n](/n)\n  - m\n- b\n");
+        assert_eq!(els.len(), 1, "{els:?}");
+        assert!(matches!(&els[0], ContentElement::List { source } if source.contains("[n](/n)") && source.ends_with("- b")), "{els:?}");
+    }
+
+    #[test]
+    fn a_link_in_a_blockquote_stays_in_the_blockquote() {
+        let els = nodes("> see [a](/a) here\n");
+        assert_eq!(els.len(), 1, "{els:?}");
+        assert!(matches!(&els[0], ContentElement::Blockquote { text } if text.contains("here")), "{els:?}");
+    }
+
+    #[test]
+    fn an_image_in_a_blockquote_stays_in_the_blockquote() {
+        let els = nodes("> see ![i](a.png) here\n");
+        assert_eq!(els.len(), 1, "{els:?}");
+        assert!(matches!(&els[0], ContentElement::Blockquote { text } if text.contains("here")), "{els:?}");
+    }
+
+    #[test]
+    fn a_link_in_a_heading_stays_in_the_heading() {
+        let els = nodes("## About [us](/us) now\n");
+        assert_eq!(els.len(), 1, "{els:?}");
+        assert!(matches!(&els[0], ContentElement::Heading { .. }), "{els:?}");
     }
 
     // ── Separator ────────────────────────────────────────────────────────────
