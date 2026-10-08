@@ -17,32 +17,39 @@ See [ADR-031](../../docs/adr/031-conductor-as-sole-authority.md) for the full de
 
 Commands are sent over an nng REQ/REP socket. Events are broadcast over an nng PUB/SUB socket. Both use JSON serialization.
 
-The command vocabulary lives in `protocol.rs`:
+The command vocabulary lives in `protocol.rs`. Client paths are validated types ([ADR-066](../../docs/adr/066-client-paths-are-validated-site-paths.md)): a `SitePath` is relative and made of plain names; a `ContentPath` is a `SitePath` under `content/` ending in `.md`. A message with any other path fails to decode.
 
 | Command | Description |
 |---|---|
-| `FileChanged { paths }` | File watcher detected changes; conductor rebuilds affected pages |
-| `GetBuildErrors` | Returns the most recent build error map |
-| `GetDocumentText { path }` | Returns editor working copy or disk fallback |
-| `DocumentChanged { path, text }` | Editor updated a buffer (does not write to disk) |
-| `DocumentSaved { path }` | Editor saved; conductor writes dirty buffer and rebuilds |
-| `BlockEdit(request)` | Browser edit of one block, or the fill of an empty slot, through its markdown (ADR-059 section 10) |
-| `CreateContent { stem, slug }` | Scaffold a new content file |
-| `ScaffoldSite { ... }` | Browser wizard: scaffold a new site from a starter template |
-| `Classify { path }` | Classify a file path by its role in the site |
-| `ListSchemas` | All schema stems with source text |
-| `ListLinkOptions { stem }` | Link completion candidates for a given schema stem |
-| `ListContent` | All content file paths (site-relative) |
-| `GetGrammar { stem }` | Cached grammar for a schema stem |
-| `SuggestSlotValue { ... }` | Create a full-slot editorial suggestion |
-| `SuggestSlotEdit { ... }` | Create a search/replace suggestion scoped to a slot |
-| `SuggestBodyEdit { ... }` | Create a search/replace suggestion in the body |
-| `GetSuggestions { file }` | All pending suggestions for a file |
-| `AcceptSuggestion { id }` | Apply and mark a suggestion accepted |
-| `RejectSuggestion { id }` | Dismiss a suggestion without applying |
-| `SaveBuffer { path }` | Write a dirty buffer to disk |
-| `SaveAllBuffers` | Write all dirty buffers to disk |
 | `Ping` / `Shutdown` | Health check and graceful shutdown |
+| `FileChanged { paths: Vec<SitePath> }` | File watcher detected changes; conductor rebuilds affected pages. Paths that resolve outside the site are ignored |
+| `DocumentChanged { path: SitePath, text }` | Editor updated a buffer (does not write to disk) |
+| `DocumentSaved { path: SitePath }` | Editor saved the file itself; the conductor drops its copy of the buffer and records a conflict if the document has unsaved edits |
+| `ReloadDocument { path: ContentPath }` | Discard the unsaved edits of one document and load it from disk (`presemble reload`) |
+| `GetDocumentText { path: SitePath }` | Returns editor working copy or disk fallback |
+| `CursorMoved { path: SitePath, line }` | Editor cursor moved; the browser scrolls to follow |
+| `Classify { path: SitePath }` | Classify a file path by its role in the site |
+| `GetBuildErrors` | Returns the most recent build error map |
+| `GetDirtyBuffers` | All documents with unsaved edits |
+| `GetConflicts` | Documents whose file changed on disk while they have unsaved edits (ADR-065) |
+| `SaveBuffer { path: SitePath, consent }` | Write one dirty buffer to disk; a conflicted buffer is written only if `consent` names it |
+| `SaveAllBuffers { consent }` | Write all dirty buffers; if any conflict is not named in `consent`, nothing is written |
+| `ApplyNedProgram { program }` | Evaluate a NED program against the node store (all selections resolved, then applied) |
+| `BlockEdit(request)` | Browser edit of one block, or the fill of an empty slot, through its markdown (ADR-059 section 10). `request.file` is a `ContentPath` |
+| `CreateNedSuggestion { file: ContentPath, selection, mutation, reason, author }` | Store a NED suggestion without applying it |
+| `GetNedSuggestions { file: ContentPath }` | All NED suggestions for a file, in every status |
+| `GetNedSuggestionFiles` | Files that have a pending NED suggestion |
+| `AcceptNedSuggestion { id }` / `RejectNedSuggestion { id }` | Apply a suggestion and mark it accepted, or dismiss it |
+| `CreateContent { stem, slug }` | Scaffold a new content file (stem must be a known schema; slug alphanumeric and dashes) |
+| `ScaffoldSite { ... }` | Browser wizard: scaffold a new site from a starter template |
+| `ListSchemas` | All schema stems with source text |
+| `GetGrammar { stem }` | Cached grammar for a schema stem |
+| `ListLinkOptions { stem }` | Link completion candidates for a schema stem (an unknown stem is an error) |
+| `ResolveLinkTargetStem { source_stem, slot }` | The collection stem a link slot points at |
+| `ListDependents { stem }` | Files that depend on a schema stem |
+| `ListContent` | All content file paths (site-relative) |
+| `RenderPage { path, mode }` | Render a page (view mode reads the output directory; schema mode renders a `/_schema/...` URL) |
+| `SchemaUrlForPage { page_url }` / `PageUrlForSchema { schema_url }` | Map a page URL to its schema URL, and back |
 
 ## Link resolution
 
