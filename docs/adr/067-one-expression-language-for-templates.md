@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -45,12 +45,20 @@ Proposed
    - A bare symbol in an expression position is `(ref symbol)`:
      `{:data item.link}` means `{:data (ref item.link)}`.
    - A list in child position is `[:presemble/insert {:data (…)}]` without
-     `:as`.
+     `:as`: it places the value as it is (see section 3).
    - A string attribute value is literal text.
 3. **Every position that reads the input takes an expression:**
-   - `presemble:insert`'s `:data`: it places the value in content position,
-     with `:as` naming the wrapping tag. `:apply` is removed; functions are
-     called in the expression;
+   - `presemble:insert`'s `:data`: it places the value in content position.
+     An insert without `:as` places the value as it is: text as text, inline
+     and node trees unchanged, template output unchanged, nothing for an
+     absent value. `:as` makes the value an element of that tag, the
+     editable form: it carries the semantic class and, in editorial output,
+     the editor attributes. A value placed without `:as` has no editor
+     attributes and cannot be edited in place. A link or image record is an
+     element by nature and renders its own element either way, as does a
+     suggestion placeholder in Structure mode, which follows an explicit
+     `:as` tag. `:apply` is removed; functions are called in the
+     expression;
    - `data-each`, which binds each element under `:item` (a name, default
      `item`);
    - `data-slot`;
@@ -62,8 +70,9 @@ Proposed
    `Transform`), path strings in directives, `:apply`, `data-href`, and the
    old design fixtures under `fixtures/blog-site/templates/`.
 6. **Values.**
-   - In content position a value renders as today: inline nodes, node trees
-     and records, with editor attributes in editorial output.
+   - In content position a value is placed as section 3 says: as it is
+     without `:as`, as an element with editor attributes in editorial output
+     with `:as`.
    - In attribute position:
      - text, inline and node values give their plain text (AsPlainText,
        ADR-059 §8);
@@ -89,7 +98,12 @@ Proposed
    the editor attributes of an insert come from the subject, as they came
    from the path string before.
 10. **Checking.** The template checker and the LSP walk every expression in
-    every position, in both syntaxes:
+    every position, in both syntaxes. They know the site through a
+    `CheckContext`: the names of its templates and its collections, each with
+    the schema of its items. Every page's `input` carries all collections, so
+    `input.post` is valid in any template and what follows it is checked
+    against the `post` item schema, as is `item.<field>` inside a `data-each`
+    over it:
     - errors:
       - an unknown path, template or function;
       - a wrong number of arguments;

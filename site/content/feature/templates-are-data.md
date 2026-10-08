@@ -12,11 +12,11 @@ The default template format uses HTML with `presemble:insert` directives. The pu
 
 ```xml
 <main class="feature-grid">
-  <template data-each="feature">
+  <template data-each="(ref input.feature)">
     <article class="feature-card">
-      <presemble:insert data="item.title" as="h3" />
-      <presemble:insert data="item.tagline" />
-      <presemble:insert data="item.link" />
+      <presemble:insert data="(ref item.title)" as="h3" />
+      <presemble:insert data="(ref item.tagline)" as="span" />
+      <presemble:insert data="(ref item.link)" />
     </article>
   </template>
 </main>
@@ -28,11 +28,11 @@ Because the internal model is a labelled tree, the same transformation logic can
 
 ```clojure
 [:main.feature-grid
- [:template {:data-each "feature"}
+ [:template {:data-each input.feature}
   [:article.feature-card
-   [:presemble/insert {:data "item.title" :as "h3"}]
-   [:presemble/insert {:data "item.tagline"}]
-   [:presemble/insert {:data "item.link"}]]]]
+   [:presemble/insert {:data item.title :as "h3"}]
+   [:presemble/insert {:data item.tagline :as "span"}]
+   [:presemble/insert {:data item.link}]]]]
 ```
 
 ### Schema-derived semantic classes

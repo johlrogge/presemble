@@ -51,7 +51,7 @@ Each starter includes schemas, seed content, Hiccup templates, navigation partia
 
 ### Navigation and collection index pages
 
-Every starter includes a shared navigation partial via `presemble:include` and breadcrumb navigation on item pages. Collection index pages (e.g. `/post/`) list all items of that type. No page is a dead end.
+Every starter includes a shared navigation partial, called as `(nav input)`, and breadcrumb navigation on item pages. Collection index pages (e.g. `/post/`) list all items of that type. No page is a dead end.
 
 ### Seed content
 

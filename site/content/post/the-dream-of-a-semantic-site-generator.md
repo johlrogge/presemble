@@ -75,11 +75,11 @@ The templates receive all it's data as input and produces it's output based on t
 [:template {:presemble/define "body"}
   [:main {:class "post"}
     [:article
-      [:presemble/insert {:data "input.title" :as "h1"}]
-      [:presemble/insert {:data "input.summary" :as "p"}]
+      [:presemble/insert {:data input.title :as "h1"}]
+      [:presemble/insert {:data input.summary :as "p"}]
       [:div {:class "byline"}
-        "By " [:presemble/insert {:data "input.author" :as "a"}]]
-      [:presemble/insert {:data "input.body"}]]]]
+        "By " [:presemble/insert {:data input.author :as "a"}]]
+      [:presemble/insert {:data input.body}]]]]
 
 ;; The page template — compose header, body, and footer
 ;; Each receives the same input. Outputs are concatenated.

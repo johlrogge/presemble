@@ -34,10 +34,16 @@ A markdown list item ending with a `{#name}` anchor declares a list slot. The oc
 - Publishing
 ```
 
-In templates, iterate the list with `data-each`; each item exposes a `text` field. To render all items joined with spaces, use `:apply text` directly on the insert:
+In templates, iterate the list with `data-each`; each item exposes a `text` field. To place all items joined with spaces, call `text` on the list (see [Expressions](#expressions)):
 
 ```html
-<presemble:insert data="input.tags" apply="text" />
+<presemble:insert data="(text input.tags)" />
+```
+
+This places:
+
+```output
+Rust WebAssembly
 ```
 
 #### Heading slots
@@ -255,82 +261,128 @@ Templates live in `templates/`. Each content type uses a directory: `templates/<
 
 Use `presemble convert` to translate any template between HTML and Hiccup syntax: `presemble convert templates/post/item.html` produces `templates/post/item.hiccup` and vice versa. Both formats are first-class — the publisher accepts either without configuration.
 
-### `presemble:insert`
+### Expressions
 
-Insert a named data path into the page:
+A template is a pure function of its page's content: it reads the content and sets nothing. Every place where a template reads the content takes an **expression**: the `data` of `presemble:insert`, `data-each`, `data-slot`, any attribute value, and a call written as a child. There is one expression language, and it is the same in HTML and in Hiccup.
 
-```html
-<presemble:insert data="input.title" as="h1" />
-<presemble:insert data="input.summary" as="p" />
-<presemble:insert data="input.body" />
-```
+#### `ref`
 
-`input` always refers to the current page's own content. The name can be changed with the `:input` directive (see [Data context](#data-context)).
+`(ref input.title)` is the value at a path. A path is dotted and starts at `input` (the current page's own content), at `item` (the current loop item, see [`data-each`](#data-each)), or at a collection name under `input` (`input.post`). `input` always refers to the current page.
 
-| Attribute | Required | Description |
-|---|---|---|
-| `data` | yes | Dot-separated path into the data graph |
-| `as` | no | Wrap the value in this element (e.g. `h1`, `p`, `span`) |
-| `apply` | no | Transform the value before rendering (see below) |
-
-Omitting `as` inserts the value as raw HTML nodes. If the path is absent from the data graph, the element is removed silently.
-
-#### `:apply` — value transforms
-
-The `apply` attribute (`:apply` in Hiccup) transforms a value before it is inserted. Use `text` to render the Display (text) representation of any value:
+In HTML, an expression is an attribute value:
 
 ```html
-<presemble:insert data="input.title" as="h1" apply="text" />
+<presemble:insert data="(ref input.title)" as="h1" />
+<presemble:insert data="(ref input.summary)" as="p" />
+<presemble:insert data="(ref input.body)" />
 ```
 
-In Hiccup:
+In Hiccup the same expression is written without quotes, and a bare symbol is shorthand for `(ref symbol)`:
 
 ```clojure
-[:presemble/insert {:data "input.title" :as "h1" :apply "text"}]
+[:presemble/insert {:data input.title :as "h1"}]
+[:presemble/insert {:data input.summary :as "p"}]
+[:presemble/insert {:data input.body}]
 ```
 
-To thread a value through multiple transforms, use a pipe expression:
+#### Calls
 
-```html
-<presemble:insert data="input.title" apply="(-> text to_lower capitalize)" />
-```
-
-In Hiccup, the expression is a list (no quoting needed):
-
-```clojure
-[:presemble/insert {:data "input.title" :apply (-> text to_lower capitalize)}]
-```
-
-**Available functions:**
+A list is a call. The functions are pure, and the first argument is the value they work on:
 
 | Function | Effect |
 |---|---|
-| `text` | Render as plain text (Display representation) |
-| `to_lower` | Convert to lowercase |
-| `to_upper` | Convert to uppercase |
+| `ref` | The value at a path (or the literal itself) |
+| `text` | Plain text (Display representation); a list of values is joined with spaces |
+| `to_lower` | Lowercase |
+| `to_upper` | Uppercase |
 | `capitalize` | Uppercase the first character |
 | `truncate` | Truncate to a default length |
-
-`:apply text` on a list field joins all items with spaces.
-
-#### Anchor wrapping for link records
-
-When the `data` path resolves to a link record (a slot declared as a link in the schema), the `as` attribute wraps the linked text in the given element and the whole thing is wrapped in an `<a>` pointing to the linked page:
+| `juxt` | Several templates side by side, used as `((juxt a b) input)` (see Template composition below) |
+| `->` | Thread a value through functions: `(-> input.title text to_lower capitalize)` |
 
 ```html
-<presemble:insert data="input.author" as="h3" />
+<presemble:insert data="(-> input.title text to_lower capitalize)" as="h1" />
 ```
 
-Produces:
+```clojure
+[:presemble/insert {:data (-> input.title text to_lower capitalize) :as "h1"}]
+```
+
+In Hiccup a list written as a child, on its own, is an insert of that call: `[:h1 (text input.title)]` is `[:h1 [:presemble/insert {:data (text input.title)}]]`.
+
+A template is a function too. Calling one is covered in [Calling templates](#calling-templates).
+
+#### Literals
+
+A string, an integer or a keyword is a literal; `(ref "text")` is the string itself. A literal is rarely needed except to write text that would otherwise be read as an expression, see [HTML attributes](#html-attributes).
+
+#### Attributes
+
+An expression is also valid as the value of any attribute of an ordinary element. It reads the content and gives plain text:
 
 ```html
-<a href="/author/johlrogge"><h3>Joakim Ohlrogge</h3></a>
+<a href="(ref item.link.href)" title="(ref input.title)">Read more</a>
+```
+
+```clojure
+[:a {:href item.link.href :title input.title} "Read more"]
+```
+
+- Text, headings and paragraphs give their plain text, never markup; the serializer escapes it like any literal.
+- An integer gives its decimal text.
+- A value that is absent gives nothing, and the attribute is left out rather than written empty: `<a href="(ref input.homepage)">x</a>` is `<a>x</a>` when the page has no homepage.
+- A record or a list cannot be an attribute value and is an error. Name the field: `item.link.href`, `item.cover.src`, not `item.link`.
+
+#### HTML attributes
+
+In HTML an attribute value that reads as an EDN list is an expression; any other value is literal text. A literal text that starts with `(` and would read as a list is written as an expression that gives the text:
+
+```html
+<a title='(ref "(draft)")'>Notes</a>
+```
+
+This gives `<a title="(draft)">Notes</a>`. The checker warns about a value that starts with `(` but does not read as a list.
+
+#### Placing values
+
+An insert places a value in the page. Without `as`, the value is placed as it is: text as text, inline and node content unchanged, the output of a template as it is, and nothing at all when the value is absent. Nothing is added around it:
+
+```html
+<h1><presemble:insert data="(ref input.title)" /></h1>
+```
+
+This places:
+
+```output
+<h1>Hello</h1>
+```
+
+With `as`, the value becomes an element of that tag, carrying the semantic class of its slot (`input-title`) and, when the server renders for editing, what the browser needs to edit it in place:
+
+```html
+<presemble:insert data="(ref input.title)" as="h1" />
+```
+
+So `as` is the editable form. A value placed without `as` has no editor attributes and cannot be edited in place in the browser; use `as` for content that authors should edit on the page.
+
+#### A link with `as`
+
+A link slot is a record. Inserted whole it is its own element, an `<a>`, whether or not there is an `as`. With `as`, the linked text is wrapped in that element, and the whole thing in an `<a>` pointing to the linked page:
+
+```html
+<presemble:insert data="(ref input.author)" as="h3" />
+```
+
+Places (the semantic class and data attributes are left out here):
+
+```html
+<a href="/author/jo"><h3>Jo</h3></a>
 ```
 
 In Hiccup:
 
 ```clojure
-[:presemble/insert {:data "input.author" :as "h3"}]
+[:presemble/insert {:data input.author :as "h3"}]
 ```
 
 #### Link and image records
@@ -345,102 +397,112 @@ A link slot or an image slot gives the template a record:
 Insert the whole record to render the link or image, or a single field to insert its text on its own:
 
 ```html
-<presemble:insert data="input.cover" />
-<presemble:insert data="input.cover.alt" as="figcaption" />
+<presemble:insert data="(ref input.cover)" />
+<presemble:insert data="(ref input.cover.alt)" as="figcaption" />
 ```
 
 The first line renders `<img src="…" alt="…">`. The second inserts only the alt text, wrapped in a `<figcaption>`; like any absent value, it is removed when the image has no alt text.
 
 ### `data-each`
 
-Iterate over a collection on a `<template>` element. The value passed to `data-each` is the singular schema stem — the publisher automatically finds all items of that type:
+Iterate on a `<template>` element. The value of `data-each` is an expression that gives a list. A collection is the list of all the items of a content type, in URL order, found under `input` by the singular schema stem:
 
 ```html
-<template data-each="post">
+<template data-each="(ref input.post)">
   <li>
-    <presemble:insert data="item.title" as="h3" />
-    <a data-href="item.url_path" href="">Read more</a>
+    <presemble:insert data="(ref item.title)" as="h3" />
+    <a href="(ref item.link.href)">Read more</a>
   </li>
 </template>
 ```
 
-The `<template>` wrapper is not emitted. Inside the loop, each item is bound to `item`. The parent context — `input`, other collections, and outer loops — remains accessible inside the loop body.
+In Hiccup:
 
-The item binding name can be customised with the `:item` directive:
+```clojure
+[:template {:data-each input.post}
+  [:li
+    [:presemble/insert {:data item.title :as "h3"}]
+    [:a {:href item.link.href} "Read more"]]]
+```
+
+The `<template>` wrapper is not emitted. Inside the loop, each item is bound to `item`. The parent context — `input`, other collections, and outer loops — remains accessible inside the loop body. The "Read more" link takes its `href` from the item's link record (`item.link` is the link every item has, with `href` and `text`).
+
+The item binding name can be changed with the `item` attribute (`:item` in Hiccup):
 
 ```html
-<template data-each="post" :item "p">
-  <presemble:insert data="p.title" as="h3" />
+<template data-each="(ref input.post)" item="p">
+  <presemble:insert data="(ref p.title)" as="h3" />
 </template>
 ```
 
 Every page template has access to all collections regardless of content type, so a `post` item template can iterate all `guide` items and vice versa.
 
-### `presemble:include`
+### `data-slot`
 
-Include a named partial template:
-
-```html
-<presemble:include src="header" />
-<presemble:include src="components/card" />
-```
-
-The `src` value is a file stem relative to `templates/`. Named template definitions inside a file use `::`:
+A `<template>` with `data-slot` renders its content only when the expression has a value, so a block is dropped when a slot is empty:
 
 ```html
-<presemble:include src="components::card" />
+<template data-slot="(ref input.cover)">
+  <figure><presemble:insert data="(ref input.cover)" /></figure>
+</template>
 ```
 
-### `data-href`
+### Calling templates
 
-Bind an `href` attribute from the data graph:
+A template is a function of its input, and it is used by calling it. Insert the call; in HTML that is an insert of a call, and in Hiccup a list as a child:
 
 ```html
-<a data-href="input.url_path">Read more</a>
+<div class="top">
+  <presemble:insert data="(header input)" />
+</div>
 ```
 
-### `presemble:class`
+```clojure
+[:body
+  (header input)
+  [:main [:presemble/insert {:data input.body}]]]
+```
 
-Conditionally apply a CSS class:
+`(header input)` renders the template `header` with the page's content as its `input`. A call takes one argument, and that value is bound as `input` inside the called template; an argument of `input` itself leaves the content unchanged. Inside a loop, call a template with the item:
 
 ```html
-<li presemble:class="active:is-active">...</li>
+<template data-each="(ref input.post)">
+  <presemble:insert data="(card item)" />
+</template>
 ```
 
-Syntax: `data-path:class-name`. If the path resolves to a truthy value, the class is added.
+Here `card` sees the item as its `input`. A call with an argument that is absent places nothing. A call of a template that does not exist is an error: the checker reports it in the editor, and the page does not render.
+
+The name is a template of the site (`templates/header.html`, `templates/header.hiccup`, `templates/card/item.hiccup`), or a local definition of the same file written `self/name` (see [Template composition](#template-composition)).
 
 ### Hiccup syntax
 
-Templates can be written in Hiccup (EDN) format instead of HTML. Use `presemble convert` to translate between the two. Hiccup templates support `;` line comments, which are stripped at parse time:
+Templates can be written in Hiccup (EDN) format instead of HTML. Use `presemble convert` to translate between the two: it writes the bare-symbol shorthand when it outputs Hiccup, and `(ref …)` when it outputs HTML. Hiccup templates support `;` line comments, which are stripped at parse time:
 
 ```clojure
-; Render title as h1
-[:presemble/insert {:data "input.title" :as "h1"}]
+; Place the title as h1
+[:presemble/insert {:data input.title :as "h1"}]
 ```
 
 #### EDN attribute types
 
-Hiccup attribute values are not limited to strings — the full EDN type system is available. Symbols, lists, sets, integers, and keywords are all valid attribute values and are interpreted by the directive that reads them:
+Hiccup attribute values are not limited to strings — the full EDN type system is available. Symbols, lists, integers, and keywords are all valid attribute values; a symbol or a list is an expression, and a string is literal text:
 
 ```clojure
-; Symbol — used as a bare function reference in :apply
-[:presemble/insert {:data "input.title" :apply text}]
+; Symbol: a reference to the content
+[:a {:href item.link.href} "Read more"]
 
-; List — used as a pipe expression in :apply
-[:presemble/insert {:data "input.title" :apply (-> text to_lower capitalize)}]
+; List: a call
+[:presemble/insert {:data (-> input.title text to_lower capitalize) :as "h1"}]
 
-; Keyword — used as an enum value
-[:presemble/insert {:data "input.title" :as :h1}]
+; String: literal text
+[:a {:title "(draft)"} "Notes"]
 
 ; Integer
 [:div {:tabindex 0}]
 ```
 
-This is a key difference from HTML templates, where all attribute values are strings. The HTML equivalent of a pipe expression must quote the list as a string:
-
-```html
-<presemble:insert data="input.title" apply="(-> text to_lower capitalize)" />
-```
+This is a difference from HTML templates, where all attribute values are strings. In HTML an attribute value is an expression when it reads as a list; see [HTML attributes](#html-attributes).
 
 ### URL paths in templates
 
@@ -464,12 +526,7 @@ Each template receives a data context with two reserved names:
 - **`input`** — the current page's own content. A post template rendering `my-post.md` sees that post's data as `input.title`, `input.summary`, etc.
 - **`item`** — the current loop item inside a `data-each` loop.
 
-Both names can be customised:
-
-- `:input "article"` — rename `input` to `article` for the current template. All paths become `article.title`, `article.summary`, etc.
-- `:item "p"` on a `data-each` element — rename `item` to `p` inside that loop.
-
-These directives only change the binding name; the underlying data is the same.
+`input` is the one name every template reads its page from. The `item` name can be changed on a `data-each` element with the `item` attribute (`item="p"` renames `item` to `p` inside that loop); the underlying data is the same. A template that is called receives its argument as `input`.
 
 ### Path structure
 
@@ -477,24 +534,26 @@ These directives only change the binding name; the underlying data is the same.
 |---|---|---|
 | `input.field` | `input.title` | A named slot from the current page; for a heading slot such as `input.title`, the heading's plain text (markup removed) |
 | `input.field.subfield` | `input.author.name` | A nested reference (linked content) |
-| `input.url_path` | `input.url_path` | The current page's clean URL |
-| `input.body` | `input.body` | The current page's free-form body as HTML |
+| `input.url` | `input.url` | The current page's clean URL |
+| `input.link` | `input.link.href` | A link to the current page, a record with `href` and `text` |
+| `input.body` | `input.body` | The current page's free-form body |
+| `input.collection` | `input.post` | All the items of a content type, as a list |
 | `item.field` | `item.title` | A named slot from the current loop item |
-| `item.url_path` | `item.url_path` | The loop item's clean URL |
+| `item.link` | `item.link.href` | A link to the loop item's page, a record with `href` and `text` |
 
 ### Collections
 
-Collections are accessed by the singular schema stem in `data-each`. A schema named `post` is iterated as `data-each="post"`:
+Collections are found under `input` by the singular schema stem. A schema named `post` is iterated as `data-each="(ref input.post)"`:
 
 ```html
-<template data-each="post">
-  <presemble:insert data="item.title" as="h2" />
+<template data-each="(ref input.post)">
+  <presemble:insert data="(ref item.title)" as="h2" />
 </template>
 ```
 
 Every page template sees all collections — a guide page can iterate all posts, and a post page can iterate all guides. Loops extend the parent context, so `input` and other collections remain accessible inside a loop. Items are listed in URL order.
 
-Because the schema defines which paths exist, the template vocabulary is finite and verified at build time. A template that references a non-existent path fails the build.
+Because the schema defines which paths exist, the template vocabulary is finite, and the checker verifies it: in the editor (the LSP) a path that does not exist in the schema is reported, `input.post.title` and `item.title` inside a loop over `input.post` are checked against the `post` schema. At build time a path that resolves to nothing places nothing.
 
 ### Stylesheet tracking
 
@@ -692,10 +751,10 @@ Replace `site/` with the path to your site directory.
 
 | Capability | Description |
 |---|---|
-| Completions | Data-path completions for `data="…"` attributes: `input.*` paths from the matching schema, `item.*` paths inside `data-each` loops, and collection names for `data-each` values |
-| Diagnostics | `input.*` or `item.*` paths referencing fields not declared in the schema |
+| Completions | Data-path completions for `data="…"` attributes: `input.*` paths from the matching schema, `item.*` paths inside `data-each` loops, and collection names under `input` for `data-each` values |
+| Diagnostics | Every expression is checked: `input.*` or `item.*` paths referencing fields not declared in the schema (and collections' item schemas), unknown templates and functions, wrong argument counts, and a record or list used as an attribute value |
 | Hover | Schema hint text for the field at the cursor |
-| Go-to-definition | Jumps to `presemble:include` target or `presemble:define` block |
+| Go-to-definition | Jumps from a template call, such as `(header input)`, to the template file or its `presemble:define` block |
 
 ### Schema file capabilities
 
@@ -724,7 +783,7 @@ Presemble validates at every stage:
 |---|---|
 | Schema parse | Schema file grammar — field names, constraint syntax, valid constraint values |
 | Content validation | Each content file structure against its schema — field presence, occurrence counts, content constraints, heading levels |
-| Template resolution | Data paths in templates exist in the schema |
+| Template checking | Every expression in a template: paths exist in the schema, templates and functions exist, argument counts, no record or list as an attribute value (reported in the editor); an unknown template or a removed spelling fails the page |
 | Asset resolution | Assets referenced by templates exist on disk |
 | Link validation | Internal `href` values resolve to built pages |
 | HTML output | Final HTML is well-formed XML |
@@ -735,47 +794,44 @@ See [validated at every level](/feature/validated-at-every-level) for the valida
 
 ## Template composition
 
-Templates are function files. A template file has two parts: optional local definitions at the top and a composition expression at the bottom. The composition expression is the template's return value — a DOM tree.
+Templates are function files. A template file has two parts: optional local definitions at the top and a composition expression at the bottom. The composition expression is the template's return value — a DOM tree. A template is used by [calling it](#calling-templates).
+
+### Local definitions
+
+Local definitions at the top of a template file are reusable fragments, named with `presemble:define`:
+
+```clojure
+[:template {:presemble/define "byline"}
+  [:p {:class "byline"}
+    [:presemble/insert {:data input.author :as "span"}]]]
+
+[:main ((juxt header self/byline footer) input)]
+```
+
+The local `byline` fragment is referenced as `self/byline` in the composition expression.
 
 ### juxt
 
 `juxt` fans the same input to multiple templates and concatenates their DOM outputs in order:
 
 ```clojure
-((juxt header self/body footer) input)
+[:template {:presemble/define "body"}
+  [:p [:presemble/insert {:data input.summary :as "span"}]]]
+
+[:body ((juxt header self/body footer) input)]
 ```
 
-`header`, `self/body`, and `footer` all receive the full content tree. Their outputs are assembled into a single page DOM. `self/body` refers to the body of the current template file (the local definitions section, referenced as a named fragment).
+`header`, `self/body`, and `footer` all receive the full content tree as their `input`. Their outputs are assembled into a single page DOM. `self/body` refers to the local definition `body` of the current template file. A name without `self/` is a template of the site, `templates/header.hiccup` or `templates/header/item.hiccup`, and also a local definition of the same name.
 
-File-qualified template references use `/` notation: `/fragments/structure#header` refers to the `header` definition inside `templates/fragments/structure.hiccup`. Unqualified references look up local definitions first, then the template file system.
+### Threading
 
-### Pipe
-
-`->` threads a value through a sequence of transforms as the first argument:
+`->` threads a value through a sequence of the functions of [Expressions](#expressions), the value as the first argument:
 
 ```clojure
-(-> input :title upcase)
+[:h1 (-> input.title text to_upper)]
 ```
 
-`->>` threads as the last argument — the standard idiom for collection pipelines:
-
-```clojure
-(->> input :tags (map :text) (str/join ", "))
-```
-
-### Local definitions
-
-Local definitions at the top of a template file are reusable fragments:
-
-```clojure
-[:template "byline"
-  [:p.byline
-    [:presemble/insert {:data "input.author" :as "span"}]]]
-
-((juxt /header self/byline self/body /footer) input)
-```
-
-The local `byline` fragment is referenced as `self/byline` in the composition expression.
+These are the only functions; they are added when a template needs another.
 
 ## Link expressions in content
 
@@ -997,7 +1053,7 @@ Each starter includes schemas, seed content, Hiccup templates, navigation partia
 
 ### Navigation and index pages
 
-Every starter includes shared navigation via `presemble:include` and breadcrumb navigation on item pages. Collection index pages list all items of that type. No page is a dead end.
+Every starter includes shared navigation by calling the `nav` template (`(nav input)`) and breadcrumb navigation on item pages. Collection index pages list all items of that type. No page is a dead end.
 
 ### After scaffolding
 

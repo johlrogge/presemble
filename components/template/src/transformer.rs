@@ -2732,6 +2732,142 @@ mod tests {
         );
     }
 
+    /// Every template example of the user guide, rendered exactly as it is
+    /// written there (the blocks are read from the guide file, so the test
+    /// fails when the guide drifts), over one page's data. Each renders without
+    /// error; where the guide shows what an example places, in an `output`
+    /// block, that is what it places.
+    #[test]
+    fn guide_examples_render_as_documented() {
+        use crate::registry::{extract_definitions, TemplateRegistry};
+        const GUIDE: &str = include_str!("../../../site/content/guide/user-guide.md");
+
+        struct Site;
+        impl TemplateRegistry for Site {
+            fn resolve(&self, name: &str) -> Option<Vec<Node>> {
+                let src = match name {
+                    "header" => "<header>H</header>",
+                    "footer" => "<footer>F</footer>",
+                    "card" => r#"<li><presemble:insert data="(ref input.title)" as="h3" /></li>"#,
+                    _ => return None,
+                };
+                Some(parse_template_xml(src).unwrap())
+            }
+        }
+
+        // The page: `input`, with a collection of posts.
+        let post = |title: &str, href: &str| {
+            let mut link = DataGraph::new();
+            link.insert("href", Value::Text(href.to_string()));
+            link.insert("text", Value::Text(title.to_string()));
+            let mut post = DataGraph::new();
+            post.insert("title", Value::Text(title.to_string()));
+            post.insert("link", Value::Record(link));
+            Value::Record(post)
+        };
+        let record = |a: (&str, &str), b: (&str, &str)| {
+            let mut r = DataGraph::new();
+            r.insert(a.0, Value::Text(a.1.to_string()));
+            r.insert(b.0, Value::Text(b.1.to_string()));
+            Value::Record(r)
+        };
+        let mut input = DataGraph::new();
+        input.insert("title", Value::Text("Hello".to_string()));
+        input.insert("summary", Value::Text("A summary".to_string()));
+        input.insert(
+            "tags",
+            Value::List(vec![Value::Text("Rust".to_string()), Value::Text("WebAssembly".to_string())]),
+        );
+        input.insert("author", record(("href", "/author/jo"), ("text", "Jo")));
+        input.insert("cover", record(("src", "c.png"), ("alt", "A cat")));
+        input.insert("body", Value::Nodes(parse_template_xml("<p>Body</p>").unwrap().into()));
+        input.insert("post", Value::List(vec![post("One", "/post/one"), post("Two", "/post/two")]));
+        let mut graph = DataGraph::new();
+        graph.insert("input", Value::Record(input));
+
+        let render = |lang: &str, src: &str| -> Result<String, RenderError> {
+            let nodes = if lang == "html" {
+                parse_template_xml(src).expect("the example parses")
+            } else {
+                crate::hiccup::parse_template_hiccup(src).expect("the example parses")
+            };
+            let (nodes, defs) = extract_definitions(nodes);
+            let ctx = RenderContext::with_local_defs(&Site, &defs, crate::data::OutputMode::Published);
+            Ok(serialize_nodes(&transform(nodes, &graph, &ctx)?))
+        };
+
+        // The guide's blocks up to the part about link expressions in content.
+        let mut blocks: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut open: Option<(String, String)> = None;
+        for line in GUIDE.lines() {
+            if open.is_none() && line.starts_with("## Link expressions in content") {
+                break;
+            }
+            match (&mut open, line.strip_prefix("```")) {
+                (None, Some(lang)) => open = Some((lang.trim().to_string(), String::new())),
+                (Some(_), Some(_)) => {
+                    let (lang, text) = open.take().expect("open");
+                    if lang == "output" {
+                        if let Some(last) = blocks.last_mut() {
+                            last.2 = Some(text);
+                        }
+                    } else {
+                        blocks.push((lang, text, None));
+                    }
+                }
+                (Some((_, text)), None) => {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+                (None, None) => {}
+            }
+        }
+        // A template example: HTML that uses a directive or an expression, or
+        // any Hiccup.
+        let examples: Vec<&(String, String, Option<String>)> = blocks
+            .iter()
+            .filter(|(lang, text, _)| {
+                (lang == "html"
+                    && (text.contains("presemble:") || text.contains("<template ") || text.contains("(ref ")))
+                    || lang == "clojure"
+            })
+            .collect();
+        assert!(examples.len() >= 20, "the guide has its template examples: {}", examples.len());
+
+        let mut rendered = Vec::new();
+        for (lang, text, output) in examples {
+            let html = render(lang, text).unwrap_or_else(|e| panic!("example fails: {e}\n{text}"));
+            if let Some(expected) = output {
+                assert_eq!(html.trim(), expected.trim(), "the example\n{text}");
+            }
+            rendered.push((text.as_str(), html));
+        }
+        let of = |needle: &str| -> Vec<&String> {
+            rendered.iter().filter(|(text, _)| text.contains(needle)).map(|(_, html)| html).collect()
+        };
+
+        // The documented outputs: the output blocks above, and these.
+        let read_more = of("Read more");
+        assert!(read_more.len() >= 2, "the data-each examples");
+        for html in read_more.iter().filter(|h| h.contains("post")) {
+            assert!(html.contains(r#"<a href="/post/one">Read more</a>"#), "{html}");
+            assert!(html.contains(r#"<a href="/post/two">Read more</a>"#), "{html}");
+        }
+        let draft = of("(draft)");
+        assert!(draft.iter().any(|h| h.trim() == r#"<a title="(draft)">Notes</a>"#), "{draft:?}");
+        let link_as = of(r#"data="(ref input.author)" as="h3""#);
+        let link_as = link_as.first().expect("the link example");
+        assert!(
+            link_as.starts_with(r#"<a href="/author/jo"><h3"#) && link_as.trim_end().ends_with(">Jo</h3></a>"),
+            "{link_as}"
+        );
+        // An absent value is left out of an attribute.
+        assert_eq!(
+            render("html", r#"<a href="(ref input.homepage)">x</a>"#).unwrap(),
+            "<a>x</a>"
+        );
+    }
+
     /// The two lines of the user guide's "Link and image records" section,
     /// rendered as it says.
     #[test]

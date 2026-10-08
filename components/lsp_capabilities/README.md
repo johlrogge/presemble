@@ -16,9 +16,9 @@ This component is pure logic with no I/O or LSP protocol types. It receives sour
 ### Template files (`templates/<name>.html`)
 
 - **Completions** — data-path completions derived from the schema matching the template file stem; completes `data="…"` attribute values
-- **Diagnostics** — flags `data` attribute paths that reference fields not declared in the schema
+- **Diagnostics** — checks every template expression (ADR-067): paths naming fields (or collections) not declared in the schema, unknown templates and functions, wrong argument counts, and a record or list used as an attribute value
 - **Hover** — returns the field's hint text for a data-path attribute at the cursor line
-- **Go-to-definition** — resolves `presemble:include src="…"` references to the target template file; resolves in-file `presemble:define` name references to their definition line
+- **Go-to-definition** — resolves a template call (`(header input)`, the first template of `((juxt …) input)`) to the target template file; resolves in-file `presemble:define` name references to their definition line
 
 ### Schema files (`schemas/<name>.md`)
 

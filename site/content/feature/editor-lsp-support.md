@@ -33,11 +33,12 @@ does not duplicate heading markers.
 ### Template files
 
 Open a template in `templates/`. The LSP reads the schema that matches the template's
-file stem and offers completions for `data="…"` attribute values. If a data path
-references a field that does not exist in the schema, the attribute is flagged as an
-error. Hover on a data-path attribute shows the field's hint text. Go-to-definition on
-a `presemble:include` jumps to the referenced template file or to the `presemble:define`
-block within the same file.
+file stem and offers completions for `data="…"` attribute values. Every expression in a
+template is checked: a path that names a field that does not exist in the schema, an
+unknown template or function, and a record or list used as an attribute value are flagged
+as errors. Hover on a data-path attribute shows the field's hint text. Go-to-definition on
+a template call such as `(header input)` jumps to the referenced template file or to the
+`presemble:define` block within the same file.
 
 ### Schema files
 
