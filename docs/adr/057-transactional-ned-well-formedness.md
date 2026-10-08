@@ -128,7 +128,7 @@ Each has the work that closes it:
 ## Open questions
 
 1. **Undo scope.** Record a bounded history now with no undo command, or ship per-document undo.
-2. **Page-body leak.** `serve`'s public file handler serves unsaved edits, working-tree-only pages and build errors to anonymous readers. Options: document it as a known gap now and gate HTML in Hosted mode later, or gate it now.
+2. **Page-body leak.** *Resolved by ADR-068.* `serve` used to hand unsaved edits, working-tree-only pages and build errors to anonymous readers. Readers are now served a separate published output (saved and valid, no editor attributes); editors keep the working copy.
 3. **Slot reshuffle on reload.** Should markdown record slot boundaries (for example an HTML comment marker), or is reassignment plus diagnostics acceptable?
 4. **Validity after an edit.** Validity is reported only when the store is populated (§4). Should each edit re-validate the affected documents and refresh their diagnostics, so the unpublishable state follows the edit without a repopulate?
 

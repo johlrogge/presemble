@@ -45,6 +45,14 @@ The browser event stream is split into two sockets with separate message types:
 
 **Consequences:** cursor-follow scrolling and suggestion live-refresh now need a logged-in browser (`--dev-session` locally). The only public endpoints under `/_presemble/*` are `/_presemble/ws` and `/_presemble/login`.
 
+## Amendment (2026-10): audiences are served different outputs (ADR-068)
+
+ADR-068 closes the "known gap" of the WebSocket amendment above:
+
+- **What each audience is served.** A request with an editor session is served the editorial output (the conductor's working copy, with editor attributes and build-error pages). Every other request is served the published output: built from the files on disk through the publish gate, without editor attributes. A page missing from it is a plain 404. `serve` without a session serves the published output; previewing drafts needs `--dev-session`.
+- **Reload channels.** `/_presemble/ws` (public) announces changes to the published output only: it fires after the published output has been rebuilt (after a save or an external file change), never for an edit in progress. `/_presemble/editorial-ws` keeps the conductor's events.
+- **Superseded detail.** The public channel is no longer fed by projecting editorial messages (`EditorialMessage::to_public` is gone). It has its own sender that accepts only `PublicMessage`, so an editorial message still cannot reach it; the conductor's rebuild events go to the editorial channel only.
+
 ## Why
 
 1. **A single shared password could not survive a real link.** Before V0 the editorial plane was gated only by one shared Caddy `editor` password — world-writable to anyone who had it, with no per-user suggestion authorship. Accounts make an app-level session boundary mandatory.

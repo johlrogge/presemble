@@ -618,9 +618,21 @@ presemble serve <site-dir> --dev-session
 
 Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors and warnings for the whole site are reported to the terminal at startup; pages still render. Reporting them on every rebuild, and showing them in the browser, is future work. Plain `presemble serve` is preview-only. To edit in the browser (Edit and Suggest modes, creating content, the site wizard), start the server with `--dev-session` and open the Login URL it prints. Without the flag the editor shows "Editing is disabled on this server. Restart presemble serve with --dev-session to enable it."
 
+### What readers and editors see
+
+The server keeps two outputs. Editors, who have a session, see the working copy: it includes unsaved edits, the editing controls, and error pages for pages that fail to build. Everyone else sees the published site: what `presemble build` would produce from the files saved on disk, with no editing controls. A page that is not published is a plain 404 for readers.
+
+Previewing drafts therefore needs a session. Start the server with `--dev-session` and open the Login URL it prints; plain `presemble serve` shows the published site.
+
+The published site is rebuilt at start-up, after every save, and after any change to a file on disk. While any page fails the publish gate, readers keep seeing the last published version; once the site passes again, they see the new one. Unsaved edits never reach readers.
+
+While serving, the published version lives in a versioned directory beside the output directory (`output/<site>.publishing-<n>`), which the server swaps for the next one in a single step, so there is no moment without a page. `output/<site>/` is written only by `presemble build`.
+
 ### Live reload
 
-When a file changes and the rebuild completes, the browser reloads automatically — no manual refresh needed. If the changed page is different from the one currently open, the browser navigates directly to the changed page. If multiple pages changed, the browser navigates to the first one.
+When a file changes and the rebuild completes, the editor's browser reloads automatically — no manual refresh needed. If the changed page is different from the one currently open, the browser navigates directly to the changed page. If multiple pages changed, the browser navigates to the first one.
+
+A reader's browser reloads only when the published site changes: after a save, or after a file changes on disk. An edit that has not been saved does not reload it.
 
 ### Suggestion nodes
 

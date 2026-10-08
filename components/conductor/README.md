@@ -48,7 +48,7 @@ The command vocabulary lives in `protocol.rs`. Client paths are validated types 
 | `ResolveLinkTargetStem { source_stem, slot }` | The collection stem a link slot points at |
 | `ListDependents { stem }` | Files that depend on a schema stem |
 | `ListContent` | All content file paths (site-relative) |
-| `RenderPage { path, mode }` | Render a page (view mode reads the output directory; schema mode renders a `/_schema/...` URL) |
+| `RenderPage { path, mode }` | Render a page (view mode reads the conductor's editorial output directory, never the published output ([ADR-068](../../docs/adr/068-serve-publishes-what-is-saved-and-valid.md)); schema mode renders a `/_schema/...` URL) |
 | `SchemaUrlForPage { page_url }` / `PageUrlForSchema { schema_url }` | Map a page URL to its schema URL, and back |
 
 ## Link resolution
