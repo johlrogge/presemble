@@ -14,6 +14,10 @@ block kinds, a lone link or image is a paragraph whose shape decides its slot,
 and an empty slot is filled by a block edit (§10 amendment). See the stage 5b
 amendments below.
 
+Stage 8 (blockquote containers, §13) is done: a blockquote holds blocks, in
+the model, the parser, the serializer, the store and the editor. See the stage
+8 amendments below.
+
 ## Context
 
 - The NodeStore models a document down to blocks
@@ -488,6 +492,12 @@ All addressing stays exact (ADR-056).
      holds a `table` element (the old `headers` shape, with cells as text, is
      refused on accept). Suggestions with other payloads, and accepted,
      rejected and stale records, stay.
+  5. `blockquote-containers` (stage 8): discards every pending suggestion that
+     touches a blockquote (a blockquote anywhere in the payload, in the old
+     single-text shape or the new one, or a selection that resolves into one).
+     A text suggestion on a quote that survives is never misapplied: it is
+     refused or goes Stale. Other suggestions, and accepted, rejected and stale
+     records, stay.
 
 ## Implementation plan
 
@@ -627,7 +637,7 @@ Every stage leaves the tree green and shippable.
   - `broken_page_link_is_error`
   - `missing_local_image_is_error`
 
-**8. Blockquote container.**
+**8. Blockquote container.** Done (8.1 to 8.4, see the stage 8 amendments).
 - Tests:
   - `multi_paragraph_blockquote_round_trips`
   - `blockquote_code_span_keeps_backticks_l17`
@@ -657,7 +667,6 @@ Every stage leaves the tree green and shippable.
 
 **Follow-ups:**
 - the split-paragraph command;
-- an Error for excess table cells on read (L16);
 - suggestions follow their target: a pending suggestion is amended (rebased)
   when its target changes by a manual edit or an accepted suggestion, not only
   marked Stale.
@@ -715,7 +724,14 @@ Every stage leaves the tree green and shippable.
   unassigned paragraphs;
 - the leading-link loss;
 - image extraction from paragraphs;
-- the multi-paragraph blockquote merge;
+- the multi-paragraph blockquote merge (stage 8);
+- any block other than a paragraph inside a quote dissolved the quote and
+  dropped the text before it (stage 8);
+- `> ---` in a quote acted as the body separator (stage 8);
+- L13 and L17 for blockquotes (stage 8: HTML in a quote is kept and reported,
+  code spans keep their backticks);
+- L16 on the read side (stage 8: extra cells are kept);
+- L19 (resolved by decision, stage 8: canonicalisation);
 - the escaped-paragraph mismatch;
 - headings rendered as full markdown;
 - link and image kind flips;
@@ -727,8 +743,8 @@ Every stage leaves the tree green and shippable.
 - L5 and L7 remain: link-expression labels stay plain, and an href starting
   with `:` reads as a link expression.
 - L10 remains until stage 9 decides it.
-- L16 remains on the read side: GFM drops excess cells on load.
-- L19 remains.
+- Thematic breaks (`---` inside a document) are not rendered. This is an
+  existing limit; stage 8 only records it.
 - L20 (new): formatting that markdown cannot express is refused, never
   silently changed.
 - L22 (new): emptying a paragraph is refused; delete it instead.
@@ -766,8 +782,12 @@ Every stage leaves the tree green and shippable.
   Errors.
 - **ADR-062:**
   - L13 and L17 are resolved for blockquotes.
-  - L15 is resolved, and L16 is resolved on the write side.
+  - L15 is resolved, and L16 is resolved on the write side (and, in stage 8,
+    on the read side).
   - Inline HTML and inline comments get node kinds (§14).
+  - D5 (comments on Replace and Delete) is generalised in stage 8: comments
+    inside a replaced or deleted block are relocated, never dropped (stage 8
+    amendments, D3).
 - **ADR-063:**
   - §1, §2 and §6 are superseded: headings store inlines, and `MarkdownText`
     and `capitalize_first` are removed.
@@ -891,7 +911,87 @@ Every stage leaves the tree green and shippable.
   nodes.
 - **§15, migration:** the `table-cells` step.
 - **Limits:** L23 is resolved. L16 is resolved on the write side; on the read
-  side GFM still drops cells beyond the header's count.
+  side GFM still drops cells beyond the header's count (resolved in stage 8).
+
+### Stage 8 amendments (blockquote containers)
+
+- **Model:** `Blocks { elements, comments }` is the shape of the document top
+  level and of a blockquote's inside: blocks, and the comments between them,
+  each with the index of the block it precedes (`elements.len()` for comments
+  after the last block). `FlatDocument` is an alias for it.
+  `ContentElement::Blockquote { blocks: Blocks }` holds any block, nested
+  blockquotes included. `Blocks` equality compares content only (the blocks in
+  order and each comment with its index), not spans.
+- **§6, store encoding:** `blockquote > block*`. A block's comments are its
+  `_trivia-before`; the comments after the last block are the quote's
+  `_trivia-end`. Decoding is strict: the old shape (one `Text` child) or any
+  other child that is not a block is `UnexpectedChild`; a non-block element is
+  too. `BLOCK_CONTAINER_KINDS` lists the container kinds (`blockquote`; stage 9
+  adds `item`) and `TEXT_BLOCK_KINDS` no longer holds `blockquote`. A quote
+  payload holds payload blocks only: a nested separator, HTML block or link
+  expression is `NotPayloadKind` (ADR-062 D4), and `block_to_tree` refuses a
+  quote that holds one. Any attribute on `blockquote` is `UnexpectedAttribute`.
+  A payload carries no comments.
+- **Parser:** a stack of open quotes holds the containers. A block goes to the
+  innermost one, and an empty quote is kept. The `Link` and `Image` states and
+  `image_element` are deleted: every block that holds inline content captures
+  it, so a link or image can no longer start a block anywhere but between
+  blocks. The stage 6.1 rule is subsumed.
+- **`unquoted`:** the source of a block inside a quote (list, HTML block,
+  setext heading, link-expression detection, marker fallback) is read with the
+  quote markers of every line but the first removed: per level, up to three
+  spaces, `>` and one optional space. A lazy line is kept as it is. Tabs are
+  not expanded.
+- **Serializer:** the quote writes its blocks with every line behind `> `, and
+  an empty line behind `>`. Nothing is ever a lazy continuation, and the blocks
+  inside need only their own, context-free, escaping.
+- **Decisions:**
+  - **D1:** markers and link expressions in a quote read as at the top level.
+    The parser and serializer stay context-free; the validator reports them as
+    for body blocks (an Error for marker misuse, a Warning for a link
+    expression that takes no effect). HTML in a quote is an Error, as in a
+    paragraph (L13).
+  - **D2:** an empty quote is kept and written as `>`. Deleting the last block
+    of a quote leaves it empty.
+  - **D3:** comments are relocated, never dropped (this generalises ADR-062
+    D5). The relocation is `relocate_inner_trivia`, and it runs before the
+    subtree is removed. On a Replace by a block of the same kind, each comment
+    keeps its index path; one whose place is gone goes to the `_trivia-end` of
+    the deepest container on its path that is still there. On any other
+    Replace they go to the first new block's `_trivia-before`, after the
+    replaced block's own leading comments, in document order. On a Delete they
+    follow the deleted block's leading comments to the next surviving block, or
+    to the container's `_trivia-end`; the comments of a deleted last block come
+    before the container's own end comments, as they did in the source. A
+    block edit cannot change comment text: comments in a proposal are ignored.
+  - **D4:** the `blockquote-containers` migration step (§15).
+  - **D5:** the whole quote is the editable body block. Nested blocks carry no
+    `data-presemble-*` attributes, and a browser edit of a quote is a
+    `Replace`. Per-block addresses for nested blocks are decided together with
+    list items in stage 9.
+  - **D6:** a row with more cells than the header keeps them on read: the
+    header is padded with empty columns (`Align::Default`), and the extra
+    cells are read from the row's source. This is canonicalisation, like L19,
+    and has no diagnostic. A `|` inside a code span still splits a cell, as in
+    GFM; only `\|` keeps a pipe in one.
+- **Addressing (§9):** `container_document` resolves a blockquote as a
+  container and its blocks as blocks, so Block, Container and Text targets
+  work inside quotes, nested ones included. `(ned/nth-child quote i)` selects
+  the i-th block of one quote (`nth-child` takes a single node, so
+  `(ned/blocks quote)` is for selecting all of them). A Replace of a quote and
+  an edit inside it overlap.
+- **Rendering:** a quote renders its blocks (`<blockquote><p>…</p></blockquote>`).
+  Only the quote carries the editor attributes. Thematic breaks are not
+  rendered.
+- **Limits:**
+  - Resolved: the merged multi-paragraph quotes; blocks other than paragraphs
+    dissolving a quote; `> ---` in a quote acting as the body separator; L13
+    and L17 for quotes; L16 on the read side; L19.
+  - **L19:** a hard break in a setext heading becomes a space. ATX cannot
+    express it, so this is canonicalisation (§0), recorded as resolved by
+    decision.
+  - There is no L26: the tab pin showed only the canonical space after `>` on a
+    save, with the same meaning.
 
 ## Related
 

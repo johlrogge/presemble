@@ -134,6 +134,9 @@ comments are stripped and are not an Error.
   the block or container it is attached to.
 - **ADR-060 P1:** resolves the known exception L12. HTML blocks are elements
   and are no longer lost on save.
+- **ADR-059 stage 8:** D5 is generalised. Comments inside a replaced or deleted
+  block (a blockquote's blocks and its end comments) are relocated, never
+  dropped. See ADR-059, stage 8 amendments, D3.
 
 ## Related
 

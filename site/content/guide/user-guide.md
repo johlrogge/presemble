@@ -168,7 +168,7 @@ The body section supports the full range of markdown block and inline content:
 |---|---|
 | Paragraph | Plain text |
 | Heading | `##`, `###`, … (within the schema's `headings` constraint) |
-| Blockquote | `> quoted text` |
+| Blockquote | `> quoted text`; it can hold any blocks, nested quotes included |
 | Unordered list | `- item` |
 | Ordered list | `1. item` |
 | Code block | Triple-backtick fence |
@@ -183,13 +183,15 @@ The body section supports the full range of markdown block and inline content:
 
 Headings keep their markdown as written, so `` ## The `<div>` element `` is saved as it was typed. Underlined (setext) headings, a line of text with `===` or `---` below it, are rewritten as `#` headings when the file is saved; until then they cannot be suggested on in the browser.
 
+In a table, a row with more cells than the header keeps them: the header is padded with empty columns when the file is saved, so no cell is lost.
+
 ### HTML and comments in content
 
 Presemble keeps content free of HTML, even though markdown allows it, like Hugo does by default (goldmark's `unsafe = false`). Presentation belongs in templates.
 
 - **HTML blocks** (a line that starts with a tag such as `<div>`) are kept in the file, but the page cannot be published until they are removed. In `presemble serve` a placeholder shows where the block is.
 - **Inline HTML** in paragraphs, headings and lists (such as `<b>bold</b>` inside a sentence) also stops the page from publishing.
-- **In blockquotes**, inline HTML is shown as text and saved escaped, for now, until blockquotes keep their markdown as written.
+- **In blockquotes**, HTML is treated as it is anywhere else: a blockquote holds any blocks (paragraphs, headings, code, lists, tables and nested quotes), and HTML in one stops the page from publishing, like HTML in a paragraph. Comments inside a blockquote are kept. A link expression inside a blockquote has no effect.
 - **The fix:** delete the HTML, write `\<` for a literal `<`, or put code in backticks (`` `<div>` ``).
 - **HTML comments** (`<!-- … -->`) are kept in the file, move with the block that follows them, and are never published.
 
@@ -885,7 +887,7 @@ WS      := [ \t]+
 
 `sort-by` without a direction sorts ascending. Strings are double-quoted and may contain spaces; write a literal quote as `\"` and a backslash as `\\`. `(refs-to self)` means the current page, while `(refs-to "/author/alice")` names a page by URL. Only `->>` is accepted; `->` is reported with a suggestion to use `->>`.
 
-A link expression must be a whole paragraph on its own line, with nothing before or after it and not inside a list or blockquote. Write it without outer parentheses: `[posts](->> :post (take 4))`. Older spellings (`[posts]((->> :post (take 4)))`, `%20`-encoded or angle-bracket destinations) are still read and are written back in this form. A link expression inside running text has no effect and is reported as a diagnostic, as is a malformed one.
+A link expression takes effect only as a whole paragraph in a preamble slot; anywhere else (the body, a blockquote, a list) it has no effect and is reported. Write it without outer parentheses: `[posts](->> :post (take 4))`. Older spellings (`[posts]((->> :post (take 4)))`, `%20`-encoded or angle-bracket destinations) are still read and are written back in this form. A link expression inside running text has no effect and is reported as a diagnostic, as is a malformed one.
 
 A link expression only takes effect in a preamble slot, above the `----` separator. In the body it is ignored and reported with a diagnostic asking you to move it above `----`.
 
