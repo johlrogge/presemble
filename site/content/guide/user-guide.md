@@ -297,7 +297,7 @@ A list is a call. The functions are pure, and the first argument is the value th
 | `to_upper` | Uppercase |
 | `capitalize` | Uppercase the first character |
 | `truncate` | Truncate to a default length |
-| `juxt` | Several templates side by side, used as `((juxt a b) input)` (see Template composition below) |
+| `juxt` | Several templates side by side, used as `((juxt a b) input)`, see [Template composition](#template-composition) |
 | `->` | Thread a value through functions: `(-> input.title text to_lower capitalize)` |
 
 ```html

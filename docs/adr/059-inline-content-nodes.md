@@ -484,6 +484,10 @@ All addressing stays exact (ADR-056).
      payload holds a `link` or `image` element (the kinds are gone, so it could
      never apply). Suggestions with other payloads, and accepted, rejected and
      stale records, stay.
+  4. `table-cells` (stage 6): discards every pending suggestion whose payload
+     holds a `table` element (the old `headers` shape, with cells as text, is
+     refused on accept). Suggestions with other payloads, and accepted,
+     rejected and stale records, stay.
 
 ## Implementation plan
 
@@ -603,14 +607,15 @@ Every stage leaves the tree green and shippable.
   - `image_alt_keeps_markup`
   - slot assignment byte-identical on the conservation corpus
 
-**6. Table cells.**
+**6. Table cells.** Done (6.1 to 6.4, see the stage 6 amendments).
 - Delivers: `cell` elements, stored alignment, `\|` escaped in cells, and
   addressable cells.
 - Tests:
   - `table_cell_is_inline_container`
   - `table_cell_text_is_addressable`
   - `pipe_in_cell_code_span_is_escaped_on_write_l16`
-  - flip `table_alignment_is_lost_on_save_l23`
+  - flip `table_alignment_is_lost_on_save_l23` (now
+    `table_alignment_survives_a_save_l23`)
 
 **7. References** (§11).
 - Tests:
@@ -698,10 +703,14 @@ Every stage leaves the tree green and shippable.
 ### Limits resolved
 
 - L6, L11, L13 and L17 (blockquotes), L15 (also for link text, stage 5b),
-  L16 (write side), and L18 (now structural);
+  L16 (write side, stage 6: `|` is escaped in cells, code spans included), and
+  L18 (now structural);
 - the kind change when a link is edited (stage 5b): adding text to a lone link
   is a content edit, not a `Replace`;
-- L23, L24 (used definitions);
+- L23 (stage 6: column alignment is stored and written), L24 (used
+  definitions);
+- a link or image inside a table cell dropped the whole table on read (stage
+  6.1);
 - ADR-058 §8 (body references), and the ADR-058 limit on image-bearing
   unassigned paragraphs;
 - the leading-link loss;
@@ -843,6 +852,46 @@ Every stage leaves the tree green and shippable.
 - **Stage 5 amendment, §10:** "a sole link or image is still a `Link` or
   `Image` block until stage 5b" no longer holds.
 - **§15, migration:** the `link-image-paragraphs` step.
+
+### Stage 6 amendments (table cells)
+
+- **6.1, parser fix (`4e8ea6f`):** a link or image started a block whatever it
+  was inside, so one in a table cell ended the table: the table vanished from
+  the parsed document, a stray link paragraph took its place, and a save wrote
+  the file without it. A link or image now starts a block only at the top
+  level, where a block can start; anywhere else it is inline content of what is
+  being read (paragraph, heading, table cell, list item, blockquote).
+- **Model:** `ContentElement::Table { columns, rows }`. A `Column` is a header
+  (`Inlines` in the `Cell` context) and an `Align` (`Default`, `Left`,
+  `Center`, `Right`). Every row has exactly one cell per column; the parser pads
+  short rows with empty cells.
+- **§6, store encoding:** `table > head > cell*` and
+  `table > rows > row > cell*`. Every `cell` is an inline container in the
+  `Cell` context (it is in `INLINE_CONTAINER_KINDS`). A head cell carries
+  `align` (`left`, `center` or `right`); the default has no attribute, and no
+  other element takes `align`. Decoding is strict: a child that is not the
+  expected element, the old `headers` shape or text directly under a row is
+  `UnexpectedChild`; `align` on a body cell is `UnexpectedAttribute`; an
+  invalid `align` value is `InvalidAttribute`; a row whose width differs from
+  the head is `RowWidth { expected, found }`. A table payload takes the same
+  shape.
+- **Canonical markdown (§7):** the delimiter row is written `---`, `:---`,
+  `:---:` or `---:`. Cells are canonical inlines, and `|` is escaped as `\|`
+  everywhere in a cell, code spans included.
+- **Rendering:** cells render through `inline_nodes`; no cell markdown is parsed
+  (`table_cell_nodes` is removed). A column that declares an alignment renders
+  `style="text-align: left|center|right"` on its `<th>` and `<td>` cells (a user
+  decision); the default renders no attribute.
+- **Addressing (§9, §10):** `(ned/header-cell table c)` and
+  `(ned/cell table r c)`, zero-based, select a cell. A cell is an inline
+  container, so `TextScope`, `SetText`, `SearchReplace` and `SetInlines` apply to
+  it unchanged. A cell's text edit is scoped to the cell, and its document is the
+  table's.
+- **Validation:** inline HTML in a table cell is an Error, diagnosed from the
+  nodes.
+- **§15, migration:** the `table-cells` step.
+- **Limits:** L23 is resolved. L16 is resolved on the write side; on the read
+  side GFM still drops cells beyond the header's count.
 
 ## Related
 
