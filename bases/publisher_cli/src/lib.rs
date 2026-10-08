@@ -610,17 +610,17 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
 
     std::fs::write(
         site_dir.join("content/note/hello-world.md"),
-        "# Hello, World! {#title}\n\n----\n\n## Welcome\n\nThis is your first Presemble note. Edit this file, add more in `content/note/`,\nor define new content types in `schemas/`.\n",
+        "# Hello, World!\n\n----\n\n## Welcome\n\nThis is your first Presemble note. Edit this file, add more in `content/note/`,\nor define new content types in `schemas/`.\n",
     )?;
 
     std::fs::write(
         site_dir.join("templates/index.html"),
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>My Site</title>\n  <link rel=\"stylesheet\" href=\"/assets/style.css\">\n</head>\n<body>\n  <h1>My Site</h1>\n  <ul>\n    <template data-each=\"notes\">\n      <li><a data=\"note.title\" data-href=\"note.url_path\"></a></li>\n    </template>\n  </ul>\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\" />\n  <title>My Site</title>\n  <link rel=\"stylesheet\" href=\"/assets/style.css\" />\n</head>\n<body>\n  <h1>My Site</h1>\n  <ul>\n    <template data-each=\"(ref input.note)\">\n      <li><presemble:insert data=\"(ref item.link)\" /></li>\n    </template>\n  </ul>\n</body>\n</html>\n",
     )?;
 
     std::fs::write(
         site_dir.join("templates/note/item.html"),
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title data=\"note.title\"></title>\n  <link rel=\"stylesheet\" href=\"/assets/style.css\">\n</head>\n<body>\n  <a href=\"/\">\u{2190} Home</a>\n  <presemble:insert data=\"note.title\" as=\"h1\" />\n  <presemble:insert data=\"note.body\" />\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\" />\n  <presemble:insert data=\"(text input.title)\" as=\"title\" />\n  <link rel=\"stylesheet\" href=\"/assets/style.css\" />\n</head>\n<body>\n  <a href=\"/\">\u{2190} Home</a>\n  <presemble:insert data=\"(ref input.title)\" as=\"h1\" />\n  <presemble:insert data=\"(ref input.body)\" />\n</body>\n</html>\n",
     )?;
 
     std::fs::write(
@@ -1091,6 +1091,62 @@ mod tests {
         let affected = dep_graph.affected_outputs(std::path::Path::new("/site/assets/base.css"));
         assert!(affected.contains(&PathBuf::from("/out/assets/base.css")));
         assert!(affected.contains(&PathBuf::from("/out/assets/style.css")));
+    }
+
+    // ── presemble init scaffold ─────────────────────────────────────────────
+
+    /// Run `init` into a fresh site, build it as `presemble build` does, and
+    /// return the site dir (kept alive by the temp dir) and its output dir.
+    fn init_and_build() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        init_site(&site).expect("init");
+        // As `presemble build` does: the publish gate, so the scaffold must be valid too.
+        build_for_publish(&site, &UrlConfig::default()).expect("the scaffolded site builds");
+        let out = output_dir(&std::fs::canonicalize(&site).unwrap());
+        (tmp, site, out)
+    }
+
+    #[test]
+    fn init_scaffold_note_links_have_their_url() {
+        let (_tmp, _site, out) = init_and_build();
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            index.contains(r#"href="/note/hello-world""#) && index.contains("Hello, World!"),
+            "index should link to the note with its title: {index}"
+        );
+    }
+
+    #[test]
+    fn init_scaffold_note_page_shows_its_title() {
+        let (_tmp, _site, out) = init_and_build();
+        let page = std::fs::read_to_string(out.join("note/hello-world/index.html")).unwrap();
+        let between = |open: &str, close: &str| {
+            let start = page.find(open).map(|i| i + open.len());
+            start.and_then(|s| page[s..].find(close).map(|e| page[s..s + e].to_string()))
+        };
+        let title = between("<title", "</title>").unwrap_or_default();
+        let h1 = between("<h1", "</h1>").unwrap_or_default();
+        assert!(title.contains("Hello, World!"), "title should hold the note's title: {page}");
+        assert!(h1.contains("Hello, World!"), "h1 should hold the note's title: {page}");
+    }
+
+    /// Guard: the scaffold's templates read only what the checker knows.
+    #[test]
+    fn init_scaffold_templates_pass_the_checker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        init_site(&site).expect("init");
+        let grammar = schema::parse_schema(&std::fs::read_to_string(site.join("schemas/note/item.md")).unwrap())
+            .expect("schema");
+        let names = template::check::TemplateNames::new(["note"]);
+        // The item template is checked against the note schema. (The index
+        // reads collections, which have no schema of their own to check
+        // against.)
+        let file = "templates/note/item.html";
+        let src = std::fs::read_to_string(site.join(file)).unwrap();
+        let found = template::check::check_template(&src, &grammar, "note", &names);
+        assert!(found.is_empty(), "{file}: {found:#?}");
     }
 
     // ── is_source_empty unit tests ──────────────────────────────────────────
