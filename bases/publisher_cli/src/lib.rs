@@ -79,7 +79,7 @@ pub fn build_for_publish(site_dir: &Path, _url_config: &UrlConfig) -> Result<Bui
         });
     }
 
-    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Published)?;
+    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Published, &output_dir(&site_dir))?;
     if outcome.files_failed > 0 {
         return Err(CliError::PagesFailed(outcome.files_failed));
     }
@@ -96,7 +96,7 @@ pub fn build_for_serve(site_dir: &Path, _url_config: &UrlConfig) -> Result<Build
 
     let conductor = load_conductor(&site_dir)?;
     let report = conductor.validation_report();
-    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial)?;
+    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial, &output_dir(&site_dir))?;
     print_report(&outcome.validation);
     let files = report_file_count(&outcome.validation);
     if files > 0 {
@@ -106,6 +106,27 @@ pub fn build_for_serve(site_dir: &Path, _url_config: &UrlConfig) -> Result<Build
             outcome.validation.warning_count(),
         );
     }
+    Ok(outcome)
+}
+
+/// Where the editorial build writes: next to [`output_dir`], never in it.
+pub fn editorial_output_dir(site_dir: &Path) -> std::path::PathBuf {
+    site_index::editorial_output_dir(site_dir)
+}
+
+/// `presemble build --editorial`: the editorial preview as `serve` shows it
+/// (unpublished pages and editor-only attributes included), written to
+/// [`editorial_output_dir`] for inspection and comparison. It never touches
+/// the published output directory.
+pub fn build_for_editorial(site_dir: &Path, _url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+    let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
+    println!("Building site (editorial): {}", site_dir.display());
+
+    let out = editorial_output_dir(&site_dir);
+    let conductor = load_conductor(&site_dir)?.with_output_dir(out.clone());
+    let report = conductor.validation_report();
+    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial, &out)?;
+    print_report(&outcome.validation);
     Ok(outcome)
 }
 
@@ -121,10 +142,11 @@ fn render_site(
     conductor: &conductor::Conductor,
     validation: validation::ValidationReport,
     output: template::OutputMode,
+    out: &Path,
 ) -> Result<BuildOutcome, CliError> {
     // Copy assets (conductor handles content → HTML; assets are just file copies)
     let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
-    copy_site_assets(site_dir, &repo)?;
+    copy_site_assets(site_dir, &repo, out)?;
 
     let (rebuilt, failed, errors) = conductor.build_all_pages(output);
 
@@ -209,10 +231,12 @@ fn dir_has_md_files(dir: &std::path::Path) -> bool {
     false
 }
 
-/// Discover and copy all assets referenced by templates to the output directory.
+/// Discover and copy all assets referenced by templates to the output
+/// directory `out`.
 pub(crate) fn copy_site_assets(
     site_dir: &Path,
     repo: &site_repository::SiteRepository,
+    out: &Path,
 ) -> Result<(), CliError> {
     let schema_stems_list = repo.schema_stems();
     let mut all_asset_paths = std::collections::BTreeSet::new();
@@ -270,8 +294,8 @@ pub(crate) fn copy_site_assets(
 
     let template_assets: Vec<String> = all_asset_paths.into_iter().collect();
     let mut asset_graph = site_index::SiteGraph::new();
-    discover_assets(site_dir, &template_assets, &mut asset_graph)?;
-    copy_graph_assets(site_dir, &asset_graph)?;
+    discover_assets(site_dir, out, &template_assets, &mut asset_graph)?;
+    copy_graph_assets(site_dir, out, &asset_graph)?;
     Ok(())
 }
 
@@ -299,6 +323,13 @@ enum Command {
         base_path: Option<String>,
         #[arg(long)]
         base_url: Option<String>,
+        /// Render the editorial preview as `serve` shows it (unpublished
+        /// pages and editor attributes included) into
+        /// `<parent>/output-editorial/<site>/`, never into the published
+        /// output. For inspection and comparison, not for publishing. Lenient:
+        /// no publish gate.
+        #[arg(long)]
+        editorial: bool,
     },
     /// Serve the site locally with automatic rebuild on changes
     Serve {
@@ -372,7 +403,7 @@ pub fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Build { site_dir, config, url_style, base_path, base_url }) => {
+        Some(Command::Build { site_dir, config, url_style, base_path, base_url, editorial }) => {
             let site_path = Path::new(&site_dir);
             let url_config = load_url_config(
                 site_path,
@@ -381,7 +412,11 @@ pub fn run() -> Result<(), CliError> {
                 base_path.as_deref(),
                 base_url.as_deref(),
             )?;
-            build_for_publish(site_path, &url_config)?;
+            if editorial {
+                build_for_editorial(site_path, &url_config)?;
+            } else {
+                build_for_publish(site_path, &url_config)?;
+            }
             Ok(())
         }
         Some(Command::Serve { site_dir, config, url_style, base_path, base_url, port, dev_session }) => {
@@ -612,11 +647,12 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
 /// in the SiteGraph. Recursively follows @import chains in stylesheets.
 fn discover_assets(
     site_dir: &std::path::Path,
+    out: &std::path::Path,
     template_asset_paths: &[String],
     site_graph: &mut site_index::SiteGraph,
 ) -> Result<(), CliError> {
     for path in template_asset_paths {
-        add_asset_node(site_dir, path, site_graph)?;
+        add_asset_node(site_dir, out, path, site_graph)?;
     }
     Ok(())
 }
@@ -626,6 +662,7 @@ fn discover_assets(
 /// For everything else, creates a LeafAsset node.
 fn add_asset_node(
     site_dir: &std::path::Path,
+    out: &std::path::Path,
     path: &str,
     site_graph: &mut site_index::SiteGraph,
 ) -> Result<(), CliError> {
@@ -637,7 +674,7 @@ fn add_asset_node(
 
     let relative = path.trim_start_matches('/');
     let source = site_dir.join(relative);
-    let output = output_dir(site_dir).join(relative);
+    let output = out.join(relative);
 
     if path.ends_with(".css") {
         let css_content = std::fs::read_to_string(&source).map_err(|_| {
@@ -673,11 +710,11 @@ fn add_asset_node(
 
         // Recursively discover imported stylesheets
         for import_path in &refs.imports {
-            add_asset_node(site_dir, import_path, site_graph)?;
+            add_asset_node(site_dir, out, import_path, site_graph)?;
         }
         // Discover referenced leaf assets
         for asset_path in &refs.asset_urls {
-            add_asset_node(site_dir, asset_path, site_graph)?;
+            add_asset_node(site_dir, out, asset_path, site_graph)?;
         }
     } else {
         let node = site_index::SiteNode {
@@ -696,13 +733,14 @@ fn add_asset_node(
 /// Copy all stylesheet and leaf asset nodes from the SiteGraph to the output directory.
 fn copy_graph_assets(
     site_dir: &std::path::Path,
+    out: &std::path::Path,
     site_graph: &site_index::SiteGraph,
 ) -> Result<(), CliError> {
     for node in site_graph.iter_stylesheets() {
-        copy_asset_file(site_dir, &node.url_path)?;
+        copy_asset_file(site_dir, out, &node.url_path)?;
     }
     for node in site_graph.iter_leaf_assets() {
-        copy_asset_file(site_dir, &node.url_path)?;
+        copy_asset_file(site_dir, out, &node.url_path)?;
     }
     Ok(())
 }
@@ -769,6 +807,7 @@ fn collect_stylesheet_sources_rec(
 
 fn copy_asset_file(
     site_dir: &std::path::Path,
+    out: &std::path::Path,
     url_path: &site_index::UrlPath,
 ) -> Result<(), CliError> {
     let path = url_path.as_str();
@@ -780,7 +819,7 @@ fn copy_asset_file(
             src.display()
         )));
     }
-    let dest = output_dir(site_dir).join(relative);
+    let dest = out.join(relative);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -841,6 +880,15 @@ mod tests {
             }
             _ => panic!("expected the reload subcommand"),
         }
+    }
+
+    #[test]
+    fn cli_parses_build_editorial() {
+        let cli = Cli::try_parse_from(["presemble", "build", "site/", "--editorial"])
+            .expect("`presemble build <site-dir> --editorial` parses");
+        assert!(matches!(cli.command, Some(Command::Build { editorial: true, .. })));
+        let plain = Cli::try_parse_from(["presemble", "build", "site/"]).expect("parses");
+        assert!(matches!(plain.command, Some(Command::Build { editorial: false, .. })));
     }
 
     #[test]

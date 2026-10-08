@@ -1269,7 +1269,7 @@ async fn scaffold_handler(
             let repo = site_repository::SiteRepository::builder()
                 .from_dir(&state.site_dir)
                 .build();
-            if let Err(e) = crate::copy_site_assets(&state.site_dir, &repo) {
+            if let Err(e) = crate::copy_site_assets(&state.site_dir, &repo, &state.output_dir) {
                 eprintln!("warning: post-scaffold asset copy failed: {e}");
             }
             axum::Json(EditResponse::ok_simple())

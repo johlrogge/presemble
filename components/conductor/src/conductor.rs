@@ -340,6 +340,13 @@ impl Conductor {
         Self::load_with_repo(site_dir, repo)
     }
 
+    /// The same conductor, writing its rendered pages to `output_dir`. Used by
+    /// the editorial build, which must not write to the published directory.
+    pub fn with_output_dir(mut self, output_dir: PathBuf) -> Self {
+        self.output_dir = output_dir;
+        self
+    }
+
     /// Create a conductor with a pre-built repository. Used in tests.
     pub fn with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
         let conductor = Self::load_with_repo(site_dir, repo)?;

@@ -109,6 +109,48 @@ snapshot-ref ref:
     echo "$out" >&2
     echo "$out" | sed -n 's/^Snapshot: //p' | tail -n 1 | sed 's/^/Snapshot: /'
 
+# Like site-snapshot, but for the EDITORIAL output: the pages as `serve` shows
+# them in edit mode (addresses, data-presemble-md, slot and editor attributes),
+# written by `presemble build --editorial` into <parent>/output-editorial/<name>/
+# (never into the published output/). The full build output goes to
+# target/editorial-snapshot.log (the just MCP drops stdout when a recipe fails).
+# Nothing is written into the site's .presemble by the build itself.
+# Build a site's editorial output and snapshot it for a later output-diff.
+editorial-snapshot dir="site":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    mkdir -p target
+    log="$PWD/target/editorial-snapshot.log"
+    if ! NO_COLOR=1 cargo polylith cargo --profile dev run --bin presemble -- build {{ dir }} --editorial >"$log" 2>&1; then
+        echo "editorial build of {{ dir }} failed; full output in target/editorial-snapshot.log" >&2
+        tail -n 20 "$log" >&2
+        exit 1
+    fi
+    if summary="$(grep -E '[1-9][0-9]* failed' "$log")"; then
+        echo "editorial-snapshot: {{ dir }} has failed pages:${summary}" >&2
+        exit 1
+    fi
+    out="$(dirname "$(realpath {{ dir }})")/output-editorial/$(basename "$(realpath {{ dir }})")"
+    test -d "$out" || { echo "missing build output $out" >&2; exit 1; }
+    snap="$(mktemp -d -t presemble-editorial-$(basename "$(realpath {{ dir }})").XXXXXX)"
+    cp -r "$out/." "$snap/"
+    echo "Snapshot: $snap"
+
+# Like snapshot-ref, for the editorial output of site/ at git <ref>. A ref that
+# predates `presemble build --editorial` has no such flag: the recipe then fails
+# (the flag is rejected), it never silently falls back to published output.
+# Snapshot the editorial output of site/ at a git ref.
+editorial-snapshot-ref ref:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    wt="$(mktemp -d -t presemble-ref.XXXXXX)"
+    cleanup() { git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"; git worktree prune; }
+    trap cleanup EXIT
+    git worktree add --detach "$wt" "{{ ref }}" >&2
+    out="$(cd "$wt" && {{ just_executable() }} editorial-snapshot site)"
+    echo "$out" >&2
+    echo "$out" | sed -n 's/^Snapshot: //p' | tail -n 1 | sed 's/^/Snapshot: /'
+
 # mode=exact: quiet and 0 when the trees are equal; otherwise `diff -rq` of
 # the two trees, then unified diffs of up to the first three differing files,
 # on stderr, and exit 1. mode=ws: report files present on one side only, and

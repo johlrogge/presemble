@@ -527,6 +527,75 @@ fn serve_renders_site_with_validation_errors() {
     );
 }
 
+/// Every file below `dir` with its bytes, in path order.
+fn tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let mut entries: Vec<_> = fs::read_dir(dir).unwrap().flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out);
+    out
+}
+
+fn tree_has_editor_attributes(files: &[(PathBuf, Vec<u8>)]) -> bool {
+    files
+        .iter()
+        .any(|(_, bytes)| String::from_utf8_lossy(bytes).contains("data-presemble-address"))
+}
+
+#[test]
+fn editorial_build_never_writes_the_published_output_directory() {
+    let tmp = TempDir::new().unwrap();
+    let site = tmp.path().join("valid-site");
+    for dir in ["schemas/article", "content/article", "templates/article", "assets"] {
+        fs::create_dir_all(site.join(dir)).unwrap();
+    }
+    fs::write(site.join("schemas/article/item.md"), "# Article title {#title}\noccurs\n: exactly once\n").unwrap();
+    fs::write(site.join("content/article/sample.md"), "# Sample\n").unwrap();
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+    fs::write(site.join("templates/index.html"), "<!DOCTYPE html><html><body><h1>Home</h1></body></html>").unwrap();
+    fs::write(site.join("assets/style.css"), "body {}").unwrap();
+    // A template that references the stylesheet, so it is an asset of the site.
+    fs::write(
+        site.join("templates/article/item.html"),
+        r#"<!DOCTYPE html><html><head><link rel="stylesheet" href="/assets/style.css" /></head><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+    )
+    .unwrap();
+
+    let config = publisher_cli::UrlConfig::default();
+    publisher_cli::build_for_publish(&site, &config).expect("a valid site should publish");
+    let published = publisher_cli::output_dir(&site);
+    let before = tree(&published);
+    assert!(!tree_has_editor_attributes(&before), "the published output has no editor attributes");
+
+    publisher_cli::build_for_editorial(&site, &config).expect("the editorial build succeeds");
+
+    // The published directory is exactly as it was.
+    let after = tree(&published);
+    assert!(!tree_has_editor_attributes(&after), "the editorial build wrote editor attributes into the published output");
+    assert_eq!(before, after, "the editorial build changed the published output");
+
+    // The editorial output is elsewhere, with its attributes and its assets.
+    let editorial = publisher_cli::editorial_output_dir(&site);
+    assert_ne!(editorial, published);
+    let page = fs::read_to_string(editorial.join("article/sample/index.html")).expect("editorial page");
+    assert!(page.contains("data-presemble-address"), "{page}");
+    assert!(editorial.join("assets/style.css").exists(), "assets are copied to the editorial output");
+}
+
 #[test]
 fn publish_succeeds_for_valid_site() {
     let tmp = TempDir::new().unwrap();

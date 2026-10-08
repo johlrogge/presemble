@@ -479,6 +479,15 @@ pub fn output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
     site_dir.parent().unwrap_or(site_dir).join("output").join(name)
 }
 
+/// Where the editorial build (`presemble build --editorial`) writes:
+/// `<parent-of-site-dir>/output-editorial/<site-dir-name>/`, next to
+/// [`output_dir`] and never inside it. The published directory is what gets
+/// deployed; editorial output has unpublished pages and editor-only attributes.
+pub fn editorial_output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
+    let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
+    site_dir.parent().unwrap_or(site_dir).join("output-editorial").join(name)
+}
+
 /// Derive the clean URL path for a content page given its schema stem and slug.
 ///
 /// - Root collection (stem == ""): index -> "/", other -> "/{slug}"
