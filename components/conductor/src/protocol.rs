@@ -269,6 +269,10 @@ pub enum ConductorEvent {
     /// the document is in conflict (reported once, when first recorded).
     /// `file` is site-relative.
     DiskConflict { file: String },
+    /// Documents were written to disk by a save: what readers see (the
+    /// published output) may have changed. `files` are site-relative paths.
+    /// Not sent for a refused save or for an edit that was not saved.
+    DocumentsSaved { files: Vec<String> },
     /// A NED-based suggestion was rejected (dismissed without applying).
     NedSuggestionRejected {
         id: editorial_types::SuggestionId,

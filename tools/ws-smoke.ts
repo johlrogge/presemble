@@ -1,6 +1,8 @@
 // ws-smoke.ts — WebSocket smoke test for the two browser sockets:
 //
-//   /_presemble/ws            public, anonymous: reload (pages only) + resync
+//   /_presemble/ws            public, anonymous: reload (pages only) + resync;
+//                             readers follow saves and file changes, never an
+//                             edit in progress
 //   /_presemble/editorial-ws  session cookie: reload with primary/anchor,
 //                             scroll, suggestion-list-changed, resync
 //
@@ -273,6 +275,18 @@ function reloadIncluding(page: string): (m: WsMessage) => m is Reload {
 function anchoredReloadIncluding(page: string): (m: WsMessage) => m is Reload {
   return (m: WsMessage): m is Reload =>
     m.type === "reload" && m.pages.includes(page) && m.anchor !== null;
+}
+
+/**
+ * Readers follow saves, not edits in progress: after an unsaved change the
+ * public socket stays silent. Waits long enough for the published build's
+ * debounce (400 ms) and a build to have announced something, were it going to.
+ */
+async function expectNoPublicMessage(desc: string, inbox: Inbox, waitMs = 1500): Promise<void> {
+  const before = inbox.seen().length;
+  await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+  const extra = inbox.seen().slice(before);
+  check(desc, extra.length === 0, `public socket received ${JSON.stringify(extra)}`);
 }
 
 /** A message that must never appear on the public socket (ADR-054). */
@@ -548,7 +562,9 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
     reportOpen(publicDesc, publicOpen);
     reportOpen(editorialDesc, editorialOpen);
 
-    await Promise.all([publicInbox.quiesce(), editorialInbox.quiesce()]);
+    // The public socket also settles longer: the smoketest's earlier saves
+    // make the published build announce shortly afterwards.
+    await Promise.all([publicInbox.quiesce(1500, 6000), editorialInbox.quiesce()]);
 
     // 2. A title block edit (built from the editorial page, as the browser
     //    builds it) → reload of the post page.
@@ -578,10 +594,9 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         m.primary === m.pages[0],
         `primary=${JSON.stringify(m.primary)} pages=${JSON.stringify(m.pages)}`,
       );
-      await publicInbox.expect(
-        `ws: /block-edit broadcasts public reload including ${PAGE}`,
-        reloadIncluding(PAGE),
-      );
+      // Readers are served the saved, published page: an edit that is not saved
+      // reloads nobody.
+      await expectNoPublicMessage("ws: an unsaved /block-edit does not reload readers", publicInbox);
     }
 
     // 3. /apply → reload of the post page.
@@ -597,10 +612,7 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         `ws: /apply broadcasts editorial reload including ${PAGE}`,
         reloadIncluding(PAGE),
       );
-      await publicInbox.expect(
-        `ws: /apply broadcasts public reload including ${PAGE}`,
-        reloadIncluding(PAGE),
-      );
+      await expectNoPublicMessage("ws: an unsaved /apply does not reload readers", publicInbox);
     }
 
     // 3b. A file that changes on disk while it has unsaved edits (step 2 and 3
@@ -635,7 +647,20 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         Array.isArray(after.json) && after.json.length === 0,
         after.text,
       );
+    } else {
+      const saved = await http.post("/_presemble/save-all", {});
+      expectOk("ws: save-all returns ok", saved);
     }
+
+    // 3c. The save is what reaches the readers: the published output is rebuilt
+    //     from the files on disk and the public socket announces the page.
+    await publicInbox.expect(
+      `ws: saving broadcasts public reload including ${PAGE}`,
+      reloadIncluding(PAGE),
+      15000,
+    );
+    // Settle: the published build may announce more than once.
+    await publicInbox.quiesce(1500, 6000);
 
     // 4. Create + accept (re-renders) → suggestion-list-changed, then reload.
     {
@@ -656,10 +681,7 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         reloadIncluding(PAGE),
       );
       check("ws: accept reload has non-empty pages", m.pages.length > 0, JSON.stringify(m));
-      await publicInbox.expect(
-        `ws: accept broadcasts public reload including ${PAGE}`,
-        reloadIncluding(PAGE),
-      );
+      await expectNoPublicMessage("ws: an unsaved accept does not reload readers", publicInbox);
     }
 
     // 5. Create + reject → suggestion-list-changed twice.
@@ -715,10 +737,6 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
       expectOk("ws: accept T returns ok", rt);
       await editorialInbox.expect(
         `ws: accept T broadcasts editorial reload including ${PAGE}`,
-        reloadIncluding(PAGE),
-      );
-      await publicInbox.expect(
-        `ws: accept T broadcasts public reload including ${PAGE}`,
         reloadIncluding(PAGE),
       );
 
@@ -788,10 +806,7 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         nodeKind === "paragraph",
         `anchor=${JSON.stringify(m.anchor)}`,
       );
-      await publicInbox.expect(
-        `ws: block-edit broadcasts public reload including ${PAGE}`,
-        reloadIncluding(PAGE),
-      );
+      await expectNoPublicMessage("ws: an unsaved body block-edit does not reload readers", publicInbox);
     }
 
     // 8. Leak check (ADR-054): nothing editorial ever reached the public

@@ -524,20 +524,6 @@ log "Saving all buffers..."
 assert_curl "save all" "/_presemble/save-all" POST "" '"ok":true'
 assert_curl "no dirty buffers after save" "/_presemble/dirty-buffers" GET "" "[]"
 
-# ── Test: Create content ──────────────────────────────────────────────────
-
-log "Creating content..."
-assert_curl "create author" "/_presemble/create-content" POST '{"stem":"author","slug":"alice"}' '"ok":true'
-assert_curl "create post" "/_presemble/create-content" POST '{"stem":"post","slug":"first-post"}' '"ok":true'
-
-# ── Test: Edit content ────────────────────────────────────────────────────
-
-log "Editing content..."
-# A new file is empty: each slot is a placeholder in the editorial page, and a
-# block edit with an empty base fills it (ADR-059 section 10).
-block_edit "fill the empty author name slot" "/author/alice" content/author/alice.md name "Alice Smith"
-block_edit "fill the empty post title slot" "/post/first-post" content/post/first-post.md title "My First Post"
-
 # ── Test: nth-child scopes edit to one paragraph, leaves others intact ────
 
 log "Testing nth-child slot edit scoping..."
@@ -841,6 +827,24 @@ elif [ "$WS_RC" -ne 0 ] && [ "$WS_FAILS" -eq 0 ]; then
     fail "ws-smoke.ts exited $WS_RC without reporting a FAIL"
     cat "$WS_ERR"
 fi
+
+# ── Test: Create content ──────────────────────────────────────────────────
+# After the WebSocket section on purpose: a new file is empty (incomplete
+# content), and an incomplete document keeps the whole site from being
+# published. The WebSocket section checks that saving reaches the readers, which
+# needs a site that passes the publish gate.
+
+log "Creating content..."
+assert_curl "create author" "/_presemble/create-content" POST '{"stem":"author","slug":"alice"}' '"ok":true'
+assert_curl "create post" "/_presemble/create-content" POST '{"stem":"post","slug":"first-post"}' '"ok":true'
+
+# ── Test: Edit content ────────────────────────────────────────────────────
+
+log "Editing content..."
+# A new file is empty: each slot is a placeholder in the editorial page, and a
+# block edit with an empty base fills it (ADR-059 section 10).
+block_edit "fill the empty author name slot" "/author/alice" content/author/alice.md name "Alice Smith"
+block_edit "fill the empty post title slot" "/post/first-post" content/post/first-post.md title "My First Post"
 
 # ── Test: Structure mode rendering via render endpoint ────────────────────
 

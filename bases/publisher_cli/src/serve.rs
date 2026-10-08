@@ -119,8 +119,10 @@ impl SocketMessage for EditorialMessage {
     }
 }
 
-/// The two browser broadcast channels. All sending goes through [`BrowserChannels::publish`],
-/// which guarantees the public channel only ever sees the public projection.
+/// The two browser broadcast channels. Editors are told through
+/// [`BrowserChannels::publish_editorial`] and readers through
+/// [`BrowserChannels::publish_reload_to_readers`]; no editorial message can
+/// reach the public channel, because its sender only takes `PublicMessage`.
 #[derive(Clone)]
 struct BrowserChannels {
     public: broadcast::Sender<PublicMessage>,
@@ -136,29 +138,19 @@ impl BrowserChannels {
 
     /// Send the public projection (if any) to the public channel, then the
     /// full message to the editorial channel. Send errors (no receivers) are ignored.
-    fn publish(&self, msg: EditorialMessage) {
-        if let Some(public) = msg.to_public() {
-            let _ = self.public.send(public);
-        }
+    /// Tell the editors only. What the conductor rebuilt is the working copy;
+    /// readers are told by the published build, about what they are served.
+    fn publish_editorial(&self, msg: EditorialMessage) {
         let _ = self.editorial.send(msg);
+    }
+
+    /// Tell the readers which published pages changed (empty: any may have).
+    fn publish_reload_to_readers(&self, pages: Vec<String>) {
+        let _ = self.public.send(PublicMessage::Reload { pages });
     }
 }
 
 impl EditorialMessage {
-    /// Project onto the public message, dropping everything editorial.
-    /// Exhaustive on purpose: a new variant must decide its public projection.
-    fn to_public(&self) -> Option<PublicMessage> {
-        match self {
-            EditorialMessage::Reload { pages, anchor: _ } => {
-                Some(PublicMessage::Reload { pages: pages.clone() })
-            }
-            EditorialMessage::Resync => Some(PublicMessage::Resync),
-            EditorialMessage::ScrollTo { .. } => None,
-            EditorialMessage::SuggestionListChanged { .. } => None,
-            EditorialMessage::Conflict { .. } => None,
-        }
-    }
-
     fn to_json(&self) -> String {
         match self {
             EditorialMessage::Reload { pages, anchor } => {
@@ -213,10 +205,29 @@ impl EditorialMessage {
     }
 }
 
-/// Project a conductor event onto the message the browser should receive.
-fn editorial_message_for(ev: conductor::ConductorEvent) -> EditorialMessage {
+/// How long saves and file changes must stay quiet before the published
+/// output is rebuilt.
+const PUBLISH_QUIET: Duration = Duration::from_millis(400);
+
+/// Handle one conductor event: a save triggers a published build; everything
+/// else is for the editors only. Readers hear of changes from the published
+/// build (what they are served), never from an edit in progress.
+fn dispatch_conductor_event(ev: conductor::ConductorEvent, channels: &BrowserChannels, trigger: &PublishTrigger) {
+    if let conductor::ConductorEvent::DocumentsSaved { .. } = ev {
+        trigger.fire();
+        return;
+    }
+    if let Some(message) = editorial_message_of(ev) {
+        channels.publish_editorial(message);
+    }
+}
+
+/// Project a conductor event onto the message the editors' browsers should
+/// receive. A save has none: it triggers the published build instead.
+fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessage> {
     use conductor::ConductorEvent;
-    match ev {
+    Some(match ev {
+        ConductorEvent::DocumentsSaved { .. } => return None,
         ConductorEvent::PagesRebuilt { pages, anchor } => EditorialMessage::Reload { pages, anchor },
         ConductorEvent::BuildFailed { error_pages } => {
             EditorialMessage::Reload { pages: error_pages, anchor: None }
@@ -240,7 +251,7 @@ fn editorial_message_for(ev: conductor::ConductorEvent) -> EditorialMessage {
             EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
         }
         ConductorEvent::DiskConflict { file } => EditorialMessage::Conflict { file },
-    }
+    })
 }
 
 const RELAY_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
@@ -274,7 +285,7 @@ fn connect_subscriber_with_retry(pub_url: &str) -> conductor::ConductorSubscribe
 /// of the process. Decode errors are logged and skipped; transport errors drop
 /// the subscriber and reconnect after a backoff (escalating across consecutive
 /// transport failures, reset once an event is relayed).
-fn relay_conductor_events(pub_url: &str, channels: &BrowserChannels) {
+fn relay_conductor_events(pub_url: &str, channels: &BrowserChannels, trigger: &PublishTrigger) {
     let mut transport_backoff = RELAY_BACKOFF_INITIAL;
     loop {
         let sub = connect_subscriber_with_retry(pub_url);
@@ -282,7 +293,7 @@ fn relay_conductor_events(pub_url: &str, channels: &BrowserChannels) {
             match sub.recv() {
                 Ok(ev) => {
                     transport_backoff = RELAY_BACKOFF_INITIAL;
-                    channels.publish(editorial_message_for(ev));
+                    dispatch_conductor_event(ev, channels, trigger);
                 }
                 Err(conductor::SubscriberError::Decode(e)) => {
                     eprintln!("Conductor subscription: skipping undecodable event: {e}");
@@ -394,9 +405,10 @@ fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) 
 /// - the editorial output (what the editors work on: unsaved edits, editor
 ///   attributes and build-error pages included), and
 /// - the published output (what readers get): the `presemble build` pipeline
-///   over the files on disk, swapped in only when the whole site passes the
-///   publish gate. A site that fails the gate keeps the last good output.
-fn build_startup_outputs(site_dir: &Path, url_config: &UrlConfig) {
+///   over the files on disk, as version 0. A site that fails the publish gate
+///   gets an empty version: readers see no page until a save makes the site
+///   valid (the publisher worker then builds the next version).
+fn build_startup_outputs(site_dir: &Path, url_config: &UrlConfig) -> PublishedSite {
     println!("Building site...");
     match build_for_serve(site_dir, url_config) {
         Ok(outcome) => {
@@ -410,10 +422,225 @@ fn build_startup_outputs(site_dir: &Path, url_config: &UrlConfig) {
             eprintln!("Build failed: {e}");
         }
     }
-    match crate::publish_with_swap(site_dir) {
-        Ok(outcome) => println!("Published output ready ({} file(s))", outcome.files_built),
-        Err(e) => eprintln!("Not published (readers keep the last published output, if any): {e}"),
+    initial_publish(site_dir)
+}
+
+// ---------------------------------------------------------------------------
+// The published output: what readers are served
+// ---------------------------------------------------------------------------
+
+/// One published version: a directory of pages. A versioned directory is
+/// removed when the last reader lets go of it, so a request that started
+/// before a republish still finds its page.
+struct PublishedVersion {
+    dir: std::path::PathBuf,
+    remove_when_unused: bool,
+}
+
+impl Drop for PublishedVersion {
+    fn drop(&mut self) {
+        if self.remove_when_unused {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
+}
+
+/// The published output readers are served, as an in-memory pointer to the
+/// current version. Every request reads through the pointer; a republish
+/// writes a fresh versioned directory and moves the pointer to it in one step,
+/// so there is no moment without a page. No symlinks, no directory exchange.
+#[derive(Clone)]
+struct PublishedSite {
+    current: Arc<std::sync::RwLock<Arc<PublishedVersion>>>,
+    /// How many publish attempts have finished (successful or not).
+    attempts: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PublishedSite {
+    fn from_version(version: PublishedVersion) -> Self {
+        PublishedSite {
+            current: Arc::new(std::sync::RwLock::new(Arc::new(version))),
+            attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// A directory that is served as it is and never removed.
+    #[cfg(test)]
+    fn fixed(dir: std::path::PathBuf) -> Self {
+        Self::from_version(PublishedVersion { dir, remove_when_unused: false })
+    }
+
+    /// The version a request reads; hold it for the length of the request.
+    fn current(&self) -> Arc<PublishedVersion> {
+        self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Move the pointer to `version`; the previous version is returned.
+    fn swap(&self, version: PublishedVersion) -> Arc<PublishedVersion> {
+        let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
+        std::mem::replace(&mut *current, Arc::new(version))
+    }
+
+    #[cfg(test)]
+    fn attempts(&self) -> usize {
+        self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The directory of published version `n`: `<output>.publishing-<n>`, beside
+/// the output directory `presemble build` writes.
+fn version_dir(site_dir: &Path, n: usize) -> std::path::PathBuf {
+    let live = crate::output_dir(site_dir);
+    let mut name = live.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".publishing-{n}"));
+    live.with_file_name(name)
+}
+
+/// Remove the version directories an earlier serve left behind.
+fn remove_stale_versions(site_dir: &Path) {
+    let live = crate::output_dir(site_dir);
+    let (Some(parent), Some(name)) = (live.parent(), live.file_name()) else { return };
+    let prefix = format!("{}.publishing-", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Publish version 0 at start-up. A site that fails the publish gate gets an
+/// empty version: readers are served no page until a save makes it valid.
+fn initial_publish(site_dir: &Path) -> PublishedSite {
+    remove_stale_versions(site_dir);
+    let dir = version_dir(site_dir, 0);
+    let _ = std::fs::create_dir_all(&dir);
+    match crate::build_published_into(site_dir, &dir) {
+        Ok(outcome) => println!("Published output ready ({} file(s))", outcome.files_built),
+        Err(e) => eprintln!("Not published (readers see no pages until the site passes the gate): {e}"),
+    }
+    PublishedSite::from_version(PublishedVersion { dir, remove_when_unused: true })
+}
+
+/// What changed between two published versions, for the readers' reload.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ChangedPages {
+    /// URL paths of the pages whose HTML differs (added, removed or changed).
+    pages: Vec<String>,
+    /// Something other than a page changed (a stylesheet, an image): every
+    /// page may be affected.
+    other: bool,
+}
+
+fn read_tree(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            read_tree(root, &path, out);
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            out.insert(rel.to_string_lossy().replace('\\', "/"), std::fs::read(&path).unwrap_or_default());
+        }
+    }
+}
+
+/// The URL paths a page file answers: `post/hello/index.html` is `/post/hello`
+/// (and `/post/hello/`), the root's `index.html` is `/`.
+fn urls_of(rel: &str) -> Vec<String> {
+    match rel.strip_suffix("index.html") {
+        Some("") => vec!["/".to_string()],
+        Some(dir) => {
+            let dir = dir.trim_end_matches('/');
+            vec![format!("/{dir}"), format!("/{dir}/")]
+        }
+        None => vec![format!("/{rel}")],
+    }
+}
+
+fn changed_pages(old: &Path, new: &Path) -> ChangedPages {
+    let (mut before, mut after) = (std::collections::BTreeMap::new(), std::collections::BTreeMap::new());
+    read_tree(old, old, &mut before);
+    read_tree(new, new, &mut after);
+    let mut changed = ChangedPages::default();
+    let names: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for name in names {
+        if before.get(name) == after.get(name) {
+            continue;
+        }
+        if name.ends_with(".html") {
+            changed.pages.extend(urls_of(name));
+        } else {
+            changed.other = true;
+        }
+    }
+    changed
+}
+
+/// Tells the published-build worker that the files on disk may have changed.
+#[derive(Clone)]
+struct PublishTrigger(mpsc::Sender<()>);
+
+impl PublishTrigger {
+    fn fire(&self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// Build the site from the files on disk into `dir`; if it passes the gate and
+/// differs from what is served, move the pointer to it and tell the readers
+/// which pages changed. Otherwise `dir` is removed and nothing changes.
+fn publish_next_version(site_dir: &Path, published: &PublishedSite, channels: &BrowserChannels, dir: std::path::PathBuf) {
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("Not published: cannot create {}: {e}", dir.display());
+        return;
+    }
+    if let Err(e) = crate::build_published_into(site_dir, &dir) {
+        eprintln!("Not republished (readers keep the last published output): {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let before = published.current();
+    let changed = changed_pages(&before.dir, &dir);
+    if changed == ChangedPages::default() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    // One step: from here every new request reads the new version. The old
+    // one is removed when the last request still reading it lets go.
+    drop(before);
+    let previous = published.swap(PublishedVersion { dir, remove_when_unused: true });
+    drop(previous);
+    // A changed non-page (stylesheet, image) may affect any page: an empty
+    // list means every page.
+    let pages = if changed.other { Vec::new() } else { changed.pages };
+    channels.publish_reload_to_readers(pages);
+}
+
+/// Start the published-build worker. A trigger (a save, an external file
+/// change) starts a build once nothing more has arrived for `quiet`; the build
+/// is the `presemble build` pipeline over the files on disk into a fresh
+/// version directory. If it passes, the pointer moves to it and the readers
+/// are told which pages changed. If the site fails the gate, nothing changes:
+/// readers keep the last good output.
+fn start_publisher(
+    site_dir: std::path::PathBuf,
+    published: PublishedSite,
+    channels: BrowserChannels,
+    quiet: Duration,
+) -> PublishTrigger {
+    let (tx, rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut next_version = 1;
+        while rx.recv().is_ok() {
+            while rx.recv_timeout(quiet).is_ok() {}
+            let dir = version_dir(&site_dir, next_version);
+            next_version += 1;
+            publish_next_version(&site_dir, &published, &channels, dir);
+            published.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    PublishTrigger(tx)
 }
 
 #[derive(Clone)]
@@ -421,7 +648,7 @@ struct AppState {
     /// What an editor is served: the working copy.
     editorial_dir: std::path::PathBuf,
     /// What everyone else is served: the saved, valid site.
-    published_dir: std::path::PathBuf,
+    published: PublishedSite,
     channels: BrowserChannels,
     site_dir: std::path::PathBuf,
     conductor: Arc<conductor::ConductorClient>,
@@ -463,9 +690,12 @@ async fn serve_async(
         }
     }
 
-    build_startup_outputs(site_dir, url_config);
+    let published = build_startup_outputs(site_dir, url_config);
 
     let channels = BrowserChannels::new(256);
+    // Readers follow saves and external file changes, not edits in progress.
+    let publish_trigger =
+        start_publisher(site_dir.to_path_buf(), published.clone(), channels.clone(), PUBLISH_QUIET);
 
     // Connect to conductor — mandatory for serve mode.
     let conductor_client = Arc::new(
@@ -477,15 +707,16 @@ async fn serve_async(
     // Start file watcher in background thread — delegates rebuilds to conductor.
     let site_dir_owned = site_dir.to_path_buf();
     let conductor_for_watcher = Arc::clone(&conductor_client);
+    let trigger_for_watcher = publish_trigger.clone();
     std::thread::spawn(move || {
-        watch_and_rebuild(&site_dir_owned, conductor_for_watcher);
+        watch_and_rebuild(&site_dir_owned, conductor_for_watcher, trigger_for_watcher);
     });
 
     // Subscribe to conductor events and forward to the browser broadcast channels
     {
         let pub_url = format!("{}-pub", conductor::socket_url(site_dir));
         let channels_clone = channels.clone();
-        std::thread::spawn(move || relay_conductor_events(&pub_url, &channels_clone));
+        std::thread::spawn(move || relay_conductor_events(&pub_url, &channels_clone, &publish_trigger));
     }
 
     // Build session store from the selected editorial mode.
@@ -510,7 +741,7 @@ async fn serve_async(
 
     let state = AppState {
         editorial_dir: out_dir.clone(),
-        published_dir,
+        published,
         channels,
         site_dir: site_dir.to_path_buf(),
         conductor: conductor_client,
@@ -1794,7 +2025,10 @@ async fn file_handler(
     // Editors are served the working copy; everyone else the published
     // output: what was saved and passed the publish gate.
     let editor = audience == serve_ui::Audience::Editor;
-    let served_dir = if editor { &state.editorial_dir } else { &state.published_dir };
+    // The published version is read through the pointer and held until the
+    // response is built, so a republish cannot remove it from under us.
+    let published = state.published.current();
+    let served_dir = if editor { &state.editorial_dir } else { &published.dir };
 
     // Check for build errors before attempting to serve from disk: editors
     // only. A reader gets the published page, or a plain 404.
@@ -1961,6 +2195,7 @@ fn is_relevant_path(path: &std::path::Path) -> bool {
 fn watch_and_rebuild(
     site_dir: &Path,
     conductor: Arc<conductor::ConductorClient>,
+    publisher: PublishTrigger,
 ) {
     let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
@@ -2080,6 +2315,9 @@ fn watch_and_rebuild(
             Ok(_) => {}
             Err(e) => eprintln!("  conductor FileChanged failed: {e}"),
         }
+        // The files on disk changed (not an edit in progress): the published
+        // output follows.
+        publisher.fire();
 
         // After each rebuild, watch any subdirectories that now exist but weren't
         // present at startup (e.g. created by the scaffold wizard).
@@ -2567,59 +2805,12 @@ mod tests {
         assert_eq!(PublicMessage::Resync.to_json(), r#"{"type":"resync"}"#);
     }
 
-    // ── EditorialMessage::to_public ─────────────────────────────────────────
-
-    #[test]
-    fn to_public_drops_scroll_to() {
-        let msg = EditorialMessage::ScrollTo { anchor: test_anchor() };
-        assert!(msg.to_public().is_none());
-    }
-
-    #[test]
-    fn to_public_drops_suggestion_list_changed() {
-        let msg = EditorialMessage::SuggestionListChanged { file: Some("content/post/a.md".to_string()) };
-        assert!(msg.to_public().is_none());
-        let msg = EditorialMessage::SuggestionListChanged { file: None };
-        assert!(msg.to_public().is_none());
-    }
-
-    #[test]
-    fn to_public_reload_keeps_pages_and_drops_anchor() {
-        let msg = EditorialMessage::Reload {
-            pages: vec!["/post/a".to_string(), "/".to_string()],
-            anchor: Some(test_anchor()),
-        };
-        match msg.to_public() {
-            Some(PublicMessage::Reload { pages }) => {
-                assert_eq!(pages, vec!["/post/a".to_string(), "/".to_string()]);
-            }
-            other => panic!("expected public Reload, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn to_public_resync_is_resync() {
-        assert!(matches!(EditorialMessage::Resync.to_public(), Some(PublicMessage::Resync)));
-    }
-
     // ── PublicMessage JSON ──────────────────────────────────────────────────
 
     #[test]
     fn public_reload_json_has_only_type_and_pages() {
         let msg = PublicMessage::Reload { pages: vec!["/a".to_string()] };
         assert_eq!(msg.to_json(), r#"{"type":"reload","pages":["/a"]}"#);
-    }
-
-    #[test]
-    fn public_reload_json_from_anchored_reload_has_no_anchor_or_primary() {
-        let msg = EditorialMessage::Reload {
-            pages: vec!["/a".to_string()],
-            anchor: Some(test_anchor()),
-        };
-        let json = msg.to_public().expect("reload is public").to_json();
-        assert_eq!(json, r#"{"type":"reload","pages":["/a"]}"#);
-        assert!(!json.contains("anchor"));
-        assert!(!json.contains("primary"));
     }
 
     #[test]
@@ -2631,59 +2822,39 @@ mod tests {
         assert_eq!(parsed["pages"][0], "/bad\"path");
     }
 
-    // ── BrowserChannels::publish ────────────────────────────────────────────
+    // ── BrowserChannels ─────────────────────────────────────────────────────
 
     #[test]
-    fn publish_scroll_to_reaches_only_editorial() {
+    fn editorial_messages_never_reach_the_public_channel() {
         let channels = BrowserChannels::new(4);
         let mut public_rx = channels.public.subscribe();
         let mut editorial_rx = channels.editorial.subscribe();
-        channels.publish(EditorialMessage::ScrollTo { anchor: test_anchor() });
-        assert!(matches!(public_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
-        assert!(matches!(editorial_rx.try_recv(), Ok(EditorialMessage::ScrollTo { .. })));
-    }
-
-    #[test]
-    fn publish_suggestion_list_changed_reaches_only_editorial() {
-        let channels = BrowserChannels::new(4);
-        let mut public_rx = channels.public.subscribe();
-        let mut editorial_rx = channels.editorial.subscribe();
-        channels.publish(EditorialMessage::SuggestionListChanged {
-            file: Some("content/post/draft.md".to_string()),
-        });
-        assert!(matches!(public_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
-        assert!(matches!(
-            editorial_rx.try_recv(),
-            Ok(EditorialMessage::SuggestionListChanged { .. })
-        ));
-    }
-
-    #[test]
-    fn publish_reload_reaches_both() {
-        let channels = BrowserChannels::new(4);
-        let mut public_rx = channels.public.subscribe();
-        let mut editorial_rx = channels.editorial.subscribe();
-        channels.publish(EditorialMessage::Reload {
+        channels.publish_editorial(EditorialMessage::Reload {
             pages: vec!["/a".to_string()],
             anchor: Some(test_anchor()),
         });
+        assert!(matches!(public_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(editorial_rx.try_recv(), Ok(EditorialMessage::Reload { .. })));
+    }
+
+    #[test]
+    fn reader_reloads_do_not_reach_the_editorial_channel() {
+        let channels = BrowserChannels::new(4);
+        let mut public_rx = channels.public.subscribe();
+        let mut editorial_rx = channels.editorial.subscribe();
+        channels.publish_reload_to_readers(vec!["/a".to_string()]);
         match public_rx.try_recv() {
             Ok(PublicMessage::Reload { pages }) => assert_eq!(pages, vec!["/a".to_string()]),
             other => panic!("expected public Reload, got {other:?}"),
         }
-        match editorial_rx.try_recv() {
-            Ok(EditorialMessage::Reload { pages, anchor }) => {
-                assert_eq!(pages, vec!["/a".to_string()]);
-                assert_eq!(anchor, Some(test_anchor()));
-            }
-            other => panic!("expected editorial Reload, got {other:?}"),
-        }
+        assert!(matches!(editorial_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
     }
 
     #[test]
-    fn publish_without_receivers_does_not_panic() {
+    fn sending_without_receivers_does_not_panic() {
         let channels = BrowserChannels::new(4);
-        channels.publish(EditorialMessage::Resync);
+        channels.publish_editorial(EditorialMessage::Resync);
+        channels.publish_reload_to_readers(Vec::new());
     }
 
     // ── origin_matches_host ─────────────────────────────────────────────────
@@ -2764,6 +2935,18 @@ mod tests {
     }
 
     // ── editorial_message_for ──────────────────────────────────────────────────
+
+    /// The editors' message for an event that has one.
+    fn editorial_message_for(ev: conductor::ConductorEvent) -> EditorialMessage {
+        editorial_message_of(ev).expect("the event is announced to the editors")
+    }
+
+    /// GUARD: a save is not announced to anyone directly; it triggers a build.
+    #[test]
+    fn a_save_has_no_editorial_message() {
+        let ev = conductor::ConductorEvent::DocumentsSaved { files: vec!["content/a.md".to_string()] };
+        assert!(editorial_message_of(ev).is_none());
+    }
 
     fn test_anchor() -> editorial_types::StructuralAnchor {
         editorial_types::StructuralAnchor {
@@ -3440,13 +3623,16 @@ mod tests {
             "# Test Title\n",
         ).unwrap();
 
-        let client = start_conductor_for(root);
+        let client = start_conductor_for(root, |_| {});
         (client, tmp)
     }
 
     /// Serve a `Conductor` for the site at `root` over an in-process socket.
     #[cfg(test)]
-    fn start_conductor_for(root: &std::path::Path) -> conductor::ConductorClient {
+    fn start_conductor_for(
+        root: &std::path::Path,
+        on_event: impl Fn(conductor::ConductorEvent) + Send + 'static,
+    ) -> conductor::ConductorClient {
         use std::sync::Arc;
 
         // Use Conductor::new so populate_node_store runs automatically.
@@ -3488,6 +3674,10 @@ mod tests {
                 let result = c.handle_command(cmd);
                 let data = serde_json::to_vec(&result.response).unwrap_or_default();
                 let _ = rep_socket.send(nng::Message::from(data.as_slice()));
+                // What the conductor daemon publishes on its PUB socket.
+                for event in result.events {
+                    on_event(event);
+                }
                 if is_shutdown {
                     break;
                 }
@@ -3529,7 +3719,7 @@ mod tests {
         ) as Arc<dyn SessionStore>;
         let state = AppState {
             editorial_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
-            published_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
+            published: PublishedSite::fixed(std::path::PathBuf::from("/tmp/presemble-test-out")),
             channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: std::sync::Arc::new(client),
@@ -3770,8 +3960,6 @@ mod tests {
             other => panic!("expected Conflict, got {other:?}"),
         }
         assert_eq!(msg.to_json(), r#"{"type":"conflict","file":"content/post/a.md"}"#);
-        // A draft file name never goes on the public socket.
-        assert!(msg.to_public().is_none());
     }
 
     /// POST (optionally with a JSON body) and parse the JSON answer.
@@ -3975,7 +4163,7 @@ mod tests {
         ) as Arc<dyn SessionStore>;
         let state = AppState {
             editorial_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
-            published_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
+            published: PublishedSite::fixed(std::path::PathBuf::from("/tmp/presemble-test-out")),
             channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: conductor.clone(),
@@ -4437,7 +4625,12 @@ mod tests {
                 Channel::Public => channels.public.receiver_count(),
                 Channel::Editorial => channels.editorial.receiver_count(),
             };
-            channels.publish(EditorialMessage::Resync);
+            match channel {
+                Channel::Public => {
+                    let _ = channels.public.send(PublicMessage::Resync);
+                }
+                Channel::Editorial => channels.publish_editorial(EditorialMessage::Resync),
+            }
             (head, receivers, read_text_frame(&mut s))
         })
         .await
@@ -4467,10 +4660,10 @@ mod tests {
         .await;
     }
 
-    // An anchored reload reaches the editorial socket with its anchor and the
-    // public socket as a bare `{type, pages}` reload.
+    // An anchored reload reaches the editorial socket with its anchor; the
+    // readers' reload is a bare `{type, pages}` frame on the public socket.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn anchored_reload_is_stripped_on_public_socket_only() {
+    async fn anchored_reload_is_editorial_and_readers_get_a_bare_reload() {
         let (client, tmp) = start_test_conductor();
         let channels = BrowserChannels::new(4);
         let state = test_state(
@@ -4487,10 +4680,11 @@ mod tests {
                 let (public_head, mut public) = raw_ws_upgrade(addr, "/_presemble/ws", None);
                 let (editorial_head, mut editorial) =
                     raw_ws_upgrade(addr, "/_presemble/editorial-ws", Some(&cookie));
-                channels.publish(EditorialMessage::Reload {
+                channels.publish_editorial(EditorialMessage::Reload {
                     pages: vec!["/a".to_string()],
                     anchor: Some(test_anchor()),
                 });
+                channels.publish_reload_to_readers(vec!["/a".to_string()]);
                 (
                     public_head,
                     read_text_frame(&mut public),
@@ -4653,6 +4847,9 @@ mod tests {
     struct ServedSite {
         app: axum::Router,
         client: Arc<conductor::ConductorClient>,
+        channels: BrowserChannels,
+        published: PublishedSite,
+        trigger: PublishTrigger,
         root: std::path::PathBuf,
         _tmp: tempfile::TempDir,
     }
@@ -4662,19 +4859,28 @@ mod tests {
             // The output directories sit beside the temp dir.
             let _ = std::fs::remove_dir_all(site_index::output_dir(&self.root));
             let _ = std::fs::remove_dir_all(site_index::editorial_output_dir(&self.root));
+            remove_stale_versions(&self.root);
         }
     }
 
     const TITLE_TEMPLATE: &str = "[:main [:presemble/insert {:data input.title :as \"h1\"}]]";
 
+    /// The quiet time the tests give the published-build worker.
+    const TEST_QUIET: Duration = Duration::from_millis(60);
+
     /// The state `serve` builds for a site whose conductor is `client`.
-    fn served_state(root: &std::path::Path, client: Arc<conductor::ConductorClient>) -> AppState {
+    fn served_state(
+        root: &std::path::Path,
+        client: Arc<conductor::ConductorClient>,
+        published: PublishedSite,
+        channels: BrowserChannels,
+    ) -> AppState {
         let session_store =
             Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))) as Arc<dyn SessionStore>;
         AppState {
             editorial_dir: site_index::editorial_output_dir(root),
-            published_dir: site_index::output_dir(root),
-            channels: BrowserChannels::new(4),
+            published,
+            channels,
             site_dir: root.to_path_buf(),
             conductor: client,
             session_store,
@@ -4691,11 +4897,63 @@ mod tests {
         std::fs::write(root.join("schemas/test/item.md"), "# Title {#title}\noccurs\n: exactly once\n").unwrap();
         std::fs::write(root.join("templates/test/item.hiccup"), template).unwrap();
         std::fs::write(root.join("content/test/doc.md"), content).unwrap();
-        if startup {
-            build_startup_outputs(&root, &UrlConfig::default());
+        let published = if startup {
+            build_startup_outputs(&root, &UrlConfig::default())
+        } else {
+            PublishedSite::fixed(site_index::output_dir(&root))
+        };
+        let channels = BrowserChannels::new(16);
+        let trigger = start_publisher(root.clone(), published.clone(), channels.clone(), TEST_QUIET);
+        // What the relay does with the events the conductor publishes.
+        let events_channels = channels.clone();
+        let events_trigger = trigger.clone();
+        let client = Arc::new(start_conductor_for(&root, move |event| {
+            dispatch_conductor_event(event, &events_channels, &events_trigger)
+        }));
+        let state = served_state(&root, client.clone(), published.clone(), channels.clone());
+        ServedSite { app: app_router(state), client, channels, published, trigger, root, _tmp: tmp }
+    }
+
+    /// Save every buffer, as the browser's "save all" does.
+    async fn save_all(site: &ServedSite) {
+        use tower::ServiceExt;
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/save-all")
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = site.app.clone().oneshot(req).await.unwrap();
+        let text = body_string(resp).await;
+        assert!(text.contains(r#""ok":true"#), "the save succeeds: {text}");
+    }
+
+    /// Wait until `done` holds, polling for at most `secs` seconds.
+    async fn wait_for(secs: u64, mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let client = Arc::new(start_conductor_for(&root));
-        ServedSite { app: app_router(served_state(&root, client.clone())), client, root, _tmp: tmp }
+        done()
+    }
+
+    /// Wait until an anonymous GET of the test page contains `text`.
+    async fn wait_for_reader_page(site: &ServedSite, text: &str) -> Option<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut last = String::new();
+        while std::time::Instant::now() < deadline {
+            let (_, page) = get_page(site, "/test/doc", None).await;
+            if page.contains(text) {
+                return Some(page);
+            }
+            last = page;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        eprintln!("last reader page: {last}");
+        None
     }
 
     async fn get_page(site: &ServedSite, uri: &str, cookie: Option<&str>) -> (axum::http::StatusCode, String) {
@@ -4792,6 +5050,163 @@ mod tests {
         assert_eq!(std::fs::metadata(&published).unwrap().modified().unwrap(), before);
     }
 
+    // ── The published output and the readers' reloads follow saves ──────────
+
+    #[tokio::test]
+    async fn saving_updates_what_anonymous_readers_see() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        apply_title_edit(&site, "Edited Title").await;
+        // Not yet: the edit is unsaved.
+        let (_, before) = get_page(&site, "/test/doc", None).await;
+        assert!(!before.contains("Edited Title"), "{before}");
+
+        save_all(&site).await;
+
+        let page = wait_for_reader_page(&site, "Edited Title").await;
+        let page = page.expect("a saved edit reaches the readers");
+        assert!(!page.contains("data-presemble-address"), "still the published form: {page}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_external_file_change_updates_the_published_page() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        // The file watcher, as `serve` runs it.
+        let (root, client, trigger) = (site.root.clone(), site.client.clone(), site.trigger.clone());
+        std::thread::spawn(move || watch_and_rebuild(&root, client, trigger));
+        tokio::time::sleep(Duration::from_millis(1200)).await; // it settles before it watches
+
+        std::fs::write(site.root.join("content/test/doc.md"), "# Changed On Disk\n").unwrap();
+
+        let page = wait_for_reader_page(&site, "Changed On Disk").await;
+        assert!(page.is_some(), "an external change reaches the readers");
+    }
+
+    #[tokio::test]
+    async fn an_unsaved_edit_does_not_reload_anonymous_readers() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        let mut public = site.channels.public.subscribe();
+
+        apply_title_edit(&site, "Edited Title").await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        assert!(
+            matches!(public.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "an edit in progress reloaded the readers"
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_reloads_anonymous_readers() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        let mut public = site.channels.public.subscribe();
+        apply_title_edit(&site, "Edited Title").await;
+        save_all(&site).await;
+
+        let message = tokio::time::timeout(Duration::from_secs(10), public.recv())
+            .await
+            .expect("the readers are told within 10s")
+            .expect("the channel is open");
+        match message {
+            PublicMessage::Reload { pages } => {
+                assert!(pages.contains(&"/test/doc".to_string()), "{pages:?}");
+            }
+            other => panic!("expected a reload, got {other:?}"),
+        }
+        // What they reload to is the saved page.
+        let (_, page) = get_page(&site, "/test/doc", None).await;
+        assert!(page.contains("Edited Title"), "{page}");
+    }
+
+    /// GUARD: green against the red stub too (it never replaced anything); it
+    /// pins that a failing gate changes nothing and announces nothing.
+    #[tokio::test]
+    async fn a_failing_gate_keeps_the_last_good_published_output() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        let attempts = site.published.attempts();
+        let mut public = site.channels.public.subscribe();
+
+        // A change that makes the site unpublishable (no heading).
+        std::fs::write(site.root.join("content/test/doc.md"), "Just a paragraph, no title.\n").unwrap();
+        site.trigger.fire();
+
+        assert!(wait_for(10, || site.published.attempts() > attempts).await, "the publisher ran");
+        let (status, page) = get_page(&site, "/test/doc", None).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{page}");
+        assert!(page.contains("Test Title"), "readers keep the last good output: {page}");
+        assert!(
+            matches!(public.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "nothing changed for the readers, so no reload"
+        );
+    }
+
+    #[test]
+    fn urls_of_a_page_file() {
+        assert_eq!(urls_of("index.html"), vec!["/".to_string()]);
+        assert_eq!(urls_of("post/a/index.html"), vec!["/post/a".to_string(), "/post/a/".to_string()]);
+        assert_eq!(urls_of("style.css"), vec!["/style.css".to_string()]);
+    }
+
+    #[test]
+    fn changed_pages_names_changed_pages_and_flags_other_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = (tmp.path().join("old"), tmp.path().join("new"));
+        for (dir, a, css) in [(&old, "A1", "x"), (&new, "A2", "y")] {
+            std::fs::create_dir_all(dir.join("a")).unwrap();
+            std::fs::create_dir_all(dir.join("b")).unwrap();
+            std::fs::write(dir.join("a/index.html"), a).unwrap();
+            std::fs::write(dir.join("b/index.html"), "same").unwrap();
+            std::fs::write(dir.join("s.css"), css).unwrap();
+        }
+        let changed = changed_pages(&old, &new);
+        assert_eq!(changed.pages, vec!["/a".to_string(), "/a/".to_string()]);
+        assert!(changed.other);
+    }
+
+    #[tokio::test]
+    async fn the_previous_version_is_removed_once_nothing_reads_it() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
+        let first = site.published.current().dir.clone();
+        assert!(first.exists());
+        let attempts = site.published.attempts();
+        std::fs::write(site.root.join("content/test/doc.md"), "# Second\n").unwrap();
+        site.trigger.fire();
+        assert!(wait_for(10, || site.published.attempts() > attempts).await);
+        assert_ne!(site.published.current().dir, first, "the pointer moved");
+        assert!(wait_for(5, || !first.exists()).await, "the old version is cleaned up");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readers_never_get_a_404_during_a_republish() {
+        let site = served_site("# Title 0\n", TITLE_TEMPLATE, true);
+        let attempts = site.published.attempts();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (app, stop) = (site.app.clone(), stop.clone());
+            tokio::spawn(async move {
+                let mut statuses = Vec::new();
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    statuses.push(oneshot_get(app.clone(), "/test/doc", None).await.status());
+                    tokio::task::yield_now().await;
+                }
+                statuses
+            })
+        };
+
+        for i in 1..=6 {
+            std::fs::write(site.root.join("content/test/doc.md"), format!("# Title {i}\n")).unwrap();
+            site.trigger.fire();
+            assert!(wait_for(10, || site.published.attempts() >= attempts + i).await, "republish {i}");
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let statuses = reader.await.expect("the reader task");
+
+        assert!(statuses.len() > 20, "the readers kept reading: {}", statuses.len());
+        let bad: Vec<_> = statuses.iter().filter(|s| **s != axum::http::StatusCode::OK).collect();
+        assert!(bad.is_empty(), "{} of {} requests were not 200: {bad:?}", bad.len(), statuses.len());
+        let (_, page) = get_page(&site, "/test/doc", None).await;
+        assert!(page.contains("Title 6"), "{page}");
+    }
+
     /// GUARD: an editor's session gets the editorial page, with its editor data.
     #[tokio::test]
     async fn editor_session_gets_the_editorial_page() {
@@ -4839,7 +5254,7 @@ mod tests {
     ) -> AppState {
         AppState {
             editorial_dir: out_dir.clone(),
-            published_dir: out_dir,
+            published: PublishedSite::fixed(out_dir),
             channels,
             site_dir: std::path::PathBuf::from("/tmp/presemble-test-site"),
             conductor: std::sync::Arc::new(client),

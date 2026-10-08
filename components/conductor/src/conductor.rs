@@ -88,6 +88,13 @@ pub struct CommandResult {
     pub events: Vec<ConductorEvent>,
 }
 
+/// The event that tells subscribers these documents were written to disk.
+fn saved_event<'a>(files: impl IntoIterator<Item = &'a PathBuf>) -> ConductorEvent {
+    let mut files: Vec<String> = files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    files.sort();
+    ConductorEvent::DocumentsSaved { files }
+}
+
 impl CommandResult {
     fn ok() -> Self {
         Self { response: Response::Ok, events: vec![] }
@@ -3846,7 +3853,7 @@ impl Conductor {
                         return CommandResult::error(format!("write error: {e}"));
                     }
                     self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(&rel_path);
-                    return CommandResult::ok();
+                    return CommandResult::ok_with_events(vec![saved_event([&rel_path])]);
                 }
 
                 // LSP-owned buffer (site path in doc_sources)
@@ -3858,7 +3865,7 @@ impl Conductor {
                         return CommandResult::error(format!("write error: {e}"));
                     }
                     self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
-                    CommandResult::ok()
+                    CommandResult::ok_with_events(vec![saved_event([&rel_path])])
                 } else {
                     CommandResult::error(format!("buffer not dirty: {path}"))
                 }
@@ -3904,6 +3911,8 @@ impl Conductor {
                 // their conflict) and are reported after the remaining
                 // buffers have been saved.
                 let mut failures: Vec<String> = Vec::new();
+                // What was written to disk, for `DocumentsSaved`.
+                let mut saved: Vec<PathBuf> = Vec::new();
                 for (rel_path, state) in &ned_docs {
                     let keep_dirty = |dirty: &RwLock<crate::dirty::DirtyDocs>| {
                         dirty
@@ -3940,6 +3949,7 @@ impl Conductor {
                         failures.push(format!("write error for {}: {e}", rel_path.display()));
                         continue;
                     }
+                    saved.push(rel_path.clone());
                 }
 
                 // Save LSP-owned buffers (doc_sources → disk)
@@ -3951,7 +3961,10 @@ impl Conductor {
                 let mut written: Vec<editorial_types::SitePath> = Vec::new();
                 for (path, text) in buffers {
                     match self.write_document(path.as_path(), text.as_bytes()) {
-                        Ok(_) => written.push(path),
+                        Ok(_) => {
+                            saved.push(path.as_path().to_path_buf());
+                            written.push(path);
+                        }
                         Err(e) => {
                             failures.push(format!("write error for {path}: {e}"));
                         }
@@ -3966,7 +3979,10 @@ impl Conductor {
                 if !failures.is_empty() {
                     return CommandResult::error(failures.join("; "));
                 }
-                CommandResult::ok()
+                if saved.is_empty() {
+                    return CommandResult::ok();
+                }
+                CommandResult::ok_with_events(vec![saved_event(saved.iter())])
             }
             Command::GetNedSuggestionFiles => {
                 let suggestions = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
@@ -7408,6 +7424,49 @@ mod suggestion_accept_tests {
         assert!(matches!(saved, Response::Ok), "{saved:?}");
         assert!(disk(&tmp, FILE).contains("Edited A"));
         assert!(conflicts(&conductor).is_empty());
+    }
+
+    // ── A save announces what it wrote (the published output follows saves) ──
+
+    fn saved_files(events: &[ConductorEvent]) -> Vec<String> {
+        let mut files: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                ConductorEvent::DocumentsSaved { files } => Some(files.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn save_all_announces_the_documents_it_wrote() {
+        let (conductor, _tmp) = conflicted(true);
+        let result = conductor.handle_command(Command::SaveAllBuffers { consent: consent(&[FILE, OTHER_FILE]) });
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert_eq!(saved_files(&result.events), vec![FILE.to_string(), OTHER_FILE.to_string()]);
+    }
+
+    #[test]
+    fn save_buffer_announces_the_document_it_wrote() {
+        let (conductor, _tmp) = conflicted(false);
+        let result = conductor.handle_command(Command::SaveBuffer {
+            path: editorial_types::SitePath::parse(FILE).expect("valid"),
+            consent: consent(&[FILE]),
+        });
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert_eq!(saved_files(&result.events), vec![FILE.to_string()]);
+    }
+
+    /// GUARD: a save that is refused wrote nothing and announces nothing saved.
+    #[test]
+    fn a_refused_save_announces_nothing_saved() {
+        let (conductor, _tmp) = conflicted(true);
+        let result = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() });
+        assert!(matches!(result.response, Response::ConflictsNeedConfirmation(_)), "{:?}", result.response);
+        assert!(saved_files(&result.events).is_empty(), "{:?}", result.events);
     }
 
     // ── The save checks the file first (ADR-065: save-time mtime check) ─────
