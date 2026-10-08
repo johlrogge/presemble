@@ -679,7 +679,7 @@ pub fn validate_template_paths(
     src: &str,
     grammar: &schema::Grammar,
     stem: &str,
-    templates: &template::check::TemplateNames,
+    templates: &template::check::CheckContext,
 ) -> Vec<PositionedDiagnostic> {
     validation::validate_template(src, grammar, stem, templates)
         .into_iter()
@@ -1124,14 +1124,14 @@ mod tests {
 
     // ── The checker walks every expression (ADR-067) ─────────────────────────
 
-    fn no_templates() -> template::check::TemplateNames {
-        template::check::TemplateNames::default()
+    fn no_templates() -> template::check::CheckContext {
+        template::check::CheckContext::default()
     }
 
     #[test]
     fn checker_knows_the_sites_templates() {
         let grammar = article_grammar();
-        let site = template::check::TemplateNames::new(["card", "header"]);
+        let site = template::check::CheckContext::new(["card", "header"]);
         // `card` is a template of the site, defined in another file.
         for src in [
             "[:ul (card input.title)]",
@@ -1147,7 +1147,7 @@ mod tests {
     #[test]
     fn an_unknown_template_name_is_still_reported() {
         let grammar = article_grammar();
-        let site = template::check::TemplateNames::new(["card"]);
+        let site = template::check::CheckContext::new(["card"]);
         let diags = validate_template_paths("[:ul (cart input.title)]", &grammar, "article", &site);
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert!(diags[0].message.contains("cart"), "{}", diags[0].message);

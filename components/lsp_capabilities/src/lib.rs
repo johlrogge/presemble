@@ -12,5 +12,5 @@ pub use lsp_capabilities::{
     SlotAction, SlotCompletion, TemplateDefinitionTarget,
 };
 
-pub use template::check::TemplateNames;
+pub use template::check::CheckContext;
 pub use validation::Severity;

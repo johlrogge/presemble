@@ -267,7 +267,7 @@ pub fn validate_template(
     src: &str,
     grammar: &Grammar,
     stem: &str,
-    templates: &template::check::TemplateNames,
+    templates: &template::check::CheckContext,
 ) -> Vec<Diagnostic> {
     // Every expression in every position, in either syntax (ADR-067).
     template::check::check_template(src, grammar, stem, templates)
@@ -530,8 +530,8 @@ mod tests {
 
     // ── validate_template ───────────────────────────────────────────────────
 
-    fn no_templates() -> template::check::TemplateNames {
-        template::check::TemplateNames::default()
+    fn no_templates() -> template::check::CheckContext {
+        template::check::CheckContext::default()
     }
 
     #[test]

@@ -262,11 +262,19 @@ impl PresembleLsp {
         };
         // The site's templates, from the conductor; without them no template
         // call could be told from a typo, so a failed query checks against none.
-        let names = {
+        // Every page's input carries the collections, so the schemas of the
+        // site are part of the context (the existing ListSchemas answer).
+        let site = {
             let cond = self.conductor.lock().await;
-            cond.list_template_names().unwrap_or_default()
+            let mut site = lsp_capabilities::CheckContext::new(cond.list_template_names().unwrap_or_default());
+            for (collection, schema_src) in cond.list_schemas().unwrap_or_default() {
+                if let Ok(item_schema) = schema::parse_schema(&schema_src) {
+                    site = site.with_collection(collection, item_schema);
+                }
+            }
+            site
         };
-        let positioned = validate_template_paths(&src, &grammar, &stem, &lsp_capabilities::TemplateNames::new(names));
+        let positioned = validate_template_paths(&src, &grammar, &stem, &site);
         let diags: Vec<Diagnostic> = positioned
             .iter()
             .map(|p| {

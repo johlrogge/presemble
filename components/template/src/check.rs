@@ -7,7 +7,7 @@
 //! attribute value is wanted; and warns about an HTML attribute value that
 //! starts with `(` but does not read as a form.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::dom::{parse_template_xml, Element, Form, Node};
 use crate::expression::{function, Expression, FunctionKind, Path};
@@ -45,35 +45,53 @@ enum Position {
     Attribute,
 }
 
-/// The names of the templates of the site, as the template registry resolves
-/// them (`header`, `post` for `templates/header.hiccup` and
-/// `templates/post/item.hiccup`).
+/// What the checker knows of the site besides the template it checks:
+/// the names of the templates, as the template registry resolves them
+/// (`header`, `post` for `templates/header.hiccup` and
+/// `templates/post/item.hiccup`), and the collections every page's `input`
+/// carries (`input.post`), each with the schema of its items.
 #[derive(Debug, Clone, Default)]
-pub struct TemplateNames(HashSet<String>);
+pub struct CheckContext {
+    templates: HashSet<String>,
+    collections: HashMap<String, Grammar>,
+}
 
-impl TemplateNames {
-    pub fn new<I, S>(names: I) -> Self
+impl CheckContext {
+    /// A site with these templates and no collections.
+    pub fn new<I, S>(templates: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        TemplateNames(names.into_iter().map(Into::into).collect())
+        CheckContext { templates: templates.into_iter().map(Into::into).collect(), collections: HashMap::new() }
+    }
+
+    /// Add the collection `stem`, whose items follow `item_schema`.
+    #[must_use]
+    pub fn with_collection(mut self, stem: impl Into<String>, item_schema: Grammar) -> Self {
+        self.collections.insert(stem.into(), item_schema);
+        self
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.0.contains(name)
+        self.templates.contains(name)
+    }
+
+    fn collection(&self, stem: &str) -> Option<&Grammar> {
+        self.collections.get(stem)
     }
 }
 
 /// Check the template `src` against `grammar`. Only paths below `input` are
 /// checked against the schema; a template whose source does not parse has
-/// nothing to check. `templates` are the site's templates; a name in neither
-/// `templates` nor the template's own definitions is unknown.
+/// nothing to check. `site` holds the site's templates and collections; a
+/// template name in neither `site` nor the template's own definitions is
+/// unknown.
 pub fn check_template(
     src: &str,
     grammar: &Grammar,
     stem: &str,
-    templates: &TemplateNames,
+    site: &CheckContext,
 ) -> Vec<CheckDiagnostic> {
     let trimmed = src.trim_start();
     let syntax = if trimmed.starts_with(['[', '(', ';']) { Syntax::Hiccup } else { Syntax::Html };
@@ -84,7 +102,7 @@ pub fn check_template(
     let Ok(nodes) = parsed else { return Vec::new() };
     let mut locals = HashSet::new();
     collect_local_definitions(&nodes, &mut locals);
-    let mut checker = Checker { grammar, stem, syntax, templates, locals, found: Vec::new() };
+    let mut checker = Checker { grammar, stem, syntax, site, locals, items: Vec::new(), found: Vec::new() };
     checker.walk(&nodes);
     checker.found
 }
@@ -106,10 +124,13 @@ struct Checker<'a> {
     grammar: &'a Grammar,
     stem: &'a str,
     syntax: Syntax,
-    /// The templates of the site.
-    templates: &'a TemplateNames,
+    /// The templates and collections of the site.
+    site: &'a CheckContext,
     /// Names defined in the template itself (`self/name`).
     locals: HashSet<String>,
+    /// The `data-each` blocks being walked over a collection: the name the
+    /// item is bound to, and the collection it comes from.
+    items: Vec<(String, String)>,
     found: Vec<CheckDiagnostic>,
 }
 
@@ -122,9 +143,39 @@ impl Checker<'_> {
         for node in nodes {
             if let Node::Element(el) = node {
                 self.element(el);
+                let bound = self.collection_item(el);
+                let scoped = bound.is_some();
+                self.items.extend(bound);
                 self.walk(&el.children);
+                if scoped {
+                    self.items.pop();
+                }
             }
         }
+    }
+
+    /// For a `data-each` over a collection of the site (`input.post`): the
+    /// name its items are bound to and the collection.
+    fn collection_item(&self, el: &Element) -> Option<(String, String)> {
+        if el.name != "template" {
+            return None;
+        }
+        let Expression::Ref(path) = Expression::from_form(el.attr_form("data-each")?).ok()? else {
+            return None;
+        };
+        let segments = path.segments();
+        match segments.as_slice() {
+            ["input", collection] if self.site.collection(collection).is_some() && !self.is_own_field(collection) => {
+                Some((el.attr("item").unwrap_or("item").to_string(), (*collection).to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `field` is a field of the template's own schema.
+    fn is_own_field(&self, field: &str) -> bool {
+        self.grammar.preamble.iter().any(|s| s.name.as_str() == field)
+            || (field == "body" && self.grammar.body.is_some())
     }
 
     fn element(&mut self, el: &Element) {
@@ -328,25 +379,48 @@ impl Checker<'_> {
     /// this template, or a template of the site.
     fn is_known(&self, name: &str) -> bool {
         self.locals.contains(name.strip_prefix("self/").unwrap_or(name))
-            || (!name.starts_with("self/") && self.templates.contains(name))
+            || (!name.starts_with("self/") && self.site.contains(name))
     }
 
     /// A path below `input` must name a field of the schema; in attribute
     /// position it must not name a record or a list.
     fn path(&mut self, path: &Path, position: Position, snippet: &str) {
+        let dotted = path.dotted();
+        let segments = path.segments();
+        // `item.<field>` inside a `data-each` over a collection.
         if path.root() != "input" {
+            let bound = self.items.iter().rev().find(|(name, _)| name == path.root()).map(|(_, c)| c.clone());
+            if let (Some(collection), Some(field)) = (bound, segments.get(1))
+                && let Some(item_schema) = self.site.collection(&collection)
+            {
+                self.item_field(item_schema, &collection, field, snippet);
+            }
             return;
         }
-        let dotted = path.dotted();
         if path.len() == 1 {
             if position == Position::Attribute {
                 self.report(Level::Error, not_an_attribute(&dotted, "record"), snippet);
             }
             return;
         }
-        let field = path.segments()[1];
+        let field = segments[1];
         let slot = self.grammar.preamble.iter().find(|s| s.name.as_str() == field);
         let is_body = field == "body" && self.grammar.body.is_some();
+        if slot.is_none()
+            && !is_body
+            && let Some(item_schema) = self.site.collection(field)
+        {
+            // Every page's input carries the collections of the site; what
+            // follows is a field of their items.
+            if path.len() == 2 {
+                if position == Position::Attribute {
+                    self.report(Level::Error, not_an_attribute(&dotted, "list"), snippet);
+                }
+            } else {
+                self.item_field(item_schema, field, segments[2], snippet);
+            }
+            return;
+        }
         if slot.is_none() && !is_body {
             self.report(
                 Level::Error,
@@ -375,8 +449,89 @@ impl Checker<'_> {
     }
 }
 
+impl Checker<'_> {
+    /// `field` of an item of `collection`: a slot or the body of the item
+    /// schema, or the `link` every item carries.
+    fn item_field(&mut self, item_schema: &Grammar, collection: &str, field: &str, snippet: &str) {
+        let known = field == "link"
+            || item_schema.preamble.iter().any(|s| s.name.as_str() == field)
+            || (field == "body" && item_schema.body.is_some());
+        if !known {
+            self.report(Level::Error, format!("unknown field '{field}' in {collection} schema"), snippet);
+            if let Some(last) = self.found.last_mut() {
+                last.slot = Some(field.to_string());
+            }
+        }
+    }
+}
+
 fn not_an_attribute(path: &str, kind: &str) -> String {
     format!(
         "{path} is a {kind} and cannot be an attribute value; name a field of it (for example {path}.href)"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema(src: &str) -> Grammar {
+        schema::parse_schema(src).expect("schema parses")
+    }
+
+    const POST: &str = include_str!("../../../site/schemas/post/item.md");
+    const FEATURE: &str = include_str!("../../../site/schemas/feature/item.md");
+    const INDEX: &str = include_str!("../../../site/schemas/index.md");
+
+    fn site() -> CheckContext {
+        CheckContext::new(["header", "footer"])
+            .with_collection("post", schema(POST))
+            .with_collection("feature", schema(FEATURE))
+    }
+
+    #[test]
+    fn index_template_may_reference_collections() {
+        let src = include_str!("../../../site/templates/index.hiccup");
+        let found = check_template(src, &schema(INDEX), "index", &site());
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
+    #[test]
+    fn a_field_of_a_collection_is_checked_against_its_item_schema() {
+        let found = check_template("[:p {:title input.post.titel}]", &schema(INDEX), "index", &site());
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].message.contains("titel") && found[0].message.contains("post"), "{found:#?}");
+        let ok = check_template("[:p (text input.post.title)]", &schema(INDEX), "index", &site());
+        assert!(ok.is_empty(), "{ok:#?}");
+    }
+
+    #[test]
+    fn item_fields_are_checked_inside_a_data_each_over_a_collection() {
+        let found = check_template(
+            "[:template {:data-each input.post} [:presemble/insert {:data item.titel}]]",
+            &schema(INDEX),
+            "index",
+            &site(),
+        );
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].message.contains("titel"), "{found:#?}");
+        // Outside the block, `item` is not bound to a collection.
+        let outside = check_template(
+            "[:div [:template {:data-each input.post} [:p]] [:presemble/insert {:data item.titel}]]",
+            &schema(INDEX),
+            "index",
+            &site(),
+        );
+        assert!(outside.is_empty(), "{outside:#?}");
+    }
+
+    /// GUARD: a name that is no collection of the site is still reported.
+    #[test]
+    fn a_field_of_an_unknown_collection_is_still_reported() {
+        let found = check_template("[:p (text input.ghost.title)]", &schema(INDEX), "index", &site());
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert!(found[0].message.contains("ghost"), "{found:#?}");
+        let none = check_template("[:p (text input.post.title)]", &schema(INDEX), "index", &CheckContext::default());
+        assert_eq!(none.len(), 1, "no collections known: {none:#?}");
+    }
 }

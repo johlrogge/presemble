@@ -1139,14 +1139,20 @@ mod tests {
         init_site(&site).expect("init");
         let grammar = schema::parse_schema(&std::fs::read_to_string(site.join("schemas/note/item.md")).unwrap())
             .expect("schema");
-        let names = template::check::TemplateNames::new(["note"]);
-        // The item template is checked against the note schema. (The index
-        // reads collections, which have no schema of their own to check
-        // against.)
-        let file = "templates/note/item.html";
-        let src = std::fs::read_to_string(site.join(file)).unwrap();
-        let found = template::check::check_template(&src, &grammar, "note", &names);
-        assert!(found.is_empty(), "{file}: {found:#?}");
+        // Red run: with this empty context (no collections) the index failed
+        // with "unknown field 'note' in index schema".
+        let site_context = template::check::CheckContext::new(["note"]).with_collection("note", grammar.clone());
+        // The item template is checked against the note schema; the index
+        // against the (empty) root schema, with the note collection in its input.
+        let root = schema::parse_schema("").expect("an empty root schema");
+        for (file, stem, own) in [
+            ("templates/note/item.html", "note", &grammar),
+            ("templates/index.html", "index", &root),
+        ] {
+            let src = std::fs::read_to_string(site.join(file)).unwrap();
+            let found = template::check::check_template(&src, own, stem, &site_context);
+            assert!(found.is_empty(), "{file}: {found:#?}");
+        }
     }
 
     // ── is_source_empty unit tests ──────────────────────────────────────────
