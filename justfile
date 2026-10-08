@@ -185,6 +185,20 @@ perf-ref rev:
     # predate this recipe.
     (cd "$wt" && cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$')
 
+# Check inject.js's protocol builders against resources/serve/protocol/*.json
+# (ADR-059 §10). The full output goes to target/protocol-fixtures.log, because
+# the just MCP drops stdout when a recipe fails.
+protocol-fixtures:
+    #!/usr/bin/env bash
+    set -o pipefail
+    mkdir -p target
+    if NO_COLOR=1 deno run --no-prompt --allow-read=. tools/protocol-fixtures.ts 2>&1 | tee target/protocol-fixtures.log; then
+        exit 0
+    fi
+    echo "protocol fixtures failed; full output in target/protocol-fixtures.log" >&2
+    grep -E 'FAIL|Error|error' target/protocol-fixtures.log >&2 || true
+    exit 1
+
 # Run the smoketest (tools/smoketest.sh) against the given polylith profile.
 smoketest profile="dev":
     ./tools/smoketest.sh {{ profile }}
