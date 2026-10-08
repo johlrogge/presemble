@@ -1,12 +1,13 @@
 //! A gate for structure mode: every schema page of `site/` and each of
 //! `example-sites/`, rendered in schema mode with the site's own templates, is
-//! byte-identical to what it rendered at 9d5433b, before an insert without
-//! `as` placed its value as it is. Structure mode renders suggestion
-//! placeholders (an element with `data-presemble-hint`) for empty slots; the
-//! snapshots of published and editorial output do not cover it.
+//! byte-identical to what it rendered when the fixture was captured. Structure
+//! mode renders suggestion placeholders (an element with `data-presemble-hint`)
+//! for empty slots; the snapshots of published and editorial output do not
+//! cover it.
 //!
-//! The fixture holds one FNV-1a hash per schema page. When the sites change on
-//! purpose, refresh it: the failure message lists the new hashes.
+//! The fixture holds one FNV-1a hash per schema page. When the sites or the
+//! renderer change on purpose, refresh it: the failure message lists the new
+//! hashes.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -42,82 +43,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash
-}
-
-/// The page with the attributes of every tag in sorted order. The order in
-/// which schema mode writes the constraint attributes of an element varies from
-/// run to run (it follows a hash map); the attributes themselves do not.
-fn sort_attributes(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let tag = &rest[open..];
-        // The end of the tag: the first `>` outside quotes.
-        let mut quote: Option<char> = None;
-        let mut end = tag.len();
-        for (i, c) in tag.char_indices() {
-            match (quote, c) {
-                (Some(q), c) if c == q => quote = None,
-                (None, '"') | (None, '\'') => quote = Some(c),
-                (None, '>') => {
-                    end = i + 1;
-                    break;
-                }
-                _ => {}
-            }
-        }
-        out.push_str(&sorted_tag(&tag[..end]));
-        rest = &tag[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn sorted_tag(tag: &str) -> String {
-    let inner = tag.trim_start_matches('<').trim_end_matches('>');
-    let self_closing = inner.ends_with('/');
-    let inner = inner.trim_end_matches('/');
-    // Split on whitespace outside quotes.
-    let mut parts: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    for c in inner.chars() {
-        match (quote, c) {
-            (Some(q), c) if c == q => {
-                quote = None;
-                current.push(c);
-            }
-            (None, '"') | (None, '\'') => {
-                quote = Some(c);
-                current.push(c);
-            }
-            (None, c) if c.is_whitespace() => {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-            }
-            (_, c) => current.push(c),
-        }
-    }
-    if !current.is_empty() {
-        parts.push(current);
-    }
-    if parts.is_empty() || tag.starts_with("</") || tag.starts_with("<!") {
-        return tag.to_string();
-    }
-    let name = parts.remove(0);
-    parts.sort();
-    let mut out = format!("<{name}");
-    for p in parts {
-        out.push(' ');
-        out.push_str(&p);
-    }
-    if self_closing {
-        out.push_str(" /");
-    }
-    out.push('>');
-    out
 }
 
 /// The schema URLs of a site: `/_schema/index`, `/_schema/<stem>/item`,
@@ -158,7 +83,8 @@ fn render(name: &str, src: &Path, hiccup_templates: bool) -> Vec<String> {
         });
         let line = match result.response {
             conductor::Response::PageRendered { html } => {
-                assert!(!html.contains("<presemble:"), "{name}{url} holds a presemble: element");                format!("{:016x}", fnv1a(sort_attributes(&html).as_bytes()))
+                assert!(!html.contains("<presemble:"), "{name}{url} holds a presemble: element");
+                format!("{:016x}", fnv1a(html.as_bytes()))
             }
             other => format!("NOT-RENDERED {other:?}"),
         };

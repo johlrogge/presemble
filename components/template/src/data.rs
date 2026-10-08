@@ -133,9 +133,13 @@ impl Value {
 
 /// A data graph node: a map from string keys to values.
 /// Supports colon-separated path resolution.
+///
+/// The entries are ordered by key, so whatever walks a graph (the constraint
+/// attributes of a slot, the entries of a record) sees the same order on
+/// every run; a hash map would give each graph its own.
 #[derive(Debug, Clone, Default)]
 pub struct DataGraph {
-    entries: im::HashMap<String, Value>,
+    entries: im::OrdMap<String, Value>,
 }
 
 impl DataGraph {

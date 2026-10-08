@@ -2507,6 +2507,41 @@ mod tests {
         }
     }
 
+    /// The constraint attributes of a slot are written in a fixed order, not
+    /// in the order of a hash map: the same page renders the same bytes every
+    /// time (each graph has its own hash seed, so many renders in one process
+    /// would show a varying order).
+    #[test]
+    fn schema_constraint_attributes_are_in_a_fixed_order() {
+        const SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n";
+        let grammar = schema::parse_schema(SCHEMA).expect("schema parses");
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            let doc = content::parse_and_assign("# Hello\n", &grammar).expect("content parses");
+            let mut graph = DataGraph::new();
+            graph.insert(
+                "input",
+                Value::Record(crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial)),
+            );
+            let html = render_for(
+                &graph,
+                r#"<presemble:insert data="(ref input.title)" as="h1" />"#,
+                crate::data::OutputMode::Editorial,
+            );
+            let names: Vec<&str> = html
+                .split("data-presemble-schema-constraints-")
+                .skip(1)
+                .map(|rest| rest.split('=').next().unwrap_or(""))
+                .collect();
+            seen.insert(names.join(","));
+        }
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            vec!["content,occurs".to_string()],
+            "the constraint attributes come in one fixed order (by name)"
+        );
+    }
+
     // ── Paragraph slots are inline nodes; strings read their plain text ────
 
     /// The page as a template sees it: `input` is the article's graph, whose
