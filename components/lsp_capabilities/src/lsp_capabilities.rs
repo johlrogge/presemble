@@ -1236,6 +1236,95 @@ mod tests {
         );
     }
 
+    // ── The checker walks every expression (ADR-067) ─────────────────────────
+
+    #[test]
+    fn checker_reports_unknown_paths_in_every_position() {
+        let grammar = article_grammar();
+        // One unknown path in each position, both syntaxes.
+        let cases = [
+            r#"<presemble:insert data="(ref input.nope)" />"#,
+            r#"<presemble:insert data="(text input.nope)" />"#,
+            r#"<template data-each="(ref input.nope)"><p>x</p></template>"#,
+            r#"<template data-slot="(ref input.nope)"><p>x</p></template>"#,
+            r#"<a href="(ref input.nope)">x</a>"#,
+            r#"[:presemble/insert {:data input.nope}]"#,
+            r#"[:presemble/insert {:data (to_upper input.nope)}]"#,
+            r#"[:template {:data-each input.nope} [:p "x"]]"#,
+            r#"[:template {:data-slot (ref input.nope)} [:p "x"]]"#,
+            r#"[:a {:href input.nope} "x"]"#,
+            r#"[:p (text input.nope)]"#,
+        ];
+        for src in cases {
+            let diags = validate_template_paths(src, &grammar, "article");
+            assert_eq!(diags.len(), 1, "{src}: {diags:#?}");
+            assert!(diags[0].message.contains("nope"), "{src}: {}", diags[0].message);
+            assert!(matches!(diags[0].severity, validation::Severity::Error), "{src}");
+        }
+        // The same positions with a field of the schema: nothing to report.
+        let valid = [
+            r#"<presemble:insert data="(ref input.title)" />"#,
+            r#"<a href="(ref input.title)">x</a>"#,
+            r#"[:presemble/insert {:data (to_upper input.title)}]"#,
+            r#"[:template {:data-slot (ref input.title)} [:p "x"]]"#,
+            r#"[:p (text input.title)]"#,
+        ];
+        for src in valid {
+            let diags = validate_template_paths(src, &grammar, "article");
+            assert!(diags.is_empty(), "{src}: {diags:#?}");
+        }
+    }
+
+    #[test]
+    fn html_literal_parenthesis_is_an_unknown_function_diagnostic() {
+        let grammar = article_grammar();
+        let diags = validate_template_paths(r#"<a title="(draft)">x</a>"#, &grammar, "article");
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert!(diags[0].message.contains("unknown function"), "{}", diags[0].message);
+        assert!(diags[0].message.contains("draft"), "{}", diags[0].message);
+        // The literal, written as an expression, is fine.
+        let ok = validate_template_paths(r#"<a title='(ref "(draft)")'>x</a>"#, &grammar, "article");
+        assert!(ok.is_empty(), "{ok:#?}");
+    }
+
+    #[test]
+    fn unbalanced_parenthesis_attribute_warns() {
+        let grammar = article_grammar();
+        let diags = validate_template_paths(r#"<a title="(draft">x</a>"#, &grammar, "article");
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert!(matches!(diags[0].severity, validation::Severity::Warning), "{diags:#?}");
+    }
+
+    #[test]
+    fn checker_reports_wrong_arity_and_values_that_cannot_be_attributes() {
+        let grammar = article_grammar();
+        let arity = validate_template_paths(
+            r#"<presemble:insert data="(text input.title input.title)" />"#,
+            &grammar,
+            "article",
+        );
+        assert_eq!(arity.len(), 1, "{arity:#?}");
+        assert!(arity[0].message.contains("arguments"), "{}", arity[0].message);
+
+        // `input.author` is a link slot: a record, not text.
+        let record = validate_template_paths(r#"<a href="(ref input.author)">x</a>"#, &grammar, "article");
+        assert_eq!(record.len(), 1, "{record:#?}");
+        assert!(record[0].message.contains("input.author"), "{}", record[0].message);
+        // Naming a field of the record is fine.
+        let field = validate_template_paths(r#"<a href="(ref input.author.href)">x</a>"#, &grammar, "article");
+        assert!(field.is_empty(), "{field:#?}");
+    }
+
+    #[test]
+    fn checker_reports_an_unknown_local_template() {
+        let grammar = article_grammar();
+        let src = r#"[:template {:presemble/define "body"} [:p "b"]]
+                     [:body ((juxt self/body self/nothing) input)]"#;
+        let diags = validate_template_paths(src, &grammar, "article");
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert!(diags[0].message.contains("nothing"), "{}", diags[0].message);
+    }
+
     // template_definition tests
 
     fn blog_site_dir() -> std::path::PathBuf {

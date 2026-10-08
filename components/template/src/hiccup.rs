@@ -368,152 +368,17 @@ impl Parser {
                 })))
             }
 
+            // A list in child position is an insert of the call it spells
+            // (ADR-067): `((juxt header self/body footer) input)` is
+            // `[:presemble/insert {:data ((juxt header self/body footer) input)}]`.
             Some(Token::LParen) => {
                 self.next(); // consume '('
-
-                // Check if next token is another '(' — nested function application:
-                // ((fn-form) arg1 arg2 ...) applies the inner form to the arguments.
-                if let Some(Token::LParen) = self.peek() {
-                    // Parse the inner form (e.g. (juxt header self/body footer))
-                    let inner = self.parse_node()?
-                        .ok_or_else(|| TemplateError::ParseError(
-                            "empty inner form in function application".into()
-                        ))?;
-
-                    // Parse arguments until ')'
-                    let mut args: Vec<String> = Vec::new();
-                    loop {
-                        match self.peek() {
-                            Some(Token::RParen) => {
-                                self.next(); // consume ')'
-                                break;
-                            }
-                            Some(Token::Symbol(_)) => {
-                                if let Some(Token::Symbol(s)) = self.next() {
-                                    args.push(s);
-                                }
-                            }
-                            None => {
-                                return Err(TemplateError::ParseError(
-                                    "unexpected end of input in function application form".into(),
-                                ));
-                            }
-                            other => {
-                                let other = other.cloned();
-                                return Err(TemplateError::ParseError(format!(
-                                    "unexpected token in function application argument position: {other:?}"
-                                )));
-                            }
-                        }
-                    }
-
-                    // Attach the first argument as a `data` attribute on the inner node
-                    return if let Node::Element(mut el) = inner {
-                        if !args.is_empty() {
-                            el.attrs.push(("data".to_string(), Form::Str(args[0].clone())));
-                        }
-                        Ok(Some(Node::Element(el)))
-                    } else {
-                        Err(TemplateError::ParseError(
-                            "function application: inner form must be an element".into()
-                        ))
-                    };
-                }
-
-                // The next token must be a Symbol naming the composition form.
-                let form_name = match self.next() {
-                    Some(Token::Symbol(s)) => s,
-                    Some(other) => {
-                        return Err(TemplateError::ParseError(format!(
-                            "expected symbol after '(' in composition form, got {other:?}"
-                        )))
-                    }
-                    None => {
-                        return Err(TemplateError::ParseError(
-                            "unexpected end of input after '(' in composition form".into(),
-                        ))
-                    }
-                };
-
-                match form_name.as_str() {
-                    "juxt" => {
-                        // (juxt arg1 arg2 ...) — collect arguments until ')'
-                        let mut children: Vec<Node> = Vec::new();
-                        loop {
-                            match self.peek() {
-                                None => {
-                                    return Err(TemplateError::ParseError(
-                                        "unexpected end of input inside (juxt ...), expected ')'".into(),
-                                    ))
-                                }
-                                Some(Token::RParen) => {
-                                    self.next(); // consume ')'
-                                    break;
-                                }
-                                Some(Token::Symbol(_)) => {
-                                    let sym = match self.next() {
-                                        Some(Token::Symbol(s)) => s,
-                                        _ => unreachable!(),
-                                    };
-                                    let child = juxt_symbol_to_node(&sym);
-                                    children.push(child);
-                                }
-                                Some(Token::LParen) => {
-                                    // Nested composition form — parse as a child node
-                                    if let Some(nested) = self.parse_node()? {
-                                        children.push(nested);
-                                    }
-                                }
-                                Some(other) => {
-                                    let other = other.clone();
-                                    return Err(TemplateError::ParseError(format!(
-                                        "unexpected token in (juxt ...) argument position: {other:?}"
-                                    )));
-                                }
-                            }
-                        }
-                        Ok(Some(Node::Element(Element {
-                            name: "presemble:juxt".to_string(),
-                            attrs: Vec::new(),
-                            children,
-                        })))
-                    }
-                    "apply" => {
-                        // (apply template-name) — single argument
-                        let name = match self.next() {
-                            Some(Token::Symbol(s)) => s,
-                            Some(other) => {
-                                return Err(TemplateError::ParseError(format!(
-                                    "expected symbol as argument to (apply ...), got {other:?}"
-                                )))
-                            }
-                            None => {
-                                return Err(TemplateError::ParseError(
-                                    "unexpected end of input in (apply ...) form".into(),
-                                ))
-                            }
-                        };
-                        // Consume ')'
-                        match self.next() {
-                            Some(Token::RParen) => {}
-                            Some(other) => {
-                                return Err(TemplateError::ParseError(format!(
-                                    "expected ')' after (apply {name}), got {other:?}"
-                                )))
-                            }
-                            None => {
-                                return Err(TemplateError::ParseError(
-                                    "unexpected end of input after (apply ...) argument".into(),
-                                ))
-                            }
-                        }
-                        let node = apply_symbol_to_node(&name);
-                        Ok(Some(node))
-                    }
-                    other => Err(TemplateError::ParseError(format!(
-                        "unknown composition form '({other} ...)'"
-                    ))),
-                }
+                let call = self.parse_list()?;
+                Ok(Some(Node::Element(Element {
+                    name: "presemble:insert".to_string(),
+                    attrs: vec![("data".to_string(), call)],
+                    children: Vec::new(),
+                })))
             }
 
             Some(other) => Err(TemplateError::ParseError(format!(
@@ -673,44 +538,6 @@ impl Parser {
 }
 
 // ---------------------------------------------------------------------------
-// Composition form helpers
-// ---------------------------------------------------------------------------
-
-/// Convert a symbol from a `(juxt ...)` argument to a Node.
-///
-/// - `self/name` → `presemble:apply` with template=name (no data attr = full graph)
-/// - bare `name` → `presemble:include` with src=name (registry template)
-fn juxt_symbol_to_node(sym: &str) -> Node {
-    if sym.starts_with("self/") {
-        apply_symbol_to_node(sym)
-    } else {
-        Node::Element(Element {
-            name: "presemble:include".to_string(),
-            attrs: vec![("src".to_string(), crate::dom::Form::Str(sym.to_string()))],
-            children: Vec::new(),
-        })
-    }
-}
-
-/// Convert a symbol from an `(apply ...)` form to a Node.
-///
-/// - `self/name` → `presemble:apply` with template=name (no data = full graph)
-/// - bare `name` → also `presemble:apply` with template=name (no data = full graph)
-///
-/// When `data` is absent, `render_apply` passes the full parent graph through.
-/// This is the juxt semantic: all children see the same data.
-fn apply_symbol_to_node(sym: &str) -> Node {
-    let template_name = sym.strip_prefix("self/").unwrap_or(sym);
-    Node::Element(Element {
-        name: "presemble:apply".to_string(),
-        attrs: vec![
-            ("template".to_string(), crate::dom::Form::Str(template_name.to_string())),
-        ],
-        children: Vec::new(),
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -750,6 +577,23 @@ pub fn parse_edn_form(src: &str) -> Result<Form, TemplateError> {
     let tokens = tokenize(src)?;
     let mut parser = Parser::new(tokens, NilChildren::Skip);
     parser.parse_form()
+}
+
+/// Read `src` as exactly one EDN form: the one reader for expressions, in
+/// hiccup templates and in HTML attribute values alike (ADR-067).
+///
+/// Unlike [`parse_edn_form`] it refuses text after the form, so `(ref a) b`
+/// is not an expression.
+pub fn read_form(src: &str) -> Result<Form, TemplateError> {
+    let tokens = tokenize(src)?;
+    let mut parser = Parser::new(tokens, NilChildren::Skip);
+    let form = parser.parse_form()?;
+    if parser.peek().is_some() {
+        return Err(TemplateError::ParseError(
+            "unexpected text after the form".into(),
+        ));
+    }
+    Ok(form)
 }
 
 #[cfg(test)]
@@ -1119,165 +963,87 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3a: (juxt ...) and (apply ...) composition forms
+    // A list in child position is an insert of the call (ADR-067)
     // -----------------------------------------------------------------------
+
+    /// The `data` form of a child-position list: an insert with no children.
+    fn insert_data(node: &Node) -> &Form {
+        let Node::Element(insert) = node else { panic!("expected an element") };
+        assert_eq!(insert.name, "presemble:insert");
+        assert!(insert.children.is_empty());
+        insert.attr_form("data").expect("data attr")
+    }
 
     #[test]
     fn parse_juxt_form() {
-        // (juxt header footer) should produce presemble:juxt with two presemble:include children
         let nodes = parse("(juxt header footer)");
         assert_eq!(nodes.len(), 1);
-        if let Node::Element(juxt) = &nodes[0] {
-            assert_eq!(juxt.name, "presemble:juxt");
-            assert_eq!(juxt.children.len(), 2);
-            if let Node::Element(c0) = &juxt.children[0] {
-                assert_eq!(c0.name, "presemble:include");
-                assert_eq!(c0.attr("src"), Some("header"));
-            } else {
-                panic!("expected first child to be element");
-            }
-            if let Node::Element(c1) = &juxt.children[1] {
-                assert_eq!(c1.name, "presemble:include");
-                assert_eq!(c1.attr("src"), Some("footer"));
-            } else {
-                panic!("expected second child to be element");
-            }
-        } else {
-            panic!("expected presemble:juxt element");
-        }
+        assert_eq!(
+            insert_data(&nodes[0]),
+            &Form::List(vec![
+                Form::Symbol("juxt".into()),
+                Form::Symbol("header".into()),
+                Form::Symbol("footer".into()),
+            ])
+        );
     }
 
     #[test]
     fn parse_juxt_with_self_apply() {
-        // (juxt header (apply self/body) footer) should produce:
-        //   presemble:juxt with [presemble:include, presemble:apply, presemble:include]
         let nodes = parse("(juxt header (apply self/body) footer)");
         assert_eq!(nodes.len(), 1);
-        if let Node::Element(juxt) = &nodes[0] {
-            assert_eq!(juxt.name, "presemble:juxt");
-            assert_eq!(juxt.children.len(), 3, "expected 3 children, got {:?}", juxt.children.len());
-
-            if let Node::Element(c0) = &juxt.children[0] {
-                assert_eq!(c0.name, "presemble:include");
-                assert_eq!(c0.attr("src"), Some("header"));
-            } else {
-                panic!("first child should be presemble:include");
-            }
-
-            if let Node::Element(c1) = &juxt.children[1] {
-                assert_eq!(c1.name, "presemble:apply");
-                assert_eq!(c1.attr("template"), Some("body"));
-                assert_eq!(c1.attr("data"), None, "juxt apply should have no data attr");
-            } else {
-                panic!("second child should be presemble:apply");
-            }
-
-            if let Node::Element(c2) = &juxt.children[2] {
-                assert_eq!(c2.name, "presemble:include");
-                assert_eq!(c2.attr("src"), Some("footer"));
-            } else {
-                panic!("third child should be presemble:include");
-            }
-        } else {
-            panic!("expected presemble:juxt element");
-        }
-    }
-
-    #[test]
-    fn parse_juxt_with_bare_self_symbol() {
-        // (juxt header self/nav footer) — self/nav becomes presemble:apply
-        // with template="nav" and no data attr (full graph pass-through)
-        let nodes = parse("(juxt header self/nav footer)");
-        assert_eq!(nodes.len(), 1);
-        if let Node::Element(juxt) = &nodes[0] {
-            assert_eq!(juxt.children.len(), 3);
-            if let Node::Element(c1) = &juxt.children[1] {
-                assert_eq!(c1.name, "presemble:apply");
-                assert_eq!(c1.attr("template"), Some("nav"));
-                assert_eq!(c1.attr("data"), None, "juxt apply should have no data attr");
-            } else {
-                panic!("middle child should be presemble:apply");
-            }
-        }
+        assert_eq!(
+            insert_data(&nodes[0]).to_edn_string(),
+            "(juxt header (apply self/body) footer)"
+        );
     }
 
     #[test]
     fn parse_juxt_applied_to_input() {
-        // ((juxt header self/body footer) input) — Clojure-style function application.
-        // Should produce presemble:juxt with data="input" attr and 3 children.
+        // ((juxt header self/body footer) input): the call of a juxt.
         let nodes = parse("((juxt header self/body footer) input)");
         assert_eq!(nodes.len(), 1);
-        if let Node::Element(juxt) = &nodes[0] {
-            assert_eq!(juxt.name, "presemble:juxt");
-            assert_eq!(juxt.attr("data"), Some("input"), "juxt should have data=input attr");
-            assert_eq!(juxt.children.len(), 3);
-            if let Node::Element(c0) = &juxt.children[0] {
-                assert_eq!(c0.name, "presemble:include");
-                assert_eq!(c0.attr("src"), Some("header"));
-            } else {
-                panic!("first child should be presemble:include");
-            }
-            if let Node::Element(c1) = &juxt.children[1] {
-                assert_eq!(c1.name, "presemble:apply");
-                assert_eq!(c1.attr("template"), Some("body"));
-            } else {
-                panic!("second child should be presemble:apply");
-            }
-            if let Node::Element(c2) = &juxt.children[2] {
-                assert_eq!(c2.name, "presemble:include");
-                assert_eq!(c2.attr("src"), Some("footer"));
-            } else {
-                panic!("third child should be presemble:include");
-            }
-        } else {
-            panic!("expected presemble:juxt element");
-        }
-    }
-
-    #[test]
-    fn parse_juxt_without_application_has_no_data_attr() {
-        // (juxt header footer) without outer application should NOT have data attr (backward compat)
-        let nodes = parse("(juxt header footer)");
-        assert_eq!(nodes.len(), 1);
-        if let Node::Element(juxt) = &nodes[0] {
-            assert_eq!(juxt.name, "presemble:juxt");
-            assert_eq!(juxt.attr("data"), None, "plain juxt should have no data attr");
-        } else {
-            panic!("expected presemble:juxt element");
-        }
+        assert_eq!(
+            insert_data(&nodes[0]).to_edn_string(),
+            "((juxt header self/body footer) input)"
+        );
     }
 
     #[test]
     fn parse_standalone_apply_form() {
-        // (apply self/body) at top level should produce a presemble:apply node
         let nodes = parse("(apply self/body)");
         assert_eq!(nodes.len(), 1);
-        if let Node::Element(el) = &nodes[0] {
-            assert_eq!(el.name, "presemble:apply");
-            assert_eq!(el.attr("template"), Some("body"));
-            assert_eq!(el.attr("data"), None, "apply should have no data attr");
-        } else {
-            panic!("expected presemble:apply element");
-        }
+        assert_eq!(insert_data(&nodes[0]).to_edn_string(), "(apply self/body)");
     }
 
     #[test]
     fn parse_juxt_inside_element() {
-        // [:body (juxt header self/content footer)] — juxt inside an element
         let nodes = parse("[:body (juxt header self/content footer)]");
         assert_eq!(nodes.len(), 1);
-        if let Node::Element(body) = &nodes[0] {
-            assert_eq!(body.name, "body");
-            assert_eq!(body.children.len(), 1);
-            if let Node::Element(juxt) = &body.children[0] {
-                assert_eq!(juxt.name, "presemble:juxt");
-                assert_eq!(juxt.children.len(), 3);
-            } else {
-                panic!("expected presemble:juxt child inside body");
-            }
-        } else {
-            panic!("expected body element");
-        }
+        let Node::Element(body) = &nodes[0] else { panic!("expected body element") };
+        assert_eq!(body.name, "body");
+        assert_eq!(body.children.len(), 1);
+        assert_eq!(
+            insert_data(&body.children[0]).to_edn_string(),
+            "(juxt header self/content footer)"
+        );
+    }
+
+    #[test]
+    fn any_list_in_child_position_is_an_insert_of_the_call() {
+        let nodes = parse("[:p (text input.title) (card item)]");
+        let Node::Element(p) = &nodes[0] else { panic!("expected p") };
+        assert_eq!(p.children.len(), 2);
+        assert_eq!(insert_data(&p.children[0]).to_edn_string(), "(text input.title)");
+        assert_eq!(insert_data(&p.children[1]).to_edn_string(), "(card item)");
+    }
+
+    #[test]
+    fn read_form_reads_exactly_one_form() {
+        assert!(matches!(read_form("(ref a.b)"), Ok(Form::List(_))));
+        assert!(read_form("(ref a.b) c").is_err());
+        assert!(read_form("(draft").is_err());
+        assert!(matches!(read_form("/x"), Ok(Form::Symbol(_))));
     }
 
     // -----------------------------------------------------------------------

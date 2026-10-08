@@ -209,9 +209,21 @@ fn parse_attrs<'a>(
             .unescape_value()
             .map_err(|err| crate::error::TemplateError::ParseError(err.to_string()))?
             .into_owned();
-        attrs.push((key, Form::Str(value)));
+        attrs.push((key, attribute_form(value)));
     }
     Ok(attrs)
+}
+
+/// An HTML attribute value as a form: a value that reads as an EDN list is an
+/// expression (ADR-067); any other value is literal text. The same reader as
+/// the hiccup templates.
+fn attribute_form(value: String) -> Form {
+    if value.trim_start().starts_with('(')
+        && let Ok(form @ Form::List(_)) = crate::hiccup::read_form(&value)
+    {
+        return form;
+    }
+    Form::Str(value)
 }
 
 /// Serialize a list of nodes back to an HTML string.

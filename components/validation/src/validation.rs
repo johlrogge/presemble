@@ -312,6 +312,20 @@ pub fn validate_template(src: &str, grammar: &Grammar, stem: &str) -> Vec<Diagno
         }
     }
 
+    // Every expression in every position, in either syntax (ADR-067).
+    for found in template::check::check_template(src, grammar, stem) {
+        let span = src.find(&found.snippet).map(|start| start..start + found.snippet.len());
+        diagnostics.push(Diagnostic {
+            severity: match found.level {
+                template::check::Level::Error => Severity::Error,
+                template::check::Level::Warning => Severity::Warning,
+            },
+            message: found.message,
+            slot: None,
+            span,
+        });
+    }
+
     diagnostics
 }
 

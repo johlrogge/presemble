@@ -2,6 +2,7 @@ use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, OutputMode, Value};
 use crate::dom::{Element, Form, Node};
 use crate::expr::parse_expr;
+use crate::expression::{self, attribute_text, evaluate, Evaluated, Expression};
 use crate::graph_view::{GraphView, ResolvedNode};
 use crate::registry::RenderContext;
 
@@ -41,7 +42,7 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
             Node::Text(_) => output.push(node),
             Node::Element(el) => {
                 if el.is_presemble() && el.name == crate::constants::ELEM_INSERT {
-                    let mut rendered = render_insert(&el, graph, ctx.output)?;
+                    let mut rendered = render_insert_node(&el, graph, ctx)?;
                     output.append(&mut rendered);
                 } else if el.is_presemble() && el.name == crate::constants::ELEM_INCLUDE {
                     if ctx.is_too_deep() {
@@ -68,74 +69,93 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                     let mut rendered = render_apply(&el, graph, ctx)?;
                     output.append(&mut rendered);
                 } else if el.is_presemble() && el.name == crate::constants::ELEM_JUXT {
-                    // Juxt: transform each child against the same data graph,
-                    // concatenating results. Children are synthetic presemble:include
-                    // or presemble:apply nodes produced by the hiccup parser.
+                    // c2: remove. Juxt: transform each child against the same data
+                    // graph, concatenating results.
                     let mut rendered = transform(el.children, graph, ctx)?;
                     output.append(&mut rendered);
-                } else if el.name == "template" && el.attr("data-slot").is_some() {
+                } else if el.name == "template" && el.attr_form("data-slot").is_some() {
                     // Conditional block: render children only if the slot is present.
-                    let slot_path = el.attr("data-slot").unwrap().to_string();
-                    let path_segments: Vec<&str> = slot_path.split('.').collect();
-                    let resolved = graph.resolve(&path_segments);
-                    match resolved.as_ref().map(|r| r.as_value()) {
-                        None | Some(Value::Absent) => {
-                            // Slot absent — drop the entire block.
+                    let present = match directive_source(&el, "data-slot")?.expect("checked above") {
+                        Source::Path(segments) => {
+                            let path_segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+                            !matches!(
+                                graph.resolve(&path_segments).as_ref().map(|r| r.as_value()),
+                                None | Some(Value::Absent)
+                            )
                         }
-                        Some(Value::Suggestion { .. }) | Some(_) => {
-                            // Slot present (including suggestion placeholders) — unwrap template
-                            // wrapper and recursively transform children so inner
-                            // presemble:insert calls can produce suggestion nodes.
-                            let mut rendered = transform(el.children, graph, ctx)?;
-                            output.append(&mut rendered);
-                        }
+                        Source::Expr(expression) => match evaluate(&expression, graph, ctx)? {
+                            Evaluated::Value(Value::Absent) => false,
+                            Evaluated::Nodes(nodes) => !nodes.is_empty(),
+                            Evaluated::Value(_) => true,
+                        },
+                    };
+                    // Absent: drop the entire block. Present (including
+                    // suggestion placeholders): unwrap the template wrapper and
+                    // recursively transform children so inner presemble:insert
+                    // calls can produce suggestion nodes.
+                    if present {
+                        let mut rendered = transform(el.children, graph, ctx)?;
+                        output.append(&mut rendered);
                     }
-                } else if el.name == "template" && el.attr("data-each").is_some() {
+                } else if el.name == "template" && el.attr_form("data-each").is_some() {
                     // Iteration block: repeat children once per item in the list.
                     // The item is bound under the key from :item attribute (default "item").
                     // The parent context (including "self" and all collections) is preserved.
-                    let each_path = el.attr("data-each").unwrap().to_string();
-                    let path_segments: Vec<&str> = each_path.split('.').collect();
+                    let source = directive_source(&el, "data-each")?.expect("checked above");
                     let item_key = el.attr("item").unwrap_or("item").to_string();
 
-                    // Fast path: iterate a NodeStore Collection without materializing Values.
                     let mut handled = false;
-                    if let Some(resolved) = graph.resolve_node(&path_segments)
-                        && matches!(resolved.store.get(resolved.id), Some(node_store::Node::Collection))
-                    {
-                            let children = resolved.store.children(resolved.id);
-                            // Probe to see if native binding is supported (avoids materializing).
-                            let supports_native = children.first().is_none_or(|&first_id| {
-                                graph.with_node_binding(item_key.clone(), first_id, resolved.store).is_some()
-                            });
-                            if supports_native {
-                                handled = true;
-                                for child_id in children {
-                                    // unwrap: we probed successfully above
-                                    let bound = graph
-                                        .with_node_binding(item_key.clone(), child_id, resolved.store)
-                                        .unwrap();
-                                    let mut rendered = transform(el.children.clone(), &*bound, ctx)?;
-                                    output.append(&mut rendered);
+                    let mut resolved_value: Option<Value> = None;
+                    match &source {
+                        Source::Path(segments) => {
+                            let path_segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+                            // Fast path: iterate a NodeStore Collection without materializing Values.
+                            if let Some(resolved) = graph.resolve_node(&path_segments)
+                                && matches!(resolved.store.get(resolved.id), Some(node_store::Node::Collection))
+                            {
+                                let children = resolved.store.children(resolved.id);
+                                // Probe to see if native binding is supported (avoids materializing).
+                                let supports_native = children.first().is_none_or(|&first_id| {
+                                    graph.with_node_binding(item_key.clone(), first_id, resolved.store).is_some()
+                                });
+                                if supports_native {
+                                    handled = true;
+                                    for child_id in children {
+                                        // unwrap: we probed successfully above
+                                        let bound = graph
+                                            .with_node_binding(item_key.clone(), child_id, resolved.store)
+                                            .unwrap();
+                                        let mut rendered = transform(el.children.clone(), &*bound, ctx)?;
+                                        output.append(&mut rendered);
+                                    }
                                 }
                             }
-                    }
-                    if !handled {
-                        // Legacy Value path for DataGraph or non-Collection nodes.
-                        let value = graph.resolve(&path_segments).map(|r| r.into_owned());
-                        if let Some(Value::List(items)) = value {
-                            for item_value in items {
-                                let child_view = graph.with_binding(item_key.clone(), item_value.clone());
-                                let mut rendered = transform(el.children.clone(), &*child_view, ctx)?;
-                                output.append(&mut rendered);
+                            if !handled {
+                                // Legacy Value path for DataGraph or non-Collection nodes.
+                                resolved_value = graph.resolve(&path_segments).map(|r| r.into_owned());
                             }
+                        }
+                        Source::Expr(expression) => {
+                            if let Evaluated::Value(value) = evaluate(expression, graph, ctx)? {
+                                resolved_value = Some(value);
+                            }
+                        }
+                    }
+                    if let Some(Value::List(items)) = resolved_value {
+                        for item_value in items {
+                            let child_view = graph.with_binding(item_key.clone(), item_value.clone());
+                            let mut rendered = transform(el.children.clone(), &*child_view, ctx)?;
+                            output.append(&mut rendered);
                         }
                     }
                     // Absent, non-list, or empty collection — produce nothing.
                 } else {
                     // Recursively transform children of regular elements.
+                    let presemble = el.is_presemble();
                     let transformed_children = transform(el.children, graph, ctx)?;
                     let attrs = apply_presemble_class(el.attrs, graph);
+                    // Attribute values that are expressions read the input (ADR-067).
+                    let attrs = if presemble { attrs } else { evaluate_attributes(attrs, graph, ctx)? };
                     output.push(Node::Element(Element {
                         name: el.name,
                         attrs,
@@ -146,6 +166,121 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
         }
     }
     Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// Expressions in the template (ADR-067)
+// ---------------------------------------------------------------------------
+
+/// Where a directive reads the input.
+enum Source {
+    /// A path into the input.
+    Path(Vec<String>),
+    /// A computation: a call.
+    Expr(Expression),
+}
+
+/// The source of the directive attribute `name`, if the element has it.
+///
+/// A string value is a path (c2: remove); any other form is an expression, and
+/// a plain reference is a path.
+fn directive_source(el: &Element, name: &str) -> Result<Option<Source>, RenderError> {
+    match el.attr_form(name) {
+        None => Ok(None),
+        // c2: remove
+        Some(Form::Str(path)) => Ok(Some(Source::Path(path.split('.').map(str::to_string).collect()))),
+        Some(form) => {
+            let expression = Expression::from_form(form)
+                .map_err(|e| RenderError::Render(format!("{name}: {e}")))?;
+            Ok(Some(match expression {
+                Expression::Ref(path) => {
+                    Source::Path(path.segments().into_iter().map(str::to_string).collect())
+                }
+                other => Source::Expr(other),
+            }))
+        }
+    }
+}
+
+/// The attributes of an ordinary element with every expression evaluated: a
+/// symbol or a list reads the input and gives its plain text; a value that is
+/// absent leaves the attribute out; text stays as written.
+fn evaluate_attributes(
+    attrs: Vec<(String, Form)>,
+    graph: &dyn GraphView,
+    ctx: &RenderContext,
+) -> Result<Vec<(String, Form)>, RenderError> {
+    let mut evaluated_attrs = Vec::with_capacity(attrs.len());
+    for (name, value) in attrs {
+        if !matches!(value, Form::List(_) | Form::Symbol(_)) {
+            evaluated_attrs.push((name, value));
+            continue;
+        }
+        let expression = Expression::from_form(&value)
+            .map_err(|e| RenderError::Render(format!("attribute '{name}': {e}")))?;
+        let evaluated = evaluate(&expression, graph, ctx)?;
+        if let Some(text) = attribute_text(&evaluated, &expression)
+            .map_err(|e| RenderError::Render(format!("attribute '{name}': {e}")))?
+        {
+            evaluated_attrs.push((name, Form::Str(text)));
+        }
+    }
+    Ok(evaluated_attrs)
+}
+
+/// Render a `presemble:insert`: its `data` is an expression.
+fn render_insert_node(
+    el: &Element,
+    graph: &dyn GraphView,
+    ctx: &RenderContext,
+) -> Result<Vec<Node>, RenderError> {
+    match el.attr_form("data") {
+        None | Some(Form::Nil) => Ok(Vec::new()),
+        // c2: remove
+        Some(Form::Str(path)) => render_insert(el, path, graph, ctx.output),
+        Some(form) => {
+            let expression = Expression::from_form(form)
+                .map_err(|e| RenderError::Render(format!("data: {e}")))?;
+            match &expression {
+                Expression::Ref(path) => render_insert(el, &path.dotted(), graph, ctx.output),
+                _ => render_insert_expression(el, &expression, graph, ctx),
+            }
+        }
+    }
+}
+
+/// Render an insert whose `data` is a call: what a template call renders is
+/// placed as it is; a computed text is wrapped like a text slot, with the
+/// class and the file of its subject.
+fn render_insert_expression(
+    el: &Element,
+    expression: &Expression,
+    graph: &dyn GraphView,
+    ctx: &RenderContext,
+) -> Result<Vec<Node>, RenderError> {
+    let value = match evaluate(expression, graph, ctx)? {
+        Evaluated::Nodes(nodes) => return Ok(nodes),
+        Evaluated::Value(value) => value,
+    };
+    let Some(text) = (match &value {
+        Value::Absent => None,
+        other => other.display_text(),
+    }) else {
+        return Ok(Vec::new());
+    };
+    let tag = el.attr("as").unwrap_or("span").to_string();
+    let mut attrs = Vec::new();
+    if let Some(subject) = expression.subject() {
+        let data_path = subject.dotted();
+        attrs.push(("class".to_string(), Form::Str(semantic_class(&data_path))));
+        attrs.push((crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(&data_path))));
+        attrs.push((
+            crate::constants::ATTR_FILE.to_string(),
+            Form::Str(resolve_presemble_file(&subject.segments(), graph)),
+        ));
+        attrs.extend(resolve_slot_constraint_form_attrs(&data_path, graph));
+    }
+    Ok(vec![Node::Element(Element { name: tag, attrs, children: vec![Node::Text(text)] })])
 }
 
 // ---------------------------------------------------------------------------
@@ -385,62 +520,29 @@ fn evaluate_pipe(items: &[Form], value: Option<&Value>) -> Result<Option<String>
 }
 
 /// Apply a named function to a Value — converts Value to Option<String>.
+/// The functions are the expression language's (one table).
+// c2: remove with `:apply`
 fn apply_function(name: &str, value: Option<&Value>) -> Result<Option<String>, RenderError> {
-    match name {
-        "text" => Ok(value.and_then(|v| v.display_text())),
-        "to_lower" | "to_upper" | "capitalize" | "truncate" => {
-            let text = value.and_then(|v| v.display_text());
-            match text {
-                Some(t) => apply_string_function(name, &t),
-                None => Ok(None),
-            }
-        }
-        _ => Err(RenderError::Render(format!("unknown :apply function '{name}'"))),
-    }
+    expression::apply_to_value(name, value)
+        .ok_or_else(|| RenderError::Render(format!("unknown :apply function '{name}'")))
 }
 
 /// Apply a named pure string→string transform.
+// c2: remove with `:apply`
 fn apply_string_function(name: &str, text: &str) -> Result<Option<String>, RenderError> {
-    match name {
-        "text" => Ok(Some(text.to_string())),
-        "to_lower" => Ok(Some(text.to_lowercase())),
-        "to_upper" => Ok(Some(text.to_uppercase())),
-        "capitalize" => Ok(Some(capitalize_string(text))),
-        "truncate" => Ok(Some(truncate_string(text, 100))),
-        _ => Err(RenderError::Render(format!("unknown string function '{name}'"))),
-    }
+    expression::apply_to_text(name, text)
+        .map(Some)
+        .ok_or_else(|| RenderError::Render(format!("unknown string function '{name}'")))
 }
 
-fn capitalize_string(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => {
-            let upper: String = c.to_uppercase().collect();
-            upper + chars.as_str()
-        }
-    }
-}
-
-fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        let mut end = max_len;
-        while !s.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        format!("{}…", &s[..end])
-    }
-}
-
-/// Handle a `<presemble:insert>` element.
-fn render_insert(el: &Element, graph: &dyn GraphView, output: OutputMode) -> Result<Vec<Node>, RenderError> {
+/// Handle a `<presemble:insert>` element that inserts the value at `data_path`.
+fn render_insert(
+    el: &Element,
+    data_path: &str,
+    graph: &dyn GraphView,
+    output: OutputMode,
+) -> Result<Vec<Node>, RenderError> {
     let editorial = output == OutputMode::Editorial;
-    let data_path = match el.attr("data") {
-        Some(p) => p,
-        None => return Ok(Vec::new()),
-    };
 
     let path_segments: Vec<&str> = data_path.split('.').collect();
     let class = semantic_class(data_path);
@@ -3547,7 +3649,7 @@ mod tests {
 
         // A string > 100 chars should be truncated with ellipsis
         let long = "a".repeat(150);
-        let truncated = truncate_string(&long, 100);
+        let truncated = apply_string_function("truncate", &long).unwrap().unwrap();
         assert!(truncated.ends_with('…'), "long string should end with ellipsis: {truncated}");
         assert!(truncated.len() < 150, "long string should be shorter after truncation");
     }
