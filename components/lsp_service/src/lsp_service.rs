@@ -260,7 +260,13 @@ impl PresembleLsp {
             self.client.publish_diagnostics(uri, vec![], None).await;
             return;
         };
-        let positioned = validate_template_paths(&src, &grammar, &stem);
+        // The site's templates, from the conductor; without them no template
+        // call could be told from a typo, so a failed query checks against none.
+        let names = {
+            let cond = self.conductor.lock().await;
+            cond.list_template_names().unwrap_or_default()
+        };
+        let positioned = validate_template_paths(&src, &grammar, &stem, &lsp_capabilities::TemplateNames::new(names));
         let diags: Vec<Diagnostic> = positioned
             .iter()
             .map(|p| {
@@ -715,14 +721,19 @@ impl LanguageServer for PresembleLsp {
                 };
                 // Find a data-path attribute at the cursor line and look up the slot's hint_text
                 let line_str = src.lines().nth(line as usize).unwrap_or("");
-                let attr_names = ["data", "data-slot", "data-each", "presemble:class"];
+                let attr_names = ["data", "data-slot", "data-each"];
                 let mut found_path: Option<String> = None;
                 for attr_name in attr_names {
                     let needle = format!("{attr_name}=\"");
                     if let Some(start) = line_str.find(needle.as_str()) {
                         let value_start = start + needle.len();
                         if let Some(close_rel) = line_str[value_start..].find('"') {
-                            found_path = Some(line_str[value_start..value_start + close_rel].to_string());
+                            // The value is an expression, e.g. `(ref input.title)`:
+                            // the path is its first dotted word.
+                            found_path = line_str[value_start..value_start + close_rel]
+                                .split(|c: char| c == '(' || c == ')' || c.is_whitespace())
+                                .find(|word| word.contains('.'))
+                                .map(str::to_string);
                             break;
                         }
                     }

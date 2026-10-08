@@ -455,7 +455,7 @@ mod tests {
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const FILE: &str = "content/post/first.md";
 
     fn site() -> tempfile::TempDir {

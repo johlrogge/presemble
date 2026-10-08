@@ -705,11 +705,11 @@ mod tests {
 
     #[test]
     fn presemble_namespaced_attr_uses_colon() {
-        let nodes = parse("[:div {:presemble/class \"article.title\"} \"text\"]");
+        let nodes = parse("[:div {:presemble/define \"body\"} \"text\"]");
         if let Node::Element(el) = &nodes[0] {
             assert!(
-                el.attrs.iter().any(|(k, _)| k == "presemble:class"),
-                "expected presemble:class attr, got {:?}",
+                el.attrs.iter().any(|(k, _)| k == "presemble:define"),
+                "expected presemble:define attr, got {:?}",
                 el.attrs
             );
         } else {
@@ -772,10 +772,10 @@ mod tests {
 
     #[test]
     fn parse_symbol_attr_value() {
-        let nodes = parse("[:div {:apply text}]");
+        let nodes = parse("[:div {:title text}]");
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(
-                el.attr_form("apply"),
+                el.attr_form("title"),
                 Some(&Form::Symbol("text".to_string())),
                 "expected Form::Symbol(\"text\")"
             );
@@ -845,9 +845,9 @@ mod tests {
 
     #[test]
     fn parse_list_attr_value() {
-        let nodes = parse("[:div {:apply (-> text to_lower)}]");
+        let nodes = parse("[:div {:title (-> text to_lower)}]");
         if let Node::Element(el) = &nodes[0] {
-            let form = el.attr_form("apply").expect("apply attr");
+            let form = el.attr_form("title").expect("title attr");
             assert!(
                 matches!(form, Form::List(_)),
                 "expected Form::List, got {form:?}"
@@ -886,9 +886,9 @@ mod tests {
     #[test]
     fn parse_nested_list() {
         // (-> text (format "yyyy")) — nested list inside list
-        let nodes = parse("[:div {:apply (-> text (format \"yyyy\"))}]");
+        let nodes = parse("[:div {:title (-> text (format \"yyyy\"))}]");
         if let Node::Element(el) = &nodes[0] {
-            let form = el.attr_form("apply").expect("apply attr");
+            let form = el.attr_form("title").expect("title attr");
             if let Form::List(items) = form {
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], Form::Symbol("->".to_string()));
@@ -989,12 +989,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_juxt_with_self_apply() {
-        let nodes = parse("(juxt header (apply self/body) footer)");
+    fn parse_juxt_with_a_nested_call() {
+        let nodes = parse("(juxt header (text self/body) footer)");
         assert_eq!(nodes.len(), 1);
         assert_eq!(
             insert_data(&nodes[0]).to_edn_string(),
-            "(juxt header (apply self/body) footer)"
+            "(juxt header (text self/body) footer)"
         );
     }
 
@@ -1010,10 +1010,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_standalone_apply_form() {
-        let nodes = parse("(apply self/body)");
+    fn parse_standalone_call_form() {
+        let nodes = parse("(body input)");
         assert_eq!(nodes.len(), 1);
-        assert_eq!(insert_data(&nodes[0]).to_edn_string(), "(apply self/body)");
+        assert_eq!(insert_data(&nodes[0]).to_edn_string(), "(body input)");
     }
 
     #[test]
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn roundtrip_symbol_attr() {
         use crate::hiccup_serializer::serialize_to_hiccup;
-        let src = "[:div {:apply text}]";
+        let src = "[:div {:title text}]";
         let nodes1 = parse_template_hiccup(src).expect("first parse");
         let serialized = serialize_to_hiccup(&nodes1);
         let nodes2 = parse_template_hiccup(&serialized).expect("second parse");
@@ -1095,7 +1095,7 @@ mod tests {
     #[test]
     fn roundtrip_list_attr() {
         use crate::hiccup_serializer::serialize_to_hiccup;
-        let src = "[:div {:apply (-> text to_lower)}]";
+        let src = "[:div {:title (-> text to_lower)}]";
         let nodes1 = parse_template_hiccup(src).expect("first parse");
         let serialized = serialize_to_hiccup(&nodes1);
         let nodes2 = parse_template_hiccup(&serialized).expect("second parse");

@@ -14,7 +14,7 @@ fn an_escaped_paragraph_renders_without_backslash() {
     let mut context = template::DataGraph::new();
     context.insert("input", template::Value::Record(graph));
     let html = template::render_template(
-        r#"<div><presemble:insert data="input.body" /></div>"#,
+        r#"<div><presemble:insert data="(ref input.body)" /></div>"#,
         &context,
         template::OutputMode::Published,
     )

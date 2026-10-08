@@ -164,26 +164,26 @@ fn generate_template(dir: &Path, schema_idx: usize, config: &BenchSiteConfig) {
          <link rel=\"stylesheet\" href=\"/assets/style.css\" />\
          </head><body><main>\n",
     );
-    content.push_str("  <presemble:insert data=\"input.title\" as=\"h1\" />\n");
-    content.push_str("  <presemble:insert data=\"input.summary\" as=\"p\" />\n");
+    content.push_str("  <presemble:insert data=\"(ref input.title)\" as=\"h1\" />\n");
+    content.push_str("  <presemble:insert data=\"(ref input.summary)\" as=\"p\" />\n");
 
     for l in 0..config.links_per_page {
-        content.push_str(&format!("  <presemble:insert data=\"input.link{l}\" />\n"));
+        content.push_str(&format!("  <presemble:insert data=\"(ref input.link{l})\" />\n"));
     }
 
     for e in 0..config.link_expressions {
         content.push_str(&format!(
-            "  <template data-each=\"input.expr{e}\">\n    <presemble:insert data=\"item.title\" as=\"h3\" />\n  </template>\n"
+            "  <template data-each=\"(ref input.expr{e})\">\n    <presemble:insert data=\"(ref item.title)\" as=\"h3\" />\n  </template>\n"
         ));
     }
 
-    content.push_str("  <div><presemble:insert data=\"input.body\" /></div>\n");
+    content.push_str("  <div><presemble:insert data=\"(ref input.body)\" /></div>\n");
     content.push_str("</main></body></html>\n");
 
     fs::write(template_dir.join("item.html"), content).unwrap();
 }
 
-fn generate_index_template(dir: &Path, config: &BenchSiteConfig) {
+fn generate_index_template(dir: &Path, _config: &BenchSiteConfig) {
     let template_dir = dir.join("templates");
     fs::create_dir_all(&template_dir).unwrap();
 
@@ -193,9 +193,9 @@ fn generate_index_template(dir: &Path, config: &BenchSiteConfig) {
          <link rel=\"stylesheet\" href=\"/assets/style.css\" />\
          </head><body><main>\n\
          <h1>Bench Site</h1>\n\
-         <template data-each=\"input.{first_stem}\">\n\
-         <presemble:insert data=\"item.title\" as=\"h2\" />\n\
-         <presemble:insert data=\"item.link\" />\n\
+         <template data-each=\"(ref input.{first_stem})\">\n\
+         <presemble:insert data=\"(ref item.title)\" as=\"h2\" />\n\
+         <presemble:insert data=\"(ref item.link)\" />\n\
          </template>\n\
          </main></body></html>\n"
     );

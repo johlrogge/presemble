@@ -1,13 +1,13 @@
 [:template {:presemble/define "body"}
   [:main
-    [:presemble/include {:src "nav"}]
+    (nav input)
     [:nav {:class "breadcrumb"}
       [:a {:href "/page/"} "← All pages"]]
-    [:presemble/insert {:data "input.title" :as "h1"}]
-    [:template {:data-slot "input.description"}
+    [:presemble/insert {:data input.title :as "h1"}]
+    [:template {:data-slot input.description}
       [:p {:class "description"}
-        [:presemble/insert {:data "input.description"}]]]
-    [:presemble/insert {:data "input.body"}]]]
+        [:presemble/insert {:data input.description}]]]
+    [:presemble/insert {:data input.body}]]]
 
 [:html {:lang "en"}
   [:head

@@ -188,6 +188,29 @@ fn body_element_kind(el: &content::ContentElement) -> Option<String> {
     })
 }
 
+/// The names a template can be called by, as the template registry resolves
+/// them: `templates/<name>/item.{hiccup,html}` and `templates/<name>.{hiccup,html}`.
+/// Sorted and deduplicated.
+fn template_names(site_dir: &Path) -> Vec<String> {
+    let is_template = |p: &Path| matches!(p.extension().and_then(|e| e.to_str()), Some("hiccup" | "html"));
+    let mut names = std::collections::BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(site_dir.join("templates")) else { return Vec::new() };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+        if path.is_dir() {
+            if ["item.hiccup", "item.html"].iter().any(|f| path.join(f).is_file())
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            {
+                names.insert(name.to_string());
+            }
+        } else if is_template(&path) {
+            names.insert(stem);
+        }
+    }
+    names.into_iter().collect()
+}
+
 #[allow(dead_code)]
 pub struct Conductor {
     site_dir: PathBuf,
@@ -4043,6 +4066,9 @@ impl Conductor {
                 let target = self.resolve_link_target_stem(&source_stem, &slot);
                 CommandResult::with_response(Response::LinkTargetStem(target))
             }
+            Command::ListTemplateNames => {
+                CommandResult::with_response(Response::TemplateNames(template_names(&self.site_dir)))
+            }
             Command::ListDependents { stem } => {
                 let site_files = self.site_index.read().unwrap_or_else(|e| e.into_inner()).dependents_of_schema(&stem);
                 let dependents: Vec<DependentFile> = site_files
@@ -5493,7 +5519,7 @@ mod feature_card_rendering_tests {
     // ── template ─────────────────────────────────────────────────────────────
 
     const INDEX_TEMPLATE_SRC: &str =
-        r#"<ul><template data-each="input.highlight"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#;
+        r#"<ul><template data-each="(ref input.highlight)"><li><presemble:insert data="(ref item.title)" as="h3" /></li></template></ul>"#;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -6807,7 +6833,7 @@ mod suggestion_accept_tests {
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const CONTENT: &str =
         "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```rust\nfn a() {}\n```\n";
 
@@ -7949,7 +7975,7 @@ mod block_edit_tests {
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const CONTENT: &str =
         "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```rust\nfn a() {}\n```\n";
 
@@ -8280,7 +8306,7 @@ mod block_edit_tests {
         .unwrap();
         std::fs::write(
             root.join("templates/index.html"),
-            r#"<ul><template data-each="input.highlight"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#,
+            r#"<ul><template data-each="(ref input.highlight)"><li><presemble:insert data="(ref item.title)" as="h3" /></li></template></ul>"#,
         )
         .unwrap();
         std::fs::write(
@@ -10142,7 +10168,7 @@ mod link_expression_pipeline_tests {
         std::fs::remove_file(root.join("templates/page/item.hiccup")).unwrap();
         std::fs::write(
             root.join("templates/page/item.html"),
-            r#"<ul><template data-each="input.latest"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#,
+            r#"<ul><template data-each="(ref input.latest)"><li><presemble:insert data="(ref item.title)" as="h3" /></li></template></ul>"#,
         )
         .unwrap();
         let conductor = make_conductor(&tmp);
@@ -10819,7 +10845,7 @@ mod model_migration_tests {
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#;
+        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const CONTENT: &str =
         "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```\nlet x = 1;\n```\n";
     const TITLE_TEXT: &str =
@@ -11258,13 +11284,13 @@ mod empty_slot_tests {
          ----\n\nBody.\nheadings\n: h3..h6\n";
     const AUTHOR_SCHEMA: &str = "# Author name {#name}\noccurs\n: exactly once\n";
     const POST_TEMPLATE: &str = r#"<html><body>
-<presemble:insert data="input.title" as="h1"></presemble:insert>
-<presemble:insert data="input.summary" as="p"></presemble:insert>
-<presemble:insert data="input.author"></presemble:insert>
-<div><presemble:insert data="input.body"></presemble:insert></div>
+<presemble:insert data="(ref input.title)" as="h1"></presemble:insert>
+<presemble:insert data="(ref input.summary)" as="p"></presemble:insert>
+<presemble:insert data="(ref input.author)"></presemble:insert>
+<div><presemble:insert data="(ref input.body)"></presemble:insert></div>
 </body></html>"#;
     const AUTHOR_TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="input.name" as="h1"></presemble:insert></body></html>"#;
+        r#"<html><body><presemble:insert data="(ref input.name)" as="h1"></presemble:insert></body></html>"#;
 
     /// A site whose posts are: `empty` (an empty file, as a new file is),
     /// `partial` (a title and a body, no summary or author), `bare` (a separator

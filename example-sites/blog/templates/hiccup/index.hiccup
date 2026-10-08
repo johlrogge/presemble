@@ -1,13 +1,13 @@
 [:template {:presemble/define "body"}
   [:main
-    [:presemble/include {:src "nav"}]
-    [:presemble/insert {:data "input.tagline" :as "h1"}]
+    (nav input)
+    [:presemble/insert {:data input.tagline :as "h1"}]
     [:section
       [:h2 "Latest Posts"]
-      [:template {:data-each "input.post"}
+      [:template {:data-each input.post}
         [:article
-          [:presemble/insert {:data "item.link" :as "h3"}]
-          [:presemble/insert {:data "item.summary" :as "p"}]]]]]]
+          [:presemble/insert {:data item.link :as "h3"}]
+          [:presemble/insert {:data item.summary :as "p"}]]]]]]
 
 [:html {:lang "en"}
   [:head

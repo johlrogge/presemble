@@ -9,6 +9,7 @@ fixtures/*/output/
 site/output/
 site/.devenv/
 /output/
+/output-editorial/
 profiles/*/
 .pre-commit-config.yaml
 bases/publisher_cli/target

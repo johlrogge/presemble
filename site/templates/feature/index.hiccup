@@ -1,10 +1,10 @@
 ;; Local template definition for the feature listing body
 [:template {:presemble/define "body"}
   [:main {:class "feature-listing"}
-    [:presemble/insert {:data "input.title" :as "h1"}]
-      [:template {:data-each "input.feature"}
-          [:presemble/insert {:data "item.link" :as "h3"}]
-          [:presemble/insert {:data "item.tagline" :as "p"}]
+    [:presemble/insert {:data input.title :as "h1"}]
+      [:template {:data-each input.feature}
+          [:presemble/insert {:data item.link :as "h3"}]
+          [:presemble/insert {:data item.tagline :as "p"}]
       ]
   ]
 ]

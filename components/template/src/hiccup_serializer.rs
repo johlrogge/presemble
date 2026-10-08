@@ -15,7 +15,7 @@ fn tag_name_to_keyword(name: &str) -> String {
 }
 
 fn attr_name_to_keyword(name: &str) -> String {
-    // "presemble:class" → ":presemble/class"
+    // "presemble:define" → ":presemble/define"
     // "class" → ":class"
     if let Some((ns, local)) = name.split_once(':') {
         format!(":{ns}/{local}")
@@ -41,6 +41,17 @@ fn is_element(node: &Node) -> bool {
     matches!(node, Node::Element(_))
 }
 
+/// `form` with `(ref p)` written as the hiccup shorthand `p` (ADR-067).
+fn shorthand(form: &Form) -> Form {
+    match form {
+        Form::List(items) => match items.as_slice() {
+            [Form::Symbol(head), Form::Symbol(path)] if head == "ref" => Form::Symbol(path.clone()),
+            _ => Form::List(items.iter().map(shorthand).collect()),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Serialize an attribute map `{:key "val" ...}`. Returns empty string if attrs is empty.
 fn serialize_attrs(attrs: &[(String, Form)]) -> String {
     if attrs.is_empty() {
@@ -53,7 +64,7 @@ fn serialize_attrs(attrs: &[(String, Form)]) -> String {
             // For other Form variants, use the generic to_edn_string serialization.
             let value_str = match v {
                 Form::Str(s) => format!("\"{}\"", escape_edn_string(s)),
-                other => other.to_edn_string(),
+                other => shorthand(other).to_edn_string(),
             };
             format!("{} {}", attr_name_to_keyword(k), value_str)
         })
@@ -183,11 +194,11 @@ mod tests {
     fn namespace_element() {
         let nodes = vec![make_el(
             "presemble:insert",
-            vec![("data", "article.title")],
+            vec![("data", "(ref article.title)")],
             vec![],
         )];
         let result = serialize_to_hiccup(&nodes);
-        assert_eq!(result, "[:presemble/insert {:data \"article.title\"}]");
+        assert_eq!(result, "[:presemble/insert {:data \"(ref article.title)\"}]");
     }
 
     // 5. Namespace attribute
@@ -195,13 +206,13 @@ mod tests {
     fn namespace_attribute() {
         let nodes = vec![make_el(
             "div",
-            vec![("presemble:class", "article.cover")],
+            vec![("presemble:define", "body")],
             vec![make_text("text")],
         )];
         let result = serialize_to_hiccup(&nodes);
         assert!(
-            result.contains(":presemble/class"),
-            "expected :presemble/class in: {result}"
+            result.contains(":presemble/define"),
+            "expected :presemble/define in: {result}"
         );
     }
 
@@ -287,6 +298,53 @@ mod tests {
         } else {
             panic!("expected elements");
         }
+    }
+
+    /// The expressions of a template, as the expression of each attribute.
+    fn expressions(nodes: &[Node]) -> Vec<crate::expression::Expression> {
+        fn walk(nodes: &[Node], out: &mut Vec<crate::expression::Expression>) {
+            for node in nodes {
+                if let Node::Element(el) = node {
+                    for (_, value) in &el.attrs {
+                        if matches!(value, Form::List(_) | Form::Symbol(_)) {
+                            out.push(crate::expression::Expression::from_form(value).expect("an expression"));
+                        }
+                    }
+                    walk(&el.children, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(nodes, &mut out);
+        out
+    }
+
+    #[test]
+    fn convert_round_trips_expressions_html_to_edn() {
+        let html = r#"<presemble:insert data="(ref article.title)" as="h1" /><a href="(ref article.author.href)">x</a><p title="(text article.title)">y</p>"#;
+        let nodes = crate::dom::parse_template_xml(html).unwrap();
+        let edn = serialize_to_hiccup(&nodes);
+        // `(ref p)` is written as the hiccup shorthand `p`; a call stays a call.
+        assert_eq!(
+            edn,
+            "[:presemble/insert {:data article.title :as \"h1\"}]\n\n[:a {:href article.author.href} \"x\"]\n\n[:p {:title (text article.title)} \"y\"]"
+        );
+        let back = parse_template_hiccup(&edn).unwrap();
+        assert_eq!(expressions(&back), expressions(&nodes));
+    }
+
+    #[test]
+    fn convert_round_trips_expressions_edn_to_html() {
+        let edn = "[:a {:href article.author.href} \"x\"]\n\n[:presemble/insert {:data (text article.title)}]";
+        let nodes = parse_template_hiccup(edn).unwrap();
+        let html = crate::dom::serialize_template_to_html(&nodes);
+        // The shorthand is written in full for HTML: `(ref p)`.
+        assert_eq!(
+            html,
+            r#"<a href="(ref article.author.href)">x</a><presemble:insert data="(text article.title)" />"#
+        );
+        let back = crate::dom::parse_template_xml(&html).unwrap();
+        assert_eq!(expressions(&back), expressions(&nodes));
     }
 
     // Verify strip_whitespace recurses into element children

@@ -738,10 +738,11 @@ mod tests {
     #[test]
     fn body_in_string_context_is_text_not_markup() {
         let graph = graph_for_body("a *b* &amp; c\n");
-        let expr = crate::ast::Expr::Lookup(vec!["body".to_string()]);
-        let text = crate::transformer::eval_expr_to_string(&expr, &graph);
-        assert_eq!(text, "a b & c");
-        assert!(!text.contains('<'), "string context must be plain text: {text:?}");
+        let nodes = crate::dom::parse_template_xml(r#"<a title="(ref body)">x</a>"#).unwrap();
+        let html = crate::render_from_nodes(nodes, &graph, OutputMode::Published).unwrap();
+        // The attribute is the body's plain text (markup-free; `&` is escaped
+        // for the attribute).
+        assert_eq!(html, r#"<a title="a b &amp; c">x</a>"#);
     }
 
     #[test]
@@ -768,7 +769,7 @@ mod tests {
         };
         let grammar = parse_schema("# Title {#title}\n\n----\n\nBody.\n").expect("schema");
         graph.merge_from(&build_article_graph(&doc, &grammar, OutputMode::Published), &[]);
-        let nodes = crate::dom::parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let nodes = crate::dom::parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let html = crate::render_from_nodes(nodes, &graph, OutputMode::Published).unwrap();
         assert!(html.contains("before"), "{html}");
         assert!(!html.contains("<a"), "a body link expression must not render: {html}");

@@ -28,6 +28,8 @@ pub struct CheckDiagnostic {
     pub level: Level,
     pub message: String,
     pub snippet: String,
+    /// The schema slot the finding is about, for an unknown field.
+    pub slot: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,10 +45,36 @@ enum Position {
     Attribute,
 }
 
+/// The names of the templates of the site, as the template registry resolves
+/// them (`header`, `post` for `templates/header.hiccup` and
+/// `templates/post/item.hiccup`).
+#[derive(Debug, Clone, Default)]
+pub struct TemplateNames(HashSet<String>);
+
+impl TemplateNames {
+    pub fn new<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        TemplateNames(names.into_iter().map(Into::into).collect())
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
+}
+
 /// Check the template `src` against `grammar`. Only paths below `input` are
 /// checked against the schema; a template whose source does not parse has
-/// nothing to check.
-pub fn check_template(src: &str, grammar: &Grammar, stem: &str) -> Vec<CheckDiagnostic> {
+/// nothing to check. `templates` are the site's templates; a name in neither
+/// `templates` nor the template's own definitions is unknown.
+pub fn check_template(
+    src: &str,
+    grammar: &Grammar,
+    stem: &str,
+    templates: &TemplateNames,
+) -> Vec<CheckDiagnostic> {
     let trimmed = src.trim_start();
     let syntax = if trimmed.starts_with(['[', '(', ';']) { Syntax::Hiccup } else { Syntax::Html };
     let parsed = match syntax {
@@ -56,7 +84,7 @@ pub fn check_template(src: &str, grammar: &Grammar, stem: &str) -> Vec<CheckDiag
     let Ok(nodes) = parsed else { return Vec::new() };
     let mut locals = HashSet::new();
     collect_local_definitions(&nodes, &mut locals);
-    let mut checker = Checker { grammar, stem, syntax, locals, found: Vec::new() };
+    let mut checker = Checker { grammar, stem, syntax, templates, locals, found: Vec::new() };
     checker.walk(&nodes);
     checker.found
 }
@@ -78,6 +106,8 @@ struct Checker<'a> {
     grammar: &'a Grammar,
     stem: &'a str,
     syntax: Syntax,
+    /// The templates of the site.
+    templates: &'a TemplateNames,
     /// Names defined in the template itself (`self/name`).
     locals: HashSet<String>,
     found: Vec<CheckDiagnostic>,
@@ -85,7 +115,7 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn report(&mut self, level: Level, message: String, snippet: &str) {
-        self.found.push(CheckDiagnostic { level, message, snippet: snippet.to_string() });
+        self.found.push(CheckDiagnostic { level, message, snippet: snippet.to_string(), slot: None });
     }
 
     fn walk(&mut self, nodes: &[Node]) {
@@ -98,19 +128,28 @@ impl Checker<'_> {
     }
 
     fn element(&mut self, el: &Element) {
+        if let Some(advice) = crate::constants::removed_element(&el.name) {
+            self.report(Level::Error, format!("{} was removed (ADR-067): {advice}", el.name), &el.name);
+            return;
+        }
+        for (attr, _) in &el.attrs {
+            if let Some(advice) = crate::constants::removed_attribute(&el.name, attr) {
+                self.report(Level::Error, format!("{attr} was removed (ADR-067): {advice}"), attr);
+            }
+        }
         if el.name == crate::constants::ELEM_INSERT {
             if let Some(form) = el.attr_form("data") {
-                self.form(form, Position::Content);
+                self.directive("data", form);
             }
         } else if el.name == "template" {
             for directive in ["data-each", "data-slot"] {
                 if let Some(form) = el.attr_form(directive) {
-                    self.form(form, Position::Content);
+                    self.directive(directive, form);
                 }
             }
         } else if !el.is_presemble() {
             for (name, value) in &el.attrs {
-                if name == crate::constants::ELEM_CLASS {
+                if crate::constants::removed_attribute(&el.name, name).is_some() {
                     continue;
                 }
                 match value {
@@ -127,6 +166,20 @@ impl Checker<'_> {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// A directive attribute: an expression. A string is the old spelling of a
+    /// path and is reported.
+    fn directive(&mut self, name: &str, form: &Form) {
+        if let Form::Str(path) = form {
+            self.report(
+                Level::Error,
+                format!("{name}=\"{path}\" is a path string, which was removed (ADR-067): write (ref {path})"),
+                path,
+            );
+        } else {
+            self.form(form, Position::Content);
         }
     }
 
@@ -179,7 +232,7 @@ impl Checker<'_> {
                                     self.threaded_function(function_name, snippet);
                                 }
                             }
-                            FunctionKind::Juxt | FunctionKind::Apply => {
+                            FunctionKind::Juxt => {
                                 for template in args {
                                     self.template_argument(template, snippet);
                                 }
@@ -187,8 +240,8 @@ impl Checker<'_> {
                         }
                     }
                     None => {
-                        // A template called by name: it must be defined here.
-                        if !self.is_local(&name) {
+                        // A template called by name: defined here or in the site.
+                        if !self.is_known(&name) {
                             self.report(
                                 Level::Error,
                                 format!("unknown function or template '{name}'"),
@@ -258,39 +311,24 @@ impl Checker<'_> {
         }
     }
 
-    /// A template named in a `juxt` or `apply`. `self/name` must be defined in
-    /// the template; a plain name comes from the site's templates, which the
-    /// checker does not see.
+    /// A template named in a `juxt`: `self/name` is defined in the template
+    /// itself, a plain name is defined here or is a template of the site.
     fn template_argument(&mut self, expression: &Expression, snippet: &str) {
-        let name = match expression {
-            Expression::Ref(path) => path.dotted(),
-            Expression::Call { head, args }
-                if matches!(head.as_ref(), Expression::Ref(p) if p.dotted() == "apply") =>
-            {
-                match args.as_slice() {
-                    [Expression::Ref(path)] => path.dotted(),
-                    _ => {
-                        self.report(
-                            Level::Error,
-                            "(apply ...) takes one template name".to_string(),
-                            snippet,
-                        );
-                        return;
-                    }
-                }
-            }
-            _ => {
-                self.report(Level::Error, "expected the name of a template".to_string(), snippet);
-                return;
-            }
+        let Expression::Ref(path) = expression else {
+            self.report(Level::Error, "expected the name of a template".to_string(), snippet);
+            return;
         };
-        if name.starts_with("self/") && !self.is_local(&name) {
+        let name = path.dotted();
+        if !self.is_known(&name) {
             self.report(Level::Error, format!("unknown template '{name}'"), snippet);
         }
     }
 
-    fn is_local(&self, name: &str) -> bool {
+    /// Whether `name` is a template: `self/name` and a bare name defined in
+    /// this template, or a template of the site.
+    fn is_known(&self, name: &str) -> bool {
         self.locals.contains(name.strip_prefix("self/").unwrap_or(name))
+            || (!name.starts_with("self/") && self.templates.contains(name))
     }
 
     /// A path below `input` must name a field of the schema; in attribute
@@ -315,6 +353,9 @@ impl Checker<'_> {
                 format!("unknown field '{field}' in {} schema", self.stem),
                 snippet,
             );
+            if let Some(last) = self.found.last_mut() {
+                last.slot = Some(field.to_string());
+            }
             return;
         }
         if position == Position::Attribute

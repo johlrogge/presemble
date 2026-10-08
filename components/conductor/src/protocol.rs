@@ -110,6 +110,9 @@ pub enum Command {
     ListSchemas,
     /// List all link options for a given schema stem (for completions).
     ListLinkOptions { stem: String },
+    /// List the names of the site's templates, as the template registry
+    /// resolves them (for the template checker).
+    ListTemplateNames,
     /// List all files that depend on a given schema stem.
     ListDependents { stem: String },
     /// List all content file paths.
@@ -192,6 +195,8 @@ pub enum Response {
     SchemaList(Vec<(String, String)>),
     /// List of link options for completions.
     LinkOptions(Vec<LinkOption>),
+    /// The names of the site's templates (sorted).
+    TemplateNames(Vec<String>),
     /// List of files that depend on a schema stem.
     Dependents(Vec<DependentFile>),
     /// List of all content file paths (site-relative).

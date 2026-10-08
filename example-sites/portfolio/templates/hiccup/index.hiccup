@@ -1,15 +1,15 @@
 [:template {:presemble/define "body"}
   [:main
-    [:presemble/include {:src "nav"}]
+    (nav input)
     [:header
-      [:presemble/insert {:data "input.title" :as "h1"}]
-      [:presemble/insert {:data "input.tagline" :as "p"}]]
+      [:presemble/insert {:data input.title :as "h1"}]
+      [:presemble/insert {:data input.tagline :as "p"}]]
     [:section
       [:h2 "Projects"]
-      [:template {:data-each "input.project"}
+      [:template {:data-each input.project}
         [:article
-          [:presemble/insert {:data "item.link" :as "h3"}]
-          [:presemble/insert {:data "item.description" :as "p"}]]]]]]
+          [:presemble/insert {:data item.link :as "h3"}]
+          [:presemble/insert {:data item.description :as "p"}]]]]]]
 
 [:html {:lang "en"}
   [:head

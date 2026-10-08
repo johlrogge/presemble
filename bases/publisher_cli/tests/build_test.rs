@@ -125,10 +125,10 @@ fn build_site_copies_assets_to_output() {
 }
 
 #[test]
-fn presemble_include_inlines_header_and_footer_fragments() {
-    // Build a minimal site where the index template uses presemble:include
-    // for header and footer fragments, and verify the output HTML contains
-    // the fragment content rather than the include directive.
+fn template_call_inlines_header_and_footer_fragments() {
+    // Build a minimal site where the index template calls the header and
+    // footer templates, and verify the output HTML contains the fragment
+    // content rather than the call.
     let tmp = TempDir::new().unwrap();
     let site = tmp.path().join("include-site");
 
@@ -164,31 +164,31 @@ fn presemble_include_inlines_header_and_footer_fragments() {
     )
     .unwrap();
 
-    // Article template using presemble:include
+    // Article template calling the fragments
     fs::write(
         site.join("templates/article/item.html"),
         r#"<!DOCTYPE html>
 <html lang="en">
 <head><title>Test</title></head>
 <body>
-<presemble:include src="header" />
-<main><presemble:insert data="input.title" as="h1" /></main>
-<presemble:include src="footer" />
+<presemble:insert data="(header input)" />
+<main><presemble:insert data="(ref input.title)" as="h1" /></main>
+<presemble:insert data="(footer input)" />
 </body>
 </html>"#,
     )
     .unwrap();
 
-    // Index template using presemble:include
+    // Index template calling the fragments
     fs::write(
         site.join("templates/index.html"),
         r#"<!DOCTYPE html>
 <html lang="en">
 <head><title>Index</title></head>
 <body>
-<presemble:include src="header" />
+<presemble:insert data="(header input)" />
 <main>Home</main>
-<presemble:include src="footer" />
+<presemble:insert data="(footer input)" />
 </body>
 </html>"#,
     )
@@ -212,8 +212,8 @@ fn presemble_include_inlines_header_and_footer_fragments() {
         "article output should contain footer content from include: {article_html}"
     );
     assert!(
-        !article_html.contains("presemble:include"),
-        "article output should not contain presemble:include directive: {article_html}"
+        !article_html.contains("(header input)"),
+        "article output should not contain the template call: {article_html}"
     );
 
     // Verify index output also inlines the fragments
@@ -299,7 +299,7 @@ fn index_content_is_rendered_into_index_page() {
     // Article template
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
     )
     .unwrap();
 
@@ -308,10 +308,10 @@ fn index_content_is_rendered_into_index_page() {
         site.join("templates/index.html"),
         r#"<!DOCTYPE html>
 <html>
-<head><title><presemble:insert data="input.site_title" /></title></head>
+<head><title><presemble:insert data="(ref input.site_title)" /></title></head>
 <body>
-<h1><presemble:insert data="input.site_title" /></h1>
-<p><presemble:insert data="input.tagline" /></p>
+<h1><presemble:insert data="(ref input.site_title)" /></h1>
+<p><presemble:insert data="(ref input.tagline)" /></p>
 </body>
 </html>"#,
     )
@@ -380,7 +380,7 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
     // Item template
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
     )
     .unwrap();
 
@@ -392,8 +392,8 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
         r#"<!DOCTYPE html>
 <html>
 <body>
-<h1><presemble:insert data="input.heading" /></h1>
-<ul><template data-each="input.article"><li><presemble:insert data="item.title" as="li" /></li></template></ul>
+<h1><presemble:insert data="(ref input.heading)" /></h1>
+<ul><template data-each="(ref input.article)"><li><presemble:insert data="(ref item.title)" as="li" /></li></template></ul>
 </body>
 </html>"#,
     )
@@ -463,7 +463,7 @@ fn collection_page_without_collection_content_is_skipped() {
     .unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(
@@ -563,7 +563,7 @@ fn editorial_build_never_writes_the_published_output_directory() {
     fs::write(site.join("content/article/sample.md"), "# Sample\n").unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(site.join("templates/index.html"), "<!DOCTYPE html><html><body><h1>Home</h1></body></html>").unwrap();
@@ -571,7 +571,7 @@ fn editorial_build_never_writes_the_published_output_directory() {
     // A template that references the stylesheet, so it is an asset of the site.
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><head><link rel="stylesheet" href="/assets/style.css" /></head><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><head><link rel="stylesheet" href="/assets/style.css" /></head><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
     )
     .unwrap();
 
@@ -614,7 +614,7 @@ fn publish_succeeds_for_valid_site() {
     fs::write(site.join("content/article/sample.md"), "# Sample\n").unwrap();
     fs::write(
         site.join("templates/article/item.html"),
-        r#"<!DOCTYPE html><html><body><presemble:insert data="input.title" as="h1" /></body></html>"#,
+        r#"<!DOCTYPE html><html><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
     )
     .unwrap();
     fs::write(

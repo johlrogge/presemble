@@ -1,11 +1,9 @@
-mod ast;
 pub mod check;
 pub mod constants;
 pub mod constraints;
 pub mod data;
 pub mod dom;
 mod error;
-pub mod expr;
 pub mod expression;
 pub mod graph_view;
 pub mod hiccup;
@@ -17,16 +15,14 @@ mod markdown_nodes;
 pub mod registry;
 pub mod transformer;
 
-pub use ast::{Expr, Transform};
 pub use constraints::{constraint_attr_name, extract_slot_constraint_attrs, CONSTRAINT_ATTR_PREFIX};
 pub use data::{build_article_graph,build_schema_included_by_json, inject_schema_included_by, synthesize_link, title_editor, Callable, DataGraph, OutputMode, SuggestionKind, Value};
 pub use graph_view::{DataRef, GraphView, ResolvedNode};
 pub use error::TemplateError;
 pub use inline_nodes::inline_nodes;
-pub use expr::parse_expr;
 pub use transformer::{attach_schema_included_by_attr, attach_schema_instance_attrs, transform, RenderError};
 pub use constants::{ATTR_SCHEMA_INCLUDED_BY, ATTR_SCHEMA_INSTANCE_COUNT, ATTR_SCHEMA_INSTANCE_SAMPLE_URL, KEY_SCHEMA_INCLUDED_BY};
-pub use dom::{parse_template_xml, serialize_nodes, extract_asset_paths, extract_include_names, extract_apply_template_names, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes, Form, html_escape_text, html_escape_attr};
+pub use dom::{parse_template_xml, serialize_nodes, serialize_template_to_html, extract_asset_paths, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes, Form, html_escape_text, html_escape_attr};
 pub use hiccup::{parse_template_hiccup, read_form};
 pub use hiccup_serializer::serialize_to_hiccup;
 pub use hiccup_tree::{hiccup_to_trees, tree_to_hiccup};
@@ -104,7 +100,7 @@ pub fn render_from_nodes(
 
 /// Like `render_from_nodes` but uses a provided registry for template composition.
 ///
-/// Use this when you need `presemble:include` to resolve against real template files.
+/// Use this when you need template calls such as `(header input)` to resolve against real template files.
 pub fn render_from_nodes_with_registry(
     nodes: Vec<dom::Node>,
     graph: &DataGraph,

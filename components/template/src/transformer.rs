@@ -1,8 +1,6 @@
-use crate::ast::{Expr, Transform};
 use crate::data::{DataGraph, OutputMode, Value};
 use crate::dom::{Element, Form, Node};
-use crate::expr::parse_expr;
-use crate::expression::{self, attribute_text, evaluate, Evaluated, Expression};
+use crate::expression::{attribute_text, evaluate, Evaluated, Expression};
 use crate::graph_view::{GraphView, ResolvedNode};
 use crate::registry::RenderContext;
 
@@ -44,35 +42,11 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                 if el.is_presemble() && el.name == crate::constants::ELEM_INSERT {
                     let mut rendered = render_insert_node(&el, graph, ctx)?;
                     output.append(&mut rendered);
-                } else if el.is_presemble() && el.name == crate::constants::ELEM_INCLUDE {
-                    if ctx.is_too_deep() {
-                        return Err(RenderError::Render(
-                            format!("template include depth limit ({}) exceeded", ctx.max_depth)
-                        ));
-                    }
-                    let src = el.attr("src").ok_or_else(|| RenderError::Render(
-                        "presemble:include requires a 'src' attribute".into()
-                    ))?;
-                    match ctx.registry.resolve(src) {
-                        Some(included_nodes) => {
-                            let child_ctx = ctx.descend();
-                            let rendered = transform(included_nodes, graph, &child_ctx)?;
-                            output.extend(rendered);
-                        }
-                        None => {
-                            return Err(RenderError::Render(
-                                format!("presemble:include: template not found: '{src}'")
-                            ));
-                        }
-                    }
-                } else if el.is_presemble() && el.name == crate::constants::ELEM_APPLY {
-                    let mut rendered = render_apply(&el, graph, ctx)?;
-                    output.append(&mut rendered);
-                } else if el.is_presemble() && el.name == crate::constants::ELEM_JUXT {
-                    // c2: remove. Juxt: transform each child against the same data
-                    // graph, concatenating results.
-                    let mut rendered = transform(el.children, graph, ctx)?;
-                    output.append(&mut rendered);
+                } else if let Some(advice) = crate::constants::removed_element(&el.name) {
+                    return Err(RenderError::Render(format!(
+                        "{} was removed (ADR-067): {advice}",
+                        el.name
+                    )));
                 } else if el.name == "template" && el.attr_form("data-slot").is_some() {
                     // Conditional block: render children only if the slot is present.
                     let present = match directive_source(&el, "data-slot")?.expect("checked above") {
@@ -152,10 +126,16 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                 } else {
                     // Recursively transform children of regular elements.
                     let presemble = el.is_presemble();
+                    for (attr, _) in &el.attrs {
+                        if let Some(advice) = crate::constants::removed_attribute(&el.name, attr) {
+                            return Err(RenderError::Render(format!(
+                                "{attr} was removed (ADR-067): {advice}"
+                            )));
+                        }
+                    }
                     let transformed_children = transform(el.children, graph, ctx)?;
-                    let attrs = apply_presemble_class(el.attrs, graph);
                     // Attribute values that are expressions read the input (ADR-067).
-                    let attrs = if presemble { attrs } else { evaluate_attributes(attrs, graph, ctx)? };
+                    let attrs = if presemble { el.attrs } else { evaluate_attributes(el.attrs, graph, ctx)? };
                     output.push(Node::Element(Element {
                         name: el.name,
                         attrs,
@@ -180,15 +160,19 @@ enum Source {
     Expr(Expression),
 }
 
-/// The source of the directive attribute `name`, if the element has it.
-///
-/// A string value is a path (c2: remove); any other form is an expression, and
-/// a plain reference is a path.
+/// The error for a path written as a string where an expression is wanted.
+fn string_path_error(directive: &str, path: &str) -> RenderError {
+    RenderError::Render(format!(
+        "{directive}=\"{path}\" is a path string, which was removed (ADR-067): write (ref {path})"
+    ))
+}
+
+/// The source of the directive attribute `name`, if the element has it. The
+/// value is an expression; a plain reference is a path.
 fn directive_source(el: &Element, name: &str) -> Result<Option<Source>, RenderError> {
     match el.attr_form(name) {
         None => Ok(None),
-        // c2: remove
-        Some(Form::Str(path)) => Ok(Some(Source::Path(path.split('.').map(str::to_string).collect()))),
+        Some(Form::Str(path)) => Err(string_path_error(name, path)),
         Some(form) => {
             let expression = Expression::from_form(form)
                 .map_err(|e| RenderError::Render(format!("{name}: {e}")))?;
@@ -218,6 +202,14 @@ fn evaluate_attributes(
         }
         let expression = Expression::from_form(&value)
             .map_err(|e| RenderError::Render(format!("attribute '{name}': {e}")))?;
+        // A reference into the node store gives its plain text without
+        // materializing a value (ADR-063, ADR-064).
+        if let Expression::Ref(path) = &expression
+            && let Some(text) = native_plain_text(&path.segments(), graph)
+        {
+            evaluated_attrs.push((name, Form::Str(text)));
+            continue;
+        }
         let evaluated = evaluate(&expression, graph, ctx)?;
         if let Some(text) = attribute_text(&evaluated, &expression)
             .map_err(|e| RenderError::Render(format!("attribute '{name}': {e}")))?
@@ -234,10 +226,14 @@ fn render_insert_node(
     graph: &dyn GraphView,
     ctx: &RenderContext,
 ) -> Result<Vec<Node>, RenderError> {
+    for (attr, _) in &el.attrs {
+        if let Some(advice) = crate::constants::removed_attribute(&el.name, attr) {
+            return Err(RenderError::Render(format!("{attr} was removed (ADR-067): {advice}")));
+        }
+    }
     match el.attr_form("data") {
         None | Some(Form::Nil) => Ok(Vec::new()),
-        // c2: remove
-        Some(Form::Str(path)) => render_insert(el, path, graph, ctx.output),
+        Some(Form::Str(path)) => Err(string_path_error("data", path)),
         Some(form) => {
             let expression = Expression::from_form(form)
                 .map_err(|e| RenderError::Render(format!("data: {e}")))?;
@@ -271,13 +267,25 @@ fn render_insert_expression(
     let tag = el.attr("as").unwrap_or("span").to_string();
     let mut attrs = Vec::new();
     if let Some(subject) = expression.subject() {
+        let editorial = ctx.output == OutputMode::Editorial;
         let data_path = subject.dotted();
+        let file = resolve_presemble_file(&subject.segments(), graph);
         attrs.push(("class".to_string(), Form::Str(semantic_class(&data_path))));
         attrs.push((crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(&data_path))));
-        attrs.push((
-            crate::constants::ATTR_FILE.to_string(),
-            Form::Str(resolve_presemble_file(&subject.segments(), graph)),
-        ));
+        attrs.push((crate::constants::ATTR_FILE.to_string(), Form::Str(file.clone())));
+        // A synthesized link still says which slot it stands for, and in
+        // editorial output carries the editor attributes of its title.
+        if let Some(Value::Record(record)) = graph.resolve(&subject.segments()).map(|r| r.into_owned())
+            && let Some(Value::Text(source)) = record.resolve(&[crate::constants::KEY_SOURCE_SLOT])
+        {
+            attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
+            if editorial {
+                attrs.extend(source_text_attrs(source, &record, &file));
+            }
+        }
+        if editorial {
+            attrs.extend(resolve_editor_attrs(&data_path, graph, &file));
+        }
         attrs.extend(resolve_slot_constraint_form_attrs(&data_path, graph));
     }
     Ok(vec![Node::Element(Element { name: tag, attrs, children: vec![Node::Text(text)] })])
@@ -287,164 +295,25 @@ fn render_insert_expression(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Process `presemble:class` attribute binding on a regular element's attribute list.
-/// If a `presemble:class` attribute is present, evaluates its pipe expression against
-/// the graph and either sets or appends to the `class` attribute. Removes `presemble:class`.
-fn apply_presemble_class(
-    mut attrs: Vec<(String, Form)>,
-    graph: &dyn GraphView,
-) -> Vec<(String, Form)> {
-    // Find and remove the `presemble:class` attribute.
-    let presemble_class_pos = attrs.iter().position(|(k, _)| k == crate::constants::ELEM_CLASS);
-    let presemble_class_value = presemble_class_pos.map(|i| attrs.remove(i).1);
-
-    if let Some(expr_form) = presemble_class_value {
-        let expr_src = expr_form.as_str().unwrap_or("").to_string();
-        let evaluated = match parse_expr(&expr_src) {
-            Ok(expr) => eval_expr_to_string(&expr, graph),
-            Err(_) => String::new(),
-        };
-
-        if !evaluated.is_empty() {
-            // Find or create the `class` attribute.
-            if let Some((_k, v)) = attrs.iter_mut().find(|(k, _)| k == "class") {
-                if let Form::Str(s) = v {
-                    s.push(' ');
-                    s.push_str(&evaluated);
-                }
-            } else {
-                attrs.push(("class".to_string(), Form::Str(evaluated)));
-            }
-        }
-    }
-
-    attrs
-}
-
-/// Evaluate a pipe expression against the data graph and return a string.
-pub fn eval_expr_to_string(expr: &Expr, graph: &dyn GraphView) -> String {
-    match expr {
-        Expr::Lookup(path) => {
-            let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-            // Try native NodeStore path first (avoids Value materialization)
-            if let Some(resolved) = graph.resolve_node(&segments) {
-                let store = resolved.store;
-                let id = resolved.id;
-                return match store.get(id) {
-                    Some(node_store::Node::Text(t)) => t.clone(),
-                    Some(node_store::Node::Integer(n)) => n.to_string(),
-                    Some(node_store::Node::Boolean(b)) => b.to_string(),
-                    Some(node_store::Node::Keyword(name)) => format!(":{}", store.resolve_name(*name)),
-                    Some(node_store::Node::Element(name)) => {
-                        // heading/paragraph — extract text from first child;
-                        // a heading's is its source, read as plain text (ADR-063).
-                        let elem_name = store.resolve_name(*name);
-                        if elem_name == "heading" {
-                            content_store::heading_plain_text(store, id).unwrap_or_default()
-                        } else if elem_name == "paragraph" {
-                            // Plain text of the nodes, as for a heading.
-                            content_store::paragraph_plain_text(store, id).unwrap_or_default()
-                        } else {
-                            String::new()
-                        }
-                    }
-                    _ => String::new(),
-                };
-            }
-            // Legacy Value path
-            let resolved = graph.resolve(&segments);
-            match resolved.as_ref().map(|r| r.as_value()) {
-                Some(Value::Text(t)) => t.clone(),
-                Some(Value::Absent) | None => String::new(),
-                // Nodes in a string context are their text, never markup (ADR-064).
-                Some(v @ (Value::Nodes(_) | Value::Inlines(_))) => v.display_text().unwrap_or_default(),
-                Some(Value::List(items)) => items
-                    .first()
-                    .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
-                    .unwrap_or_default(),
-                Some(Value::Record(_)) => String::new(),
-                Some(Value::Suggestion { hint, .. }) => hint.clone(),
-                Some(Value::LinkExpression { .. }) => String::new(),
-                Some(Value::Integer(n)) => n.to_string(),
-                Some(Value::Bool(b)) => b.to_string(),
-                Some(Value::Keyword { namespace, name }) => match namespace {
-                    Some(ns) => format!(":{ns}/{name}"),
-                    None => format!(":{name}"),
-                },
-                Some(Value::Fn(c)) => format!("#<fn {}>", c.name().unwrap_or("anonymous")),
-                Some(Value::Opaque(_)) => String::new(),
-            }
-        }
-        Expr::Pipe(inner, transform) => {
-            let inner_value = eval_expr_to_value(inner, graph);
-            apply_transform_to_string(&inner_value, transform)
-        }
-        Expr::TemplateRef(_) => String::new(),
-    }
-}
-
-/// Evaluate a pipe expression against the data graph and return a Value (for chained pipes).
-fn eval_expr_to_value(expr: &Expr, graph: &dyn GraphView) -> EvalValue {
-    match expr {
-        Expr::Lookup(path) => {
-            let segments: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-            match graph.resolve(&segments) {
-                Some(data_ref) => EvalValue::Owned(data_ref.into_owned()),
-                None => EvalValue::Absent,
-            }
-        }
-        Expr::Pipe(inner, transform) => {
-            let inner_value = eval_expr_to_value(inner, graph);
-            let s = apply_transform_to_string(&inner_value, transform);
-            EvalValue::Owned(Value::Text(s))
-        }
-        Expr::TemplateRef(_) => EvalValue::Absent,
-    }
-}
-
-/// Lightweight wrapper for evaluated expressions.
-enum EvalValue {
-    Owned(Value),
-    Absent,
-}
-
-impl EvalValue {
-    fn as_value(&self) -> Option<&Value> {
-        match self {
-            EvalValue::Owned(v) => Some(v),
-            EvalValue::Absent => None,
-        }
-    }
-}
-
-/// Apply a single transform to a value and return a string.
-fn apply_transform_to_string(value: &EvalValue, transform: &Transform) -> String {
-    match transform {
-        Transform::Match(pairs) => match value.as_value() {
-            Some(Value::Text(s)) => pairs
-                .iter()
-                .find(|(k, _)| k == s)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default(),
-            _ => String::new(),
+/// The plain text of the node `path` names in a node-store-backed graph, read
+/// without materializing a value: text, an integer, a boolean or keyword, a
+/// heading or a paragraph (their plain text, ADR-063). `None` for anything
+/// else, and for a graph that is not node-store-backed.
+fn native_plain_text(path: &[&str], graph: &dyn GraphView) -> Option<String> {
+    let resolved = graph.resolve_node(path)?;
+    let store = resolved.store;
+    let id = resolved.id;
+    match store.get(id)? {
+        node_store::Node::Text(t) => Some(t.clone()),
+        node_store::Node::Integer(n) => Some(n.to_string()),
+        node_store::Node::Boolean(b) => Some(b.to_string()),
+        node_store::Node::Keyword(name) => Some(format!(":{}", store.resolve_name(*name))),
+        node_store::Node::Element(name) => match store.resolve_name(*name) {
+            "heading" => content_store::heading_plain_text(store, id),
+            "paragraph" => content_store::paragraph_plain_text(store, id),
+            _ => None,
         },
-        Transform::Default(fallback) => match value.as_value() {
-            None | Some(Value::Absent) => fallback.clone(),
-            Some(Value::Text(s)) => s.clone(),
-            _ => String::new(),
-        },
-        Transform::First => match value.as_value() {
-            Some(Value::List(items)) => items
-                .first()
-                .and_then(|v| if let Value::Text(t) = v { Some(t.clone()) } else { None })
-                .unwrap_or_default(),
-            Some(Value::Text(s)) => s.clone(),
-            _ => String::new(),
-        },
-        _ => match value.as_value() {
-            Some(Value::Text(s)) => s.clone(),
-            _ => String::new(),
-        },
+        _ => None,
     }
 }
 
@@ -463,76 +332,6 @@ fn semantic_class(data_path: &str) -> String {
         [only] => only.to_string(),
         [.., second_last, last] => format!("{second_last}-{last}"),
     }
-}
-
-/// Evaluate an `:apply` expression against a resolved value.
-/// Returns the resulting text string, or None if value is absent.
-fn evaluate_apply(form: &Form, value: Option<&Value>) -> Result<Option<String>, RenderError> {
-    match form {
-        Form::Symbol(name) => apply_function(name, value),
-        Form::List(items) => evaluate_pipe(items, value),
-        other => Err(RenderError::Render(format!(
-            ":apply expects a symbol or (-> ...) expression, got '{}'",
-            other.to_edn_string()
-        ))),
-    }
-}
-
-/// Evaluate a `(-> initial fn1 fn2 ...)` threading expression.
-fn evaluate_pipe(items: &[Form], value: Option<&Value>) -> Result<Option<String>, RenderError> {
-    match items.first() {
-        Some(Form::Symbol(s)) if s == "->" => {}
-        _ => {
-            return Err(RenderError::Render(
-                ":apply list must start with -> (threading macro)".to_string(),
-            ))
-        }
-    }
-
-    if items.len() < 2 {
-        return Err(RenderError::Render(
-            ":apply (-> ...) requires at least one function".to_string(),
-        ));
-    }
-
-    let first_fn = items[1].as_str().ok_or_else(|| {
-        RenderError::Render(format!(
-            "expected function name, got '{}'",
-            items[1].to_edn_string()
-        ))
-    })?;
-    let mut current: Option<String> = apply_function(first_fn, value)?;
-
-    for item in &items[2..] {
-        let func_name = item.as_str().ok_or_else(|| {
-            RenderError::Render(format!(
-                "expected function name, got '{}'",
-                item.to_edn_string()
-            ))
-        })?;
-        current = match current {
-            Some(text) => apply_string_function(func_name, &text)?,
-            None => None,
-        };
-    }
-
-    Ok(current)
-}
-
-/// Apply a named function to a Value — converts Value to Option<String>.
-/// The functions are the expression language's (one table).
-// c2: remove with `:apply`
-fn apply_function(name: &str, value: Option<&Value>) -> Result<Option<String>, RenderError> {
-    expression::apply_to_value(name, value)
-        .ok_or_else(|| RenderError::Render(format!("unknown :apply function '{name}'")))
-}
-
-/// Apply a named pure string→string transform.
-// c2: remove with `:apply`
-fn apply_string_function(name: &str, text: &str) -> Result<Option<String>, RenderError> {
-    expression::apply_to_text(name, text)
-        .map(Some)
-        .ok_or_else(|| RenderError::Render(format!("unknown string function '{name}'")))
 }
 
 /// Handle a `<presemble:insert>` element that inserts the value at `data_path`.
@@ -557,75 +356,33 @@ fn render_insert(
     // These become data-presemble-schema-constraints-* attributes on the outer element.
     let constraint_attrs = resolve_slot_constraint_form_attrs(data_path, graph);
 
-    // Check for :apply attribute — resolve to Form (native from hiccup, re-parsed from HTML strings)
-    let apply_form = match el.attr_form("apply") {
-        Some(form @ (Form::Symbol(_) | Form::List(_))) => Some(form.clone()),
-        Some(Form::Str(s)) => Some(crate::hiccup::parse_edn_form(s)
-            .map_err(|e| RenderError::Render(format!(":apply parse error: {e}")))?),
-        Some(other) => return Err(RenderError::Render(format!(":apply expects a symbol or expression, got {:?}", other))),
-        None => None,
+    // The node of the page being rendered, from which the page's own
+    // document is reached when a slot stands for a block in it.
+    // That is the path's prefix when it has one (`input` of `input.author`,
+    // `item` of `item.link` inside a data-each), else the view's root.
+    let page = editorial
+        .then(|| match path_segments.split_last() {
+            Some((_, prefix)) if !prefix.is_empty() => graph.resolve_node(prefix),
+            _ => graph.root_node(),
+        })
+        .flatten()
+        .map(|r| r.id);
+    let editor_mode = if editorial {
+        EditorAttrs::Computed { page }
+    } else {
+        EditorAttrs::Published
     };
-
-    // :apply needs Value — go to legacy path immediately
-    if apply_form.is_none() {
-        // The node of the page being rendered, from which the page's own
-        // document is reached when a slot stands for a block in it.
-        // That is the path's prefix when it has one (`input` of `input.author`,
-        // `item` of `item.link` inside a data-each), else the view's root.
-        let page = editorial
-            .then(|| match path_segments.split_last() {
-                Some((_, prefix)) if !prefix.is_empty() => graph.resolve_node(prefix),
-                _ => graph.root_node(),
-            })
-            .flatten()
-            .map(|r| r.id);
-        let editor_mode = if editorial {
-            EditorAttrs::Computed { page }
-        } else {
-            EditorAttrs::Published
-        };
-        // Try the fast NodeId path first (avoids Value materialization).
-        // Falls back to legacy Value path for unhandled node types (e.g. body).
-        if let Some(ref resolved) = graph.resolve_node(&path_segments)
-            && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs, editor_mode)?
-        {
-            return Ok(nodes);
-        }
+    // Try the fast NodeId path first (avoids Value materialization).
+    // Falls back to the Value path for unhandled node types (e.g. body).
+    if let Some(ref resolved) = graph.resolve_node(&path_segments)
+        && let Some(nodes) = render_insert_native(resolved, as_tag, &class, data_path, &presemble_file, &constraint_attrs, editor_mode)?
+    {
+        return Ok(nodes);
     }
 
-    // Legacy Value path (DataGraph fallback or :apply)
+    // Value path (DataGraph fallback)
     let resolved = graph.resolve(&path_segments);
     let value: Option<Value> = resolved.map(|r| r.into_owned());
-
-    if let Some(ref form) = apply_form {
-        return match evaluate_apply(form, value.as_ref())? {
-            Some(text) => {
-                let tag = as_tag.unwrap_or("span").to_string();
-                let mut attrs = vec![
-                    ("class".to_string(), Form::Str(class)),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                ];
-                // Preserve _source_slot from record values for browser editing
-                if let Some(Value::Record(sub_graph)) = &value
-                    && let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT])
-                {
-                    attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
-                    if editorial {
-                        attrs.extend(source_text_attrs(source, sub_graph, &presemble_file));
-                    }
-                }
-                attrs.extend(constraint_attrs);
-                let element = Element {
-                    name: tag,
-                    attrs,
-                    children: vec![Node::Text(text)],
-                };
-                Ok(vec![Node::Element(element)])
-            }
-            None => Ok(Vec::new()),
-        };
-    }
 
     match value {
         None | Some(Value::Absent) => Ok(Vec::new()),
@@ -1434,8 +1191,8 @@ fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> Stri
 ///
 /// The slot name is derived as the last segment of `data_path` (e.g. "input.title" → "title").
 /// The constraint record is stored as `"_presemble_schema_constraints_<slotname>"` within
-/// the same parent record that holds the slot value.  For `data="input.title"` the lookup
-/// path is `["input", "_presemble_schema_constraints_title"]`; for `data="title"` it is
+/// the same parent record that holds the slot value.  For `data="(ref input.title)"` the lookup
+/// path is `["input", "_presemble_schema_constraints_title"]`; for `data="(ref title)"` it is
 /// `["_presemble_schema_constraints_title"]`.  Falls back to a top-level lookup if the
 /// scoped lookup returns nothing (mirrors `resolve_presemble_file`).
 fn resolve_slot_constraint_form_attrs(data_path: &str, graph: &dyn GraphView) -> Vec<(String, Form)> {
@@ -1471,57 +1228,6 @@ fn resolve_slot_constraint_form_attrs(data_path: &str, graph: &dyn GraphView) ->
         }
         None => Vec::new(),
     }
-}
-
-/// Handle a `<presemble:apply>` element.
-/// Invokes a named callable template fragment with an explicit data context.
-fn render_apply(el: &Element, graph: &dyn GraphView, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
-    let template_name = el
-        .attr("template")
-        .ok_or_else(|| RenderError::Render("presemble:apply requires a 'template' attribute".into()))?
-        .to_string();
-
-    if ctx.is_too_deep() {
-        return Err(RenderError::Render("max depth exceeded".into()));
-    }
-
-    let callable_nodes = ctx
-        .resolve_callable(&template_name)
-        .ok_or_else(|| RenderError::Render(format!("callable not found: '{template_name}'")))?;
-
-    // If data attribute is absent, pass the full graph through (no scoping).
-    // This is the juxt semantic: all children see the same data.
-    let Some(data_path) = el.attr("data") else {
-        return transform(callable_nodes, graph, &ctx.descend());
-    };
-    let data_path = data_path.to_string();
-
-    // Resolve the data value. If absent, produce no output.
-    let segments: Vec<&str> = data_path.split('.').collect();
-    let resolved_value = match graph.resolve(&segments) {
-        None => return Ok(Vec::new()),
-        Some(r) => r.into_owned(),
-    };
-    if matches!(resolved_value, Value::Absent) {
-        return Ok(Vec::new());
-    }
-
-    // Build the effective data graph for the callable.
-    let mut effective_graph = match &resolved_value {
-        Value::Record(sub) => sub.clone(),
-        other => {
-            let mut g = DataGraph::new();
-            g.insert("value", other.clone());
-            g
-        }
-    };
-
-    // Inject presemble.self = the resolved value
-    let mut presemble_ns = DataGraph::new();
-    presemble_ns.insert("self", resolved_value);
-    effective_graph.insert("presemble", Value::Record(presemble_ns));
-
-    transform(callable_nodes, &effective_graph, &ctx.descend())
 }
 
 /// Build the common presemble attribute vec for a rendered record element.
@@ -1996,7 +1702,7 @@ pub fn attach_schema_included_by_attr(mut nodes: Vec<Node>, included: &[(&str, &
 mod tests {
     use super::*;
     use crate::data::{DataGraph, Value};
-    use crate::dom::{parse_template_xml, serialize_nodes, Element, Form, Node};
+    use crate::dom::{parse_template_xml, serialize_nodes, Form, Node};
     use crate::registry::{NullRegistry, RenderContext};
 
     fn make_graph_with_title(title: &str) -> DataGraph {
@@ -2010,7 +1716,7 @@ mod tests {
     #[test]
     fn insert_text_value_as_h1() {
         let graph = make_graph_with_title("Hello World");
-        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
+        let src = r#"<presemble:insert data="(ref article.title)" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2023,7 +1729,7 @@ mod tests {
     fn insert_text_has_data_presemble_slot() {
         // data-presemble-slot should be set to the last path segment for text values
         let graph = make_graph_with_title("My Title");
-        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
+        let src = r#"<presemble:insert data="(ref article.title)" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2042,7 +1748,7 @@ mod tests {
         article.insert("body", Value::Nodes(parse_template_xml("<p>Body text</p>").unwrap().into()));
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.body" />"#;
+        let src = r#"<presemble:insert data="(ref article.body)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2061,7 +1767,7 @@ mod tests {
         article.insert("author", Value::Record(author));
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.author" />"#;
+        let src = r#"<presemble:insert data="(ref article.author)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2083,7 +1789,7 @@ mod tests {
         article.insert("cover", Value::Record(cover));
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.cover" />"#;
+        let src = r#"<presemble:insert data="(ref article.cover)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2098,7 +1804,7 @@ mod tests {
     #[test]
     fn insert_absent_removes_node() {
         let graph = DataGraph::new();
-        let src = r#"<presemble:insert data="article.missing" />"#;
+        let src = r#"<presemble:insert data="(ref article.missing)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2109,7 +1815,7 @@ mod tests {
     #[test]
     fn recursive_transform_on_regular_elements() {
         let graph = make_graph_with_title("Hello World");
-        let src = r#"<div><presemble:insert data="article.title" as="h1" /></div>"#;
+        let src = r#"<div><presemble:insert data="(ref article.title)" as="h1" /></div>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2119,95 +1825,6 @@ mod tests {
             html,
             r#"<div><h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello World</h1></div>"#
         );
-    }
-
-    #[test]
-    fn presemble_class_is_evaluated_and_set() {
-        let mut graph = DataGraph::new();
-        let mut article = DataGraph::new();
-        let mut cover = DataGraph::new();
-        cover.insert("orientation", Value::Text("landscape".to_string()));
-        article.insert("cover", Value::Record(cover));
-        graph.insert("article", Value::Record(article));
-
-        // Construct element directly: the presemble:class attribute value is the
-        // raw pipe expression string (XML entities already unescaped).
-        let nodes = vec![Node::Element(Element {
-            name: "div".to_string(),
-            attrs: vec![(
-                "presemble:class".to_string(),
-                Form::Str(r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
-                    .to_string()),
-            )],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
-        assert_eq!(html, r#"<div class="wide"></div>"#);
-    }
-
-    #[test]
-    fn presemble_class_appends_to_existing_class() {
-        let mut graph = DataGraph::new();
-        let mut article = DataGraph::new();
-        let mut cover = DataGraph::new();
-        cover.insert("orientation", Value::Text("portrait".to_string()));
-        article.insert("cover", Value::Record(cover));
-        graph.insert("article", Value::Record(article));
-
-        let nodes = vec![Node::Element(Element {
-            name: "div".to_string(),
-            attrs: vec![
-                ("class".to_string(), Form::Str("base".to_string())),
-                (
-                    "presemble:class".to_string(),
-                    Form::Str(r#"article.cover.orientation | match(landscape => "wide", portrait => "tall")"#
-                        .to_string()),
-                ),
-            ],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
-        assert_eq!(html, r#"<div class="base tall"></div>"#);
-    }
-
-    #[test]
-    fn presemble_class_absent_value_produces_empty() {
-        let graph = DataGraph::new();
-
-        let nodes = vec![Node::Element(Element {
-            name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), Form::Str("article.missing".to_string()))],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
-        // No class attribute when value is absent; presemble:class is removed
-        assert_eq!(html, r#"<div></div>"#);
-    }
-
-    #[test]
-    fn presemble_class_removed_from_output() {
-        let mut graph = DataGraph::new();
-        graph.insert("article", Value::Record(DataGraph::new()));
-
-        let nodes = vec![Node::Element(Element {
-            name: "div".to_string(),
-            attrs: vec![("presemble:class".to_string(), Form::Str("article.title".to_string()))],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
-        assert!(!html.contains("presemble:class"), "presemble:class should not appear in output");
     }
 
     #[test]
@@ -2223,7 +1840,7 @@ mod tests {
         );
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.summary" as="p" />"#;
+        let src = r#"<presemble:insert data="(ref article.summary)" as="p" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2253,7 +1870,7 @@ mod tests {
     #[test]
     fn data_slot_present_renders_children() {
         let graph = make_cover_graph();
-        let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
+        let src = r#"<template data-slot="(ref article.cover)"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2265,7 +1882,7 @@ mod tests {
     #[test]
     fn data_slot_absent_removes_block() {
         let graph = DataGraph::new();
-        let src = r#"<template data-slot="article.cover"><p>Has cover</p></template>"#;
+        let src = r#"<template data-slot="(ref article.cover)"><p>Has cover</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2276,7 +1893,7 @@ mod tests {
     #[test]
     fn data_slot_children_are_transformed() {
         let graph = make_cover_graph();
-        let src = r#"<template data-slot="article.cover"><presemble:insert data="article.cover" /></template>"#;
+        let src = r#"<template data-slot="(ref article.cover)"><presemble:insert data="(ref article.cover)" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2301,7 +1918,7 @@ mod tests {
             Value::List(vec![Value::Record(a1), Value::Record(a2)]),
         );
 
-        let src = r#"<template data-each="articles"><presemble:insert data="item.title" as="h3" /></template>"#;
+        let src = r#"<template data-each="(ref articles)"><presemble:insert data="(ref item.title)" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2318,7 +1935,7 @@ mod tests {
         let mut graph = DataGraph::new();
         graph.insert("articles", Value::List(vec![]));
 
-        let src = r#"<template data-each="articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="(ref articles)"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2330,7 +1947,7 @@ mod tests {
     fn data_each_absent_produces_nothing() {
         let graph = DataGraph::new();
 
-        let src = r#"<template data-each="articles"><p>Item</p></template>"#;
+        let src = r#"<template data-each="(ref articles)"><p>Item</p></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2345,7 +1962,7 @@ mod tests {
         a1.insert("title", Value::Text("Only Article".to_string()));
         graph.insert("articles", Value::List(vec![Value::Record(a1)]));
 
-        let src = r#"<template data-each="articles"><presemble:insert data="item.title" as="h3" /></template>"#;
+        let src = r#"<template data-each="(ref articles)"><presemble:insert data="(ref item.title)" as="h3" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2356,11 +1973,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // presemble:include tests
-    // ---------------------------------------------------------------------------
-
-    // ---------------------------------------------------------------------------
-    // presemble:apply tests
+    // Template calls: `(name arg)` binds arg as `input` (ADR-067)
     // ---------------------------------------------------------------------------
 
     struct MockCallableRegistry {
@@ -2378,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_callable_inlines_body() {
+    fn call_inlines_body() {
         let mut graph = DataGraph::new();
         let mut item = DataGraph::new();
         item.insert("title", Value::Text("My Feature".to_string()));
@@ -2386,11 +1999,11 @@ mod tests {
 
         let reg = MockCallableRegistry {
             name: "feature-card",
-            src: r#"<li><presemble:insert data="title" as="h3" /></li>"#,
+            src: r#"<li><presemble:insert data="(ref input.title)" as="h3" /></li>"#,
         };
         let ctx = RenderContext::editorial(&reg);
 
-        let src = r#"<presemble:apply template="feature-card" data="feature" />"#;
+        let src = r#"<presemble:insert data="(feature-card feature)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
@@ -2399,55 +2012,33 @@ mod tests {
     }
 
     #[test]
-    fn apply_with_missing_template_attr_returns_error() {
-        let graph = DataGraph::new();
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let src = r#"<presemble:apply data="feature" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph, &ctx);
-        assert!(result.is_err(), "missing template attr should error");
-    }
-
-    #[test]
-    fn apply_with_missing_data_attr_returns_error() {
-        let graph = DataGraph::new();
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let src = r#"<presemble:apply template="feature-card" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph, &ctx);
-        assert!(result.is_err(), "missing data attr should error");
-    }
-
-    #[test]
-    fn apply_with_unknown_template_returns_error() {
+    fn call_of_an_unknown_template_returns_error() {
         let mut graph = DataGraph::new();
         graph.insert("feature", Value::Record(DataGraph::new()));
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
-        let src = r#"<presemble:apply template="unknown-callable" data="feature" />"#;
+        let src = r#"<presemble:insert data="(unknown-callable feature)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx);
         assert!(result.is_err(), "unknown template should error");
     }
 
     #[test]
-    fn apply_with_absent_data_produces_no_output() {
+    fn call_with_absent_data_produces_no_output() {
         let graph = DataGraph::new(); // nothing in graph
         let reg = MockCallableRegistry {
             name: "card",
             src: "<li>card</li>",
         };
         let ctx = RenderContext::editorial(&reg);
-        let src = r#"<presemble:apply template="card" data="missing.path" />"#;
+        let src = r#"<presemble:insert data="(card missing.path)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx).unwrap();
         assert!(result.is_empty(), "absent data should produce no output");
     }
 
     #[test]
-    fn apply_passes_correct_context_to_callable() {
+    fn call_passes_the_argument_as_input() {
         // Callable should resolve fields relative to the passed data record
         let mut graph = DataGraph::new();
         let mut author = DataGraph::new();
@@ -2456,11 +2047,11 @@ mod tests {
 
         let reg = MockCallableRegistry {
             name: "author-card",
-            src: r#"<span><presemble:insert data="name" as="strong" /></span>"#,
+            src: r#"<span><presemble:insert data="(ref input.name)" as="strong" /></span>"#,
         };
         let ctx = RenderContext::editorial(&reg);
 
-        let src = r#"<presemble:apply template="author-card" data="author" />"#;
+        let src = r#"<presemble:insert data="(author-card author)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
@@ -2468,39 +2059,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_presemble_self_accessible_inside_callable() {
-        let mut graph = DataGraph::new();
-        let mut item = DataGraph::new();
-        item.insert("label", Value::Text("Click me".to_string()));
-        graph.insert("btn", Value::Record(item));
-
-        // Inside the callable, presemble.self.label should equal the top-level label
-        let reg = MockCallableRegistry {
-            name: "btn-template",
-            src: r#"<button><presemble:insert data="presemble.self.label" as="span" /></button>"#,
-        };
-        let ctx = RenderContext::editorial(&reg);
-
-        let src = r#"<presemble:apply template="btn-template" data="btn" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
-        assert!(html.contains("Click me"), "presemble.self should be accessible: {html}");
-    }
-
-    #[test]
-    fn apply_depth_limit_prevents_infinite_recursion() {
-        // A self-referencing callable that passes its received value back to itself.
-        // When the resolved value is not a Record, it is stored under "value".
-        // The callable then re-applies itself with data="value", which always resolves —
-        // so without the depth guard this would recurse forever.
+    fn call_depth_limit_prevents_infinite_recursion() {
+        // A self-referencing callable that calls itself with its own input:
+        // without the depth guard this would recurse forever.
         struct SelfRefRegistry;
         impl crate::registry::TemplateRegistry for SelfRefRegistry {
             fn resolve(&self, name: &str) -> Option<Vec<Node>> {
                 if name == "recurse" {
-                    // Re-applies itself using the "value" key (populated for non-Record inputs)
                     Some(parse_template_xml(
-                        r#"<div><presemble:apply template="recurse" data="value" /></div>"#
+                        r#"<div><presemble:insert data="(recurse input)" /></div>"#
                     ).unwrap())
                 } else {
                     None
@@ -2509,22 +2076,23 @@ mod tests {
         }
 
         let mut graph = DataGraph::new();
-        // Use a Text value so the callable graph has `value = Text("x")`
-        graph.insert("item", Value::Text("x".to_string()));
+        let mut item = DataGraph::new();
+        item.insert("label", Value::Text("x".to_string()));
+        graph.insert("item", Value::Record(item));
 
         let reg = SelfRefRegistry;
         let mut ctx = RenderContext::editorial(&reg);
         ctx.max_depth = 5; // Low limit so the test is fast
 
-        let src = r#"<presemble:apply template="recurse" data="item" />"#;
+        let src = r#"<presemble:insert data="(recurse item)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx);
         assert!(result.is_err(), "self-referencing callable should hit depth limit");
     }
 
     #[test]
-    fn include_missing_template_returns_error() {
-        let src = r#"<presemble:include src="missing" />"#;
+    fn call_of_a_missing_template_returns_error() {
+        let src = r#"<presemble:insert data="(missing input)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let graph = DataGraph::new();
         let reg = NullRegistry;
@@ -2534,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn include_with_mock_registry_renders_fragment() {
+    fn call_with_mock_registry_renders_fragment() {
         struct MockReg;
         impl crate::registry::TemplateRegistry for MockReg {
             fn resolve(&self, name: &str) -> Option<Vec<Node>> {
@@ -2546,7 +2114,7 @@ mod tests {
             }
         }
 
-        let src = r#"<div><presemble:include src="greeting" /></div>"#;
+        let src = r#"<div><presemble:insert data="(greeting input)" /></div>"#;
         let nodes = parse_template_xml(src).unwrap();
         let graph = DataGraph::new();
         let reg = MockReg;
@@ -2575,7 +2143,7 @@ mod tests {
         );
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
+        let src = r#"<presemble:insert data="(ref article.title)" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2603,7 +2171,7 @@ mod tests {
         );
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.title" />"#;
+        let src = r#"<presemble:insert data="(ref article.title)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2629,7 +2197,7 @@ mod tests {
         );
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.cover" as="img" />"#;
+        let src = r#"<presemble:insert data="(ref article.cover)" as="img" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2659,7 +2227,7 @@ mod tests {
         );
         graph.insert("article", Value::Record(article));
 
-        let src = r#"<presemble:insert data="article.author" />"#;
+        let src = r#"<presemble:insert data="(ref article.author)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2689,7 +2257,7 @@ mod tests {
         graph.insert("article", Value::Record(article));
 
         // data-slot block should NOT be dropped when slot is a Suggestion
-        let src = r#"<template data-slot="article.title"><presemble:insert data="article.title" as="h1" /></template>"#;
+        let src = r#"<template data-slot="(ref article.title)"><presemble:insert data="(ref article.title)" as="h1" /></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2702,8 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_expr_to_string_returns_hint_for_suggestion() {
-        use crate::ast::Expr;
+    fn attribute_expression_leaves_out_a_suggestion() {
         use crate::data::SuggestionKind;
 
         let mut graph = DataGraph::new();
@@ -2716,9 +2283,9 @@ mod tests {
             },
         );
 
-        let expr = Expr::Lookup(vec!["tagline".to_string()]);
-        let result = eval_expr_to_string(&expr, &graph);
-        assert_eq!(result, "Write your tagline here");
+        let html = render_with(&graph, r#"<a title="(ref tagline)">x</a>"#);
+        // A placeholder is no value: the attribute is left out.
+        assert_eq!(html, r#"<a>x</a>"#);
     }
 
     #[test]
@@ -2727,7 +2294,7 @@ mod tests {
         let link = crate::data::synthesize_link("Hello World", "/article/hello-world", None);
         graph.insert("link", Value::Record(link));
 
-        let src = r#"<presemble:insert data="link" />"#;
+        let src = r#"<presemble:insert data="(ref link)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2751,7 +2318,7 @@ mod tests {
         link.insert("text", Value::Text("Page".to_string()));
         graph.insert("link", Value::Record(link));
 
-        let src = r#"<presemble:insert data="link" />"#;
+        let src = r#"<presemble:insert data="(ref link)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -2824,33 +2391,33 @@ mod tests {
         let cases: Vec<(&str, String)> = vec![
             (
                 "native heading slot",
-                render_with(&heading_store("Tom & \"Jerry\""), r#"<presemble:insert data="title" as="h1" />"#),
+                render_with(&heading_store("Tom & \"Jerry\""), r#"<presemble:insert data="(ref title)" as="h1" />"#),
             ),
             (
                 "legacy heading slot",
                 render_with(
                     &stored_text_graph("# Tom & \"Jerry\"\n\nA summary.\n"),
-                    r#"<presemble:insert data="title" as="h1" />"#,
+                    r#"<presemble:insert data="(ref title)" as="h1" />"#,
                 ),
             ),
             (
                 "legacy synthesized title link",
-                render_with(&link_graph, r#"<presemble:insert data="link" />"#),
+                render_with(&link_graph, r#"<presemble:insert data="(ref link)" />"#),
             ),
             (
-                "legacy synthesized title link, :apply text",
-                render_with(&link_graph, r#"<presemble:insert data="link" as="h3" apply="text" />"#),
+                "legacy synthesized title link, (text link)",
+                render_with(&link_graph, r#"<presemble:insert data="(text link)" as="h3" />"#),
             ),
             (
                 "native synthesized title link",
-                render_with(&native_link, r#"<presemble:insert data="link" />"#),
+                render_with(&native_link, r#"<presemble:insert data="(ref link)" />"#),
             ),
         ];
         for (what, html) in cases {
             assert!(!html.contains(OLD_ATTR), "{what} still carries {OLD_ATTR}: {html}");
         }
         // The synthesized title link still carries what the editor needs.
-        let html = render_with(&link_graph, r#"<presemble:insert data="link" />"#);
+        let html = render_with(&link_graph, r#"<presemble:insert data="(ref link)" />"#);
         assert!(html.contains("data-presemble-md=\"Hello *src*\""), "{html}");
     }
 
@@ -2862,7 +2429,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_text_on_synthesized_link_carries_title_md() {
+    fn text_of_a_synthesized_link_carries_title_md() {
         let mut graph = DataGraph::new();
         let link = crate::data::synthesize_link(
             "Hello src",
@@ -2871,10 +2438,10 @@ mod tests {
         );
         graph.insert("link", Value::Record(link));
 
-        let html = render_with(&graph, r#"<presemble:insert data="link" as="h3" apply="text" />"#);
+        let html = render_with(&graph, r#"<presemble:insert data="(text link)" as="h3" />"#);
         assert!(
             html.contains(r#"data-presemble-md="Hello *src*""#),
-            ":apply on a synthesized title link should carry the title's markdown: {html}"
+            "(text ..) of a synthesized title link should carry the title's markdown: {html}"
         );
     }
 
@@ -2888,7 +2455,7 @@ mod tests {
         );
         graph.insert("link", Value::Record(link));
 
-        let nodes = parse_template_xml(r#"<presemble:insert data="link" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref link)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::published(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
@@ -2912,7 +2479,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
 
         let graph = NodeStoreGraphView { store, root };
-        let nodes = parse_template_xml(r#"<presemble:insert data="title" as="h1" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref title)" as="h1" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::published(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
@@ -2982,16 +2549,15 @@ mod tests {
         let native = heading_store(TITLE_SOURCE);
         let applied = render_for(
             &legacy,
-            r#"<presemble:insert data="input.title" as="h1" apply="text" />"#,
+            r#"<presemble:insert data="(text input.title)" as="h1" />"#,
             Editorial,
         );
         assert!(applied.contains(">Use &lt;div&gt;</h1>"), "{applied}");
-        // (`:apply` on a native heading is pinned in `node_store_bridge`,
-        // whose graph view resolves it.)
-        let expr = crate::ast::Expr::Lookup(vec!["input".to_string(), "title".to_string()]);
-        assert_eq!(eval_expr_to_string(&expr, &legacy), "Use <div>");
-        let expr = crate::ast::Expr::Lookup(vec!["title".to_string()]);
-        assert_eq!(eval_expr_to_string(&expr, &native), "Use <div>");
+        // In attribute position the expression is a string context too.
+        let legacy_attr = render_for(&legacy, r#"<a title="(ref input.title)">x</a>"#, Editorial);
+        assert_eq!(legacy_attr, r#"<a title="Use &lt;div&gt;">x</a>"#);
+        let native_attr = render_for(&native, r#"<a title="(ref title)">x</a>"#, Editorial);
+        assert_eq!(native_attr, r#"<a title="Use &lt;div&gt;">x</a>"#);
     }
 
     /// In content position a heading slot is its inline nodes, on both render
@@ -3001,12 +2567,12 @@ mod tests {
         use crate::data::OutputMode::Editorial;
         let legacy = render_for(
             &heading_graph(SOURCE_TITLE, Editorial),
-            r#"<h1><presemble:insert data="input.title" /></h1>"#,
+            r#"<h1><presemble:insert data="(ref input.title)" /></h1>"#,
             Editorial,
         );
         let native = render_for(
             &heading_store(TITLE_SOURCE),
-            r#"<h1><presemble:insert data="title" /></h1>"#,
+            r#"<h1><presemble:insert data="(ref title)" /></h1>"#,
             Editorial,
         );
         for html in [legacy, native] {
@@ -3055,12 +2621,12 @@ mod tests {
         let source = "A *summary* with ![c](c.png) and [a link](/a).";
         let legacy = render_for(
             &paragraph_graph(source, Published),
-            r#"<presemble:insert data="input.summary" as="p" />"#,
+            r#"<presemble:insert data="(ref input.summary)" as="p" />"#,
             Published,
         );
         let native = render_for(
             &paragraph_store(source),
-            r#"<presemble:insert data="summary" as="p" />"#,
+            r#"<presemble:insert data="(ref summary)" as="p" />"#,
             Published,
         );
         for html in [legacy, native] {
@@ -3076,10 +2642,10 @@ mod tests {
         use crate::data::OutputMode::Editorial;
         let legacy = paragraph_graph("A summary.", Editorial);
         let native = paragraph_store("A summary.");
-        let expr = crate::ast::Expr::Lookup(vec!["input".to_string(), "summary".to_string()]);
-        assert_eq!(eval_expr_to_string(&expr, &legacy), "A summary.");
-        let expr = crate::ast::Expr::Lookup(vec!["summary".to_string()]);
-        assert_eq!(eval_expr_to_string(&expr, &native), "A summary.");
+        let html = render_for(&legacy, r#"<a title="(ref input.summary)">x</a>"#, Editorial);
+        assert_eq!(html, r#"<a title="A summary.">x</a>"#);
+        let html = render_for(&native, r#"<a title="(ref summary)">x</a>"#, Editorial);
+        assert_eq!(html, r#"<a title="A summary.">x</a>"#);
     }
 
     /// A summary with markup in a string context is its plain text, never
@@ -3090,10 +2656,10 @@ mod tests {
         let source = "A *summary* of \\<div> <!-- note -->";
         let legacy = paragraph_graph(source, Editorial);
         let native = paragraph_store(source);
-        let expr = crate::ast::Expr::Lookup(vec!["input".to_string(), "summary".to_string()]);
-        assert_eq!(eval_expr_to_string(&expr, &legacy), "A summary of <div>");
-        let expr = crate::ast::Expr::Lookup(vec!["summary".to_string()]);
-        assert_eq!(eval_expr_to_string(&expr, &native), "A summary of <div>");
+        let html = render_for(&legacy, r#"<a title="(ref input.summary)">x</a>"#, Editorial);
+        assert_eq!(html, r#"<a title="A summary of &lt;div&gt;">x</a>"#);
+        let html = render_for(&native, r#"<a title="(ref summary)">x</a>"#, Editorial);
+        assert_eq!(html, r#"<a title="A summary of &lt;div&gt;">x</a>"#);
     }
 
     // ── Image records are {src, alt} (stage 5b.0) ──────────────────────────
@@ -3141,7 +2707,7 @@ mod tests {
         use crate::data::OutputMode::Published;
         let html = render_for(
             &cover_graph(),
-            r#"<span><presemble:insert data="input.cover.src" /></span>"#,
+            r#"<span><presemble:insert data="(ref input.cover.src)" /></span>"#,
             Published,
         );
         assert!(html.contains("images/cat.jpg"), "{html}");
@@ -3180,7 +2746,7 @@ mod tests {
         let graph = records_graph();
         // A field alone, inserted as content, between two markers.
         let field = |path: &str| {
-            render_for(&graph, &format!(r#"<p>[<presemble:insert data="{path}" as="b" />]</p>"#), Published)
+            render_for(&graph, &format!(r#"<p>[<presemble:insert data="(ref {path})" as="b" />]</p>"#), Published)
         };
         let inside = |html: String| {
             let start = html.find('>').and_then(|_| html.find("<b").map(|b| b + 2)).unwrap_or(0);
@@ -3193,7 +2759,7 @@ mod tests {
         assert_eq!(inside(field("input.cover.src")), "images/cat.jpg");
         assert_eq!(inside(field("input.cover.alt")), "A cat");
         let whole = |path: &str| {
-            render_for(&graph, &format!(r#"<presemble:insert data="{path}" />"#), Published)
+            render_for(&graph, &format!(r#"<presemble:insert data="(ref {path})" />"#), Published)
         };
         assert_eq!(
             whole("input.cover"),
@@ -3211,8 +2777,8 @@ mod tests {
     fn guide_link_and_image_records_example_renders_as_documented() {
         use crate::data::OutputMode::Published;
         const LINES: [&str; 2] = [
-            r#"<presemble:insert data="input.cover" />"#,
-            r#"<presemble:insert data="input.cover.alt" as="figcaption" />"#,
+            r#"<presemble:insert data="(ref input.cover)" />"#,
+            r#"<presemble:insert data="(ref input.cover.alt)" as="figcaption" />"#,
         ];
         let page = |image: &str| {
             let grammar = schema::parse_schema(COVER_SCHEMA).expect("schema parses");
@@ -3244,7 +2810,7 @@ mod tests {
     fn whole_image_record_insert_renders_unchanged() {
         use crate::data::OutputMode::Published;
         let html =
-            render_for(&cover_graph(), r#"<presemble:insert data="input.cover" />"#, Published);
+            render_for(&cover_graph(), r#"<presemble:insert data="(ref input.cover)" />"#, Published);
         assert!(html.contains(r#"<img src="images/cat.jpg" alt="A cat""#), "{html}");
     }
 
@@ -3254,12 +2820,12 @@ mod tests {
         let attr = r#"data-presemble-md="Use \&lt;div&gt; &lt;!-- note --&gt;""#;
         let legacy = render_for(
             &heading_graph(SOURCE_TITLE, Editorial),
-            r#"<presemble:insert data="input.title" as="h1" />"#,
+            r#"<presemble:insert data="(ref input.title)" as="h1" />"#,
             Editorial,
         );
         let native = render_for(
             &heading_store(TITLE_SOURCE),
-            r#"<presemble:insert data="title" as="h1" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" />"#,
             Editorial,
         );
         for html in [legacy, native] {
@@ -3274,8 +2840,8 @@ mod tests {
         let attr = r#"data-presemble-md="Use \&lt;div&gt; &lt;!-- note --&gt;""#;
         let graph = heading_graph(SOURCE_TITLE, Editorial);
         for template in [
-            r#"<presemble:insert data="input.link" />"#,
-            r#"<presemble:insert data="input.link" as="h3" apply="text" />"#,
+            r#"<presemble:insert data="(ref input.link)" />"#,
+            r#"<presemble:insert data="(text input.link)" as="h3" />"#,
         ] {
             let html = render_for(&graph, template, Editorial);
             assert!(html.contains(">Use &lt;div&gt;</"), "{template}: {html}");
@@ -3288,12 +2854,12 @@ mod tests {
         use crate::data::OutputMode::Published;
         let legacy = render_for(
             &heading_graph(SOURCE_TITLE, Published),
-            r#"<presemble:insert data="input.title" as="h1" />"#,
+            r#"<presemble:insert data="(ref input.title)" as="h1" />"#,
             Published,
         );
         let native = render_for(
             &heading_store(TITLE_SOURCE),
-            r#"<presemble:insert data="title" as="h1" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" />"#,
             Published,
         );
         for html in [legacy, native] {
@@ -3303,18 +2869,18 @@ mod tests {
     }
 
     #[test]
-    fn eval_expr_to_string_reads_heading_plain_text() {
-        use crate::ast::Expr;
+    fn attribute_expression_reads_heading_plain_text() {
+        use crate::data::OutputMode::Editorial;
         let graph = heading_store(TITLE_SOURCE);
-        let expr = Expr::Lookup(vec!["title".to_string()]);
-        assert_eq!(eval_expr_to_string(&expr, &graph), "Use <div>");
+        let html = render_for(&graph, r#"<a title="(ref title)">x</a>"#, Editorial);
+        assert_eq!(html, r#"<a title="Use &lt;div&gt;">x</a>"#);
     }
 
     #[test]
     fn paragraph_slot_has_no_stored_text_attribute() {
         // Legacy: a paragraph slot from build_article_graph.
         let graph = stored_text_graph("# Title\n\nA summary.\n");
-        let html = render_with(&graph, r#"<presemble:insert data="summary" as="p" />"#);
+        let html = render_with(&graph, r#"<presemble:insert data="(ref summary)" as="p" />"#);
         assert!(html.contains("A summary."), "paragraph should render: {html}");
         assert!(
             !html.contains("data-presemble-text"),
@@ -3333,7 +2899,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: para });
 
         let graph = NodeStoreGraphView { store, root };
-        let html = render_with(&graph, r#"<presemble:insert data="summary" as="p" />"#);
+        let html = render_with(&graph, r#"<presemble:insert data="(ref summary)" as="p" />"#);
         assert!(html.contains("A summary."), "paragraph should render: {html}");
         assert!(
             !html.contains("data-presemble-text"),
@@ -3342,13 +2908,13 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // :apply text tests
+    // (text ..) tests
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn apply_text_on_link_record_renders_plain_text() {
-        // A link record with :apply text should render just the text, no anchor.
-        // <presemble:insert data="link" as="h3" apply="text" />
+    fn text_of_a_link_record_renders_plain_text() {
+        // A link record under (text ..) should render just the text, no anchor.
+        // <presemble:insert data="(text link)" as="h3" />
         // with link = {href: "/foo", text: "Hello"} -> <h3>Hello</h3>
         let mut graph = DataGraph::new();
         let mut link = DataGraph::new();
@@ -3356,7 +2922,7 @@ mod tests {
         link.insert("text", Value::Text("Hello".to_string()));
         graph.insert("link", Value::Record(link));
 
-        let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
+        let src = r#"<presemble:insert data="(text link)" as="h3" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3365,18 +2931,18 @@ mod tests {
 
         assert!(html.contains("<h3"), "should render as h3: {html}");
         assert!(html.contains("Hello"), "should contain link text: {html}");
-        assert!(!html.contains("<a"), "should NOT render as anchor with :apply text: {html}");
-        assert!(!html.contains("href"), "should NOT have href with :apply text: {html}");
+        assert!(!html.contains("<a"), "should NOT render as anchor with (text ..): {html}");
+        assert!(!html.contains("href"), "should NOT have href with (text ..): {html}");
         assert!(html.contains(r#"data-presemble-slot="link""#), "should have data-presemble-slot: {html}");
     }
 
     #[test]
-    fn apply_text_on_plain_text_is_identity() {
-        // A text value with :apply text should render the same as without.
+    fn text_of_plain_text_is_identity() {
+        // A text value under (text ..) should render the same as without.
         let mut graph = DataGraph::new();
         graph.insert("title", Value::Text("My Title".to_string()));
 
-        let src = r#"<presemble:insert data="title" as="h1" apply="text" />"#;
+        let src = r#"<presemble:insert data="(text title)" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3389,15 +2955,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_text_on_nodes_strips_tags() {
-        // A nodes value with :apply text is its text.
+    fn text_of_nodes_strips_tags() {
+        // A nodes value under (text ..) is its text.
         let mut graph = DataGraph::new();
         graph.insert(
             "body",
             Value::Nodes(parse_template_xml("<p>Hello <strong>world</strong></p>").unwrap().into()),
         );
 
-        let src = r#"<presemble:insert data="body" as="div" apply="text" />"#;
+        let src = r#"<presemble:insert data="(text body)" as="div" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3411,14 +2977,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_text_preserves_source_slot() {
+    fn text_preserves_source_slot() {
         // A synthesized link record (with _source_slot) should carry
-        // data-presemble-source-slot even when :apply text is used.
+        // data-presemble-source-slot even when (text ..) is used.
         let mut graph = DataGraph::new();
         let link = crate::data::synthesize_link("Hello World", "/article/hello-world", None);
         graph.insert("link", Value::Record(link));
 
-        let src = r#"<presemble:insert data="link" as="h3" apply="text" />"#;
+        let src = r#"<presemble:insert data="(text link)" as="h3" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3427,7 +2993,7 @@ mod tests {
 
         assert!(html.contains("<h3"), "should render as h3: {html}");
         assert!(html.contains("Hello World"), "should contain link text: {html}");
-        assert!(!html.contains("<a"), "should NOT wrap in anchor with :apply text: {html}");
+        assert!(!html.contains("<a"), "should NOT wrap in anchor with (text ..): {html}");
         assert!(
             html.contains(r#"data-presemble-source-slot="title""#),
             "should preserve source-slot attribute: {html}"
@@ -3435,230 +3001,147 @@ mod tests {
     }
 
     #[test]
-    fn apply_unknown_function_errors() {
-        // :apply foo should produce a render error.
+    fn text_of_an_unknown_function_errors() {
+        // (foo title) names no function and no template: a render error.
         let mut graph = DataGraph::new();
         graph.insert("title", Value::Text("My Title".to_string()));
 
-        let src = r#"<presemble:insert data="title" apply="foo" />"#;
+        let src = r#"<presemble:insert data="(foo title)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx);
 
-        assert!(result.is_err(), "unknown :apply function should produce an error");
+        assert!(result.is_err(), "unknown function should produce an error");
         if let Err(RenderError::Render(msg)) = result {
             assert!(msg.contains("foo"), "error message should mention unknown function name: {msg}");
         }
     }
 
     #[test]
-    fn apply_text_absent_value_produces_no_output() {
-        // :apply text on an absent value should produce empty output.
+    fn text_of_an_absent_value_produces_no_output() {
         let graph = DataGraph::new();
 
-        let src = r#"<presemble:insert data="missing" apply="text" />"#;
+        let src = r#"<presemble:insert data="(text missing)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
 
-        assert!(result.is_empty(), "absent value with :apply text should produce no output");
+        assert!(result.is_empty(), "absent value under (text ..) should produce no output");
     }
 
     // ---------------------------------------------------------------------------
-    // pipe expression tests
+    // threaded expression tests
     // ---------------------------------------------------------------------------
 
+    fn render_text_expression(graph: &DataGraph, src: &str) -> String {
+        let nodes = parse_template_xml(src).unwrap();
+        let reg = NullRegistry;
+        let ctx = RenderContext::editorial(&reg);
+        serialize_nodes(&transform(nodes, graph, &ctx).unwrap())
+    }
+
     #[test]
-    fn apply_pipe_to_lower() {
-        // :apply (-> text to_lower) on Value::Text("HELLO") -> "hello"
+    fn threaded_to_lower() {
         let mut graph = DataGraph::new();
         graph.insert("title", Value::Text("HELLO".to_string()));
 
-        // Build element with apply attribute as a List form directly
-        let nodes = vec![Node::Element(Element {
-            name: "presemble:insert".to_string(),
-            attrs: vec![
-                ("data".to_string(), Form::Str("title".to_string())),
-                ("as".to_string(), Form::Str("span".to_string())),
-                (
-                    "apply".to_string(),
-                    Form::List(vec![
-                        Form::Symbol("->".to_string()),
-                        Form::Symbol("text".to_string()),
-                        Form::Symbol("to_lower".to_string()),
-                    ]),
-                ),
-            ],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
+        let html = render_text_expression(
+            &graph,
+            r#"<presemble:insert data="(-> title text to_lower)" as="span" />"#,
+        );
 
         assert!(html.contains("hello"), "to_lower should lowercase: {html}");
         assert!(!html.contains("HELLO"), "uppercase should be gone: {html}");
     }
 
     #[test]
-    fn apply_pipe_chain() {
-        // :apply (-> text to_lower capitalize) on "HELLO WORLD" -> "Hello world"
+    fn threaded_chain() {
         let mut graph = DataGraph::new();
         graph.insert("title", Value::Text("HELLO WORLD".to_string()));
 
-        let nodes = vec![Node::Element(Element {
-            name: "presemble:insert".to_string(),
-            attrs: vec![
-                ("data".to_string(), Form::Str("title".to_string())),
-                ("as".to_string(), Form::Str("span".to_string())),
-                (
-                    "apply".to_string(),
-                    Form::List(vec![
-                        Form::Symbol("->".to_string()),
-                        Form::Symbol("text".to_string()),
-                        Form::Symbol("to_lower".to_string()),
-                        Form::Symbol("capitalize".to_string()),
-                    ]),
-                ),
-            ],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
+        let html = render_text_expression(
+            &graph,
+            r#"<presemble:insert data="(-> title text to_lower capitalize)" as="span" />"#,
+        );
 
         assert!(html.contains("Hello world"), "chain should produce Hello world: {html}");
     }
 
     #[test]
-    fn apply_to_upper_directly() {
-        // :apply to_upper on "hello" -> "HELLO"
+    fn threaded_to_upper() {
         let mut graph = DataGraph::new();
         graph.insert("title", Value::Text("hello".to_string()));
 
-        let nodes = vec![Node::Element(Element {
-            name: "presemble:insert".to_string(),
-            attrs: vec![
-                ("data".to_string(), Form::Str("title".to_string())),
-                ("as".to_string(), Form::Str("span".to_string())),
-                ("apply".to_string(), Form::Symbol("to_upper".to_string())),
-            ],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
+        let html = render_text_expression(
+            &graph,
+            r#"<presemble:insert data="(-> title to_upper)" as="span" />"#,
+        );
 
         assert!(html.contains("HELLO"), "to_upper should uppercase: {html}");
     }
 
     #[test]
-    fn apply_pipe_on_record() {
-        // :apply (-> text to_upper) on a record with text field -> "TITLE TEXT"
+    fn threaded_on_record() {
         let mut graph = DataGraph::new();
         let mut link = DataGraph::new();
         link.insert("text", Value::Text("title text".to_string()));
         link.insert("href", Value::Text("/foo".to_string()));
         graph.insert("link", Value::Record(link));
 
-        let nodes = vec![Node::Element(Element {
-            name: "presemble:insert".to_string(),
-            attrs: vec![
-                ("data".to_string(), Form::Str("link".to_string())),
-                ("as".to_string(), Form::Str("span".to_string())),
-                (
-                    "apply".to_string(),
-                    Form::List(vec![
-                        Form::Symbol("->".to_string()),
-                        Form::Symbol("text".to_string()),
-                        Form::Symbol("to_upper".to_string()),
-                    ]),
-                ),
-            ],
-            children: vec![],
-        })];
-        let reg = NullRegistry;
-        let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
+        let html = render_text_expression(
+            &graph,
+            r#"<presemble:insert data="(-> link text to_upper)" as="span" />"#,
+        );
 
-        assert!(html.contains("TITLE TEXT"), "pipe on record should uppercase display text: {html}");
+        assert!(html.contains("TITLE TEXT"), "thread on record should uppercase display text: {html}");
         assert!(!html.contains("<a"), "should NOT render as anchor: {html}");
     }
 
     #[test]
-    fn apply_pipe_missing_arrow_errors() {
-        // :apply (text to_lower) without -> should produce an error
-        let result = evaluate_pipe(
-            &[
-                Form::Symbol("text".to_string()),
-                Form::Symbol("to_lower".to_string()),
-            ],
-            Some(&Value::Text("hello".to_string())),
-        );
-        assert!(result.is_err(), "pipe without -> should error");
-        if let Err(RenderError::Render(msg)) = result {
-            assert!(msg.contains("->"), "error should mention ->: {msg}");
-        }
-    }
-
-    #[test]
-    fn apply_unknown_function_in_pipe_errors() {
-        // :apply (-> text unknown_fn) should produce an error
-        let result = evaluate_pipe(
-            &[
-                Form::Symbol("->".to_string()),
-                Form::Symbol("text".to_string()),
-                Form::Symbol("unknown_fn".to_string()),
-            ],
-            Some(&Value::Text("hello".to_string())),
-        );
-        assert!(result.is_err(), "unknown function in pipe should error");
-        if let Err(RenderError::Render(msg)) = result {
-            assert!(
-                msg.contains("unknown_fn"),
-                "error should mention unknown function name: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn apply_truncate() {
-        // :apply truncate on a string <= 100 chars should pass through unchanged
+    fn threaded_unknown_function_errors() {
         let mut graph = DataGraph::new();
-        graph.insert("title", Value::Text("short text".to_string()));
-
-        let nodes = vec![Node::Element(Element {
-            name: "presemble:insert".to_string(),
-            attrs: vec![
-                ("data".to_string(), Form::Str("title".to_string())),
-                ("as".to_string(), Form::Str("span".to_string())),
-                ("apply".to_string(), Form::Symbol("truncate".to_string())),
-            ],
-            children: vec![],
-        })];
+        graph.insert("title", Value::Text("hello".to_string()));
+        let nodes = parse_template_xml(r#"<presemble:insert data="(-> title text unknown_fn)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
-        let result = transform(nodes, &graph, &ctx).unwrap();
-        let html = serialize_nodes(&result);
-        assert!(html.contains("short text"), "truncate should pass through short text: {html}");
-
-        // A string > 100 chars should be truncated with ellipsis
-        let long = "a".repeat(150);
-        let truncated = apply_string_function("truncate", &long).unwrap().unwrap();
-        assert!(truncated.ends_with('…'), "long string should end with ellipsis: {truncated}");
-        assert!(truncated.len() < 150, "long string should be shorter after truncation");
+        let result = transform(nodes, &graph, &ctx);
+        assert!(result.is_err(), "unknown function in a thread should error");
+        if let Err(RenderError::Render(msg)) = result {
+            assert!(msg.contains("unknown_fn"), "error should mention the function name: {msg}");
+        }
     }
 
     #[test]
-    fn apply_capitalize() {
-        // :apply capitalize on "hello world" -> "Hello world"
-        let result = apply_string_function("capitalize", "hello world").unwrap();
-        assert_eq!(result, Some("Hello world".to_string()));
+    fn truncate_passes_short_text_through_and_cuts_long_text() {
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("short text".to_string()));
+        graph.insert("long", Value::Text("a".repeat(150)));
+
+        let html = render_text_expression(
+            &graph,
+            r#"<presemble:insert data="(truncate title)" as="span" />"#,
+        );
+        assert!(html.contains("short text"), "truncate should pass through short text: {html}");
+
+        let html = render_text_expression(
+            &graph,
+            r#"<presemble:insert data="(truncate long)" as="span" />"#,
+        );
+        assert!(html.contains('…'), "long string should end with ellipsis: {html}");
+        assert!(!html.contains(&"a".repeat(150)), "long string should be cut: {html}");
+    }
+
+    #[test]
+    fn capitalize_uppercases_the_first_letter() {
+        let mut graph = DataGraph::new();
+        graph.insert("title", Value::Text("hello world".to_string()));
+        let html = render_text_expression(
+            &graph,
+            r#"<presemble:insert data="(capitalize title)" as="span" />"#,
+        );
+        assert!(html.contains("Hello world"), "{html}");
     }
 
     // ---------------------------------------------------------------------------
@@ -3827,7 +3310,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: title_val });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="title" as="h1" />"#;
+        let src = r#"<presemble:insert data="(ref title)" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3846,7 +3329,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: count_name, part: count_val });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="count" as="span" />"#;
+        let src = r#"<presemble:insert data="(ref count)" as="span" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3866,7 +3349,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: field_name, part: nil_val });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="empty" />"#;
+        let src = r#"<presemble:insert data="(ref empty)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3895,7 +3378,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: nav_link_name, part: link });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="nav_link" />"#;
+        let src = r#"<presemble:insert data="(ref nav_link)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3922,7 +3405,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: items_name, part: collection });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="items" as="li" />"#;
+        let src = r#"<presemble:insert data="(ref items)" as="li" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3948,7 +3431,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="title" as="h2" />"#;
+        let src = r#"<presemble:insert data="(ref title)" as="h2" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -3959,9 +3442,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_expr_to_string_native_path_text() {
-        use crate::ast::Expr;
-
+    fn attribute_expression_reads_a_native_text_node() {
         let mut store = node_store::NodeStore::new();
         let root_name = store.intern("page");
         let root = store.add_node(node_store::Node::Element(root_name));
@@ -3970,9 +3451,8 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: title_val });
 
         let graph = NodeStoreGraphView { store, root };
-        let expr = Expr::Lookup(vec!["tagline".to_string()]);
-        let result = eval_expr_to_string(&expr, &graph);
-        assert_eq!(result, "Fast path text");
+        let html = render_with(&graph, r#"<a title="(ref tagline)">x</a>"#);
+        assert_eq!(html, r#"<a title="Fast path text">x</a>"#);
     }
 
     #[test]
@@ -3996,7 +3476,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="body" />"#;
+        let src = r#"<presemble:insert data="(ref body)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -4010,7 +3490,7 @@ mod tests {
 
     #[test]
     fn data_each_over_linked_semantic_roots_renders_fields() {
-        // Simulates: index page has data-each="input.highlight" iterating
+        // Simulates: index page has data-each="(ref input.highlight)" iterating
         // over linked feature pages. Each feature has a "title" ConsistsOf
         // edge pointing to a heading. The template accesses item.title.
         let mut store = node_store::NodeStore::new();
@@ -4044,7 +3524,7 @@ mod tests {
 
         let graph = NodeStoreGraphView { store, root: index_root };
 
-        let src = r#"<ul><template data-each="highlight"><li><presemble:insert data="item.title" as="h3" /></li></template></ul>"#;
+        let src = r#"<ul><template data-each="(ref highlight)"><li><presemble:insert data="(ref item.title)" as="h3" /></li></template></ul>"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -4061,7 +3541,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // presemble:juxt tests
+    // ((juxt a b) input) tests
     // ---------------------------------------------------------------------------
 
     struct TwoTemplateRegistry;
@@ -4077,30 +3557,15 @@ mod tests {
 
     #[test]
     fn juxt_concatenates_template_outputs() {
-        // A presemble:juxt node with two presemble:include children should produce
-        // the output of both templates concatenated in order.
+        // A juxt of two templates produces the output of both, concatenated in order.
         let graph = DataGraph::new();
         let reg = TwoTemplateRegistry;
         let ctx = RenderContext::editorial(&reg);
 
-        let juxt_node = Node::Element(Element {
-            name: "presemble:juxt".to_string(),
-            attrs: vec![],
-            children: vec![
-                Node::Element(Element {
-                    name: "presemble:include".to_string(),
-                    attrs: vec![("src".to_string(), Form::Str("header".to_string()))],
-                    children: vec![],
-                }),
-                Node::Element(Element {
-                    name: "presemble:include".to_string(),
-                    attrs: vec![("src".to_string(), Form::Str("footer".to_string()))],
-                    children: vec![],
-                }),
-            ],
-        });
+        let juxt_node = parse_template_xml(r#"<presemble:insert data="((juxt header footer) input)" />"#)
+            .unwrap();
 
-        let result = transform(vec![juxt_node], &graph, &ctx).unwrap();
+        let result = transform(juxt_node, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         // Both outputs should appear in order
         let header_pos = html.find("<header>HEADER</header>").expect("header should appear");
@@ -4118,8 +3583,8 @@ mod tests {
         impl crate::registry::TemplateRegistry for DataReadRegistry {
             fn resolve(&self, name: &str) -> Option<Vec<Node>> {
                 match name {
-                    "part1" => Some(parse_template_xml(r#"<span><presemble:insert data="greeting" /></span>"#).unwrap()),
-                    "part2" => Some(parse_template_xml(r#"<em><presemble:insert data="greeting" /></em>"#).unwrap()),
+                    "part1" => Some(parse_template_xml(r#"<span><presemble:insert data="(ref greeting)" /></span>"#).unwrap()),
+                    "part2" => Some(parse_template_xml(r#"<em><presemble:insert data="(ref greeting)" /></em>"#).unwrap()),
                     _ => None,
                 }
             }
@@ -4128,24 +3593,10 @@ mod tests {
         let reg = DataReadRegistry;
         let ctx = RenderContext::editorial(&reg);
 
-        let juxt_node = Node::Element(Element {
-            name: "presemble:juxt".to_string(),
-            attrs: vec![],
-            children: vec![
-                Node::Element(Element {
-                    name: "presemble:include".to_string(),
-                    attrs: vec![("src".to_string(), Form::Str("part1".to_string()))],
-                    children: vec![],
-                }),
-                Node::Element(Element {
-                    name: "presemble:include".to_string(),
-                    attrs: vec![("src".to_string(), Form::Str("part2".to_string()))],
-                    children: vec![],
-                }),
-            ],
-        });
+        let juxt_node = parse_template_xml(r#"<presemble:insert data="((juxt part1 part2) input)" />"#)
+            .unwrap();
 
-        let result = transform(vec![juxt_node], &graph, &ctx).unwrap();
+        let result = transform(juxt_node, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
         // Both children should have seen "greeting" = "Hello"
@@ -4247,7 +3698,7 @@ mod tests {
             "body",
             Value::Nodes(crate::body_nodes::render_body_nodes(elements, true).into()),
         );
-        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
@@ -4341,7 +3792,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_name, part: body });
 
         let graph = NodeStoreGraphView { store, root };
-        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
@@ -4459,7 +3910,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
 
         let graph = NodeStoreGraphView { store, root };
-        let src = r#"<presemble:insert data="body" />"#;
+        let src = r#"<presemble:insert data="(ref body)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
@@ -4585,7 +4036,7 @@ mod tests {
         // Legacy: a paragraph slot from build_article_graph.
         let html = render_with(
             &stored_text_graph("# Title\n\nA summary.\n"),
-            r#"<presemble:insert data="summary" as="p" />"#,
+            r#"<presemble:insert data="(ref summary)" as="p" />"#,
         );
         assert!(html.contains(&want), "legacy: {html}");
 
@@ -4600,7 +4051,7 @@ mod tests {
         let summary_name = store.intern("summary");
         store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: para });
         let graph = NodeStoreGraphView { store, root };
-        let html = render_with(&graph, r#"<presemble:insert data="summary" as="p" />"#);
+        let html = render_with(&graph, r#"<presemble:insert data="(ref summary)" as="p" />"#);
         assert!(html.contains(&want), "native: {html}");
     }
 
@@ -4614,12 +4065,12 @@ mod tests {
         let want = md_attr(&want);
         let legacy = render_for(
             &heading_graph(&format!("# {source}\n\nA summary.\n"), Editorial),
-            r#"<presemble:insert data="input.title" as="h1" />"#,
+            r#"<presemble:insert data="(ref input.title)" as="h1" />"#,
             Editorial,
         );
         let native = render_for(
             &heading_store(source),
-            r#"<presemble:insert data="title" as="h1" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" />"#,
             Editorial,
         );
         for html in [legacy, native] {
@@ -4628,7 +4079,7 @@ mod tests {
         // The synthesized title link projects as Content too.
         let link = render_for(
             &heading_graph(&format!("# {source}\n\nA summary.\n"), Editorial),
-            r#"<presemble:insert data="input.link" />"#,
+            r#"<presemble:insert data="(ref input.link)" />"#,
             Editorial,
         );
         assert!(link.contains(&want), "{link}");
@@ -4652,12 +4103,12 @@ mod tests {
         );
         let legacy = render_for(
             &page,
-            r#"<presemble:insert data="input.title" as="h1" />"#,
+            r#"<presemble:insert data="(ref input.title)" as="h1" />"#,
             Published,
         );
         let native = render_for(
             &heading_store("Hello *World*"),
-            r#"<presemble:insert data="title" as="h1" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" />"#,
             Published,
         );
         for html in [legacy, native] {
@@ -4680,12 +4131,12 @@ mod tests {
         );
         let legacy = render_for(
             &page,
-            r#"<presemble:insert data="input.title" as="h1" />"#,
+            r#"<presemble:insert data="(ref input.title)" as="h1" />"#,
             Published,
         );
         let native = render_for(
             &heading_store(""),
-            r#"<presemble:insert data="title" as="h1" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" />"#,
             Published,
         );
         for html in [legacy, native] {
@@ -4723,7 +4174,7 @@ mod tests {
         // Legacy: the link of a graph built from `# _x_`.
         let legacy = render_for(
             &heading_graph("# _x_\n\nA summary.\n", Editorial),
-            r#"<presemble:insert data="input.link" />"#,
+            r#"<presemble:insert data="(ref input.link)" />"#,
             Editorial,
         );
         assert!(legacy.contains(&want), "legacy: {legacy}");
@@ -4755,7 +4206,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: link });
         let native = render_for(
             &NodeStoreGraphView { store, root },
-            r#"<presemble:insert data="link" />"#,
+            r#"<presemble:insert data="(ref link)" />"#,
             Editorial,
         );
         assert!(native.contains(&want), "native: {native}");
@@ -4813,7 +4264,7 @@ mod tests {
         graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
         let html = render_with(
             &graph,
-            r#"<presemble:insert data="title" as="h1" /><presemble:insert data="summary" as="p" /><presemble:insert data="body" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" /><presemble:insert data="(ref summary)" as="p" /><presemble:insert data="(ref body)" />"#,
         );
         let got = attr_values(&html, "data-presemble-address");
         let mut want = vec![title_addr.clone(), summary_addr.clone()];
@@ -4875,7 +4326,7 @@ mod tests {
         let graph = NodeStoreGraphView { store, root };
         let html = render_with(
             &graph,
-            r#"<presemble:insert data="title" as="h1" /><presemble:insert data="summary" as="p" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" /><presemble:insert data="(ref summary)" as="p" />"#,
         );
         assert_eq!(
             attr_values(&html, "data-presemble-address"),
@@ -4913,7 +4364,7 @@ mod tests {
         graph.insert("items", Value::List(items));
         let html = render_with(
             &graph,
-            r#"<template data-each="items"><presemble:insert data="item.title" as="h3" /><presemble:insert data="item.summary" as="p" /></template>"#,
+            r#"<template data-each="(ref items)"><presemble:insert data="(ref item.title)" as="h3" /><presemble:insert data="(ref item.summary)" as="p" /></template>"#,
         );
         let summary = |file: &str| {
             format!(
@@ -5023,7 +4474,7 @@ mod tests {
 
         // Native: the page's own link block, reached from the page.
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
-        let native = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        let native = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
         assert!(native.contains("Page of Joakim"), "renders the target's link: {native}");
         assert_eq!(attr_values(&native, "data-presemble-address"), vec![address.clone()], "{native}");
         assert_eq!(attr_values(&native, "data-presemble-md"), vec![md.to_string()], "{native}");
@@ -5039,7 +4490,7 @@ mod tests {
         .expect("content parses");
         let mut data = crate::data::build_article_graph(&doc, &grammar, Editorial);
         data.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
-        let legacy = render_for(&data, r#"<presemble:insert data="author" />"#, Editorial);
+        let legacy = render_for(&data, r#"<presemble:insert data="(ref author)" />"#, Editorial);
         assert_eq!(attr_values(&legacy, "data-presemble-address"), vec![address], "{legacy}");
         assert_eq!(attr_values(&legacy, "data-presemble-md"), vec![md.to_string()], "{legacy}");
     }
@@ -5048,7 +4499,7 @@ mod tests {
     fn multi_value_link_slot_gets_no_bundle() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("A", "/author/a"), ("B", "/author/b")], true);
-        let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        let html = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
         assert!(html.contains("Page of A") && html.contains("Page of B"), "{html}");
         assert!(!html.contains("data-presemble-address"), "{html}");
         assert!(!html.contains("data-presemble-md"), "{html}");
@@ -5058,7 +4509,7 @@ mod tests {
     fn link_slot_bundle_without_a_title_slot() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], false);
-        let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        let html = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
         assert_eq!(
             attr_values(&html, "data-presemble-address"),
             vec![format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("author"))],
@@ -5067,13 +4518,13 @@ mod tests {
         assert_eq!(attr_values(&html, "data-presemble-md"), vec!["[Joakim](/author/joakim)".to_string()]);
     }
 
-    /// A template that names the slot without a prefix (`data="author"`): the
+    /// A template that names the slot without a prefix (`data="(ref author)"`): the
     /// page is the view's root.
     #[test]
     fn unprefixed_link_slot_carries_bundle() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
-        let html = render_for(&graph, r#"<presemble:insert data="author" />"#, Editorial);
+        let html = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
         assert_eq!(
             attr_values(&html, "data-presemble-address"),
             vec![format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("author"))],
@@ -5085,7 +4536,7 @@ mod tests {
     fn semantic_document_edge_is_not_a_template_path() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
-        let html = render_for(&graph, r#"<presemble:insert data="_document" />"#, Editorial);
+        let html = render_for(&graph, r#"<presemble:insert data="(ref _document)" />"#, Editorial);
         assert_eq!(html, "", "{html}");
     }
 
@@ -5122,7 +4573,7 @@ mod tests {
             "link",
             Value::Record(crate::data::synthesize_link("Plain em title", "/x", Some(&editor))),
         );
-        let legacy = render_for(&graph, r#"<presemble:insert data="link" />"#, Editorial);
+        let legacy = render_for(&graph, r#"<presemble:insert data="(ref link)" />"#, Editorial);
         assert_eq!(attr_values(&legacy, "data-presemble-address"), vec![title_address(ADDRESS_FILE)], "{legacy}");
         assert!(legacy.contains(&want_md), "{legacy}");
 
@@ -5162,7 +4613,7 @@ mod tests {
             store.add_edge(link, node_store::Edge::Attribute { name, value: val });
         }
         store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: link });
-        let native = render_for(&NodeStoreGraphView { store, root }, r#"<presemble:insert data="link" />"#, Editorial);
+        let native = render_for(&NodeStoreGraphView { store, root }, r#"<presemble:insert data="(ref link)" />"#, Editorial);
         assert_eq!(attr_values(&native, "data-presemble-address"), vec![title_address(ADDRESS_FILE)], "{native}");
         assert!(native.contains(&want_md), "{native}");
     }
@@ -5176,7 +4627,7 @@ mod tests {
         graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
         let html = render_for(
             &graph,
-            r#"<presemble:insert data="title" as="h1" /><presemble:insert data="summary" as="p" /><presemble:insert data="body" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" /><presemble:insert data="(ref summary)" as="p" /><presemble:insert data="(ref body)" />"#,
             Published,
         );
         assert!(html.contains("Para two."), "{html}");
@@ -5198,13 +4649,13 @@ mod tests {
         assert!(!body.contains("data-presemble-md"), "{body}");
         let slot = render_for(
             &heading_store("Plain *em* title"),
-            r#"<presemble:insert data="title" as="h1" />"#,
+            r#"<presemble:insert data="(ref title)" as="h1" />"#,
             Published,
         );
         assert!(!slot.contains("data-presemble-md"), "{slot}");
         let legacy = render_for(
             &heading_graph("# T\n\nA summary.\n", Published),
-            r#"<presemble:insert data="input.title" as="h1" /><presemble:insert data="input.link" />"#,
+            r#"<presemble:insert data="(ref input.title)" as="h1" /><presemble:insert data="(ref input.link)" />"#,
             Published,
         );
         assert!(!legacy.contains("data-presemble-md"), "{legacy}");
@@ -5252,7 +4703,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
 
         let graph = NodeStoreGraphView { store, root };
-        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let reg = NullRegistry;
         // Published: these tests are about how a block renders, not the editor's md.
         let ctx = RenderContext::published(&reg);
@@ -5281,7 +4732,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
 
         let graph = NodeStoreGraphView { store, root };
-        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::published(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
@@ -5387,7 +4838,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
 
         let graph = NodeStoreGraphView { store, root };
-        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::published(&reg);
         serialize_nodes(&transform(nodes, &graph, &ctx).unwrap())
@@ -5466,7 +4917,7 @@ mod tests {
         store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
 
         let graph = NodeStoreGraphView { store, root };
-        let nodes = parse_template_xml(r#"<presemble:insert data="body" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());

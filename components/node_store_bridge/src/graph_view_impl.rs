@@ -812,10 +812,10 @@ mod tests {
         assert!(matches!(result.as_value(), Value::Text(t) if t == "Via ConsistsOf"));
     }
 
-    /// `:apply` reads a store heading through `resolve`: its plain text, not
+    /// `(text ..)` reads a store heading through `resolve`: its plain text, not
     /// its stored source (ADR-063).
     #[test]
-    fn apply_text_on_store_heading_is_plain_text() {
+    fn text_of_a_store_heading_is_plain_text() {
         let mut store = NodeStore::new();
         let page_name = store.intern("page");
         let root = store.add_node(Node::Element(page_name));
@@ -832,7 +832,7 @@ mod tests {
         let view = NodeStoreView::new(&store, root);
         let prefixed = PrefixedGraphView::new("input".to_string(), view);
         let nodes = template::parse_template_xml(
-            r#"<presemble:insert data="input.title" as="h1" apply="text" />"#,
+            r#"<presemble:insert data="(text input.title)" as="h1" />"#,
         )
         .unwrap();
         let reg = template::NullRegistry;

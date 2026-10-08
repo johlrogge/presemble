@@ -108,8 +108,6 @@ pub enum FunctionKind {
     Thread,
     /// `juxt`: its arguments are template names.
     Juxt,
-    /// `apply`: its argument is one template name.
-    Apply,
 }
 
 /// One entry of the function table.
@@ -130,8 +128,6 @@ pub const FUNCTIONS: &[FunctionSpec] = &[
     FunctionSpec { name: "truncate", arity: Arity::Exactly(1), kind: FunctionKind::Text },
     FunctionSpec { name: "juxt", arity: Arity::AtLeast(1), kind: FunctionKind::Juxt },
     FunctionSpec { name: "->", arity: Arity::AtLeast(2), kind: FunctionKind::Thread },
-    // c2: remove
-    FunctionSpec { name: "apply", arity: Arity::Exactly(1), kind: FunctionKind::Apply },
 ];
 
 /// The function called `name`, if there is one.
@@ -216,8 +212,8 @@ impl Expression {
             Expression::Ref(path) => Some(path),
             Expression::Literal(_) => None,
             Expression::Call { head, args } => match head.as_ref() {
-                // The arguments of `juxt` and `apply` are template names.
-                Expression::Ref(name) if matches!(name.dotted().as_str(), "juxt" | "apply") => None,
+                // The arguments of `juxt` are template names.
+                Expression::Ref(name) if name.dotted() == "juxt" => None,
                 _ => args.first().and_then(Expression::subject),
             },
         }
@@ -403,9 +399,7 @@ fn call_function(
             }
             Ok(Evaluated::Value(current.map(Value::Text).unwrap_or(Value::Absent)))
         }
-        FunctionKind::Juxt | FunctionKind::Apply => {
-            apply_templates(&template_names(args)?, None, graph, ctx)
-        }
+        FunctionKind::Juxt => apply_templates(&template_names(args)?, None, graph, ctx),
     }
 }
 
@@ -432,26 +426,20 @@ fn unknown_function(name: &str) -> RenderError {
     RenderError::Render(format!("unknown function '{name}'"))
 }
 
-/// The template names a `juxt` (or `apply`) was given.
+/// The template names a `juxt` was given.
 fn template_names(args: &[Expression]) -> Result<Vec<String>, RenderError> {
     args.iter()
         .map(|arg| match arg {
             Expression::Ref(path) => Ok(path.dotted()),
-            // c2: remove
-            Expression::Call { head, args }
-                if matches!(head.as_ref(), Expression::Ref(p) if p.dotted() == "apply") =>
-            {
-                match args.as_slice() {
-                    [Expression::Ref(path)] => Ok(path.dotted()),
-                    _ => Err(RenderError::Render("(apply ...) takes one template name".to_string())),
-                }
-            }
             _ => Err(RenderError::Render("expected the name of a template".to_string())),
         })
         .collect()
 }
 
 /// Render the templates `names` against the graph their argument makes.
+///
+/// A name is `self/x` for a template defined in the template itself, else the
+/// name of a template of the site.
 ///
 /// A template is a function of its input: the argument becomes `input` in the
 /// template. The argument `input` (or none) leaves the graph as it is.
@@ -764,12 +752,11 @@ mod rendering_tests {
     #[test]
     fn insert_data_takes_an_expression() {
         let g = graph();
-        let legacy = hiccup(&g, r#"[:presemble/insert {:data "article.title" :as "h1"}]"#).unwrap();
+        let legacy = hiccup(&g, r#"[:presemble/insert {:data article.title :as "h1"}]"#).unwrap();
         assert_eq!(
             legacy,
             r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello</h1>"#
         );
-        assert_eq!(hiccup(&g, r#"[:presemble/insert {:data article.title :as "h1"}]"#).unwrap(), legacy);
         assert_eq!(
             hiccup(&g, r#"[:presemble/insert {:data (ref article.title) :as "h1"}]"#).unwrap(),
             legacy
@@ -794,12 +781,12 @@ mod rendering_tests {
         let g = graph();
         let want = hiccup(
             &g,
-            r#"[:template {:data-each "articles"} [:presemble/insert {:data "item.title" :as "h3"}]]"#,
+            r#"[:template {:data-each articles} [:presemble/insert {:data item.title :as "h3"}]]"#,
         )
         .unwrap();
         assert!(want.contains("One") && want.contains("Two"), "{want}");
         assert_eq!(
-            hiccup(&g, r#"[:template {:data-each (ref articles)} [:presemble/insert {:data item.title :as "h3"}]]"#)
+            hiccup(&g, r#"[:template {:data-each (ref articles)} [:presemble/insert {:data (ref item.title) :as "h3"}]]"#)
                 .unwrap(),
             want
         );
@@ -860,6 +847,54 @@ mod rendering_tests {
         let registry = Templates(HashMap::from([("card", r#"[:b {:title input.text}]"#)]));
         let nodes = parse_template_hiccup("[:p (card article.author)]").unwrap();
         assert_eq!(render_nodes(&g, nodes, &registry).unwrap(), r#"<p><b title="Jo"></b></p>"#);
+    }
+
+    #[test]
+    fn string_path_in_a_directive_is_an_error() {
+        let g = graph();
+        for src in [
+            r#"[:presemble/insert {:data "article.title"}]"#,
+            r#"[:template {:data-each "articles"} [:p "x"]]"#,
+            r#"[:template {:data-slot "article.author"} [:p "x"]]"#,
+        ] {
+            let err = hiccup(&g, src).expect_err(src);
+            assert!(err.to_string().contains("(ref "), "{src}: {err}");
+        }
+        for src in [
+            r#"<presemble:insert data="article.title" />"#,
+            r#"<template data-each="articles"><p>x</p></template>"#,
+            r#"<template data-slot="article.author"><p>x</p></template>"#,
+        ] {
+            let err = html(&g, src).expect_err(src);
+            assert!(err.to_string().contains("(ref "), "{src}: {err}");
+        }
+    }
+
+    #[test]
+    fn removed_spellings_are_errors() {
+        let g = graph();
+        let registry = Templates(HashMap::from([("card", r#"[:b "card"]"#)]));
+        let render = |src: &str| render_nodes(&g, parse_template_xml(src).unwrap(), &registry);
+        for (src, mentions) in [
+            (r#"<presemble:include src="card" />"#, "presemble:include"),
+            (r#"<presemble:apply template="card" />"#, "presemble:apply"),
+            (r#"<presemble:insert data="(ref article.title)" apply="text" />"#, "apply"),
+            (r#"<div presemble:class="article.title">x</div>"#, "presemble:class"),
+        ] {
+            let err = render(src).expect_err(src);
+            assert!(err.to_string().contains(mentions), "{src}: {err}");
+        }
+    }
+
+    /// GUARD: a pipe in a string attribute is plain text; it was before, and
+    /// the `|` language is gone now, so it stays so.
+    #[test]
+    fn pipe_string_language_is_gone() {
+        let g = graph();
+        assert_eq!(
+            hiccup(&g, r#"[:p {:title "article.title | first"} "x"]"#).unwrap(),
+            r#"<p title="article.title | first">x</p>"#
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@ fn render_schema_derived_slot_emits_constraint_attributes() {
     let mut context = template::DataGraph::new();
     context.insert("input", template::Value::Record(slot_graph));
 
-    let template_src = r#"<h1><presemble:insert data="input.title" /></h1>"#;
+    let template_src = r#"<h1><presemble:insert data="(ref input.title)" /></h1>"#;
     let html = template::render_template(template_src, &context, template::OutputMode::Editorial)
         .expect("render should succeed");
 
@@ -77,7 +77,7 @@ fn render_article_with_dom_transformer() {
 #[test]
 fn render_template_missing_slot_produces_empty_not_error() {
     // A slot that's absent should produce empty output, not a RenderError
-    let template_src = r#"<div><presemble:insert data="input.missing" /></div>"#;
+    let template_src = r#"<div><presemble:insert data="(ref input.missing)" /></div>"#;
     let graph = template::DataGraph::new(); // empty graph
     let html = template::render_template(template_src, &graph, template::OutputMode::Editorial).expect("should not error");
     assert!(html.contains("<div>") && !html.contains("presemble"), "{html}");
@@ -85,7 +85,7 @@ fn render_template_missing_slot_produces_empty_not_error() {
 
 #[test]
 fn render_template_data_slot_absent_removes_block() {
-    let template_src = r#"<template data-slot="input.cover"><img src="x" /></template>"#;
+    let template_src = r#"<template data-slot="(ref input.cover)"><img src="x" /></template>"#;
     let graph = template::DataGraph::new();
     let html = template::render_template(template_src, &graph, template::OutputMode::Editorial).expect("should not error");
     assert!(html.is_empty() || !html.contains("img"), "{html}");
@@ -310,7 +310,7 @@ fn render_typelink_slot_produces_schema_href() {
     let mut context = template::DataGraph::new();
     context.insert("input", template::Value::Record(slot_graph));
 
-    let template_src = r#"<div><presemble:insert data="input.author" /></div>"#;
+    let template_src = r#"<div><presemble:insert data="(ref input.author)" /></div>"#;
     let html = template::render_template(template_src, &context, template::OutputMode::Editorial)
         .expect("render should succeed");
 

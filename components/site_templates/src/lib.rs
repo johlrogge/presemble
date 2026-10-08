@@ -53,7 +53,7 @@ impl SiteTemplate {
                     .map_err(|e| format!("utf8 error in {}: {e}", path_str))?;
                 let nodes = template::parse_template_hiccup(src)
                     .map_err(|e| format!("hiccup parse error in {}: {e}", path_str))?;
-                let html = serialize_nodes_preserve_presemble(&nodes);
+                let html = template::serialize_template_to_html(&nodes);
                 // Remap templates/hiccup/* → templates/*, change extension to .html
                 let remapped = path_str.replacen("templates/hiccup/", "templates/", 1);
                 let remapped_html = if remapped.ends_with(".hiccup") {
@@ -81,49 +81,6 @@ impl SiteTemplate {
             self.write_dir(subdir, target, format)?;
         }
         Ok(())
-    }
-}
-
-/// Serialize template nodes to HTML/XML, preserving presemble directive elements as XML tags.
-///
-/// Unlike `template::serialize_nodes`, which strips presemble elements (designed for final
-/// rendered output), this serializer keeps them as XML so the resulting `.html` templates
-/// can be loaded and used by the template engine.
-fn serialize_nodes_preserve_presemble(nodes: &[template::dom::Node]) -> String {
-    let mut out = String::new();
-    for node in nodes {
-        serialize_node_preserve_presemble(node, &mut out);
-    }
-    out
-}
-
-fn serialize_node_preserve_presemble(node: &template::dom::Node, out: &mut String) {
-    match node {
-        template::dom::Node::Text(text) => out.push_str(&template::html_escape_text(text)),
-        template::dom::Node::Element(el) => serialize_element_preserve_presemble(el, out),
-    }
-}
-
-fn serialize_element_preserve_presemble(el: &template::dom::Element, out: &mut String) {
-    out.push('<');
-    out.push_str(&el.name);
-    for (k, v) in &el.attrs {
-        out.push(' ');
-        out.push_str(k);
-        out.push_str("=\"");
-        out.push_str(&template::html_escape_attr(&v.to_html_value()));
-        out.push('"');
-    }
-    if el.children.is_empty() {
-        out.push_str(" />");
-    } else {
-        out.push('>');
-        for child in &el.children {
-            serialize_node_preserve_presemble(child, out);
-        }
-        out.push_str("</");
-        out.push_str(&el.name);
-        out.push('>');
     }
 }
 
@@ -906,16 +863,48 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_blog_html_content_contains_presemble_include() {
+    fn scaffold_blog_html_content_contains_the_nav_call() {
         let dir = tempfile::tempdir().unwrap();
         let t = template_by_name("blog").unwrap();
         t.scaffold(dir.path(), "html", &StyleConfig::default()).unwrap();
 
         let post_html = std::fs::read_to_string(dir.path().join("templates/post/item.html")).unwrap();
         assert!(
-            post_html.contains("presemble:include"),
-            "converted post template should contain presemble:include reference"
+            post_html.contains(r#"data="(nav input)""#),
+            "converted post template should call nav: {post_html}"
         );
+        assert!(
+            post_html.contains(r#"data="(ref input.title)""#),
+            "converted post template should write the path as an expression: {post_html}"
+        );
+    }
+
+    /// Every scaffolded template, in either format, builds as a checked
+    /// template: the HTML conversion keeps the expressions.
+    #[test]
+    fn scaffolded_html_templates_parse_back_to_the_same_expressions() {
+        for name in ["blog", "personal", "portfolio"] {
+            let hiccup_dir = tempfile::tempdir().unwrap();
+            let html_dir = tempfile::tempdir().unwrap();
+            let t = template_by_name(name).unwrap();
+            t.scaffold(hiccup_dir.path(), "hiccup", &StyleConfig::default()).unwrap();
+            t.scaffold(html_dir.path(), "html", &StyleConfig::default()).unwrap();
+            for entry in ["index", "post/item", "page/item", "project/item"] {
+                let hiccup = hiccup_dir.path().join(format!("templates/{entry}.hiccup"));
+                let html = html_dir.path().join(format!("templates/{entry}.html"));
+                if !hiccup.exists() {
+                    continue;
+                }
+                let from_hiccup =
+                    template::parse_template_hiccup(&std::fs::read_to_string(&hiccup).unwrap()).unwrap();
+                let from_html =
+                    template::parse_template_xml(&std::fs::read_to_string(&html).unwrap()).unwrap();
+                let render = |nodes: Vec<template::dom::Node>| {
+                    template::serialize_template_to_html(&nodes)
+                };
+                assert_eq!(render(from_hiccup), render(from_html), "{name}/{entry}");
+            }
+        }
     }
 
     #[test]

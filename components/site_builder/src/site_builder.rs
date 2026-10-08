@@ -473,7 +473,7 @@ mod tests {
         assert_eq!(pd.page_kind, PageKind::Collection);
     }
 
-    const TITLE_AND_LINK_TEMPLATE: &str = r#"<div><presemble:insert data="title" as="h1" /><presemble:insert data="link" /></div>"#;
+    const TITLE_AND_LINK_TEMPLATE: &str = r#"<div><presemble:insert data="(ref title)" as="h1" /><presemble:insert data="(ref link)" /></div>"#;
 
     fn render_item(attachment: SourceAttachment) -> String {
         let repo = make_repo();

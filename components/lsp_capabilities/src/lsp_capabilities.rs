@@ -5,7 +5,6 @@ use content::{
 use schema::{Element, Grammar};
 use site_index::{DIR_CONTENT, DIR_TEMPLATES};
 use std::sync::Arc;
-use template::Expr;
 
 /// A completion suggestion for a schema slot.
 #[derive(Debug, Clone)]
@@ -596,98 +595,13 @@ pub fn hover_for_line(src: &str, grammar: &Grammar, line: u32) -> Option<String>
     None
 }
 
-/// A data-path reference found in a template, with its source location.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct TemplateDataRef {
-    pub expr_src: String,
-    pub path: Vec<String>,
-    pub attr_value_start: usize,
-    pub attr_value_end: usize,
-    pub line: u32,
-    pub character: u32,
-}
-
-/// Find all occurrences of `attr_name="..."` in `src`.
-/// Returns `(start_byte, end_byte, value_str)` for each match, where start/end
-/// are the byte offsets of the content inside the quotes (excluding the quotes).
-#[allow(dead_code)]
-fn find_attr_values<'a>(src: &'a str, attr_name: &str) -> Vec<(usize, usize, &'a str)> {
-    let needle = format!("{attr_name}=\"");
-    let mut results = Vec::new();
-    let mut search_start = 0;
-
-    while let Some(rel) = src[search_start..].find(needle.as_str()) {
-        let abs = search_start + rel;
-        let value_start = abs + needle.len();
-        // Find the closing quote, scanning from value_start
-        if let Some(close_rel) = src[value_start..].find('"') {
-            let value_end = value_start + close_rel;
-            results.push((value_start, value_end, &src[value_start..value_end]));
-            search_start = value_end + 1;
-        } else {
-            break;
-        }
-    }
-
-    results
-}
-
-/// Extract the root lookup path from an `Expr`.
-/// Returns the path parts for `Lookup` and `Pipe(Lookup, _)`.
-#[allow(dead_code)]
-fn lookup_path(expr: &Expr) -> Option<Vec<String>> {
-    match expr {
-        Expr::Lookup(parts) => Some(parts.clone()),
-        Expr::Pipe(inner, _) => match inner.as_ref() {
-            Expr::Lookup(parts) => Some(parts.clone()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Scan a raw template source for data-path references in known attribute positions.
-///
-/// Scans for:
-/// - `data="..."` (presemble:insert / presemble:apply)
-/// - `data-slot="..."` (template elements)
-/// - `data-each="..."` (template elements)
-/// - `presemble:class="..."` (any element)
-#[allow(dead_code)]
-pub fn extract_template_data_refs(src: &str) -> Vec<TemplateDataRef> {
-    let attr_names = ["data", "data-slot", "data-each", "presemble:class"];
-    let mut refs = Vec::new();
-
-    for attr_name in attr_names {
-        for (start, end, value) in find_attr_values(src, attr_name) {
-            let expr_src = value.to_string();
-            let parsed = template::parse_expr(value);
-            if let Ok(expr) = parsed
-                && let Some(path) = lookup_path(&expr)
-            {
-                let (line, character) = byte_to_position(src, start);
-                refs.push(TemplateDataRef {
-                    expr_src,
-                    path,
-                    attr_value_start: start,
-                    attr_value_end: end,
-                    line,
-                    character,
-                });
-            }
-        }
-    }
-
-    refs
-}
-
 /// Given a template source, cursor position (line, char), a grammar, and content stem,
 /// return completions for data-path attributes.
 ///
-/// - If cursor is inside `data="`, `data-slot="`, `data-each="`, or `presemble:class="` value:
-///   - If no dot typed yet → offer the stem as a completion
-///   - If text starts with `{stem}.` → offer all preamble slot names
+/// - If cursor is inside a `data="`, `data-slot="` or `data-each="` value (an
+///   expression, e.g. `(ref input.`), looking at the word before the cursor:
+///   - If no dot typed yet → offer `input`
+///   - If the word starts with `input.` → offer all preamble slot names
 /// - Otherwise returns empty vec.
 pub fn template_completions(
     src: &str,
@@ -701,7 +615,7 @@ pub fn template_completions(
         None => return vec![],
     };
 
-    let attr_names = ["data", "data-slot", "data-each", "presemble:class"];
+    let attr_names = ["data", "data-slot", "data-each"];
 
     for attr_name in attr_names {
         let needle = format!("{attr_name}=\"");
@@ -721,7 +635,9 @@ pub fn template_completions(
             let cursor = cursor_char as usize;
             if cursor >= value_start_in_line && cursor <= value_end_in_line {
                 // Extract the prefix typed so far before the cursor
-                let prefix = &line_str[value_start_in_line..cursor];
+                // The word being typed: after the last `(` or space.
+                let typed = &line_str[value_start_in_line..cursor];
+                let prefix = typed.rsplit(|c: char| c == '(' || c.is_whitespace()).next().unwrap_or("");
 
                 if !prefix.contains('.') {
                     // No dot yet — offer "input"
@@ -763,8 +679,9 @@ pub fn validate_template_paths(
     src: &str,
     grammar: &schema::Grammar,
     stem: &str,
+    templates: &template::check::TemplateNames,
 ) -> Vec<PositionedDiagnostic> {
-    validation::validate_template(src, grammar, stem)
+    validation::validate_template(src, grammar, stem, templates)
         .into_iter()
         .map(|d| {
             let severity = d.severity.clone();
@@ -792,7 +709,8 @@ pub enum TemplateDefinitionTarget {
 /// Given the template source, a cursor line, and the site directory,
 /// return where the template referenced on that line is defined.
 ///
-/// Looks for `template="..."` or `src="..."` on `cursor_line`.
+/// Looks for a template call on `cursor_line`: `(name arg)`, or the first
+/// template of `(juxt name ...)`, where `name` is not a built-in function.
 /// Resolution order:
 /// 1. File-qualified (`components::card`) → `templates/components.html`
 /// 2. In-file definition (`<template presemble:define="name">` or `<template name="name">`)
@@ -804,10 +722,7 @@ pub fn template_definition(
 ) -> Option<TemplateDefinitionTarget> {
     let line = src.lines().nth(cursor_line as usize)?;
 
-    // Extract template name from `template="..."` or `src="..."`
-    let name = extract_attr_value_on_line(line, "template")
-        .or_else(|| extract_attr_value_on_line(line, "src"))?
-        .to_string();
+    let name = called_template_on_line(line)?.to_string();
 
     // 1. File-qualified names containing `::`
     if name.contains("::") {
@@ -848,6 +763,31 @@ pub fn template_definition(
         return Some(TemplateDefinitionTarget::File(flat_path));
     }
 
+    None
+}
+
+/// The name of the first template called on `line`: the head of a list that is
+/// not a built-in function, or the first name after `juxt`.
+fn called_template_on_line(line: &str) -> Option<&str> {
+    let symbols = |after: usize| {
+        line[after..]
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == '"')
+            .find(|s| !s.is_empty())
+    };
+    let mut from = 0;
+    while let Some(rel) = line[from..].find('(') {
+        let open = from + rel + 1;
+        if let Some(head) = symbols(open) {
+            if head == "juxt" {
+                let after = open + line[open..].find("juxt")? + "juxt".len();
+                return symbols(after).filter(|name| template::expression::function(name).is_none());
+            }
+            if !head.contains('=') && template::expression::function(head).is_none() {
+                return Some(head);
+            }
+        }
+        from = open;
+    }
     None
 }
 
@@ -1120,64 +1060,10 @@ mod tests {
     }
 
     #[test]
-    fn extract_data_refs_simple_lookup() {
-        let src = r#"<presemble:insert data="article.title" />"#;
-        let refs = extract_template_data_refs(src);
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].expr_src, "article.title");
-        assert_eq!(refs[0].path, vec!["article", "title"]);
-    }
-
-    #[test]
-    fn extract_data_refs_data_each() {
-        let src = r#"<div data-each="articles"><span data="item.title" /></div>"#;
-        let refs = extract_template_data_refs(src);
-        // Should find both data-each="articles" and data="item.title"
-        let each_ref = refs.iter().find(|r| r.expr_src == "articles");
-        let title_ref = refs.iter().find(|r| r.expr_src == "item.title");
-        assert!(each_ref.is_some(), "should find data-each ref: {refs:#?}");
-        assert_eq!(each_ref.unwrap().path, vec!["articles"]);
-        assert!(title_ref.is_some(), "should find data ref: {refs:#?}");
-        assert_eq!(title_ref.unwrap().path, vec!["item", "title"]);
-    }
-
-    #[test]
-    fn extract_data_refs_pipe_expression() {
-        let _src = r#"<img presemble:class="article.cover.orientation | match(landscape => &quot;cover--landscape&quot;, portrait => &quot;cover--portrait&quot;)" />"#;
-        // The value is stored literally in the attribute; we test with a simpler pipe
-        let src2 = r#"<img presemble:class="article.cover.orientation | first" />"#;
-        let refs = extract_template_data_refs(src2);
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].path, vec!["article", "cover", "orientation"]);
-    }
-
-    #[test]
-    fn extract_data_refs_positions_are_correct() {
-        // Line 0: "<presemble:insert data="article.title" />"
-        // The value "article.title" starts after `data="`
-        let src = "<presemble:insert data=\"article.title\" />";
-        let refs = extract_template_data_refs(src);
-        assert_eq!(refs.len(), 1);
-        // Line 0, character is the byte offset of the opening quote's next char
-        assert_eq!(refs[0].line, 0);
-        let expected_char = src.find("article.title").unwrap() as u32;
-        assert_eq!(refs[0].character, expected_char);
-    }
-
-    #[test]
-    fn extract_data_refs_data_slot() {
-        let src = r#"<template data-slot="article.subtitle"></template>"#;
-        let refs = extract_template_data_refs(src);
-        let slot_ref = refs.iter().find(|r| r.expr_src == "article.subtitle");
-        assert!(slot_ref.is_some(), "should find data-slot ref: {refs:#?}");
-        assert_eq!(slot_ref.unwrap().path, vec!["article", "subtitle"]);
-    }
-
-    #[test]
     fn validate_template_paths_valid_path_no_diagnostics() {
-        let src = r#"<presemble:insert data="input.title" />"#;
+        let src = r#"<presemble:insert data="(ref input.title)" />"#;
         let grammar = article_grammar();
-        let diags = validate_template_paths(src, &grammar, "article");
+        let diags = validate_template_paths(src, &grammar, "article", &no_templates());
         assert!(
             diags.is_empty(),
             "valid path input.title should produce no diagnostics: {diags:#?}"
@@ -1186,9 +1072,9 @@ mod tests {
 
     #[test]
     fn validate_template_paths_invalid_field_emits_diagnostic() {
-        let src = r#"<presemble:insert data="input.titel" />"#;
+        let src = r#"<presemble:insert data="(ref input.titel)" />"#;
         let grammar = article_grammar();
-        let diags = validate_template_paths(src, &grammar, "article");
+        let diags = validate_template_paths(src, &grammar, "article", &no_templates());
         assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:#?}");
         assert!(
             diags[0].message.contains("titel"),
@@ -1199,9 +1085,9 @@ mod tests {
 
     #[test]
     fn validate_template_paths_unknown_root_skipped() {
-        let src = r#"<presemble:insert data="site.nav" />"#;
+        let src = r#"<presemble:insert data="(ref site.nav)" />"#;
         let grammar = article_grammar();
-        let diags = validate_template_paths(src, &grammar, "article");
+        let diags = validate_template_paths(src, &grammar, "article", &no_templates());
         assert!(
             diags.is_empty(),
             "unknown root 'site' should be silently skipped: {diags:#?}"
@@ -1210,9 +1096,9 @@ mod tests {
 
     #[test]
     fn validate_template_paths_body_is_valid() {
-        let src = r#"<presemble:insert data="input.body" />"#;
+        let src = r#"<presemble:insert data="(ref input.body)" />"#;
         let grammar = article_grammar();
-        let diags = validate_template_paths(src, &grammar, "article");
+        let diags = validate_template_paths(src, &grammar, "article", &no_templates());
         assert!(
             diags.is_empty(),
             "input.body should be valid: {diags:#?}"
@@ -1221,9 +1107,9 @@ mod tests {
 
     #[test]
     fn validate_template_paths_multiple_refs_multiple_diagnostics() {
-        let src = r#"<presemble:insert data="input.titel" /><presemble:insert data="input.authr" />"#;
+        let src = r#"<presemble:insert data="(ref input.titel)" /><presemble:insert data="(ref input.authr)" />"#;
         let grammar = article_grammar();
-        let diags = validate_template_paths(src, &grammar, "article");
+        let diags = validate_template_paths(src, &grammar, "article", &no_templates());
         assert_eq!(diags.len(), 2, "expected two diagnostics: {diags:#?}");
         let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(
@@ -1237,6 +1123,38 @@ mod tests {
     }
 
     // ── The checker walks every expression (ADR-067) ─────────────────────────
+
+    fn no_templates() -> template::check::TemplateNames {
+        template::check::TemplateNames::default()
+    }
+
+    #[test]
+    fn checker_knows_the_sites_templates() {
+        let grammar = article_grammar();
+        let site = template::check::TemplateNames::new(["card", "header"]);
+        // `card` is a template of the site, defined in another file.
+        for src in [
+            "[:ul (card input.title)]",
+            r#"<presemble:insert data="(card input.title)" />"#,
+            "((juxt header card) input)",
+        ] {
+            let diags = validate_template_paths(src, &grammar, "article", &site);
+            assert!(diags.is_empty(), "{src}: {diags:#?}");
+        }
+    }
+
+    /// GUARD: a name that is no template of the site is still reported.
+    #[test]
+    fn an_unknown_template_name_is_still_reported() {
+        let grammar = article_grammar();
+        let site = template::check::TemplateNames::new(["card"]);
+        let diags = validate_template_paths("[:ul (cart input.title)]", &grammar, "article", &site);
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert!(diags[0].message.contains("cart"), "{}", diags[0].message);
+        let diags = validate_template_paths("((juxt card nothing) input)", &grammar, "article", &site);
+        assert_eq!(diags.len(), 1, "{diags:#?}");
+        assert!(diags[0].message.contains("nothing"), "{}", diags[0].message);
+    }
 
     #[test]
     fn checker_reports_unknown_paths_in_every_position() {
@@ -1256,7 +1174,7 @@ mod tests {
             r#"[:p (text input.nope)]"#,
         ];
         for src in cases {
-            let diags = validate_template_paths(src, &grammar, "article");
+            let diags = validate_template_paths(src, &grammar, "article", &no_templates());
             assert_eq!(diags.len(), 1, "{src}: {diags:#?}");
             assert!(diags[0].message.contains("nope"), "{src}: {}", diags[0].message);
             assert!(matches!(diags[0].severity, validation::Severity::Error), "{src}");
@@ -1270,7 +1188,7 @@ mod tests {
             r#"[:p (text input.title)]"#,
         ];
         for src in valid {
-            let diags = validate_template_paths(src, &grammar, "article");
+            let diags = validate_template_paths(src, &grammar, "article", &no_templates());
             assert!(diags.is_empty(), "{src}: {diags:#?}");
         }
     }
@@ -1278,19 +1196,19 @@ mod tests {
     #[test]
     fn html_literal_parenthesis_is_an_unknown_function_diagnostic() {
         let grammar = article_grammar();
-        let diags = validate_template_paths(r#"<a title="(draft)">x</a>"#, &grammar, "article");
+        let diags = validate_template_paths(r#"<a title="(draft)">x</a>"#, &grammar, "article", &no_templates());
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert!(diags[0].message.contains("unknown function"), "{}", diags[0].message);
         assert!(diags[0].message.contains("draft"), "{}", diags[0].message);
         // The literal, written as an expression, is fine.
-        let ok = validate_template_paths(r#"<a title='(ref "(draft)")'>x</a>"#, &grammar, "article");
+        let ok = validate_template_paths(r#"<a title='(ref "(draft)")'>x</a>"#, &grammar, "article", &no_templates());
         assert!(ok.is_empty(), "{ok:#?}");
     }
 
     #[test]
     fn unbalanced_parenthesis_attribute_warns() {
         let grammar = article_grammar();
-        let diags = validate_template_paths(r#"<a title="(draft">x</a>"#, &grammar, "article");
+        let diags = validate_template_paths(r#"<a title="(draft">x</a>"#, &grammar, "article", &no_templates());
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert!(matches!(diags[0].severity, validation::Severity::Warning), "{diags:#?}");
     }
@@ -1302,16 +1220,17 @@ mod tests {
             r#"<presemble:insert data="(text input.title input.title)" />"#,
             &grammar,
             "article",
+            &no_templates(),
         );
         assert_eq!(arity.len(), 1, "{arity:#?}");
         assert!(arity[0].message.contains("arguments"), "{}", arity[0].message);
 
         // `input.author` is a link slot: a record, not text.
-        let record = validate_template_paths(r#"<a href="(ref input.author)">x</a>"#, &grammar, "article");
+        let record = validate_template_paths(r#"<a href="(ref input.author)">x</a>"#, &grammar, "article", &no_templates());
         assert_eq!(record.len(), 1, "{record:#?}");
         assert!(record[0].message.contains("input.author"), "{}", record[0].message);
         // Naming a field of the record is fine.
-        let field = validate_template_paths(r#"<a href="(ref input.author.href)">x</a>"#, &grammar, "article");
+        let field = validate_template_paths(r#"<a href="(ref input.author.href)">x</a>"#, &grammar, "article", &no_templates());
         assert!(field.is_empty(), "{field:#?}");
     }
 
@@ -1320,7 +1239,7 @@ mod tests {
         let grammar = article_grammar();
         let src = r#"[:template {:presemble/define "body"} [:p "b"]]
                      [:body ((juxt self/body self/nothing) input)]"#;
-        let diags = validate_template_paths(src, &grammar, "article");
+        let diags = validate_template_paths(src, &grammar, "article", &no_templates());
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert!(diags[0].message.contains("nothing"), "{}", diags[0].message);
     }
@@ -1333,9 +1252,9 @@ mod tests {
     }
 
     #[test]
-    fn template_definition_apply_resolves_to_file() {
+    fn template_definition_call_resolves_to_file() {
         // `header` template exists as fixtures/blog-site/templates/header.html
-        let src = r#"<presemble:apply template="header" />"#;
+        let src = r#"<presemble:insert data="(header input)" />"#;
         let site_dir = blog_site_dir();
         let result = template_definition(src, 0, &site_dir);
         match result {
@@ -1350,10 +1269,10 @@ mod tests {
     }
 
     #[test]
-    fn template_definition_apply_inline_definition_resolves_infile() {
+    fn template_definition_call_inline_definition_resolves_infile() {
         // Template defined inline in the same source
         let src = concat!(
-            "<presemble:apply template=\"feature-card\" />\n",
+            "<presemble:insert data=\"(feature-card input)\" />\n",
             "<template presemble:define=\"feature-card\">\n",
             "  <div>card</div>\n",
             "</template>\n",
@@ -1370,9 +1289,9 @@ mod tests {
     }
 
     #[test]
-    fn template_definition_include_src_resolves_to_file() {
+    fn template_definition_juxt_resolves_the_first_template() {
         // `footer` template exists as fixtures/blog-site/templates/footer.html
-        let src = r#"<presemble:include src="footer" />"#;
+        let src = r#"<presemble:insert data="((juxt footer header) input)" />"#;
         let site_dir = blog_site_dir();
         let result = template_definition(src, 0, &site_dir);
         match result {
@@ -1389,7 +1308,7 @@ mod tests {
     #[test]
     fn template_definition_no_match_returns_none() {
         // No template with this name exists
-        let src = r#"<presemble:apply template="nonexistent-template-xyz" />"#;
+        let src = r#"<presemble:insert data="(nonexistent-template-xyz input)" />"#;
         let site_dir = blog_site_dir();
         let result = template_definition(src, 0, &site_dir);
         assert!(result.is_none(), "nonexistent template should return None");
@@ -1480,6 +1399,21 @@ mod tests {
             !completions.is_empty(),
             "data-each attribute should also produce slot completions: {completions:#?}"
         );
+    }
+
+    #[test]
+    fn template_completions_look_at_the_word_inside_an_expression() {
+        let grammar = article_grammar();
+        let src = r#"<a href="(ref input.">x</a><presemble:insert data="(text input." />"#;
+        // The first attribute (`href`) is no completion site; the insert is.
+        let cursor_char = src.rfind("input.").unwrap() as u32 + "input.".len() as u32;
+        let completions = template_completions(src, 0, cursor_char, &grammar, "article");
+        assert!(completions.iter().any(|c| c.label == "title"), "{completions:#?}");
+        let after_paren = r#"<presemble:insert data="(" />"#;
+        let cursor_char = after_paren.find("(\"").unwrap() as u32 + 1;
+        let offered = template_completions(after_paren, 0, cursor_char, &grammar, "article");
+        assert_eq!(offered.len(), 1, "{offered:#?}");
+        assert_eq!(offered[0].label, "input");
     }
 
     // --- schema_completions tests ---

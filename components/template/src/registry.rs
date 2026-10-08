@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn extract_definitions_leaves_data_each_intact() {
         use crate::dom::parse_template_xml;
-        let src = r#"<template data-each="features"><li>item</li></template>"#;
+        let src = r#"<template data-each="(ref features)"><li>item</li></template>"#;
         let nodes = parse_template_xml(src).unwrap();
         let (stripped, defs) = extract_definitions(nodes);
         assert_eq!(stripped.len(), 1, "data-each template should stay in tree");

@@ -25,7 +25,7 @@ mod tests {
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
 
     const POST_TEMPLATE_SRC: &str =
-        r#"<html><body><presemble:insert data="post.title" as="h1"></presemble:insert></body></html>"#;
+        r#"<html><body><presemble:insert data="(ref post.title)" as="h1"></presemble:insert></body></html>"#;
 
     fn sp(s: &str) -> editorial_types::SitePath {
         editorial_types::SitePath::parse(s).expect("a valid site path")
@@ -737,6 +737,30 @@ mod tests {
     }
 
     #[test]
+    fn list_template_names_returns_the_sites_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = dir.path().join("templates");
+        std::fs::create_dir_all(templates.join("post")).unwrap();
+        std::fs::create_dir_all(templates.join("docs")).unwrap();
+        std::fs::write(templates.join("header.hiccup"), "[:header]").unwrap();
+        std::fs::write(templates.join("footer.html"), "<footer></footer>").unwrap();
+        std::fs::write(templates.join("index.hiccup"), "[:main]").unwrap();
+        std::fs::write(templates.join("post/item.hiccup"), "[:article]").unwrap();
+        // A collection template alone is no template one can call by name.
+        std::fs::write(templates.join("docs/index.hiccup"), "[:main]").unwrap();
+        std::fs::write(templates.join("notes.txt"), "not a template").unwrap();
+
+        let repo = site_repository::SiteRepository::builder().build();
+        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
+        match conductor.handle_command(Command::ListTemplateNames).response {
+            Response::TemplateNames(names) => {
+                assert_eq!(names, vec!["footer", "header", "index", "post"]);
+            }
+            other => panic!("expected TemplateNames, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn list_dependents_returns_files_for_known_stem() {
         let (_dir, conductor) = two_post_conductor();
         let result = conductor.handle_command(Command::ListDependents {
@@ -851,7 +875,7 @@ mod tests {
         std::fs::create_dir_all(&tpl_dir).unwrap();
         std::fs::write(
             tpl_dir.join("item.html"),
-            r#"<html><body><presemble:insert data="input.title" as="h1"></presemble:insert></body></html>"#,
+            r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#,
         )
         .unwrap();
 
@@ -963,7 +987,7 @@ mod tests {
         let store_view = NodeStoreView::new(&store, root);
         let prefixed = PrefixedGraphView::new("input".to_string(), store_view);
 
-        let template_src = r#"<h1><presemble:insert data="input.title" /></h1>"#;
+        let template_src = r#"<h1><presemble:insert data="(ref input.title)" /></h1>"#;
         let nodes = template::parse_template_xml(template_src).expect("template parse");
         let reg = template::NullRegistry;
         let ctx = template::RenderContext::editorial(&reg);

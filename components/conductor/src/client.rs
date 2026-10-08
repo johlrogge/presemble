@@ -111,6 +111,15 @@ impl ConductorClient {
         }
     }
 
+    /// The names of the site's templates, for the template checker.
+    pub fn list_template_names(&self) -> Result<Vec<String>, String> {
+        match self.send(&Command::ListTemplateNames)? {
+            Response::TemplateNames(names) => Ok(names),
+            Response::Error(e) => Err(e),
+            other => Err(format!("unexpected response: {other:?}")),
+        }
+    }
+
     /// List files that depend on a given schema stem.
     pub fn list_dependents(&self, stem: &str) -> Result<Vec<DependentFile>, String> {
         match self.send(&Command::ListDependents { stem: stem.to_string() })? {

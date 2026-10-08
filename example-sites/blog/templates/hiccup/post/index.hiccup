@@ -1,12 +1,12 @@
 [:template {:presemble/define "body"}
   [:main
-    [:presemble/include {:src "nav"}]
-    [:presemble/insert {:data "input.title" :as "h1"}]
+    (nav input)
+    [:presemble/insert {:data input.title :as "h1"}]
     [:ul
-      [:template {:data-each "input.post"}
+      [:template {:data-each input.post}
         [:li
-          [:presemble/insert {:data "item.link" :as "h2"}]
-          [:presemble/insert {:data "item.summary" :as "p"}]]]]]]
+          [:presemble/insert {:data item.link :as "h2"}]
+          [:presemble/insert {:data item.summary :as "p"}]]]]]]
 
 [:html {:lang "en"}
   [:head

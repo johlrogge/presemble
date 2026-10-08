@@ -1,14 +1,14 @@
 ;; Local template definition for the docs hub body
 [:template {:presemble/define "body"}
   [:main {:class "docs"}
-    [:presemble/insert {:data "input.title" :as "h1"}]
-    [:presemble/insert {:data "input.description" :as "p"}]
+    [:presemble/insert {:data input.title :as "h1"}]
+    [:presemble/insert {:data input.description :as "p"}]
     [:ul {:class "docs__cards"}
-      [:template {:data-each "input.guide"}
+      [:template {:data-each input.guide}
         [:li
-          [:presemble/insert {:data "item.title" :as "h2"}]
-          [:presemble/insert {:data "item.summary" :as "p"}]
-          [:presemble/insert {:data "item.link"}]]]]]]
+          [:presemble/insert {:data item.title :as "h2"}]
+          [:presemble/insert {:data item.summary :as "p"}]
+          [:presemble/insert {:data item.link}]]]]]]
 
 ;; Main template: juxt composes header + local body + footer
 [:html {:lang "en"}

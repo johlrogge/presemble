@@ -246,6 +246,50 @@ fn serialize_node(node: &Node, out: &mut String) {
     }
 }
 
+/// Serialize template nodes as an HTML template: unlike [`serialize_nodes`] the
+/// `presemble:*` elements are kept, and an expression is written in full
+/// (`(ref p)` for the hiccup shorthand `p`).
+pub fn serialize_template_to_html(nodes: &[Node]) -> String {
+    let mut out = String::new();
+    for node in nodes {
+        serialize_template_node(node, &mut out);
+    }
+    out
+}
+
+fn serialize_template_node(node: &Node, out: &mut String) {
+    match node {
+        Node::Text(text) => out.push_str(&html_escape_text(text)),
+        Node::Element(el) => {
+            out.push('<');
+            out.push_str(&el.name);
+            for (k, v) in &el.attrs {
+                out.push(' ');
+                out.push_str(k);
+                let value = match v {
+                    // The hiccup shorthand for `(ref p)`.
+                    Form::Symbol(s) => format!("(ref {s})"),
+                    other => other.to_html_value(),
+                };
+                out.push_str("=\"");
+                out.push_str(&html_escape_attr(&value));
+                out.push('"');
+            }
+            if el.children.is_empty() && (el.is_presemble() || is_void_element(&el.name)) {
+                out.push_str(" />");
+            } else {
+                out.push('>');
+                for child in &el.children {
+                    serialize_template_node(child, out);
+                }
+                out.push_str("</");
+                out.push_str(&el.name);
+                out.push('>');
+            }
+        }
+    }
+}
+
 pub fn html_escape_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -447,51 +491,6 @@ fn extract_asset_paths_recursive(nodes: &[Node], found: &mut std::collections::H
     }
 }
 
-/// Extract the names of templates referenced via `<presemble:include src="...">` elements.
-///
-/// Walks the node tree recursively. For each `presemble:include` element, extracts the `src`
-/// attribute and normalises it to a file stem:
-/// - If `src` contains `"::"`, takes the part before `"::"` as the file path portion and
-///   extracts the file stem (without extension), stripping any leading `"templates/"` prefix.
-/// - If `src` has no `"::"`, uses it as-is (already a stem).
-///
-/// Returns a deduplicated, sorted list of template stems.
-pub fn extract_include_names(nodes: &[Node]) -> Vec<String> {
-    let mut found = std::collections::HashSet::new();
-    extract_include_names_recursive(nodes, &mut found);
-    let mut result: Vec<String> = found.into_iter().collect();
-    result.sort();
-    result
-}
-
-fn extract_include_names_recursive(nodes: &[Node], found: &mut std::collections::HashSet<String>) {
-    for node in nodes {
-        if let Node::Element(el) = node {
-            if el.name == crate::constants::ELEM_INCLUDE
-                && let Some(src) = el.attr("src")
-            {
-                let stem = if let Some(pos) = src.find("::") {
-                    let file_part = &src[..pos];
-                    // Strip leading "templates/" if present
-                    let file_part = file_part.strip_prefix("templates/").unwrap_or(file_part);
-                    // Extract file stem (drop extension)
-                    std::path::Path::new(file_part)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                } else {
-                    Some(src.to_string())
-                };
-                if let Some(s) = stem {
-                    found.insert(s);
-                }
-            }
-            // Recurse into children for all elements
-            extract_include_names_recursive(&el.children, found);
-        }
-    }
-}
-
 /// Remove text nodes that consist entirely of whitespace.
 /// Recurses into element children.
 pub fn strip_whitespace_text_nodes(nodes: Vec<Node>) -> Vec<Node> {
@@ -515,48 +514,6 @@ pub fn strip_whitespace_text_nodes(nodes: Vec<Node>) -> Vec<Node> {
         .collect()
 }
 
-/// Extract the names of template files referenced via `<presemble:apply template="...">` elements.
-///
-/// Only file-qualified names (containing "::") contribute a file stem — bare names resolve from
-/// local definitions and do not correspond to a file. Results are deduplicated and sorted.
-pub fn extract_apply_template_names(nodes: &[Node]) -> Vec<String> {
-    let mut found = std::collections::HashSet::new();
-    extract_apply_template_names_recursive(nodes, &mut found);
-    let mut result: Vec<String> = found.into_iter().collect();
-    result.sort();
-    result
-}
-
-fn extract_apply_template_names_recursive(
-    nodes: &[Node],
-    found: &mut std::collections::HashSet<String>,
-) {
-    for node in nodes {
-        if let Node::Element(el) = node {
-            if el.name == crate::constants::ELEM_APPLY
-                && let Some(template_attr) = el.attr("template")
-            {
-                // Only file-qualified names (with "::") contribute a file stem
-                if let Some(pos) = template_attr.find("::") {
-                    let file_part = &template_attr[..pos];
-                    // Strip leading "templates/" if present
-                    let file_part = file_part.strip_prefix("templates/").unwrap_or(file_part);
-                    // Extract file stem (drop extension)
-                    if let Some(stem) = std::path::Path::new(file_part)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                    {
-                        found.insert(stem.to_string());
-                    }
-                }
-                // Bare names contribute nothing — they resolve from local defs
-            }
-            // Recurse into children for all elements
-            extract_apply_template_names_recursive(&el.children, found);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,12 +528,18 @@ mod tests {
 
     #[test]
     fn self_closing_presemble_element() {
-        let src = r#"<presemble:insert data="article.title" as="h1" />"#;
+        let src = r#"<presemble:insert data="(ref article.title)" as="h1" />"#;
         let nodes = parse_template_xml(src).unwrap();
         assert_eq!(nodes.len(), 1);
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:insert");
-            assert_eq!(el.attr("data"), Some("article.title"));
+            assert_eq!(
+                el.attr_form("data"),
+                Some(&Form::List(vec![
+                    Form::Symbol("ref".to_string()),
+                    Form::Symbol("article.title".to_string()),
+                ]))
+            );
             assert_eq!(el.attr("as"), Some("h1"));
             assert!(el.is_presemble());
         } else {
@@ -586,7 +549,7 @@ mod tests {
 
     #[test]
     fn namespace_prefix_preserved() {
-        let src = r#"<presemble:insert data="article.cover"></presemble:insert>"#;
+        let src = r#"<presemble:insert data="(ref article.cover)"></presemble:insert>"#;
         let nodes = parse_template_xml(src).unwrap();
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(el.name, "presemble:insert");
@@ -672,7 +635,7 @@ mod tests {
 
     #[test]
     fn extract_asset_paths_ignores_presemble_elements() {
-        let src = r#"<presemble:insert data="feature.cover" src="/assets/icon.svg" />"#;
+        let src = r#"<presemble:insert data="(ref feature.cover)" src="/assets/icon.svg" />"#;
         let nodes = parse_template_xml(src).unwrap();
         assert!(extract_asset_paths(&nodes).is_empty());
     }
@@ -701,76 +664,6 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let out = serialize_nodes(&nodes);
         assert!(out.contains("&lt;presemble:insert"), "presemble tag must be escaped in output: {out}");
-    }
-
-    #[test]
-    fn extract_include_names_bare_name() {
-        let src = r#"<presemble:include src="header" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert_eq!(extract_include_names(&nodes), vec!["header"]);
-    }
-
-    #[test]
-    fn extract_include_names_file_qualified() {
-        let src = r#"<presemble:include src="common::card" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert_eq!(extract_include_names(&nodes), vec!["common"]);
-    }
-
-    #[test]
-    fn extract_include_names_templates_prefix() {
-        let src = r#"<presemble:include src="templates/common::hero" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert_eq!(extract_include_names(&nodes), vec!["common"]);
-    }
-
-    #[test]
-    fn extract_include_names_deduplication() {
-        let src = r#"<div><presemble:include src="header" /><presemble:include src="header" /></div>"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert_eq!(extract_include_names(&nodes), vec!["header"]);
-    }
-
-    #[test]
-    fn extract_include_names_no_src_attr() {
-        let src = r#"<presemble:include />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert!(extract_include_names(&nodes).is_empty());
-    }
-
-    #[test]
-    fn extract_apply_template_names_bare_name_contributes_nothing() {
-        let src = r#"<presemble:apply template="feature-card" data="item" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert!(extract_apply_template_names(&nodes).is_empty(), "bare names should not contribute file stems");
-    }
-
-    #[test]
-    fn extract_apply_template_names_file_qualified() {
-        let src = r#"<presemble:apply template="components::card" data="item" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert_eq!(extract_apply_template_names(&nodes), vec!["components"]);
-    }
-
-    #[test]
-    fn extract_apply_template_names_templates_prefix() {
-        let src = r#"<presemble:apply template="templates/components::card" data="item" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert_eq!(extract_apply_template_names(&nodes), vec!["components"]);
-    }
-
-    #[test]
-    fn extract_apply_template_names_deduplicates() {
-        let src = r#"<div><presemble:apply template="components::card" data="a" /><presemble:apply template="components::hero" data="b" /></div>"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert_eq!(extract_apply_template_names(&nodes), vec!["components"]);
-    }
-
-    #[test]
-    fn extract_apply_template_names_no_template_attr() {
-        let src = r#"<presemble:apply data="item" />"#;
-        let nodes = parse_template_xml(src).unwrap();
-        assert!(extract_apply_template_names(&nodes).is_empty());
     }
 
     #[test]

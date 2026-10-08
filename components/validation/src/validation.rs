@@ -263,82 +263,28 @@ pub fn validate_schema(src: &str) -> Vec<Diagnostic> {
 ///
 /// Only validates paths whose root segment matches `stem`. Paths with a different root
 /// (e.g. `site.*`, `item.*`) are silently skipped.
-pub fn validate_template(src: &str, grammar: &Grammar, stem: &str) -> Vec<Diagnostic> {
-    let attr_names = ["data", "data-slot", "data-each", "presemble:class"];
-    let mut diagnostics = Vec::new();
-
-    for attr_name in attr_names {
-        let needle = format!("{attr_name}=\"");
-        let mut search_start = 0;
-
-        while let Some(rel) = src[search_start..].find(needle.as_str()) {
-            let abs = search_start + rel;
-            let value_start = abs + needle.len();
-            match src[value_start..].find('"') {
-                Some(close_rel) => {
-                    let value_end = value_start + close_rel;
-                    let value = &src[value_start..value_end];
-
-                    if let Ok(expr) = template::parse_expr(value)
-                        && let Some(path) = lookup_path(&expr)
-                        && !path.is_empty()
-                        && path[0] == "input"
-                        && path.len() >= 2
-                    {
-                        let field = &path[1];
-                        let valid_slot = grammar
-                            .preamble
-                            .iter()
-                            .any(|s| s.name.as_str() == field.as_str());
-                        let valid_body = field == "body" && grammar.body.is_some();
-
-                        if !valid_slot && !valid_body {
-                            diagnostics.push(Diagnostic {
-                                severity: Severity::Error,
-                                message: format!(
-                                    "unknown field '{}' in {} schema",
-                                    field, stem
-                                ),
-                                slot: Some(SlotName::new(field.clone())),
-                                span: Some(value_start..value_end),
-                            });
-                        }
-                    }
-
-                    search_start = value_end + 1;
-                }
-                None => break,
-            }
-        }
-    }
-
+pub fn validate_template(
+    src: &str,
+    grammar: &Grammar,
+    stem: &str,
+    templates: &template::check::TemplateNames,
+) -> Vec<Diagnostic> {
     // Every expression in every position, in either syntax (ADR-067).
-    for found in template::check::check_template(src, grammar, stem) {
-        let span = src.find(&found.snippet).map(|start| start..start + found.snippet.len());
-        diagnostics.push(Diagnostic {
-            severity: match found.level {
-                template::check::Level::Error => Severity::Error,
-                template::check::Level::Warning => Severity::Warning,
-            },
-            message: found.message,
-            slot: None,
-            span,
-        });
-    }
-
-    diagnostics
-}
-
-/// Extract the root lookup path from a template expression.
-fn lookup_path(expr: &template::Expr) -> Option<Vec<String>> {
-    match expr {
-        template::Expr::Lookup(parts) => Some(parts.clone()),
-        template::Expr::Pipe(inner, _) => match inner.as_ref() {
-            template::Expr::Lookup(parts) => Some(parts.clone()),
-            _ => None,
-        },
-        _ => None,
-    }
+    template::check::check_template(src, grammar, stem, templates)
+        .into_iter()
+        .map(|found| {
+            let span = src.find(&found.snippet).map(|start| start..start + found.snippet.len());
+            Diagnostic {
+                severity: match found.level {
+                    template::check::Level::Error => Severity::Error,
+                    template::check::Level::Warning => Severity::Warning,
+                },
+                message: found.message,
+                slot: found.slot.map(SlotName::new),
+                span,
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -584,11 +530,15 @@ mod tests {
 
     // ── validate_template ───────────────────────────────────────────────────
 
+    fn no_templates() -> template::check::TemplateNames {
+        template::check::TemplateNames::default()
+    }
+
     #[test]
     fn validate_template_valid_data_paths_returns_empty() {
         let src = include_str!("../../../fixtures/blog-site/templates/article/item.html");
         let grammar = article_grammar();
-        let diagnostics = validate_template(src, &grammar, "article");
+        let diagnostics = validate_template(src, &grammar, "article", &no_templates());
         assert!(
             diagnostics.is_empty(),
             "expected no diagnostics for valid template, got: {:#?}",
@@ -598,9 +548,9 @@ mod tests {
 
     #[test]
     fn validate_template_unknown_field_returns_error_with_span() {
-        let src = r#"<div data="input.nonexistent_field"></div>"#;
+        let src = r#"<div data="(ref input.nonexistent_field)"></div>"#;
         let grammar = article_grammar();
-        let diagnostics = validate_template(src, &grammar, "article");
+        let diagnostics = validate_template(src, &grammar, "article", &no_templates());
 
         assert!(
             !diagnostics.is_empty(),
@@ -622,9 +572,9 @@ mod tests {
     #[test]
     fn validate_template_unknown_root_stem_is_skipped() {
         // `site.*` is a different root — should produce no diagnostics (not "input").
-        let src = r#"<div data="site.title"></div>"#;
+        let src = r#"<div data="(ref site.title)"></div>"#;
         let grammar = article_grammar();
-        let diagnostics = validate_template(src, &grammar, "article");
+        let diagnostics = validate_template(src, &grammar, "article", &no_templates());
         assert!(
             diagnostics.is_empty(),
             "paths with a different root should be skipped, got: {:#?}",
@@ -634,9 +584,9 @@ mod tests {
 
     #[test]
     fn validate_template_body_reference_is_valid() {
-        let src = r#"<div data="input.body"></div>"#;
+        let src = r#"<div data="(ref input.body)"></div>"#;
         let grammar = article_grammar();
-        let diagnostics = validate_template(src, &grammar, "article");
+        let diagnostics = validate_template(src, &grammar, "article", &no_templates());
         assert!(
             diagnostics.is_empty(),
             "input.body should be valid, got: {:#?}",

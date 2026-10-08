@@ -850,7 +850,7 @@ fn convert_template(input: &Path, to: &str, output: Option<&Path>) -> Result<(),
             };
             template::serialize_to_hiccup(&cleaned)
         }
-        "html" => template::serialize_nodes(&nodes),
+        "html" => template::serialize_template_to_html(&nodes),
         _ => return Err(CliError::Render(format!("unknown target format: {to}"))),
     };
 

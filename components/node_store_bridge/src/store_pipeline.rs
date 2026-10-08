@@ -1045,7 +1045,7 @@ mod tests {
         let view = crate::NodeStoreView::new(&store, index);
         let prefixed = crate::PrefixedGraphView::new("input".to_string(), view);
         let nodes = template::parse_template_xml(
-            r#"<ul><template data-each="input.post"><presemble:insert data="item.title" as="li" /></template></ul>"#,
+            r#"<ul><template data-each="(ref input.post)"><presemble:insert data="(ref item.title)" as="li" /></template></ul>"#,
         )
         .unwrap();
         let reg = template::NullRegistry;
