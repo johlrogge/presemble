@@ -573,7 +573,10 @@ impl Conductor {
             | NedMutation::InsertBefore(trees)
             | NedMutation::InsertAfter(trees)
             | NedMutation::SetInlines(trees) => trees.iter().any(|tree| holds_kind(tree, kind)),
-            NedMutation::SetText(_) | NedMutation::SearchReplace { .. } | NedMutation::Delete => false,
+            NedMutation::SetText(_)
+            | NedMutation::SearchReplace { .. }
+            | NedMutation::SetComments { .. }
+            | NedMutation::Delete => false,
         };
         if payload {
             return true;

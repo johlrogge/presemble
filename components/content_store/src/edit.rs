@@ -12,7 +12,7 @@ use std::fmt;
 use content::inline::{InlineContext, InlinePath, Inlines, SearchReplaceError};
 use content::{ContentElement, RoundTripError, Spacing, check_block_round_trip};
 use editorial_types::{PlanFailure, StaleCause};
-pub use editorial_types::{NedMutation, TargetKind};
+pub use editorial_types::{CommentPlace, NedMutation, TargetKind};
 use ned::{NodeTree, Selection};
 use node_store::{Node, NodeId, NodeStore};
 
@@ -329,6 +329,8 @@ pub enum EditError {
     InlinesNotWritable,
     /// The edit would leave a paragraph with no content (ADR-059 L22).
     EmptiesParagraph,
+    /// A comment that is not an HTML comment (`<!-- … -->`).
+    InvalidComment(String),
     NoChange,
 }
 
@@ -353,6 +355,9 @@ impl fmt::Display for EditError {
             }
             EditError::EmptiesParagraph => {
                 f.write_str("this would leave the paragraph empty; delete it instead")
+            }
+            EditError::InvalidComment(text) => {
+                write!(f, "not an HTML comment: {text}")
             }
             EditError::NoChange => StaleCause::NoChange.fmt(f),
         }
@@ -390,7 +395,8 @@ pub struct PreparedEdit {
 impl PreparedEdit {
     /// The node this edit writes under. SetText and SearchReplace: the owning
     /// block. Replace and Delete: the target block. InsertBefore and
-    /// InsertAfter: the anchor. InsertChild: the container.
+    /// InsertAfter: the anchor. InsertChild: the container. SetComments: the
+    /// host of the comments (the block, or the container).
     pub fn footprint(&self) -> NodeId {
         self.footprint
     }
@@ -409,6 +415,8 @@ enum Change {
     /// Replace the children of an inline container with `inlines`.
     SetInlines { container: NodeId, inlines: Inlines },
     Delete { block: NodeId },
+    /// Replace the comments of `host` under the trivia attribute `attr`.
+    SetComments { host: NodeId, attr: &'static str, comments: Vec<String> },
     Replace { block: NodeId, container: NodeId, blocks: Vec<ContentElement> },
     InsertBefore { anchor: NodeId, container: NodeId, blocks: Vec<ContentElement> },
     InsertAfter { anchor: NodeId, container: NodeId, blocks: Vec<ContentElement> },
@@ -497,6 +505,18 @@ pub fn prepare(
         (NedMutation::InsertChild(trees), Target::Container { container, .. }) => {
             (container, Change::InsertChild { container, blocks: decode_payload(trees)? })
         }
+        (
+            NedMutation::SetComments { place: CommentPlace::Before, comments },
+            Target::Block { block, .. },
+        ) => {
+            return prepare_comments(store, block, ned::trivia::ATTR_TRIVIA_BEFORE, comments, document);
+        }
+        (
+            NedMutation::SetComments { place: CommentPlace::End, comments },
+            Target::Container { container, .. },
+        ) => {
+            return prepare_comments(store, container, ned::trivia::ATTR_TRIVIA_END, comments, document);
+        }
         (mutation, target) => {
             return Err(EditError::TargetMismatch {
                 expected: mutation.target_kind(),
@@ -505,6 +525,36 @@ pub fn prepare(
         }
     };
     Ok(PreparedEdit { footprint, document, change })
+}
+
+/// `SetComments`: every string must be an HTML comment, and the list must
+/// differ from what `host` holds under `attr`. The footprint is the host, so
+/// a step that replaces or deletes it, or sets its comments again, overlaps.
+fn prepare_comments(
+    store: &NodeStore,
+    host: NodeId,
+    attr: &'static str,
+    comments: &[String],
+    document: NodeId,
+) -> Result<PreparedEdit, EditError> {
+    if let Some(bad) = comments.iter().find(|c| content::Comment::new(c).is_none()) {
+        return Err(EditError::InvalidComment(bad.clone()));
+    }
+    let current: Vec<String> = ned::trivia::trivia_texts(store, host, attr)
+        .into_iter()
+        .filter_map(|t| match store.get(t) {
+            Some(Node::Text(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    if current == comments {
+        return Err(EditError::NoChange);
+    }
+    Ok(PreparedEdit {
+        footprint: host,
+        document,
+        change: Change::SetComments { host, attr, comments: comments.to_vec() },
+    })
 }
 
 fn is_inline_container(store: &NodeStore, block: NodeId) -> bool {
@@ -701,6 +751,18 @@ fn write(store: &mut NodeStore, change: Change) {
                 delete(store, child);
             }
             inlines_to_store(store, container, &inlines);
+        }
+        Change::SetComments { host, attr, comments } => {
+            // What was there goes, trivia element included; the new list is
+            // written fresh.
+            if let Some(trivia) = ned::trivia::trivia_element(store, host, attr) {
+                for text in store.children(trivia) {
+                    store.remove_node(text);
+                }
+                store.remove_node(trivia);
+            }
+            let comments: Vec<&str> = comments.iter().map(String::as_str).collect();
+            crate::block::add_trivia(store, host, attr, &comments);
         }
         Change::Delete { block } => {
             let parent = element_parent(store, block);
@@ -1180,6 +1242,14 @@ pub fn execute(store: &mut NodeStore, plan: Plan) -> Result<Executed, PlanError>
 
 /// Two footprints overlap when they are the same node, or one is an ancestor
 /// of the other.
+///
+/// This is deliberately conservative for comments. A comment edit's footprint
+/// is its host, so a container's end comments and the comments before one of
+/// its blocks never share a host, yet the two are not independent: deleting a
+/// container's last block moves that block's leading comments into the
+/// container's `_trivia-end`, and deleting any other block moves them to the
+/// next block's `_trivia-before`. Treating a container and everything inside it
+/// as one footprint keeps a plan from depending on which of its steps ran first.
 fn footprints_overlap(store: &NodeStore, a: NodeId, b: NodeId) -> bool {
     a == b || is_ancestor(store, a, b) || is_ancestor(store, b, a)
 }

@@ -114,6 +114,21 @@ pub enum NedMutation {
     InsertAfter(Vec<NodeTree>),
     /// Delete the single addressed block.
     Delete,
+    /// Replace the comments at `place` of the single addressed node with
+    /// these. Each string is one HTML comment (`<!-- … -->`, or several in a
+    /// row): anything else is refused.
+    SetComments { place: CommentPlace, comments: Vec<String> },
+}
+
+/// Where the comments of a [`NedMutation::SetComments`] sit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommentPlace {
+    /// The comments directly before a block (`_trivia-before`). Any block,
+    /// a blockquote included.
+    Before,
+    /// The comments after a container's last block (`_trivia-end`): body,
+    /// slot, unassigned, blockquote or item.
+    End,
 }
 
 /// The kind of node a [`NedMutation`]'s selection must resolve to.
@@ -153,6 +168,8 @@ impl NedMutation {
             | NedMutation::InsertBefore(_)
             | NedMutation::InsertAfter(_) => TargetKind::Block,
             NedMutation::InsertChild(_) => TargetKind::Container,
+            NedMutation::SetComments { place: CommentPlace::Before, .. } => TargetKind::Block,
+            NedMutation::SetComments { place: CommentPlace::End, .. } => TargetKind::Container,
         }
     }
 }
@@ -457,6 +474,7 @@ pub fn validate_no_existing(m: &NedMutation) -> Result<(), String> {
     match m {
         NedMutation::SetText(_)
         | NedMutation::SearchReplace { .. }
+        | NedMutation::SetComments { .. }
         | NedMutation::Delete => Ok(()),
         NedMutation::Replace(trees)
         | NedMutation::InsertChild(trees)

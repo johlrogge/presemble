@@ -904,6 +904,66 @@ mod tests {
         assert_eq!(back.comments.len(), 4);
     }
 
+    /// LSP-2 2.1: comments set through NED are written by a save, in the right
+    /// place, and read back as the same comments: a block's before it, a
+    /// container's at its end.
+    #[test]
+    fn set_comments_round_trips_through_a_save() {
+        use content_store::edit::{CommentPlace, NedMutation, Plan, PlannedMutation, execute};
+        let src = "# Title\n\nSummary.\n\n----\n\nOne.\n\nTwo.\n";
+        let doc = trivia_doc(src);
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let blocks = store.children(body);
+        let set = |id, place, texts: &[&str], origin| PlannedMutation {
+            targets: ned::Selection::single(id),
+            mutation: NedMutation::SetComments {
+                place,
+                comments: texts.iter().map(|t| t.to_string()).collect(),
+            },
+            origin,
+        };
+        // A container and a block inside it overlap (the container is an
+        // ancestor), so they are two plans.
+        let plan: Plan = [set(
+            blocks[1],
+            CommentPlace::Before,
+            &["<!-- before two -->", "<!-- also -->"],
+            "ned/set-comments-before",
+        )]
+        .into_iter()
+        .collect();
+        execute(&mut store, plan).expect("applies");
+        let plan: Plan =
+            [set(body, CommentPlace::End, &["<!-- the end -->"], "ned/set-end-comments")]
+                .into_iter()
+                .collect();
+        execute(&mut store, plan).expect("applies");
+
+        let saved = serialize_from_store(&store, root).expect("serialises");
+        assert_eq!(
+            saved,
+            "# Title\n\nSummary.\n\n----\n\nOne.\n\n<!-- before two -->\n\n<!-- also -->\n\nTwo.\n\n<!-- the end -->\n"
+        );
+        // Read back, the comments are the same ones in the same places.
+        let again = trivia_doc(&saved);
+        let mut store2 = NodeStore::new();
+        let root2 = document_to_store(&again, &mut store2, None);
+        let body2 = find_child_by_name(&store2, root2, "body").unwrap();
+        let blocks2 = store2.children(body2);
+        assert_eq!(
+            comment_texts(&store2, blocks2[1], ned::trivia::ATTR_TRIVIA_BEFORE),
+            vec!["<!-- before two -->", "<!-- also -->"]
+        );
+        assert!(comment_texts(&store2, blocks2[0], ned::trivia::ATTR_TRIVIA_BEFORE).is_empty());
+        assert_eq!(
+            comment_texts(&store2, body2, ned::trivia::ATTR_TRIVIA_END),
+            vec!["<!-- the end -->"]
+        );
+        assert_eq!(serialize_from_store(&store2, root2).unwrap(), saved);
+    }
+
     /// Stage 9.2 (L10): deleting the block between two lists of one kind
     /// leaves them adjacent, so the save writes the separator between them.
     #[test]

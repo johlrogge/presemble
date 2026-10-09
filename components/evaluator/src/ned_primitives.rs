@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex, RwLock};
-use content_store::edit::{NedMutation, Plan, PlannedMutation};
+use content_store::edit::{CommentPlace, NedMutation, Plan, PlannedMutation};
 use template::Value;
 use node_store::{Node, NodeId, NodeStore};
 use ned::Selection;
@@ -146,6 +146,8 @@ pub const NED_MUTATING_BUILTINS: &[&str] = &[
     "ned/insert-before",
     "ned/insert-after",
     "ned/replace",
+    "ned/set-comments-before",
+    "ned/set-end-comments",
     "ned/parse-body",
 ];
 
@@ -564,6 +566,26 @@ fn reg_planned(
     });
 }
 
+/// The arguments of the two comment builtins: a selection and a list of
+/// strings.
+fn comments_args(name: &str, args: &[Value]) -> Result<(Selection, Vec<String>), String> {
+    if args.len() < 2 {
+        return Err(format!("{name} requires selection and list of comments"));
+    }
+    let sel = extract_selection(&args[0])?;
+    let comments = match &args[1] {
+        Value::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Text(s) => Ok(s.clone()),
+                _ => Err(format!("{name}: every comment must be a string")),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(format!("{name}: second argument must be a list of strings")),
+    };
+    Ok((sel, comments))
+}
+
 /// `s` with every run of whitespace as one space, trimmed (the comparison
 /// `ned/filter :heading-text-equals` makes).
 fn normalize_text(s: &str) -> String {
@@ -637,6 +659,16 @@ pub fn register_ned_mutation_builtins(root: &RootEnv, recorder: &PlanRecorder) {
         let sel = extract_selection(&args[0])?;
         let trees = extract_node_tree_list(&args[1])?;
         Ok((sel, NedMutation::Replace(trees)))
+    });
+
+    reg_planned(root, recorder, "ned/set-comments-before", "(ned/set-comments-before sel comments)", "Plan: replace the comments directly before the one block sel addresses with a list of HTML comment strings.", |args| {
+        let (sel, comments) = comments_args("ned/set-comments-before", &args)?;
+        Ok((sel, NedMutation::SetComments { place: CommentPlace::Before, comments }))
+    });
+
+    reg_planned(root, recorder, "ned/set-end-comments", "(ned/set-end-comments sel comments)", "Plan: replace the comments after the last block of the one container (body, slot, unassigned, blockquote, item) sel addresses with a list of HTML comment strings.", |args| {
+        let (sel, comments) = comments_args("ned/set-end-comments", &args)?;
+        Ok((sel, NedMutation::SetComments { place: CommentPlace::End, comments }))
     });
 
     // ── Body-fragment parsing (pure) ──────────────────────────────────────────
@@ -865,6 +897,78 @@ mod tests {
         let program = format!(r#"(ned/set-text (ned/text-in (ned/body-at {FOO} 1)) "Changed")"#);
         run(&store, &program).unwrap();
         assert_eq!(foo_body_texts(&store), vec!["First", "Changed", "Third"]);
+    }
+
+    /// The comments before foo's second body paragraph, as the store holds them.
+    fn foo_second_comments(store: &Arc<RwLock<NodeStore>>) -> Vec<String> {
+        let root_env = setup_with_prelude(store.clone());
+        let block = extract_selection(&eval(&root_env, &format!("(ned/body-at {FOO} 1)")))
+            .unwrap()
+            .iter()
+            .next()
+            .expect("foo has a second block");
+        let st = store.read().unwrap();
+        ned::trivia::trivia_texts(&st, block, ned::trivia::ATTR_TRIVIA_BEFORE)
+            .into_iter()
+            .map(|t| match st.get(t) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The comments at the end of foo's body, as the store holds them.
+    fn foo_end_comments(store: &Arc<RwLock<NodeStore>>) -> Vec<String> {
+        let root_env = setup_with_prelude(store.clone());
+        let body = extract_selection(&eval(&root_env, &format!("(ned/slot {FOO} \"body\")")))
+            .unwrap()
+            .iter()
+            .next()
+            .expect("foo has a body");
+        let st = store.read().unwrap();
+        ned::trivia::trivia_texts(&st, body, ned::trivia::ATTR_TRIVIA_END)
+            .into_iter()
+            .map(|t| match st.get(t) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// LSP-2 2.1: `ned/set-comments-before` and `ned/set-end-comments` plan a
+    /// SetComments, and a program runs it.
+    #[test]
+    fn set_comments_plans_and_executes() {
+        let store = make_doc_store();
+        let program = format!(
+            r#"(ned/set-comments-before (ned/body-at {FOO} 1) ["<!-- a -->" "<!-- b -->"])"#
+        );
+        run(&store, &program).unwrap();
+        assert_eq!(foo_second_comments(&store), vec!["<!-- a -->", "<!-- b -->"]);
+        assert_eq!(foo_body_texts(&store), vec!["First", "Second", "Third"]);
+
+        let program = format!(r#"(ned/set-end-comments (ned/slot {FOO} "body") ["<!-- end -->"])"#);
+        run(&store, &program).unwrap();
+        assert_eq!(foo_end_comments(&store), vec!["<!-- end -->"]);
+        assert_eq!(foo_second_comments(&store), vec!["<!-- a -->", "<!-- b -->"]);
+
+        // A string that is not a comment is refused, and nothing changes.
+        let program = format!(r#"(ned/set-comments-before (ned/body-at {FOO} 1) ["text"])"#);
+        let err = run(&store, &program).unwrap_err();
+        assert!(
+            err.starts_with("step 1 (ned/set-comments-before):") && err.contains("not an HTML comment"),
+            "{err}"
+        );
+        assert_eq!(foo_second_comments(&store), vec!["<!-- a -->", "<!-- b -->"]);
+
+        // The second argument must be a list of strings.
+        let program = format!(r#"(ned/set-comments-before (ned/body-at {FOO} 1) "<!-- a -->")"#);
+        assert!(run(&store, &program).is_err());
+
+        // The place names the kind: end comments on a block are refused.
+        let program = format!(r#"(ned/set-end-comments (ned/body-at {FOO} 1) ["<!-- x -->"])"#);
+        let err = run(&store, &program).unwrap_err();
+        assert!(err.starts_with("step 1 (ned/set-end-comments):"), "{err}");
     }
 
     #[test]
@@ -1415,6 +1519,8 @@ mod tests {
             ("ned/insert-before", vec![texts_sel.clone(), tree()]),
             ("ned/insert-after", vec![texts_sel.clone(), tree()]),
             ("ned/replace", vec![texts_sel.clone(), Value::List(vec![tree()])]),
+            ("ned/set-comments-before", vec![texts_sel.clone(), Value::List(vec![text("<!-- c -->")])]),
+            ("ned/set-end-comments", vec![texts_sel.clone(), Value::List(vec![text("<!-- c -->")])]),
         ];
         for (name, args) in calls {
             let result = call(&root, name, args).unwrap();

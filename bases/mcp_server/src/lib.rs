@@ -1012,6 +1012,19 @@ fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
                 n = trees.len(),
             )
         }
+        editorial_types::NedMutation::SetComments { place, comments } => {
+            format!(
+                "{status_prefix}set-comments-{place} @ {sel}: {reason} ({n} comment(s))",
+                status_prefix = status_prefix,
+                place = match place {
+                    editorial_types::CommentPlace::Before => "before",
+                    editorial_types::CommentPlace::End => "end",
+                },
+                sel = s.selection,
+                reason = s.reason,
+                n = comments.len(),
+            )
+        }
     };
 
     format!("{author_label} {mutation_part}{stale_suffix} ({id})", id = s.id)

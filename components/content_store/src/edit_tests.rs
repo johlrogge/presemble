@@ -12,7 +12,7 @@ use schema::HeadingLevel;
 use crate::access::{add_child_element, add_text_attr, find_child_by_name, make_element};
 use crate::block::{BlockDecodeError, add_trivia, block_from_node, block_to_store};
 use crate::edit::{
-    AddressError, Committed, EditError, Executed, NedMutation, Plan, PlanCause, PlanError, PlannedMutation,
+    AddressError, CommentPlace, Committed, EditError, Executed, NedMutation, Plan, PlanCause, PlanError, PlannedMutation,
     PreparedEdit, Target, TargetKind, commit, execute, prepare, resolve,
 };
 
@@ -1645,6 +1645,181 @@ fn plan_replacing_a_list_and_editing_inside_it_is_rejected() {
     .collect();
     assert_eq!(execute(&mut f.store, plan), Err(overlap(1, "ned/set-text", 0, "ned/replace")));
     assert_eq!(decoded(&f, list), quote_md("- a\n- b\n"));
+}
+
+// ── comments (LSP-2, 2.1) ───────────────────────────────────────────────────
+
+fn set_comments(place: CommentPlace, texts: &[&str]) -> NedMutation {
+    NedMutation::SetComments { place, comments: texts.iter().map(|t| t.to_string()).collect() }
+}
+
+/// The comments directly before a block.
+fn before(texts: &[&str]) -> NedMutation {
+    set_comments(CommentPlace::Before, texts)
+}
+
+/// The comments after a container's last block.
+fn end(texts: &[&str]) -> NedMutation {
+    set_comments(CommentPlace::End, texts)
+}
+
+/// A Block target: the list replaces the comments before the block.
+#[test]
+fn set_comments_replaces_a_blocks_leading_comments() {
+    let mut f = fixture();
+    let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
+    add_trivia(&mut f.store, a, BEFORE, &["<!-- old -->"]);
+    add_trivia(&mut f.store, b, BEFORE, &["<!-- keep -->"]);
+
+    f.run(a, &before(&["<!-- x -->", "<!-- y -->"]));
+    assert_eq!(leading_comments(&f.store, a), vec!["<!-- x -->", "<!-- y -->"]);
+    assert_eq!(leading_comments(&f.store, b), vec!["<!-- keep -->"], "a sibling is untouched");
+    assert_eq!(f.body_texts(), vec!["a", "b"], "the blocks are untouched");
+
+    // An empty list removes them all.
+    f.run(a, &before(&[]));
+    assert!(leading_comments(&f.store, a).is_empty());
+
+    // A block with none gets some.
+    f.run(a, &before(&["<!-- z -->"]));
+    assert_eq!(leading_comments(&f.store, a), vec!["<!-- z -->"]);
+
+    // The same list is no change.
+    assert_eq!(f.prepare(a, &before(&["<!-- z -->"])), Err(EditError::NoChange));
+    assert_eq!(f.prepare(b, &before(&["<!-- keep -->"])), Err(EditError::NoChange));
+}
+
+/// A Container target (body, slot, unassigned, blockquote, item): the list
+/// replaces the comments at its end.
+#[test]
+fn set_comments_on_a_container_sets_its_end_comments() {
+    let mut f = fixture();
+    let body = f.body();
+    add_trivia(&mut f.store, body, END, &["<!-- old end -->"]);
+    let a = f.body_blocks()[0];
+    add_trivia(&mut f.store, a, BEFORE, &["<!-- lead -->"]);
+
+    f.run(body, &end(&["<!-- e1 -->", "<!-- e2 -->"]));
+    assert_eq!(comments_of(&f.store, body, END), vec!["<!-- e1 -->", "<!-- e2 -->"]);
+    assert_eq!(leading_comments(&f.store, a), vec!["<!-- lead -->"], "leading comments are untouched");
+
+    f.run(body, &end(&[]));
+    assert!(comments_of(&f.store, body, END).is_empty());
+
+    // A slot.
+    let slot = f.slot("summary");
+    f.run(slot, &end(&["<!-- s -->"]));
+    assert_eq!(comments_of(&f.store, slot, END), vec!["<!-- s -->"]);
+
+    // A blockquote and a list item.
+    let quote = add_quote(&mut f, "> a\n");
+    f.run(quote, &end(&["<!-- q -->"]));
+    assert_eq!(comments_of(&f.store, quote, END), vec!["<!-- q -->"]);
+    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> <!-- q -->\n"));
+
+    let list = add_list(&mut f, "- a\n- b\n");
+    let item = f.store.children(list)[0];
+    f.run(item, &end(&["<!-- i -->"]));
+    assert_eq!(comments_of(&f.store, item, END), vec!["<!-- i -->"]);
+    assert_eq!(decoded(&f, list), quote_md("- a\n  <!-- i -->\n- b\n"));
+}
+
+/// A blockquote is a block too: the comments set "before" it are the ones
+/// before the quote, and its own end comments are not touched.
+#[test]
+fn set_comments_before_a_blockquote_sets_its_leading_comments() {
+    let mut f = fixture();
+    let quote = add_quote(&mut f, "> a\n>\n> <!-- end -->\n");
+    add_trivia(&mut f.store, quote, BEFORE, &["<!-- old -->"]);
+
+    f.run(quote, &before(&["<!-- new -->"]));
+    assert_eq!(leading_comments(&f.store, quote), vec!["<!-- new -->"]);
+    assert_eq!(comments_of(&f.store, quote, END), vec!["<!-- end -->"], "the end comments stay");
+}
+
+/// Each string must be an HTML comment; anything else is refused with the
+/// store untouched.
+#[test]
+fn set_comments_refuses_a_non_comment() {
+    for bad in ["not a comment", "", "<!-- open", "<div>x</div>", "<!-- a --> text"] {
+        let mut f = fixture();
+        let a = f.body_blocks()[0];
+        add_trivia(&mut f.store, a, BEFORE, &["<!-- old -->"]);
+        let plan: Plan = [step(&[a], before(&["<!-- fine -->", bad]), "ned/set-comments-before")]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            execute(&mut f.store, plan),
+            Err(PlanError {
+                entry: 0,
+                origin: "ned/set-comments-before",
+                cause: PlanCause::Edit(EditError::InvalidComment(bad.to_string())),
+            }),
+            "{bad:?}"
+        );
+        assert_eq!(leading_comments(&f.store, a), vec!["<!-- old -->"], "{bad:?}: nothing changed");
+    }
+}
+
+/// Guard: a plan that replaces a block and also sets its comments changes the
+/// same node twice.
+#[test]
+fn replace_and_set_comments_on_one_block_overlap() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [
+        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        step(&[a], before(&["<!-- c -->"]), "ned/set-comments-before"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/set-comments-before", 0, "ned/replace"))
+    );
+    assert_eq!(f.body_texts(), vec!["a", "b"]);
+    assert!(leading_comments(&f.store, a).is_empty());
+}
+
+/// Guard: end comments belong to a container, so a paragraph is the wrong
+/// kind.
+#[test]
+fn end_comments_on_a_paragraph_is_wrong_kind() {
+    let mut f = fixture();
+    let a = f.body_blocks()[0];
+    let plan: Plan = [step(&[a], end(&["<!-- c -->"]), "ned/set-end-comments")].into_iter().collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(PlanError {
+            entry: 0,
+            origin: "ned/set-end-comments",
+            cause: PlanCause::Address(AddressError::WrongKind {
+                expected: TargetKind::Container,
+                found: "paragraph".to_string(),
+            }),
+        })
+    );
+}
+
+/// Guard: comments before a node belong to a block, so the body is the wrong
+/// kind.
+#[test]
+fn comments_before_the_body_is_wrong_kind() {
+    let mut f = fixture();
+    let body = f.body();
+    let plan: Plan =
+        [step(&[body], before(&["<!-- c -->"]), "ned/set-comments-before")].into_iter().collect();
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(PlanError {
+            entry: 0,
+            origin: "ned/set-comments-before",
+            cause: PlanCause::Address(AddressError::WrongKind {
+                expected: TargetKind::Block,
+                found: "body".to_string(),
+            }),
+        })
+    );
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────
