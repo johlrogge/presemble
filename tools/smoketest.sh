@@ -616,6 +616,32 @@ printf '%s\n' "$HW_ORIG" > "$HW_PATH"
 wait_for_page_text "/post/hello-world" "Hello, World: Your First Post" || true
 assert_curl "hello-world is back to its scaffolded text" "/post/hello-world" GET "" "Hello, World: Your First Post"
 
+# ── Test: Diagnostics in the editorial page (FU-7b) ───────────────────────
+# A copy of hello-world with inline HTML in a body paragraph: the editorial page
+# carries the diagnostics (element attribute + page script). The probe is fixed
+# afterwards and stays in the site: the closed section at the end asserts that
+# its published output carries neither (a site with an error is never published).
+
+# inject.js is inlined in editorial pages and names the attribute (without the
+# `="`), so the attribute assertions include the opening quote of its value.
+log "Testing editorial diagnostics..."
+PROBE_FILE="content/post/diag-probe.md"
+PROBE_PATH="$SITE_DIR/$PROBE_FILE"
+{ cat "$HW_PATH"; printf '\nProbe paragraph with <b>x</b> inline html.\n'; } > "$PROBE_PATH"
+wait_for_page_text "/post/diag-probe" "Probe paragraph" || true
+assert_curl "diagnostics: editorial page carries the element attribute" "/post/diag-probe" GET "" 'data-presemble-diagnostics="'
+assert_curl "diagnostics: editorial page carries the page script" "/post/diag-probe" GET "" 'id="presemble-diagnostics"'
+assert_curl "diagnostics: page script counts the error" "/post/diag-probe" GET "" '"errors":1'
+assert_curl "diagnostics: a valid page counts no errors" "/post/hello-world" GET "" '"errors":0'
+assert_curl_not_contains "diagnostics: a valid page has no element diagnostics" "/post/hello-world" 'data-presemble-diagnostics="'
+sed 's|<b>x</b>|x|' "$PROBE_PATH" > "$PROBE_PATH.tmp" && mv "$PROBE_PATH.tmp" "$PROBE_PATH"
+for i in $(seq 1 50); do
+    if ! acurl "http://127.0.0.1:$PORT/post/diag-probe" 2>/dev/null | grep -qF '"errors":1'; then break; fi
+    sleep 0.2
+done
+assert_curl_not_contains "diagnostics: fixing the inline html clears the attribute" "/post/diag-probe" 'data-presemble-diagnostics="'
+assert_curl "diagnostics: fixing the inline html zeroes the page script" "/post/diag-probe" GET "" '"errors":0'
+
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
 log "Testing suggestions..."
@@ -1000,6 +1026,10 @@ else
         B=$(curl -s "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
         assert_contains "anonymous page gets public live-reload socket" "$B" "/_presemble/ws"
         assert_not_contains "published page carries no editor attributes" "$B" "data-presemble-address"
+        assert_status_anon "closed: the diagnostics probe is published" GET "/post/diag-probe" "200"
+        B=$(curl -s "http://127.0.0.1:$PORT/post/diag-probe" 2>&1 || true)
+        assert_not_contains "published probe carries no diagnostics attribute" "$B" "data-presemble-diagnostics"
+        assert_not_contains "published probe carries no diagnostics script" "$B" 'id="presemble-diagnostics"'
 
         EDIT_JSON="$BLOCK_EDIT_PROBE"
         R=$(http_with_status -X POST "http://127.0.0.1:$PORT/_presemble/block-edit" -H 'Content-Type: application/json' -d "$EDIT_JSON")

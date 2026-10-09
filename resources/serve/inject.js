@@ -295,6 +295,105 @@ function _noteConflict(file){
 if(_conflictFiles.indexOf(file)<0){_conflictFiles.push(file);}
 _showConflictNotice();
 }
+// ── Diagnostics (FU-7b) ───────────────────────────────────────────────────
+// The server tags the element a diagnostic belongs to with
+// `data-presemble-diagnostics` (a JSON array of {severity,message}) and puts the
+// page-level counts and the unplaced ones in the JSON script element whose id is
+// presemble-diagnostics.
+// Messages quote user content: they only ever reach the DOM as text nodes.
+// Badges live in one overlay layer (never inside the content, so editors that
+// read an element's text never see them); `_diagRender` removes what it made
+// before adding again, and the window listeners are registered once.
+var _diagBound=false;
+function _diagParse(text){
+var list;
+try{list=JSON.parse(text);}catch(err){return [];}
+if(!Array.isArray(list)){return [];}
+return list.filter(function(d){return d&&typeof d.message==='string'&&(d.severity==='error'||d.severity==='warning');});
+}
+function _diagWorst(list){return list.some(function(d){return d.severity==='error';})?'error':'warning';}
+function _diagMessagesBox(list){
+var box=document.createElement('div');
+box.className='presemble-diag-messages';
+list.forEach(function(d){
+var line=document.createElement('div');
+line.className='presemble-diag-line presemble-diag-line-'+d.severity;
+line.textContent=d.message;
+box.appendChild(line);
+});
+return box;
+}
+function _diagPlaceBadges(){
+var layer=document.querySelector('.presemble-diag-layer');
+if(!layer){return;}
+layer.querySelectorAll('.presemble-diag-badge').forEach(function(b){
+var el=b._diagTarget;
+if(!el||!el.isConnected){b.remove();return;}
+var r=el.getBoundingClientRect();
+b.style.top=(r.top+window.scrollY-8)+'px';
+b.style.left=(r.right+window.scrollX-12)+'px';
+});
+}
+function _diagRender(){
+document.querySelectorAll('.presemble-diag-layer,.presemble-diag-panel').forEach(function(n){n.remove();});
+document.querySelectorAll('.presemble-diag-error,.presemble-diag-warning').forEach(function(el){el.classList.remove('presemble-diag-error','presemble-diag-warning');});
+var layer=document.createElement('div');
+layer.className='presemble-diag-layer';
+document.querySelectorAll('[data-presemble-diagnostics]').forEach(function(el){
+var list=_diagParse(el.getAttribute('data-presemble-diagnostics'));
+if(!list.length){return;}
+var worst=_diagWorst(list);
+el.classList.add('presemble-diag-'+worst);
+var badge=document.createElement('button');
+badge.type='button';
+badge.className='presemble-diag-badge presemble-diag-badge-'+worst;
+badge.textContent=String(list.length);
+badge.setAttribute('aria-label',list.length+(list.length===1?' problem':' problems')+' on this element');
+badge._diagTarget=el;
+var pop=_diagMessagesBox(list);
+pop.classList.add('presemble-diag-popover');
+badge.appendChild(pop);
+badge.addEventListener('click',function(ev){ev.stopPropagation();badge.classList.toggle('presemble-diag-open');});
+layer.appendChild(badge);
+});
+if(layer.childNodes.length){document.body.appendChild(layer);_diagPlaceBadges();}
+var data=null;
+var script=document.getElementById('presemble-diagnostics');
+if(script){try{data=JSON.parse(script.textContent);}catch(err){data=null;}}
+if(data&&typeof data==='object'){
+var errors=Number(data.errors)||0;
+var warnings=Number(data.warnings)||0;
+var unplaced=Array.isArray(data.unplaced)?_diagParse(JSON.stringify(data.unplaced)):[];
+if(errors>0||warnings>0){
+var panel=document.createElement('div');
+panel.className='presemble-diag-panel';
+panel.setAttribute('role','status');
+var head=document.createElement('button');
+head.type='button';
+head.className='presemble-diag-panel-head';
+var summary=[];
+if(errors>0){summary.push(errors+(errors===1?' error':' errors')+" on this page. The site can't be published until they're fixed.");}
+if(warnings>0){summary.push(warnings+(warnings===1?' warning':' warnings')+' on this page.');}
+head.textContent=summary.join(' ');
+var body=document.createElement('div');
+body.className='presemble-diag-panel-body';
+if(unplaced.length){body.appendChild(_diagMessagesBox(unplaced));}
+else{body.style.display='none';}
+head.addEventListener('click',function(){panel.classList.toggle('presemble-diag-collapsed');});
+panel.appendChild(head);
+panel.appendChild(body);
+document.body.appendChild(panel);
+}
+}
+if(!_diagBound){
+_diagBound=true;
+window.addEventListener('resize',_diagPlaceBadges);
+window.addEventListener('load',_diagPlaceBadges);
+document.addEventListener('click',function(){document.querySelectorAll('.presemble-diag-open').forEach(function(b){b.classList.remove('presemble-diag-open');});});
+}
+}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_diagRender);}
+else{_diagRender();}
 _fetchConflicts();
 _wsConnect();
 (function(){
