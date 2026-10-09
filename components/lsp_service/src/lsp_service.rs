@@ -1,3 +1,4 @@
+use crate::buffer::{self, Synced};
 use lsp_capabilities::{
     build_transform, content_completions, definition_for_position, hover_for_line,
     link_completions,
@@ -64,8 +65,6 @@ fn content_path_for(
     conductor::editorial_types::ContentPath::parse(site_path.as_str()).ok()
 }
 
-const DISK_CONFLICT_MESSAGE: &str = "Unsaved edits from the browser or REPL conflict with this file on disk. Save them from the browser (you will be asked to confirm), or run `presemble reload <site-dir> <file>` to keep the file.";
-
 struct StoredDiagnostic {
     lsp_diag: Diagnostic,
     action: Option<SlotAction>,
@@ -78,20 +77,173 @@ pub struct PresembleLsp {
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
     conductor: Arc<Mutex<conductor::ConductorClient>>,
+    /// The conductor's last answer for each open content file: what it did not
+    /// take (drifts) and what it holds back (held regions).
+    synced: Arc<Mutex<HashMap<String, Synced>>>,
+    /// The version of each open document, as the client last said.
+    versions: Arc<Mutex<HashMap<String, i32>>>,
+    /// Shows what the conductor answered (shared with the sender's callbacks).
+    publisher: Publisher,
+    /// Everything that is sent to the conductor in the editor's name goes
+    /// through this one queue, off the handlers.
+    sender: buffer::Sender,
+    /// The runtime the sender's callbacks hand their async work to.
+    handle: tokio::runtime::Handle,
+}
+
+/// What publishes diagnostics: the pieces of the server a conductor answer
+/// needs, cloneable so that the sender's callbacks can hold them.
+#[derive(Clone)]
+struct Publisher {
+    client: Client,
+    site_dir: std::path::PathBuf,
+    doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
+    synced: Arc<Mutex<HashMap<String, Synced>>>,
+    conductor: Arc<Mutex<conductor::ConductorClient>>,
+}
+
+impl Publisher {
+    /// Whether the conductor holds unsaved edits for this file that conflict
+    /// with a change on disk. Asked synchronously: the conductor is the source
+    /// of truth and the LSP has no channel for it to push (channel gap 8).
+    async fn has_disk_conflict(&self, uri: &Url) -> bool {
+        let Ok(path) = uri.to_file_path() else {
+            return false;
+        };
+        let Ok(rel) = path.strip_prefix(&self.site_dir) else {
+            return false;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let cond = self.conductor.lock().await;
+        match cond.send(&conductor::Command::GetConflicts) {
+            Ok(conductor::Response::Conflicts(files)) => files.contains(&rel),
+            _ => false,
+        }
+    }
+
+    /// Keep what the conductor answered, and show it.
+    async fn record_reply(&self, uri: &Url, version: i32, text: String, reply: Result<conductor::Response, String>) {
+        match reply {
+            Ok(conductor::Response::EditorSynced { drifts, held }) => {
+                self.synced.lock().await.insert(uri.to_string(), Synced { version, text, drifts, held });
+                self.publish_content_diagnostics(uri.clone()).await;
+            }
+            Ok(conductor::Response::Error(e)) | Err(e) => {
+                eprintln!("presemble-lsp: the conductor did not take the change to {uri}: {e}");
+            }
+            Ok(_) => {}
+        }
+    }
+
+    /// Publish what the local validation found, with what the conductor did
+    /// not take, and a conflict with the file on disk.
+    async fn publish_content_diagnostics(&self, uri: Url) {
+        let mut diags: Vec<Diagnostic> = self
+            .doc_diagnostics
+            .lock()
+            .await
+            .get(&uri.to_string())
+            .map(|stored| stored.iter().map(|s| s.lsp_diag.clone()).collect())
+            .unwrap_or_default();
+        if let Some(synced) = self.synced.lock().await.get(&uri.to_string()) {
+            diags.extend(buffer::sync_diagnostics(synced));
+        }
+        // ADR-065: unsaved edits that conflict with this file on disk are never
+        // discarded automatically; tell the author where they stand.
+        if self.has_disk_conflict(&uri).await {
+            diags.push(buffer::conflict_diagnostic());
+        }
+        self.client.publish_diagnostics(uri, diags, None).await;
+    }
+}
+
+/// The line to the conductor for the sender thread. The handlers share the
+/// client behind an async mutex; the thread takes it for the length of a send.
+struct ConductorLink(Arc<Mutex<conductor::ConductorClient>>);
+
+impl buffer::Link for ConductorLink {
+    fn send(&mut self, cmd: &conductor::Command) -> Result<conductor::Response, String> {
+        self.0.blocking_lock().send(cmd)
+    }
 }
 
 impl PresembleLsp {
     pub fn new(client: Client, site_dir: std::path::PathBuf, conductor: conductor::ConductorClient) -> Self {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let repo = site_repository::SiteRepository::new(site_dir.clone());
+        let conductor = Arc::new(Mutex::new(conductor));
+        let doc_diagnostics = Arc::new(Mutex::new(HashMap::new()));
+        let synced = Arc::new(Mutex::new(HashMap::new()));
+        let publisher = Publisher {
+            client: client.clone(),
+            site_dir: site_dir.clone(),
+            doc_diagnostics: doc_diagnostics.clone(),
+            synced: synced.clone(),
+            conductor: conductor.clone(),
+        };
         Self {
             client,
             repo,
             site_dir,
             doc_sources: Arc::new(Mutex::new(HashMap::new())),
-            doc_diagnostics: Arc::new(Mutex::new(HashMap::new())),
-            conductor: Arc::new(Mutex::new(conductor)),
+            doc_diagnostics,
+            sender: buffer::Sender::start(ConductorLink(conductor.clone())),
+            conductor,
+            synced,
+            versions: Arc::new(Mutex::new(HashMap::new())),
+            publisher,
+            handle: tokio::runtime::Handle::current(),
         }
+    }
+
+    /// Queue the editor's text for the conductor and return at once. A newer
+    /// text replaces this one while it waits; the answer is kept and shown by
+    /// the sender's thread when it comes.
+    fn queue_editor_text(&self, uri: &Url, path: conductor::editorial_types::ContentPath, version: i32, text: String) {
+        let publisher = self.publisher.clone();
+        let handle = self.handle.clone();
+        let uri_for_reply = uri.clone();
+        let sent_text = text.clone();
+        self.sender.push_latest(
+            uri.as_str(),
+            conductor::Command::EditorChanged { path, text },
+            Box::new(move |reply| {
+                handle.spawn(async move {
+                    publisher.record_reply(&uri_for_reply, version, sent_text, reply).await;
+                });
+            }),
+        );
+    }
+
+    /// Queue a command whose answer needs nothing done with it.
+    fn queue_command(&self, uri: &Url, cmd: conductor::Command) {
+        self.sender.push(uri.as_str(), cmd, Box::new(|_| {}));
+    }
+
+    async fn publish_content_diagnostics(&self, uri: Url) {
+        self.publisher.publish_content_diagnostics(uri).await;
+    }
+
+    /// Queue `cmd` for the file at site-relative `rel`, and show its
+    /// diagnostics again when the conductor has answered.
+    fn queue_and_republish(&self, rel: &str, cmd: conductor::Command) {
+        let Ok(uri) = Url::from_file_path(self.site_dir.join(rel)) else { return };
+        let publisher = self.publisher.clone();
+        let handle = self.handle.clone();
+        let key = uri.to_string();
+        self.sender.push(
+            &key,
+            cmd,
+            Box::new(move |_| {
+                handle.spawn(async move { publisher.publish_content_diagnostics(uri).await });
+            }),
+        );
+    }
+
+    /// The site-relative path of the file behind `uri`.
+    fn rel_path(&self, uri: &Url) -> Option<String> {
+        let path = uri.to_file_path().ok()?;
+        Some(site_path_for(&self.site_dir, &path)?.as_str().to_string())
     }
 
     async fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
@@ -197,21 +349,9 @@ impl PresembleLsp {
     }
 
     /// Whether the conductor holds unsaved edits for this file that conflict
-    /// with a change on disk. Asked synchronously: the conductor is the source
-    /// of truth and the LSP has no channel for it to push (channel gap 8).
+    /// with a change on disk.
     async fn has_disk_conflict(&self, uri: &Url) -> bool {
-        let Ok(path) = uri.to_file_path() else {
-            return false;
-        };
-        let Ok(rel) = path.strip_prefix(&self.site_dir) else {
-            return false;
-        };
-        let rel = rel.to_string_lossy().replace('\\', "/");
-        let cond = self.conductor.lock().await;
-        match cond.send(&conductor::Command::GetConflicts) {
-            Ok(conductor::Response::Conflicts(files)) => files.contains(&rel),
-            _ => false,
-        }
+        self.publisher.has_disk_conflict(uri).await
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
@@ -244,22 +384,8 @@ impl PresembleLsp {
             })
             .collect();
 
-        let mut diags: Vec<Diagnostic> = stored.iter().map(|s| s.lsp_diag.clone()).collect();
-        // ADR-065: unsaved edits that conflict with this file on disk are never
-        // discarded automatically; tell the author where they stand.
-        if self.has_disk_conflict(&uri).await {
-            diags.push(Diagnostic {
-                range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
-                },
-                severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING),
-                message: DISK_CONFLICT_MESSAGE.to_string(),
-                ..Default::default()
-            });
-        }
         *self.doc_diagnostics.lock().await.entry(uri.to_string()).or_default() = stored;
-        self.client.publish_diagnostics(uri, diags, None).await;
+        self.publish_content_diagnostics(uri).await;
     }
 
     async fn validate_template_and_publish(&self, uri: Url, src: String) {
@@ -432,10 +558,14 @@ impl LanguageServer for PresembleLsp {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         "presemble.acceptSuggestion".to_string(),
                         "presemble.rejectSuggestion".to_string(),
+                        buffer::KEEP_MINE.to_string(),
+                        buffer::RELOAD_DOCUMENT.to_string(),
+                        buffer::OVERWRITE_FILE.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -467,11 +597,14 @@ impl LanguageServer for PresembleLsp {
         let uri = p.text_document.uri;
         let src = p.text_document.text;
         let path = uri.to_file_path().unwrap_or_default();
+        self.versions.lock().await.insert(uri.to_string(), p.text_document.version);
         // The conductor keeps the text of an open content file, to compare the
-        // changes that follow with it. Fire-and-forget.
+        // changes that follow with it. Queued behind whatever is on its way,
+        // and the handler goes on. What was answered for an earlier session of
+        // the file is gone.
         if let Some(content_path) = content_path_for(&self.site_dir, &path) {
-            let cond = self.conductor.lock().await;
-            let _ = cond.send(&conductor::Command::EditorOpened { path: content_path, text: src.clone() });
+            self.synced.lock().await.remove(&uri.to_string());
+            self.queue_command(&uri, conductor::Command::EditorOpened { path: content_path, text: src.clone() });
         }
         let kind = self.classify_path(&path).await;
         match kind {
@@ -487,10 +620,13 @@ impl LanguageServer for PresembleLsp {
     }
 
     async fn did_close(&self, p: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
-        let path = p.text_document.uri.to_file_path().unwrap_or_default();
+        let uri = p.text_document.uri;
+        let path = uri.to_file_path().unwrap_or_default();
+        self.versions.lock().await.remove(&uri.to_string());
         if let Some(content_path) = content_path_for(&self.site_dir, &path) {
-            let cond = self.conductor.lock().await;
-            let _ = cond.send(&conductor::Command::EditorClosed { path: content_path });
+            self.synced.lock().await.remove(&uri.to_string());
+            // Behind the text that waits: both are sent, in order.
+            self.queue_command(&uri, conductor::Command::EditorClosed { path: content_path });
         }
     }
 
@@ -499,25 +635,27 @@ impl LanguageServer for PresembleLsp {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
             let kind = self.classify_path(&path).await;
-            // Notify conductor of the change (lowered into N, then the browser
-            // reloads). Fire-and-forget: if it fails, the LSP still works
-            // locally. Only content files have an editor in the conductor.
-            if let Some(content_path) = content_path_for(&self.site_dir, &path) {
-                let cond = self.conductor.lock().await;
-                let _ = cond.send(&conductor::Command::EditorChanged {
-                    path: content_path,
-                    text: c.text.clone(),
-                });
-            }
+            let version = p.text_document.version;
+            self.versions.lock().await.insert(uri.to_string(), version);
+            let text = c.text;
+            // Local validation first: it does not wait for the conductor.
             match kind {
-                conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, c.text).await,
+                conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri.clone(), text.clone()).await,
                 conductor::FileClassification::Schema { .. } => {
-                    self.validate_schema_and_publish(uri.clone(), c.text).await;
+                    self.validate_schema_and_publish(uri.clone(), text.clone()).await;
                     if let Some(stem) = self.schema_stem(&uri).await {
                         self.revalidate_dependents(&stem).await;
                     }
                 }
-                _ => self.validate_and_publish(uri, c.text).await,
+                _ => self.validate_and_publish(uri.clone(), text.clone()).await,
+            }
+            // Then the conductor: the change is lowered into N and the browser
+            // shows it. Only content files have an editor in the conductor.
+            // Queued, and the handler returns: the sender's thread does the
+            // blocking send, and a text that comes before it gets its turn
+            // replaces this one. If the send fails, the LSP still works locally.
+            if let Some(content_path) = content_path_for(&self.site_dir, &path) {
+                self.queue_editor_text(&uri, content_path, version, text);
             }
         }
     }
@@ -530,9 +668,20 @@ impl LanguageServer for PresembleLsp {
         let Some(site_path) = site_path_for(&self.site_dir, &saved) else {
             return;
         };
+        // Queued behind the text that waits: the conductor holds the text that
+        // was saved before it is told about the save. When it has answered, the
+        // diagnostics are shown again (a conflict may be settled by the save).
         {
-            let cond = self.conductor.lock().await;
-            let _ = cond.send(&conductor::Command::DocumentSaved { path: site_path });
+            let publisher = self.publisher.clone();
+            let handle = self.handle.clone();
+            let uri = p.text_document.uri.clone();
+            self.sender.push(
+                p.text_document.uri.as_str(),
+                conductor::Command::DocumentSaved { path: site_path },
+                Box::new(move |_| {
+                    handle.spawn(async move { publisher.publish_content_diagnostics(uri).await });
+                }),
+            );
         }
         if let Ok(src) = std::fs::read_to_string(&saved) {
             let uri = p.text_document.uri;
@@ -851,7 +1000,46 @@ impl LanguageServer for PresembleLsp {
             };
             actions.push(CodeActionOrCommand::CodeAction(code_action));
         }
+
+        // What the conductor did not take: a drift offers its two ways out.
+        if let Some(synced) = self.synced.lock().await.get(&uri.to_string()) {
+            actions.extend(buffer::sync_actions(uri, synced, &request_range));
+        }
+
+        // The rest compares the buffer with the file as it is on disk.
+        let version = self.versions.lock().await.get(&uri.to_string()).copied();
+        let file = uri.to_file_path().ok().and_then(|p| std::fs::read_to_string(p).ok());
+        if let (Some(version), Some(file)) = (version, file) {
+            // Same content, spelled differently: the buffer can take the
+            // file's spelling.
+            if let Some(edits) = buffer::match_file_edits(&src, &file) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: buffer::MATCH_FILE.to_string(),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    edit: Some(buffer::versioned_edit(uri, version, edits)),
+                    ..Default::default()
+                }));
+            }
+            // While the document is in conflict (ADR-065), both ways out are
+            // offered wherever the cursor is.
+            if let Some(rel) = self.rel_path(uri) {
+                let conflicted = self.has_disk_conflict(uri).await;
+                actions.extend(buffer::conflict_offer(&request_range, conflicted, uri, &rel, version, &src, &file));
+            }
+        }
         Ok(Some(actions))
+    }
+
+    async fn formatting(
+        &self,
+        p: DocumentFormattingParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
+        let uri = &p.text_document.uri;
+        let Some((grammar, _)) = self.grammar_for_uri(uri).await else {
+            return Ok(None);
+        };
+        let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+        Ok(Some(buffer::formatting_edits(&src, &grammar)))
     }
 
     async fn goto_definition(
@@ -902,7 +1090,47 @@ impl LanguageServer for PresembleLsp {
         }
     }
 
-    async fn execute_command(&self, _params: ExecuteCommandParams) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
+    async fn execute_command(&self, params: ExecuteCommandParams) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
+        let arg = |i: usize| params.arguments.get(i).and_then(|v| v.as_str()).map(str::to_string);
+        match params.command.as_str() {
+            // The conductor takes the editor's version of a drift.
+            buffer::KEEP_MINE => {
+                let Some(uri) = arg(0).and_then(|u| Url::parse(&u).ok()) else { return Ok(None) };
+                let Some(drift_id) = arg(1).and_then(|s| buffer::parse_drift_id(&s)) else { return Ok(None) };
+                let path = uri.to_file_path().unwrap_or_default();
+                let Some(content_path) = content_path_for(&self.site_dir, &path) else { return Ok(None) };
+                // The answer is about the text last sent: keep its place.
+                let known = self.synced.lock().await.get(&uri.to_string()).map(|s| (s.version, s.text.clone()));
+                let publisher = self.publisher.clone();
+                let handle = self.handle.clone();
+                let reply_uri = uri.clone();
+                self.sender.push(
+                    uri.as_str(),
+                    conductor::Command::KeepMine { path: content_path, drift_id },
+                    Box::new(move |reply| {
+                        if let Some((version, text)) = known {
+                            handle.spawn(async move { publisher.record_reply(&reply_uri, version, text, reply).await });
+                        }
+                    }),
+                );
+            }
+            // The file on disk wins; the code action replaced the buffer text.
+            buffer::RELOAD_DOCUMENT => {
+                let Some(rel) = arg(0) else { return Ok(None) };
+                let Ok(path) = conductor::editorial_types::ContentPath::parse(&rel) else { return Ok(None) };
+                self.queue_and_republish(&rel, conductor::Command::ReloadDocument { path });
+            }
+            // The unsaved edits win; the user said which file to overwrite.
+            buffer::OVERWRITE_FILE => {
+                let Some(rel) = arg(0) else { return Ok(None) };
+                let Ok(path) = conductor::editorial_types::SitePath::parse(&rel) else { return Ok(None) };
+                let consent = conductor::editorial_types::ConflictConsent::Overwrite(
+                    std::collections::BTreeSet::from([rel.clone()]),
+                );
+                self.queue_and_republish(&rel, conductor::Command::SaveBuffer { path, consent });
+            }
+            _ => {}
+        }
         Ok(None)
     }
 }
