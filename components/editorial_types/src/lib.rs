@@ -240,7 +240,9 @@ impl fmt::Display for StaleCause {
             ),
             StaleCause::WrongKind { expected, found } => write!(
                 f,
-                "the address matches a {found}, but this change needs a {expected} node"
+                "the address matches {}, but this change needs {} node",
+                schema::with_article(found),
+                schema::with_article(&expected.to_string())
             ),
             StaleCause::SearchNotFound => {
                 f.write_str("the search text does not occur in the addressed text")
@@ -769,6 +771,25 @@ mod tests {
         assert_eq!(
             StaleCause::Ambiguous { matches: 3 }.to_string(),
             "the address matches 3 nodes; it must match exactly one"
+        );
+    }
+
+    #[test]
+    fn wrong_kind_names_the_kind_with_the_right_article() {
+        let message = |found: &str, expected| {
+            StaleCause::WrongKind { expected, found: found.to_string() }.to_string()
+        };
+        assert_eq!(
+            message("item", TargetKind::Text),
+            "the address matches an item, but this change needs a text node"
+        );
+        assert_eq!(
+            message("list", TargetKind::Block),
+            "the address matches a list, but this change needs a block node"
+        );
+        assert_eq!(
+            message("html-block", TargetKind::Container),
+            "the address matches an html-block, but this change needs a container node"
         );
     }
 

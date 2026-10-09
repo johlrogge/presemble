@@ -1492,6 +1492,161 @@ fn plan_replacing_a_blockquote_and_editing_inside_it_is_rejected() {
     assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> b\n"));
 }
 
+// ── blocks inside a list item (ADR-059 stage 9.3) ───────────────────────────
+
+fn list_tree(tight: bool, items: Vec<Vec<NodeTree>>) -> NodeTree {
+    let list = NodeTree::element("list")
+        .with_attr("ordered", "false")
+        .with_attr("tight", tight.to_string());
+    items.into_iter().fold(list, |list, blocks| {
+        let item = blocks.into_iter().fold(NodeTree::element("item"), |item, b| item.with_child(b));
+        list.with_child(item)
+    })
+}
+
+/// A list read from `md`, appended to the body of the fixture.
+fn add_list(f: &mut Fixture, md: &str) -> NodeId {
+    let body = f.body();
+    add_block(&mut f.store, body, &quote_md(md))
+}
+
+/// A block directly in an item resolves with the item as its container (the
+/// document is that of the list), and a Replace of it changes the item in
+/// place.
+#[test]
+fn block_inside_a_list_item_is_replaceable() {
+    let mut f = fixture();
+    let list = add_list(&mut f, "- a\n- b\n");
+    let item = f.store.children(list)[1];
+    let block = f.store.children(item)[0];
+    assert_eq!(
+        f.resolve(&[block], TargetKind::Block),
+        Ok(Target::Block { block, container: item, document: f.doc })
+    );
+    f.run(block, &NedMutation::Replace(vec![para_tree("X")]));
+    assert_eq!(decoded(&f, list), quote_md("- a\n- X\n"));
+    assert!(f.store.get(block).is_none());
+}
+
+/// D6: an item is a container for an insert, never a block to edit itself.
+#[test]
+fn insert_into_a_list_item() {
+    let mut f = fixture();
+    let list = add_list(&mut f, "- a\n- b\n");
+    let item = f.store.children(list)[0];
+    assert_eq!(
+        f.resolve(&[item], TargetKind::Container),
+        Ok(Target::Container { container: item, document: f.doc })
+    );
+    assert!(f.resolve(&[item], TargetKind::Block).is_err(), "an item is not a block target");
+    // A second block makes the tight item unwritable as tight: the list reads
+    // as loose, with nothing else changed.
+    f.run(item, &NedMutation::InsertChild(vec![para_tree("X")]));
+    assert_eq!(decoded(&f, list), quote_md("- a\n\n  X\n\n- b\n"));
+    // After a child.
+    let first = f.store.children(item)[0];
+    f.run(first, &NedMutation::InsertAfter(vec![para_tree("Y")]));
+    assert_eq!(decoded(&f, list), quote_md("- a\n\n  Y\n\n  X\n\n- b\n"));
+}
+
+/// The edit path normalises spacing as the parser does, in both directions: a
+/// loose list left with nothing to separate is written, and read back, tight.
+/// N must not change when the file is read again.
+#[test]
+fn deleting_down_to_one_block_makes_a_loose_list_tight() {
+    let mut f = fixture();
+    let list = add_list(&mut f, "- a\n\n  b\n");
+    let ContentElement::List { list: before } = decoded(&f, list) else { panic!("a list") };
+    assert_eq!(before.spacing, content::Spacing::Loose);
+    let item = f.store.children(list)[0];
+    let second = f.store.children(item)[1];
+    f.run(second, &NedMutation::Delete);
+
+    let after = decoded(&f, list);
+    let ContentElement::List { list: after_list } = &after else { panic!("a list") };
+    assert_eq!(after_list.spacing, content::Spacing::Tight, "stored tight: {after:?}");
+    // Saved and read again, it is the same N.
+    let saved = content::project_markdown(&after, content::Projection::Block).expect("projects");
+    assert_eq!(quote_md(&saved), after, "{saved:?}");
+}
+
+/// The text of a paragraph in an item is a text target; the edit changes that
+/// paragraph only.
+#[test]
+fn list_item_text_is_addressable() {
+    let mut f = fixture();
+    let list = add_list(&mut f, "- a\n- b\n");
+    let item = f.store.children(list)[1];
+    let paragraph = f.store.children(item)[0];
+    let text = f.text_of(paragraph);
+    assert_eq!(
+        f.resolve(&[text], TargetKind::Text),
+        Ok(Target::Text { text, block: paragraph, document: f.doc })
+    );
+    f.run(text, &NedMutation::SetText("x".to_string()));
+    assert_eq!(decoded(&f, list), quote_md("- a\n- x\n"));
+}
+
+const LIST_WITH_COMMENTS: &str = "- a\n  <!-- c1 -->\n  - b\n  <!-- end -->\n- c\n";
+
+/// D3 through lists and items: each comment keeps its place in the new list.
+#[test]
+fn replacing_a_list_keeps_the_comments_inside_its_items() {
+    // The same shape, and every child still there.
+    let mut f = fixture();
+    let list = add_list(&mut f, LIST_WITH_COMMENTS);
+    let same = list_tree(
+        true,
+        vec![
+            vec![para_tree("a"), list_tree(true, vec![vec![para_tree("b")]])],
+            vec![para_tree("c")],
+        ],
+    );
+    f.run(list, &NedMutation::Replace(vec![same]));
+    let new = f.body_blocks()[2];
+    assert_eq!(decoded(&f, new), quote_md(LIST_WITH_COMMENTS));
+
+    // The nested list is gone: its place falls back to the end of the item.
+    let mut f = fixture();
+    let list = add_list(&mut f, LIST_WITH_COMMENTS);
+    let flat = list_tree(true, vec![vec![para_tree("a")], vec![para_tree("c")]]);
+    f.run(list, &NedMutation::Replace(vec![flat]));
+    let new = f.body_blocks()[2];
+    assert_eq!(decoded(&f, new), quote_md("- a\n  <!-- c1 -->\n  <!-- end -->\n- c\n"));
+
+    // Another shape: all go to the first new block, after its own.
+    let mut f = fixture();
+    let list = add_list(&mut f, LIST_WITH_COMMENTS);
+    add_trivia(&mut f.store, list, BEFORE, &["<!-- lead -->"]);
+    f.run(list, &NedMutation::Replace(vec![para_tree("X")]));
+    let blocks = f.body_blocks();
+    assert_eq!(
+        leading_comments(&f.store, blocks[2]),
+        vec!["<!-- lead -->", "<!-- c1 -->", "<!-- end -->"]
+    );
+}
+
+/// Guard: Replace of a list and an edit inside it change the same thing.
+#[test]
+fn plan_replacing_a_list_and_editing_inside_it_is_rejected() {
+    let mut f = fixture();
+    let list = add_list(&mut f, "- a\n- b\n");
+    let item = f.store.children(list)[0];
+    let paragraph = f.store.children(item)[0];
+    let plan: Plan = [
+        step(
+            &[list],
+            NedMutation::Replace(vec![list_tree(true, vec![vec![para_tree("X")]])]),
+            "ned/replace",
+        ),
+        set_text(f.text_of(paragraph), "y"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(execute(&mut f.store, plan), Err(overlap(1, "ned/set-text", 0, "ned/replace")));
+    assert_eq!(decoded(&f, list), quote_md("- a\n- b\n"));
+}
+
 // ── errors ──────────────────────────────────────────────────────────────────
 
 #[test]

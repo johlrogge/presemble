@@ -180,7 +180,7 @@ fn payload_refusal(e: BlockDecodeError) -> BlockEditError {
     match e {
         BlockDecodeError::NotPayloadKind(name) => refuse(
             BlockEditCause::Invalid,
-            format!("a {name} cannot be written through a block edit"),
+            format!("{} cannot be written through a block edit", schema::with_article(&name)),
         ),
         other => refuse(BlockEditCause::Invalid, other.to_string()),
     }
@@ -1384,6 +1384,28 @@ mod tests {
                     assert!(!rendered.contains("trivia") && !rendered.contains("<!--"), "{rendered}");
                 }
                 other => panic!("a quote change replaces the block, got {other:?}"),
+            }
+            assert_eq!(l.preview.base, pv(&base));
+        }
+    }
+
+    /// Guard (ADR-059 stage 9.3): a list holds items of blocks, so it has no
+    /// text of its own either: any change to it is a Replace of the list, with
+    /// no comments in the payload (the old ones are relocated by the edit).
+    #[test]
+    fn lower_list_change_is_replace() {
+        let list = content::parse_document("- a\n- b\n").unwrap().elements[0].node.clone();
+        let base = content::project_markdown(&list, Projection::Block).unwrap();
+        for proposed in ["- a\n- z", "- a\n- b\n- c", "- a\n  <!-- n -->\n- z", "1. a\n2. b"] {
+            let l = expect_lowered(lowered("body", &list, &base, proposed));
+            assert_eq!(l.selection, SEL, "{proposed}");
+            match l.mutation {
+                NedMutation::Replace(trees) => {
+                    assert_eq!(trees.len(), 1);
+                    let rendered = format!("{:?}", trees[0]);
+                    assert!(!rendered.contains("trivia") && !rendered.contains("<!--"), "{rendered}");
+                }
+                other => panic!("a list change replaces the block, got {other:?}"),
             }
             assert_eq!(l.preview.base, pv(&base));
         }

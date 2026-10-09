@@ -9384,6 +9384,62 @@ mod ned_program_plan_tests {
         assert_eq!(stored_quote(&conductor), expected);
     }
 
+    const LIST: &str = r#"(ned/nth-of-kind (ned/blocks (ned/slot (ned/doc-by-path "content/test/list.md") "body")) "list" 0)"#;
+
+    /// `content/test/list.md`: a body holding the list `- a` / `- b`.
+    fn add_list_doc(conductor: &Conductor) {
+        let list = content::parse_document("- a\n- b\n").expect("parses").elements[0].node.clone();
+        add_doc(
+            conductor,
+            "content/test/list.md",
+            "/test/list",
+            Document {
+                preamble: im::vector![title("List doc")],
+                body: im::vector![spanned(list)],
+                has_separator: true,
+                separator_span: None,
+                unassigned: Default::default(),
+                comments: Default::default(),
+            },
+        );
+    }
+
+    /// The list of `content/test/list.md` as the store holds it.
+    fn stored_list(conductor: &Conductor) -> ContentElement {
+        let value = evaluator::eval_str_with_root(
+            LIST,
+            &conductor.make_ned_query_root().expect("query root"),
+        )
+        .expect("selection evaluates");
+        let sel = evaluator::ned_primitives::extract_selection(&value).expect("a selection");
+        let id = sel.iter().next().expect("one list");
+        let store = conductor.node_store.read().unwrap();
+        node_store_bridge::content_bridge::block_from_node(&store, id).expect("decodes")
+    }
+
+    /// The blocks of a list item are the children of the item (the item is the
+    /// child of the list), and the text of one is addressed like any block's
+    /// (ADR-059 stage 9.3).
+    #[test]
+    fn list_item_text_is_addressable() {
+        let (conductor, _tmp) = make_conductor();
+        add_list_doc(&conductor);
+
+        let program =
+            format!(r#"(ned/set-text (ned/text-in (ned/nth-child (ned/nth-child {LIST} 1) 0)) "x")"#);
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+        let expected = content::parse_document("- a\n- x\n").unwrap().elements[0].node.clone();
+        assert_eq!(stored_list(&conductor), expected);
+
+        // A block of the item is a block target as well.
+        let program = format!(
+            r#"(ned/replace (ned/nth-child (ned/nth-child {LIST} 0) 0) [(ned/with-child (ned/mk-element "paragraph") (ned/mk-text "y"))])"#
+        );
+        assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
+        let expected = content::parse_document("- y\n- x\n").unwrap().elements[0].node.clone();
+        assert_eq!(stored_list(&conductor), expected);
+    }
+
     #[test]
     fn apply_program_with_ambiguous_selection_applies_nothing() {
         let (conductor, _tmp) = make_conductor();
@@ -11945,7 +12001,7 @@ mod emitted_address_tests {
             "blockquote" => "blockquote",
             "img" => "image",
             "table" => "table",
-            "div" => "list",
+            "ul" | "ol" => "list",
             "span" if tag.contains("hidden=") => "separator",
             // A synthesized title link stands for the title heading.
             "a" if tag.contains("data-presemble-source-slot=\"title\"") => "heading",

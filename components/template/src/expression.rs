@@ -515,7 +515,8 @@ pub fn attribute_text(
             let label = expression.label();
             let kind = if matches!(value, Value::Record(_)) { "record" } else { "list" };
             Err(RenderError::Render(format!(
-                "{label} is a {kind} and cannot be an attribute value; name a field of it (for example {label}.href)"
+                "{label} is {} and cannot be an attribute value; name a field of it (for example {label}.href)",
+                schema::with_article(kind)
             )))
         }
         Value::Absent

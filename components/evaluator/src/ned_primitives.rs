@@ -1363,7 +1363,7 @@ mod tests {
             )
             .expect_err(kind);
             assert!(
-                err.contains(&format!("a {kind} cannot be written through a program")),
+                err.contains(&format!("{} cannot be written through a program", schema::with_article(kind))),
                 "{kind}: {err}"
             );
         }

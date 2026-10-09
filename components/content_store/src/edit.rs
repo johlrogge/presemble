@@ -10,7 +10,7 @@
 use std::fmt;
 
 use content::inline::{InlineContext, InlinePath, Inlines, SearchReplaceError};
-use content::{ContentElement, RoundTripError, check_block_round_trip};
+use content::{ContentElement, RoundTripError, Spacing, check_block_round_trip};
 use editorial_types::{PlanFailure, StaleCause};
 pub use editorial_types::{NedMutation, TargetKind};
 use ned::{NodeTree, Selection};
@@ -32,6 +32,8 @@ pub const DOCUMENT_KIND: &str = "document";
 
 const CELL_KIND: &str = "cell";
 const TABLE_KIND: &str = "table";
+const LIST_KIND: &str = "list";
+const ITEM_KIND: &str = "item";
 
 // ── Addressing ──────────────────────────────────────────────────────────────
 
@@ -169,6 +171,16 @@ fn container_document(
             }
             let parent = single_parent(store, preamble, expected)?;
             live_document(store, parent)
+        }
+        // An item sits in a list, which is the block: the document is that of
+        // the list (ADR-059 stage 9). The item is a container to insert into,
+        // never a block of its own (D6).
+        Some(ITEM_KIND) => {
+            let list = single_parent(store, id, expected)?;
+            if element_name(store, list) != Some(LIST_KIND) {
+                return Err(AddressError::Unresolved);
+            }
+            block_context(store, list, expected).map(|(_, document)| document)
         }
         // A block container is a block too: the document is that of the quote
         // it sits in, so quotes nest (ADR-059 §13).
@@ -691,19 +703,26 @@ fn write(store: &mut NodeStore, change: Change) {
             inlines_to_store(store, container, &inlines);
         }
         Change::Delete { block } => {
+            let parent = element_parent(store, block);
             assert!(delete(store, block) > 0, "the prepared block is a live node");
+            if let Some(parent) = parent {
+                normalise_lists_above(store,parent);
+            }
         }
         Change::InsertBefore { anchor, container, blocks } => {
             let at = anchor_index(store, container, anchor);
             insert_blocks(store, container, at, &blocks);
+            normalise_lists_above(store,container);
         }
         Change::InsertAfter { anchor, container, blocks } => {
             let at = anchor_index(store, container, anchor);
             insert_blocks(store, container, at + 1, &blocks);
+            normalise_lists_above(store,container);
         }
         Change::InsertChild { container, blocks } => {
             let at = store.children(container).len();
             insert_blocks(store, container, at, &blocks);
+            normalise_lists_above(store,container);
         }
         Change::Replace { block, container, blocks } => {
             let at = anchor_index(store, container, block);
@@ -725,7 +744,58 @@ fn write(store: &mut NodeStore, change: Change) {
             relocate_inner_trivia(store, block, InnerTrivia::Replaced { first });
             store.remove_child_edge(container, block);
             delete(store, block);
+            normalise_lists_above(store,container);
         }
+    }
+}
+
+/// An edit inside a list item can change what the list's spacing can be: a
+/// tight list may have an item that cannot be written tight (a second block
+/// that is not a list, a list straight after a paragraph that cannot interrupt
+/// it), and a loose list may be left with nothing to separate (one item of one
+/// block). Such a list is not refused: its spacing becomes what the markdown
+/// would read as, which is [`List::normalised`], the parser's rule in both
+/// directions (D3), so that N does not change when the file is read again.
+/// Climbs from `node` through every list around it.
+fn normalise_lists_above(store: &mut NodeStore, node: NodeId) {
+    let mut at = Some(node);
+    while let Some(current) = at {
+        if element_name(store, current) == Some(LIST_KIND) {
+            normalise_list(store, current);
+        }
+        at = element_parent(store, current);
+    }
+}
+
+/// Write the spacing of the list `list` as [`List::normalised`] says.
+fn normalise_list(store: &mut NodeStore, list: NodeId) {
+    // A tight list that cannot be written tight does not decode: make it
+    // loose first, then decide again.
+    if matches!(
+        block_from_node(store, list),
+        Err(BlockDecodeError::InvalidAttribute { ref attr, .. }) if attr == "tight"
+    ) {
+        set_tight(store, list, false);
+    }
+    let Ok(ContentElement::List { list: decoded }) = block_from_node(store, list) else {
+        return;
+    };
+    let current = decoded.spacing;
+    let wanted = decoded.normalised().spacing;
+    if wanted != current {
+        set_tight(store, list, wanted == Spacing::Tight);
+    }
+}
+
+/// Set the `tight` attribute of the list `list`.
+fn set_tight(store: &mut NodeStore, list: NodeId, tight: bool) {
+    if let Some(value) = store
+        .attributes(list)
+        .into_iter()
+        .find(|(name, _)| store.resolve_name(*name) == "tight")
+        .map(|(_, value)| value)
+    {
+        store.replace_node(value, Node::Boolean(tight));
     }
 }
 
@@ -813,7 +883,7 @@ fn inner_trivia(store: &NodeStore, block: NodeId) -> Vec<(Spot, NodeId, &'static
             if !trivia_texts(store, child, ATTR_TRIVIA_BEFORE).is_empty() {
                 out.push((Spot::Before(path.clone()), child, ATTR_TRIVIA_BEFORE));
             }
-            if is_block_container(store, child) {
+            if holds_inner_trivia(store, child) {
                 walk(store, child, path, out);
             }
             path.pop();
@@ -823,14 +893,18 @@ fn inner_trivia(store: &NodeStore, block: NodeId) -> Vec<(Spot, NodeId, &'static
         }
     }
     let mut out = Vec::new();
-    if is_block_container(store, block) {
+    if holds_inner_trivia(store, block) {
         walk(store, block, &mut Vec::new(), &mut out);
     }
     out
 }
 
-fn is_block_container(store: &NodeStore, id: NodeId) -> bool {
-    element_name(store, id).is_some_and(|n| BLOCK_CONTAINER_KINDS.contains(&n))
+/// Whether `id` is a block that comments can sit inside: a quote, a list (in
+/// its items) or an item (ADR-059 stage 9). The separator is never in the
+/// store, so a list has none of its own.
+fn holds_inner_trivia(store: &NodeStore, id: NodeId) -> bool {
+    element_name(store, id)
+        .is_some_and(|n| n == LIST_KIND || BLOCK_CONTAINER_KINDS.contains(&n))
 }
 
 /// Where `spot` of a replaced container is in `root`, the container that
@@ -847,7 +921,7 @@ fn spot_in(store: &NodeStore, root: NodeId, spot: &Spot) -> (NodeId, &'static st
         if matches!(spot, Spot::Before(_)) && depth + 1 == path.len() {
             return (child, ATTR_TRIVIA_BEFORE);
         }
-        if !is_block_container(store, child) {
+        if !holds_inner_trivia(store, child) {
             return (container, ATTR_TRIVIA_END);
         }
         container = child;
@@ -898,7 +972,7 @@ fn delete(store: &mut NodeStore, node: NodeId) -> usize {
     let sel = Selection::single(node);
     let to_delete = sel.union(&sel.descendants(store));
     // Only a block with comments of its own or a container can hold any.
-    let may_hold_comments = is_block_container(store, node)
+    let may_hold_comments = holds_inner_trivia(store, node)
         || !trivia_texts(store, node, ATTR_TRIVIA_BEFORE).is_empty();
     if may_hold_comments && let Some((host, attr)) = trivia_home(store, node, &to_delete) {
         // In front of whatever the home holds: the block's comments come

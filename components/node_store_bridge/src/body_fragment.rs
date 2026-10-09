@@ -35,7 +35,7 @@ pub fn parse_body_fragment(src: &str, grammar: &Grammar) -> Result<Vec<NodeTree>
             block_to_tree(&spanned.node).map_err(|e| {
                 ContentError::ParseError(match e {
                     BlockDecodeError::NotPayloadKind(kind) => {
-                        format!("a {kind} cannot be written through a program")
+                        format!("{} cannot be written through a program", schema::with_article(&kind))
                     }
                     other => other.to_string(),
                 })
@@ -82,7 +82,10 @@ mod tests {
     fn kinds_a_payload_cannot_carry_are_refused() {
         for (src, kind) in [("<div>x</div>\n", "html-block"), ("One.\n\n---\n\nTwo.\n", "separator")] {
             let err = refusal(src);
-            assert!(err.contains(&format!("a {kind} cannot be written through a program")), "{err}");
+            assert!(
+                err.contains(&format!("{} cannot be written through a program", schema::with_article(kind))),
+                "{err}"
+            );
         }
     }
 

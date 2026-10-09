@@ -467,7 +467,8 @@ impl Checker<'_> {
 
 fn not_an_attribute(path: &str, kind: &str) -> String {
     format!(
-        "{path} is a {kind} and cannot be an attribute value; name a field of it (for example {path}.href)"
+        "{path} is {} and cannot be an attribute value; name a field of it (for example {path}.href)",
+        schema::with_article(kind)
     )
 }
 

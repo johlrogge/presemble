@@ -1,8 +1,10 @@
+mod article;
 mod error;
 mod grammar;
 mod parser;
 pub mod span;
 
+pub use article::with_article;
 pub use error::SchemaError;
 pub use grammar::{
     AltRequirement, BodyRules, Constraint, ContentConstraint, CountRange, Element, Grammar,

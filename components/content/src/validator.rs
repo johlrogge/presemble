@@ -242,8 +242,9 @@ fn validate_unassigned(
             UnassignedReason::NotAllowedHere => {
                 let kind = kind_name(el);
                 let mut message = format!(
-                    "{}: the schema does not allow a {kind} here in the preamble",
-                    describe_element(el)
+                    "{}: the schema does not allow {} here in the preamble",
+                    describe_element(el),
+                    schema::with_article(kind)
                 );
                 let takers: Vec<String> = grammar
                     .preamble
