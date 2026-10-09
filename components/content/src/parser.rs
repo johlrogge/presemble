@@ -1093,6 +1093,7 @@ fn finish_paragraph(
     let raw = input.get(byte_range.clone()).unwrap_or_default();
     // Inside containers the prefixes of later lines are not content.
     let source = container_source(raw, prefixes);
+    let events = without_container_prefixes(input, events, prefixes);
     let trimmed = source.trim();
     if trimmed.is_empty() {
         return;
@@ -1142,6 +1143,32 @@ fn finish_paragraph(
         node: ContentElement::Paragraph { content, marker },
         span: Span::from(byte_range),
     });
+}
+
+/// The events of a paragraph in a container, with the container's prefixes
+/// taken from the later lines of an HTML tag or comment that spans lines:
+/// pulldown-cmark keeps the indentation of an item there, so it would be read
+/// as part of the comment, and written again behind the item's indentation, it
+/// would grow with every save.
+fn without_container_prefixes(
+    input: &str,
+    events: ParagraphEvents,
+    prefixes: &[Prefix],
+) -> ParagraphEvents {
+    if prefixes.is_empty() {
+        return events;
+    }
+    events
+        .into_iter()
+        .map(|(event, range)| match event {
+            Event::InlineHtml(text) if text.contains('\n') => {
+                let source = input.get(range.clone()).unwrap_or_default();
+                let stripped = container_source(source, prefixes).into_owned();
+                (Event::InlineHtml(stripped.into()), range)
+            }
+            other => (other, range),
+        })
+        .collect()
 }
 
 /// Say once that a heading was kept as literal text. The parser does not know
@@ -2723,6 +2750,58 @@ headings
         assert_saved_as("- a\n  <!-- c -->\n  - b\n  <!-- end -->", "- a\n  <!-- c -->\n  - b\n  <!-- end -->");
         // Loose.
         assert_saved_as("- a\n\n  <!-- c -->\n\n  b\n\n- c", "- a\n\n  <!-- c -->\n\n  b\n\n- c");
+    }
+
+    /// A comment or an HTML tag that spans lines inside a paragraph reads the
+    /// same at every depth: pulldown-cmark keeps an item's indentation in the
+    /// later lines, which would be part of the comment and grow by the item's
+    /// indentation with every save. In an item, in a quote and in a quote in an
+    /// item; saved text is a fixed point.
+    #[test]
+    fn multi_line_inline_comment_in_a_container_is_a_fixed_point() {
+        use crate::inline::Inlines;
+        fn in_item(md: &str) -> String {
+            md.split('\n')
+                .enumerate()
+                .map(|(i, l)| if i == 0 { format!("- {l}") } else { format!("  {l}") })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        fn in_quote(md: &str) -> String {
+            md.split('\n').map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
+        }
+        /// The first paragraph found, at any depth.
+        fn paragraph(element: &ContentElement) -> Option<Inlines> {
+            match element {
+                ContentElement::Paragraph { content, .. } => Some(content.clone()),
+                ContentElement::Blockquote { blocks } => blocks.elements.iter().find_map(|e| paragraph(&e.node)),
+                ContentElement::List { list } => {
+                    list.items.iter().flat_map(|i| i.elements.iter()).find_map(|e| paragraph(&e.node))
+                }
+                _ => None,
+            }
+        }
+        for flat in [
+            "a\n    <!--\n    multi\n    line\n    --> b",
+            "a\n    <div\n    class=\"x\">y</div> z",
+            "a\n    <p>x</p>\n    <!--\n      deeper\n    -->",
+        ] {
+            let top = paragraph(&nodes(flat)[0]).expect("a paragraph");
+            let cases = [
+                flat.to_string(),
+                in_item(flat),
+                in_quote(flat),
+                in_item(&in_quote(flat)),
+                in_quote(&in_item(flat)),
+            ];
+            for md in cases {
+                let element = &nodes(&md)[0];
+                assert_eq!(paragraph(element).as_ref(), Some(&top), "{md:?} reads differently");
+                let saved = written(&md);
+                assert_eq!(nodes(&saved), nodes(&md), "{md:?} saved as {saved:?}");
+                assert_eq!(written(&saved), saved, "{md:?}: the second save differs");
+            }
+        }
     }
 
     /// The paragraph of a tight item has no tag in pulldown's events; it is
