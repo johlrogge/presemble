@@ -374,17 +374,27 @@ pub(crate) enum LineContext {
 
 /// Escape the lines of paragraph or blockquote text so they stay one
 /// paragraph. Lines are split on `\n` only (paragraphs and blockquotes alike).
-pub(crate) fn escape_block_lines(text: &str) -> Vec<String> {
+///
+/// `html_starts` are the byte offsets in `text` where an HTML tag or a comment
+/// node (not literal text) begins: a later line that starts one of those with a
+/// block opener is written indented by four spaces instead of escaped, so it
+/// stays markup in the paragraph (an indented line cannot open an HTML block
+/// or interrupt a paragraph). Literal text keeps its `\<`.
+pub(crate) fn escape_block_lines(text: &str, html_starts: &[usize]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut offset = 0;
     for line in text.split('\n') {
         let escaped = match out.last() {
             None => escape_first_line(text),
             Some(prev) => {
                 let header = table_header_candidate(prev, out.len() == 1);
-                escape_continuation_line(line, header)
+                let (indent_bytes, _) = leading_indent(line);
+                let is_html = html_starts.contains(&(offset + indent_bytes));
+                escape_continuation_line(line, header, is_html)
             }
         };
         out.push(escaped);
+        offset += line.len() + 1;
     }
     out
 }
@@ -421,13 +431,17 @@ fn escape_first_line(text: &str) -> String {
 /// Escape a later line of a paragraph so it neither interrupts the paragraph
 /// nor turns it (or its tail) into a setext heading or a table. `header` is
 /// the written previous line when it could head a table.
-fn escape_continuation_line(line: &str, header: Option<&str>) -> String {
+fn escape_continuation_line(line: &str, header: Option<&str>, is_html: bool) -> String {
     let (indent_bytes, columns) = leading_indent(line);
     if columns >= 4 {
         // Indented lines are lazy continuation text, never code.
         return line.to_string();
     }
     let (indent, rest) = line.split_at(indent_bytes);
+    // HTML markup that would open a block: indented, not escaped.
+    if is_html && opener_escape_offset(rest, LineContext::Continuation) == Some(0) {
+        return format!("    {rest}");
+    }
     let at = opener_escape_offset(rest, LineContext::Continuation).or_else(|| {
         let header = header?;
         let (columns, first_hyphen) = table_delimiter_row(rest)?;
@@ -2088,6 +2102,50 @@ headings
         );
         // Text is a fixed point from then on.
         assert_eq!(serialize_document(&second), saved);
+    }
+
+    /// 9.2b: an inline comment at the start of a paragraph's later line stays
+    /// a comment on save: the line is written indented by four spaces (relative
+    /// to its container), which can neither open a block nor interrupt the
+    /// paragraph. At the top level, in a quote and in an item.
+    #[test]
+    fn inline_comment_at_the_start_of_a_line_survives_a_save() {
+        use crate::inline::Inline;
+        let para = src_para("a\n    <!-- c --> b");
+        let ContentElement::Paragraph { content, .. } = &para else { panic!("{para:?}") };
+        assert!(content.as_slice().iter().any(|i| matches!(i, Inline::Comment(_))), "{content:?}");
+
+        let saved = serialize_element(&para);
+        assert_eq!(saved, "a\n    <!-- c --> b");
+        assert_eq!(reparse_one(&saved), para);
+
+        let quote = ContentElement::Blockquote {
+            blocks: crate::document::Blocks::from_elements(im::vector![Spanned {
+                node: para.clone(),
+                span: Span { start: 0, end: 0 },
+            }]),
+        };
+        let saved = serialize_element(&quote);
+        assert_eq!(saved, "> a\n>     <!-- c --> b");
+        assert_eq!(reparse_one(&saved), quote);
+
+        let item = ContentElement::List {
+            list: List {
+                kind: ListKind::Bullet,
+                spacing: Spacing::Tight,
+                items: vec![crate::document::Blocks::from_elements(im::vector![Spanned {
+                    node: para.clone(),
+                    span: Span { start: 0, end: 0 },
+                }])],
+            },
+        };
+        let saved = serialize_element(&item);
+        assert_eq!(saved, "- a\n      <!-- c --> b");
+        assert_eq!(reparse_one(&saved), item);
+
+        // Literal text that starts with `<` keeps its escape.
+        let literal = self::tests::para("a\n<!-- c");
+        assert_eq!(serialize_element(&literal), "a\n\\<!-- c");
     }
 
     /// The lists that `first` and `second` (markdown of one list each) read as.

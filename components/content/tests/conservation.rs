@@ -267,12 +267,11 @@ fn gen_list_of_kind(rng: &mut Rng, ordered: bool, depth: usize) -> String {
     let loose = rng.chance(30);
     let bullet = rng.pick(&["-", "-", "*", "+"]);
     let delimiter = rng.pick(&[".", ".", ")"]);
-    // A nested list straight after an item's paragraph must be able to
-    // interrupt it (CommonMark): an ordered one starts at 1 and its first item
-    // is not empty. (Otherwise it is paragraph text, and its lines hold
-    // whatever the generator put there, an inline comment at the start of a
-    // line included, which a paragraph cannot write back.)
-    let start: u64 = if depth > 0 { 1 } else { [1, 1, 1, 0, 3, 9, 10][rng.below(7)] };
+    // A nested ordered list that cannot interrupt the item's paragraph (it
+    // starts at other than 1, or its first item is empty) is paragraph text;
+    // its lines may hold an inline comment at their start, which the save
+    // writes indented (9.2b).
+    let start: u64 = [1, 1, 1, 0, 3, 9, 10][rng.below(7)];
     let constant = ordered && rng.chance(15);
     let n = 1 + rng.below(3);
     let separator = if loose { "\n\n" } else { "\n" };
@@ -285,7 +284,7 @@ fn gen_list_of_kind(rng: &mut Rng, ordered: bool, depth: usize) -> String {
                 bullet.to_string()
             };
             let indent = " ".repeat(marker.len() + 1);
-            let body = gen_item_blocks(rng, loose, depth, i > 0 || depth == 0).join(separator);
+            let body = gen_item_blocks(rng, loose, depth, true).join(separator);
             let mut item = marker;
             for (at, line) in body.split('\n').enumerate() {
                 if at == 0 {

@@ -59,7 +59,9 @@ pub fn serialize_inlines(inlines: &Inlines, ctx: InlineContext) -> String {
     match ctx {
         // Line starts are escaped by the block writer, which knows pulldown's
         // exact rules (tables, link reference definitions, HTML blocks).
-        InlineContext::Paragraph => crate::serializer::escape_block_lines(&out).join("\n"),
+        InlineContext::Paragraph => {
+            crate::serializer::escape_block_lines(&out, &ahead.html_line_starts).join("\n")
+        }
         // The first line sits behind `[` or `![`, so it opens no block.
         InlineContext::LinkText | InlineContext::Alt => escape_line_starts(&out, false),
         InlineContext::Heading => crate::serializer::escape_closing_hashes(&out),
@@ -120,6 +122,10 @@ struct Ahead {
     /// `>` not yet written, wherever it comes from in the written output: a
     /// `<` is only escaped when one is still to come.
     gts: usize,
+    /// The byte offsets in the output where an HTML tag or a comment node
+    /// starts its line (behind blanks at most): written there, it must stay
+    /// markup (see `escape_block_lines`).
+    html_line_starts: Vec<usize>,
 }
 
 impl Ahead {
@@ -136,6 +142,15 @@ impl Ahead {
             flat_pos: 0,
             backticks: count_backticks(items),
             gts: count_gts(items),
+            html_line_starts: Vec::new(),
+        }
+    }
+
+    /// An HTML node is about to be written at the end of `out`.
+    fn html_at(&mut self, out: &str) {
+        let line_start = out.rfind('\n').map_or(0, |n| n + 1);
+        if out[line_start..].chars().all(|c| matches!(c, ' ' | '\t')) {
+            self.html_line_starts.push(out.len());
         }
     }
 
@@ -301,11 +316,13 @@ fn write_run(items: &[Inline], place: Place, ahead: &mut Ahead, out: &mut String
                 out.push(')');
             }
             Inline::Html(html) => {
+                ahead.html_at(out);
                 ahead.pass_backticks(backticks_in(html.as_str()));
                 ahead.pass_gts(gts_in(html.as_str()));
                 out.push_str(html.as_str());
             }
             Inline::Comment(comment) => {
+                ahead.html_at(out);
                 ahead.pass_backticks(backticks_in(comment.as_str()));
                 ahead.pass_gts(gts_in(comment.as_str()));
                 out.push_str(comment.as_str());
@@ -936,6 +953,13 @@ mod tests {
         assert!(tree.check_writable(InlineContext::Paragraph).is_err());
     }
 
+    /// Where a tag or comment would open an HTML block:
+    /// - On a later line of a paragraph it is writable: the line is written
+    ///   indented by four spaces, where an HTML block cannot start and
+    ///   indented code cannot interrupt a paragraph (9.2b).
+    /// - On the FIRST line it is not writable. Indented, the line would be
+    ///   code; unindented, it would be an HTML block. Such a paragraph can only
+    ///   come from an edit, which is refused (L20).
     #[test]
     fn html_that_would_open_an_html_block_is_not_writable() {
         let html = |s: &str| Inline::Html(InlineHtml::new(s).unwrap());
@@ -943,11 +967,8 @@ mod tests {
         let not_writable = [
             vec![html("<div>"), t("x")],
             vec![comment("<!-- c -->"), t("x")],
-            vec![t("a\n"), html("<div>"), t("x")],
-            vec![t("a\n"), comment("<!-- c -->")],
             vec![html("<span>")],
             vec![comment("<!-- c -->")],
-            vec![t("a"), Inline::LineBreak, html("<div>")],
         ];
         for items in not_writable {
             let tree = Inlines::new(items.clone(), InlineContext::Paragraph);
@@ -965,6 +986,11 @@ mod tests {
             // A type-7 tag (any other tag) cannot interrupt a paragraph, so
             // alone on a later line it stays inline.
             vec![t("a\n"), html("<span>")],
+            // 9.2b: on a later line a tag or comment that would open an HTML
+            // block is written indented by four spaces, and stays markup.
+            vec![t("a\n"), html("<div>"), t("x")],
+            vec![t("a\n"), comment("<!-- c -->")],
+            vec![t("a"), Inline::LineBreak, html("<div>")],
         ];
         for items in writable {
             let tree = Inlines::new(items.clone(), InlineContext::Paragraph);

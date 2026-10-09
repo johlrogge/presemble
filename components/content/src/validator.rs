@@ -1539,6 +1539,33 @@ mod tests {
         assert!(body_diagnostics("- a `<b>` \\<i>").is_empty());
     }
 
+    /// 9.2b: inline HTML at the start of a paragraph's later line is still
+    /// inline HTML after a save, so the Error stays (the save used to escape
+    /// the `<`, turning the tag into text and the Error silently away).
+    #[test]
+    fn inline_html_at_the_start_of_a_line_stays_html() {
+        let g = summary_grammar(true);
+        let diagnostics = |src: &str| {
+            let doc = parse_and_assign(src, &g).expect("parses");
+            validate(&doc, &g).diagnostics
+        };
+        for body in [
+            "a\n    <div>x</div> y",
+            "> a\n>     <div>x</div> y",
+            "- a\n      <div>x</div> y",
+            "a\n    <p>x</p>\n    <div>y</div> z",
+        ] {
+            let src = format!("# Title\n\nOne.\n\n----\n\n{body}\n");
+            let before = diagnostics(&src);
+            assert_eq!(before.len(), 1, "{body:?}: {before:#?}");
+            assert!(before[0].message.contains("inline HTML"), "{body:?}: {}", before[0].message);
+            let saved = crate::serialize_document(&parse_and_assign(&src, &g).expect("parses"));
+            assert_eq!(saved, src, "{body:?}: the save changes the text");
+            let after = diagnostics(&saved);
+            assert_eq!(after.len(), 1, "{body:?}: {after:#?}");
+        }
+    }
+
     /// The reading is uniform: a list item holds blocks, and its paragraphs are
     /// read exactly as at the top level, as a blockquote's are (stage 8 D1, see
     /// `markers_and_link_expressions_in_a_blockquote_read_as_at_top_level`).
