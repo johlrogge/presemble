@@ -7,6 +7,17 @@ in
   claude.code.enable = true;
   env.METADEV_PROJECT = "presemble";
 
+  # The one source of the Rust toolchain: pinned, so local clippy/rustc match
+  # CI (which runs `devenv shell`). Bump it deliberately; the rust-overlay input
+  # in devenv.yaml must be new enough to know the version (`devenv update
+  # rust-overlay`).
+  languages.rust = {
+    enable = true;
+    channel = "stable";
+    version = "1.99.0";
+    components = [ "rustc" "cargo" "clippy" "rustfmt" "rust-analyzer" ];
+  };
+
   git-hooks.enable = true;
   git-hooks.hooks.polylith-clippy = {
     enable = true;
