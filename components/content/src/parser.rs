@@ -788,7 +788,7 @@ fn current<'a>(root: &'a mut Blocks, open: &'a mut [Open]) -> &'a mut Blocks {
 
 /// What a line of a block inside a container loses to the container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Prefix {
+pub enum Prefix {
     /// A blockquote: up to three spaces, `>`, and one optional space.
     Quote,
     /// A list item: up to this many spaces, the item's content column
@@ -848,7 +848,7 @@ fn item_content_column(input: &str, at: usize) -> usize {
 ///
 /// Tabs are not expanded: a tab after `>` stays (CommonMark would count part
 /// of it as the marker's space), which is pinned by a test.
-pub(crate) fn container_source<'a>(raw: &'a str, prefixes: &[Prefix]) -> Cow<'a, str> {
+pub fn container_source<'a>(raw: &'a str, prefixes: &[Prefix]) -> Cow<'a, str> {
     if prefixes.is_empty() {
         return Cow::Borrowed(raw);
     }

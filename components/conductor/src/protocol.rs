@@ -37,9 +37,80 @@ pub enum RenderMode {
     Schema,
 }
 
+/// Names a drift (LSP-2 §0.5): a hash of the base text of the region and the
+/// ids of the N blocks aligned with it, so it is the same across keystrokes
+/// outside the region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DriftId(pub u64);
+
+impl std::fmt::Display for DriftId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+/// One step down from a container into a block inside it, to the container
+/// where a drift or a held region is (the wire form of `content::sync::Step`).
+/// The indices are part indices in the editor's base text and new text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PathStep {
+    /// Into a blockquote.
+    Quote { base: usize, new: usize },
+    /// Into item `item` of a list.
+    Item { base: usize, new: usize, item: usize },
+}
+
+impl From<&content::sync::Step> for PathStep {
+    fn from(step: &content::sync::Step) -> PathStep {
+        match step {
+            content::sync::Step::Quote { base, new } => PathStep::Quote { base: *base, new: *new },
+            content::sync::Step::Item { base, new, item } => {
+                PathStep::Item { base: *base, new: *new, item: *item }
+            }
+        }
+    }
+}
+
+/// A region of the editor's text that N did not take, because N's blocks for
+/// it no longer read as what the editor started from (LSP-2 §0.3, §0.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Drift {
+    pub id: DriftId,
+    /// The containers down to the one the region is in; empty for a region of
+    /// a slot, `unassigned` or the body itself.
+    pub path: Vec<PathStep>,
+    /// Bytes in the editor's new text.
+    pub range: std::ops::Range<usize>,
+    /// N's canonical markdown for the region.
+    pub current: String,
+}
+
+/// A region of the editor's text that is not lowered into N yet, because it
+/// opens a construct that is not closed (LSP-2 §0.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldRegion {
+    /// The containers down to the one the region is in.
+    pub path: Vec<PathStep>,
+    /// Bytes in the editor's new text.
+    pub range: std::ops::Range<usize>,
+    pub reason: String,
+}
+
 /// Commands sent from clients (LSP, serve) to the conductor via nng REQ/REP.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
+    /// An editor opened a document with this text. N is not changed; the text
+    /// is what later changes are compared with.
+    EditorOpened { path: editorial_types::ContentPath, text: String },
+    /// The editor's text changed. Every region that differs from what the
+    /// editor started from is lowered into N at once, block by block (LSP-2).
+    /// Does NOT write to disk. Answered with [`Response::EditorSynced`].
+    EditorChanged { path: editorial_types::ContentPath, text: String },
+    /// The editor closed the document. N is unchanged.
+    EditorClosed { path: editorial_types::ContentPath },
+    /// Take the editor's version of a region N did not take (a drift that
+    /// still exists), over N's.
+    KeepMine { path: editorial_types::ContentPath, drift_id: DriftId },
     /// Editor updated a document's text (from LSP did_change). Does NOT write to disk.
     DocumentChanged { path: editorial_types::SitePath, text: String },
     /// Editor saved a document (from LSP did_save).
@@ -214,6 +285,9 @@ pub enum Response {
     PageUrl(Option<String>),
     /// Result of a [`Command::BlockEdit`]: done, or refused with a cause.
     BlockEdited(editorial_types::BlockEditResponse),
+    /// Answer to an editor command: the regions N did not take (drifts) and
+    /// the regions held back until their construct is closed.
+    EditorSynced { drifts: Vec<Drift>, held: Vec<HeldRegion> },
     /// Result of applying a NED program: counts of dirty paths and rebuilt/failed pages.
     Applied {
         rebuilt_pages: Vec<String>,

@@ -298,28 +298,82 @@ pub fn document_regions(base: &Document, new: &Document) -> Vec<ContainerRegions
 /// so blocks inserted in the model do not shift it.
 pub fn align(base: &[ContentElement], model: &[ContentElement]) -> Vec<Option<usize>> {
     let mut out = vec![None; base.len()];
-    match lcs_pairs(base, model, |a, b| a == b) {
-        Some(pairs) => {
-            for (i, j) in pairs {
-                out[i] = Some(j);
-            }
+    // The common prefix and suffix are aligned as they stand, so that the
+    // table is only built for what is left (a document edited in one place).
+    let prefix = base.iter().zip(model).take_while(|(a, b)| a == b).count();
+    for (i, slot) in out.iter_mut().enumerate().take(prefix) {
+        *slot = Some(i);
+    }
+    let suffix = base[prefix..]
+        .iter()
+        .rev()
+        .zip(model[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    for k in 0..suffix {
+        out[base.len() - 1 - k] = Some(model.len() - 1 - k);
+    }
+    let (base_end, model_end) = (base.len() - suffix, model.len() - suffix);
+    // Too large even so for the table: the prefix and suffix alone are aligned.
+    if let Some(pairs) = lcs_pairs(&base[prefix..base_end], &model[prefix..model_end], |a, b| a == b) {
+        for (i, j) in pairs {
+            out[prefix + i] = Some(prefix + j);
         }
-        // Too large for the table: align the common prefix and suffix only.
-        None => {
-            let prefix = base.iter().zip(model).take_while(|(a, b)| a == b).count();
-            for (i, slot) in out.iter_mut().enumerate().take(prefix) {
-                *slot = Some(i);
-            }
-            let suffix = base[prefix..]
-                .iter()
-                .rev()
-                .zip(model[prefix..].iter().rev())
-                .take_while(|(a, b)| a == b)
-                .count();
-            for k in 0..suffix {
-                out[base.len() - 1 - k] = Some(model.len() - 1 - k);
-            }
+    }
+    out
+}
+
+pub use crate::parser::{Prefix, container_source};
+
+/// The column (in characters) of `offset` on its line.
+fn column_of(text: &str, offset: usize) -> usize {
+    let line_start = text[..offset].rfind('\n').map_or(0, |p| p + 1);
+    text[line_start..offset].chars().count()
+}
+
+/// What the containers along `path` take from every line of a block inside
+/// them, outermost first, as the parser strips it: a `Quote` step adds
+/// [`Prefix::Quote`], an `Item` step adds [`Prefix::Indent`] of the item's
+/// content column relative to the container outside it. `root` is the
+/// container the path starts in, and `text` the source its spans are in. The
+/// indices of the path are the new side's.
+pub fn path_prefixes(text: &str, root: &Blocks, path: &[Step]) -> Vec<Prefix> {
+    let mut out = Vec::new();
+    let mut current = root;
+    let mut outer = 0;
+    for step in path {
+        let (part, item) = match step {
+            Step::Quote { new, .. } => (*new, None),
+            Step::Item { new, item, .. } => (*new, Some(*item)),
+        };
+        // The part index is the index of a block among the parts; the element
+        // is the one that many blocks in.
+        let parts = container_parts(current);
+        if !matches!(parts.get(part).map(|p| &p.node), Some(Part::Block(_))) {
+            break;
         }
+        let at = parts[..part].iter().filter(|p| matches!(p.node, Part::Block(_))).count();
+        let Some(element) = current.elements.get(at).map(|e| &e.node) else { break };
+        let inner = match (element, item) {
+            (ContentElement::Blockquote { blocks }, None) => blocks,
+            (ContentElement::List { list }, Some(i)) => match list.items.get(i) {
+                Some(blocks) => blocks,
+                None => break,
+            },
+            _ => break,
+        };
+        let content_column = inner
+            .elements
+            .front()
+            .map(|e| e.span.start)
+            .or_else(|| inner.comments.front().map(|(_, c)| c.span.start))
+            .map_or(outer, |at| column_of(text, at));
+        out.push(match item {
+            None => Prefix::Quote,
+            Some(_) => Prefix::Indent(content_column.saturating_sub(outer)),
+        });
+        outer = content_column;
+        current = inner;
     }
     out
 }
@@ -851,6 +905,41 @@ mod tests {
         // Repeats keep their order.
         assert_eq!(align(&elements("a\n\na\n"), &elements("a\n\nz\n\na\n")), vec![Some(0), Some(2)]);
         assert_eq!(align(&[], &model), Vec::<Option<usize>>::new());
+    }
+
+    /// A container too big for the table of the longest common subsequence
+    /// (more than 2000 by 2000 blocks) is still aligned in full when it is
+    /// edited in one place: the common prefix and suffix are trimmed first, and
+    /// the table is built for what is left. (At 600 blocks the whole table
+    /// fits, so a smaller container would not tell the two apart.)
+    #[test]
+    fn alignment_of_a_large_document_runs_lcs_on_the_middle() {
+        let source = |changed: Option<usize>, inserted_before: Option<usize>| -> String {
+            let mut out = String::new();
+            for i in 0..2500 {
+                if inserted_before == Some(i) {
+                    out.push_str("new block\n\n");
+                }
+                if changed == Some(i) {
+                    out.push_str("changed block\n\n");
+                } else {
+                    out.push_str(&format!("p{i}\n\n"));
+                }
+            }
+            out
+        };
+        let base = elements(&source(None, None));
+        let model = elements(&source(Some(1000), Some(1500)));
+        assert_eq!((base.len(), model.len()), (2500, 2501));
+        let aligned = align(&base, &model);
+        for (i, to) in aligned.iter().enumerate() {
+            let expected = match i {
+                1000 => None,
+                0..1500 => Some(i),
+                _ => Some(i + 1),
+            };
+            assert_eq!(*to, expected, "block {i}");
+        }
     }
 
     // ── unterminated constructs ─────────────────────────────────────────────

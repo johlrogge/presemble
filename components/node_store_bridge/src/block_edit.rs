@@ -94,10 +94,26 @@ fn count_occurrences(hay: &[char], needle: &[char], limit: usize) -> usize {
     count
 }
 
+/// The node a lowered mutation addresses, relative to the block (or slot
+/// container) it was lowered for. The selection string is derived from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoweredTarget {
+    /// The block itself (a replace, or a search over its whole text).
+    Block,
+    /// The text node that is the block's only child.
+    TextOf,
+    /// The container the lowering was made for (an insert into an empty slot).
+    Container,
+}
+
 /// The result of lowering a block edit: what to run and what to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lowered {
+    /// The selection that addresses [`Lowered::target`], derived from the
+    /// selection the caller passed.
     pub selection: String,
+    /// What the mutation addresses, typed, for a caller that has the node.
+    pub target: LoweredTarget,
     pub mutation: NedMutation,
     pub preview: SuggestionPreview,
 }
@@ -117,12 +133,16 @@ fn refuse(cause: BlockEditCause, message: impl Into<String>) -> BlockEditError {
 
 /// The projection a block is edited under, from its parent: a block in a
 /// preamble `slot` is edited as content; a block in `body` or `unassigned`
-/// as block markdown.
+/// as block markdown. A block inside a quote or a list item is edited under
+/// the projection of the block it is in.
 fn projection_for(store: &NodeStore, block: NodeId) -> Option<Projection> {
     store.parents(block).into_iter().find_map(|p| match store.get(p)? {
         Node::Element(name) => match store.resolve_name(*name) {
             "slot" => Some(Projection::Content),
             "body" | "unassigned" => Some(Projection::Block),
+            // The parent of a block in a quote is the quote, of a block in an
+            // item the item, whose parent is the list.
+            "blockquote" | "item" | "list" => projection_for(store, p),
             _ => None,
         },
         _ => None,
@@ -331,6 +351,7 @@ pub fn lower(
         };
         return Ok(Lowering::Lowered(Lowered {
             selection: block_selection.to_string(),
+            target: LoweredTarget::Block,
             mutation,
             preview,
         }));
@@ -354,6 +375,7 @@ pub fn lower(
         };
         return Ok(Lowering::Lowered(Lowered {
             selection: format!("(ned/text-in {block_selection})"),
+            target: LoweredTarget::TextOf,
             mutation,
             preview,
         }));
@@ -362,6 +384,7 @@ pub fn lower(
     // Anything else replaces the block.
     Ok(Lowering::Lowered(Lowered {
         selection: block_selection.to_string(),
+        target: LoweredTarget::Block,
         mutation: NedMutation::Replace(trees),
         preview,
     }))
@@ -424,6 +447,7 @@ pub fn lower_into_empty_slot(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Lowering::Lowered(Lowered {
         selection: container_selection.to_string(),
+        target: LoweredTarget::Container,
         mutation: NedMutation::InsertChild(trees),
         preview: SuggestionPreview {
             base: PreviewText::new(String::new()),

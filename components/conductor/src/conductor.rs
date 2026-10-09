@@ -8,6 +8,8 @@ use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification
 use crate::suggestion_apply::{self, DOCUMENT_KIND};
 use content_store::edit;
 
+mod editor_sync;
+
 /// Element kind given to a document root that has been superseded by a
 /// re-ingest of the same file (ADR-056). See `Conductor::retire_document_root`.
 const SUPERSEDED_DOCUMENT_KIND: &str = "superseded-document";
@@ -225,6 +227,9 @@ pub struct Conductor {
     dep_graph: RwLock<dep_graph::DependencyGraph>,
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
     doc_sources: RwLock<HashMap<editorial_types::SitePath, String>>, // site path -> in-memory text
+    /// The documents an editor has open, each with the text N and the editor
+    /// last agreed on (LSP-2).
+    editors: RwLock<HashMap<editorial_types::ContentPath, editor_sync::EditorState>>,
     site_index: RwLock<site_index::SiteIndex>,
     repo: site_repository::SiteRepository,
     build_errors: RwLock<HashMap<String, Vec<String>>>,
@@ -438,6 +443,7 @@ impl Conductor {
             dep_graph: RwLock::new(dep_graph::DependencyGraph::new()),
             schema_cache: RwLock::new(schema_cache),
             doc_sources: RwLock::new(HashMap::new()),
+            editors: RwLock::new(HashMap::new()),
             site_index: RwLock::new(site_index),
             repo,
             build_errors: RwLock::new(HashMap::new()),
@@ -3533,6 +3539,10 @@ impl Conductor {
                 CommandResult::with_response(Response::BuildErrors(errors.clone()))
             }
             Command::Shutdown => CommandResult::ok(),
+            Command::EditorOpened { path, text } => self.editor_opened(path, text),
+            Command::EditorChanged { path, text } => self.editor_changed(path, text),
+            Command::EditorClosed { path } => self.editor_closed(&path),
+            Command::KeepMine { path, drift_id } => self.keep_mine(path, drift_id),
             Command::DocumentChanged { path, text } => {
                 let path_buf = match crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
                     Ok(abs) => abs,
@@ -3686,6 +3696,8 @@ impl Conductor {
                     sources.remove(path.as_site_path()).is_some()
                 };
                 self.populate_node_store(&[rel]);
+                // An editor of it is given what N has now.
+                self.editor_follows_reload(&path);
 
                 // The store changed under every page: re-render, as after a
                 // file change.
@@ -3701,7 +3713,8 @@ impl Conductor {
                 }
             }
             Command::CursorMoved { path, line } => {
-                if let Some(src) = self.document_text(&path)
+                // An open editor's text is the one the line is in.
+                if let Some(src) = self.editor_text(&path).or_else(|| self.document_text(&path))
                     && let Some(anchor) = self.body_element_anchor_at_line(&src, path.as_str(), line)
                 {
                     return CommandResult::ok_with_events(vec![

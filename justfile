@@ -211,6 +211,13 @@ output-diff a b mode="exact":
 perf:
     cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$'
 
+# The gate of LSP-2 2.3: p50 and p95 of an editor change (in place, and a new
+# paragraph) against DocumentChanged, interleaved, on a 1000-page site with one
+# 500-block document. Release build; the numbers are printed.
+# Time editor changes against DocumentChanged (release).
+perf-editor:
+    cargo polylith cargo --profile dev test --release -p conductor -- --ignored --nocapture timing_editor_changed
+
 # Runs the same bench as `perf` in a throwaway worktree at git <rev>, like snapshot-ref: the
 # worktree is removed afterwards, and it has its own target dir (a full build),
 # so the numbers are the rev's and the working tree's build is left alone.
