@@ -31,9 +31,19 @@ ssh-config := env_var('HOME') / ".metadev/projects/presemble/.ssh/config"
 
 # List available targets.
 default:
-    @just --list
+    @just --list --unsorted
 
-# --- local development ---
+# Prints a login URL; stop it with `just serve-stop`.
+# Serve a site for manual testing.
+[group('develop')]
+serve dir="site" session="manual":
+    cargo polylith cargo --profile dev run --bin presemble -- serve {{ dir }} --dev-session={{ session }}
+
+# Never `pkill -f presemble`: that kills the devenv shell.
+# Stop a running `presemble serve`.
+[group('develop')]
+serve-stop:
+    -pkill -f "presemble serve"
 
 # Output lands in <parent-of-dir>/output/<dir-name>/. The site is validated
 # first (publish gate, ADR-061): on validation errors every diagnostic is
@@ -41,6 +51,7 @@ default:
 # build exits non-zero. On render failure the CLI prints the count
 # ("N pages built, M failed") followed by one "error:" line per page message.
 # Build a site with the dev profile; exits non-zero on validation errors or failed pages.
+[group('develop')]
 site-build dir="site":
     #!/usr/bin/env bash
     set -uo pipefail
@@ -57,6 +68,7 @@ site-build dir="site":
 # No build output is written into the repo; the temp path is printed and the
 # output lands under <tmp>/output/<name>/.
 # Build example-sites/<name> in a fresh temp dir.
+[group('develop')]
 site-build-example name="blog":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -79,6 +91,7 @@ site-build-example name="blog":
 # always writes to <parent-of-dir>/output/<dir-name>/, which the next build
 # overwrites.
 # Build a site and snapshot its output for a later output-diff.
+[group('compare')]
 site-snapshot dir="site":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -98,6 +111,7 @@ site-snapshot dir="site":
 # one lets the ref's binary overwrite target/debug/presemble, which cargo then
 # mistakes for the working tree's up-to-date binary.
 # Snapshot the published output of site/ at a git ref.
+[group('compare')]
 snapshot-ref ref:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -116,6 +130,7 @@ snapshot-ref ref:
 # target/editorial-snapshot.log (the just MCP drops stdout when a recipe fails).
 # Nothing is written into the site's .presemble by the build itself.
 # Build a site's editorial output and snapshot it for a later output-diff.
+[group('compare')]
 editorial-snapshot dir="site":
     #!/usr/bin/env bash
     set -uo pipefail
@@ -140,6 +155,7 @@ editorial-snapshot dir="site":
 # predates `presemble build --editorial` has no such flag: the recipe then fails
 # (the flag is rejected), it never silently falls back to published output.
 # Snapshot the editorial output of site/ at a git ref.
+[group('compare')]
 editorial-snapshot-ref ref:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -158,6 +174,7 @@ editorial-snapshot-ref ref:
 # newlines between tags count as equal; check suspicious files in exact mode).
 # Exits 0 when equal, 1 when different, 2 on usage errors.
 # Compare two build outputs.
+[group('compare')]
 output-diff a b mode="exact":
     #!/usr/bin/env bash
     set -uo pipefail
@@ -208,6 +225,7 @@ output-diff a b mode="exact":
 # dev polylith profile. Each result prints `time: [low median high]`; compare
 # the middle value. Slow: about 30 seconds of measurement per size.
 # Benchmark a full site build at 1K and 10K pages.
+[group('perf')]
 perf:
     cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$'
 
@@ -215,6 +233,7 @@ perf:
 # paragraph) against DocumentChanged, interleaved, on a 1000-page site with one
 # 500-block document. Release build; the numbers are printed.
 # Time editor changes against DocumentChanged (release).
+[group('perf')]
 perf-editor:
     cargo polylith cargo --profile dev test --release -p conductor -- --ignored --nocapture timing_editor_changed
 
@@ -223,6 +242,7 @@ perf-editor:
 # so the numbers are the rev's and the working tree's build is left alone.
 # Compare with `just perf` on the working tree.
 # Benchmark a full site build at 1K and 10K pages at a git rev.
+[group('perf')]
 perf-ref rev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -237,6 +257,8 @@ perf-ref rev:
 # Check inject.js's protocol builders against resources/serve/protocol/*.json
 # (ADR-059 §10). The full output goes to target/protocol-fixtures.log, because
 # the just MCP drops stdout when a recipe fails.
+# Check inject.js's protocol builders against the fixtures.
+[group('develop')]
 protocol-fixtures:
     #!/usr/bin/env bash
     set -o pipefail
@@ -249,22 +271,25 @@ protocol-fixtures:
     exit 1
 
 # Run the smoketest (tools/smoketest.sh) against the given polylith profile.
+[group('develop')]
 smoketest profile="dev":
     ./tools/smoketest.sh {{ profile }}
 
 # Run workspace tests (dev profile). Prefer the rust-codebase MCP `cargo_test`.
+[group('develop')]
 test:
     cargo polylith cargo --profile dev test
 
-# --- conductor (openstack module) ---
-
 # Preview changes to the conductor box / network. The Caddy basic_auth hash is
 # sourced from the auth-file just-in-time into -var (rendered into cloud-init).
+# Preview changes to the conductor box.
+[group('conductor')]
 conductor-plan:
     @test -f {{ auth-file }} || { echo "missing {{ auth-file }} — run: just conductor-auth"; exit 1; }
     set -a && . {{ auth-file }} && set +a && tofu -chdir=infra/openstack plan -var caddy_editor_hash="$CADDY_EDITOR_HASH"
 
 # Apply the conductor box / network (non-interactive; plan first).
+[group('conductor')]
 conductor-apply:
     @test -f {{ auth-file }} || { echo "missing {{ auth-file }} — run: just conductor-auth"; exit 1; }
     set -a && . {{ auth-file }} && set +a && tofu -chdir=infra/openstack apply -auto-approve -var caddy_editor_hash="$CADDY_EDITOR_HASH"
@@ -274,6 +299,8 @@ conductor-apply:
 # auth — gets baked, since user_data has ignore_changes). The floating IP
 # re-associates so the public address is unchanged. (Brief downtime — the
 # blue-green workstream will make this zero-downtime later.)
+# Re-provision the conductor box from scratch.
+[group('conductor')]
 conductor-replace:
     @test -f {{ auth-file }} || { echo "missing {{ auth-file }} — run: just conductor-auth"; exit 1; }
     set -a && . {{ auth-file }} && set +a && tofu -chdir=infra/openstack apply -auto-approve -var caddy_editor_hash="$CADDY_EDITOR_HASH" -replace=openstack_compute_instance_v2.conductor
@@ -282,12 +309,16 @@ conductor-replace:
 # x86_64, glibc 2.41). cargo-zigbuild pins the glibc version with a standard ELF
 # interpreter so the binary runs on stock Debian; profile `live` selects
 # fs_site_repository (production). Output: target/x86_64-unknown-linux-gnu/release/content_management
+# Cross-compile the conductor binary for the box.
+[group('conductor')]
 conductor-build:
     ZIG_GLOBAL_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zig" cargo polylith cargo --profile live zigbuild --release --target x86_64-unknown-linux-gnu.2.41 --bin content_management
 
 # Cross-compile the `presemble` binary for the box — THIS is the deploy artifact
 # (the live-edit server: `presemble serve <site-dir>`). Same zigbuild pipeline as
 # conductor-build, just --bin presemble. Output: target/x86_64-unknown-linux-gnu/release/presemble
+# Cross-compile the presemble binary (the deploy artifact).
+[group('conductor')]
 presemble-build:
     ZIG_GLOBAL_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zig" cargo polylith cargo --profile live zigbuild --release --target x86_64-unknown-linux-gnu.2.41 --bin presemble
 
@@ -295,6 +326,8 @@ presemble-build:
 # random password, hashes it with the box's caddy, and writes the hash (single-
 # quoted) + the plaintext to the auth-file (chmod 600, outside the repo). Prints
 # the password once. Real per-user control is M11.
+# Generate the live-edit credential (one-time).
+[group('conductor')]
 conductor-auth:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -308,20 +341,23 @@ conductor-auth:
 # Deploy the built presemble binary + a site to the box and (re)start the
 # service. THIS is what CI runs on master. Defaults to the cross-compiled binary
 # and the repo's site/. The box must already be provisioned (cloud-init).
+# Deploy the presemble binary and a site to the box.
+[group('conductor')]
 conductor-deploy bin="target/x86_64-unknown-linux-gnu/release/presemble" site_dir="site":
     test -x {{ bin }} || { echo "missing {{ bin }} — run: just presemble-build"; exit 1; }
     scp -F {{ ssh-config }} {{ bin }} conductor:/tmp/presemble.new
     tar -C {{ site_dir }} --exclude=./output --exclude=./.presemble --exclude=./.devenv -czf - . | ssh -F {{ ssh-config }} conductor 'cat > /tmp/site.tgz'
     ssh -F {{ ssh-config }} conductor 'sudo install -o root -g root -m0755 /tmp/presemble.new /usr/local/bin/presemble && sudo mkdir -p /var/lib/presemble/site && sudo tar -C /var/lib/presemble/site -xzf /tmp/site.tgz && sudo chown -R presemble:presemble /var/lib/presemble && sudo systemctl restart presemble && rm -f /tmp/presemble.new /tmp/site.tgz && sleep 1 && systemctl is-active presemble'
 
-# --- DNS (dnsimple module) ---
-
 # One-time provider download for the DNS module.
+[group('dns')]
 dns-init:
     tofu -chdir=infra/dns init
 
 # Preview the conductor DNS record against the live floating IP.
 # Credentials are sourced from ~/.config/presemble/secrets.env just for the tofu call.
+# Preview the conductor DNS record.
+[group('dns')]
 dns-plan:
     @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
     set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns plan -var floating_ip={{ _conductor-ip }}
@@ -330,44 +366,56 @@ dns-plan:
 # Credentials are sourced from ~/.config/presemble/secrets.env just for the tofu call.
 # Non-interactive (-auto-approve) so it runs over the just MCP; `just dns-plan`
 # is the review gate — run it first.
+# Apply the conductor DNS record (run dns-plan first).
+[group('dns')]
 dns-apply:
     @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
     set -a && . {{ secrets-file }} && set +a && tofu -chdir=infra/dns apply -auto-approve -var floating_ip={{ _conductor-ip }}
 
-# --- alpha box (infra/alpha module — separate Tofu state from conductor) ---
-
 # Cross-compile the alpha control-plane binary (Rust) for the Bahnhof box.
 # Output: target/x86_64-unknown-linux-gnu/release/control_plane
+# Cross-compile the alpha control-plane binary.
+[group('alpha')]
 alpha-build-cp:
     ZIG_GLOBAL_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zig" cargo polylith cargo --profile live zigbuild --release --target x86_64-unknown-linux-gnu.2.41 --bin control_plane
 
 # Cross-compile the presemble binary for the alpha box (site builder / serve).
 # Output: target/x86_64-unknown-linux-gnu/release/presemble
+# Cross-compile the presemble binary for the alpha box.
+[group('alpha')]
 alpha-build-presemble:
     ZIG_GLOBAL_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/zig" cargo polylith cargo --profile live zigbuild --release --target x86_64-unknown-linux-gnu.2.41 --bin presemble
 
 # Cross-compile both alpha binaries.
+[group('alpha')]
 alpha-build: alpha-build-cp alpha-build-presemble
 
 # Preview changes to the alpha box / network.
 # The session key is sourced from alpha-secrets-file just-in-time into -var.
+# Preview changes to the alpha box.
+[group('alpha')]
 alpha-plan:
     @test -f {{ alpha-secrets-file }} || { echo "missing {{ alpha-secrets-file }} — create it with: printf 'PRESEMBLE_SESSION_KEY=%s\n' \"\$(openssl rand -base64 32)\" > {{ alpha-secrets-file }} && chmod 600 {{ alpha-secrets-file }}"; exit 1; }
     set -a && . {{ alpha-secrets-file }} && set +a && tofu -chdir=infra/alpha plan -var presemble_session_key="$PRESEMBLE_SESSION_KEY"
 
 # Apply the alpha box / network (non-interactive; run alpha-plan first).
+[group('alpha')]
 alpha-apply:
     @test -f {{ alpha-secrets-file }} || { echo "missing {{ alpha-secrets-file }} — create it with: printf 'PRESEMBLE_SESSION_KEY=%s\n' \"\$(openssl rand -base64 32)\" > {{ alpha-secrets-file }} && chmod 600 {{ alpha-secrets-file }}"; exit 1; }
     set -a && . {{ alpha-secrets-file }} && set +a && tofu -chdir=infra/alpha apply -auto-approve -var presemble_session_key="$PRESEMBLE_SESSION_KEY"
 
 # Re-provision the alpha box from scratch (destroys the instance, re-creates from
 # cloud-init). The floating IP re-associates so the public address is unchanged.
+# Re-provision the alpha box from scratch.
+[group('alpha')]
 alpha-replace:
     @test -f {{ alpha-secrets-file }} || { echo "missing {{ alpha-secrets-file }} — run: just alpha-plan to see the creation message"; exit 1; }
     set -a && . {{ alpha-secrets-file }} && set +a && tofu -chdir=infra/alpha apply -auto-approve -var presemble_session_key="$PRESEMBLE_SESSION_KEY" -replace=openstack_compute_instance_v2.presemble_alpha
 
 # Deploy both binaries to the alpha box and restart the control-plane service.
 # Prerequisites: alpha-build + alpha box provisioned (alpha-apply).
+# Deploy both binaries to the alpha box.
+[group('alpha')]
 alpha-deploy cp_bin="target/x86_64-unknown-linux-gnu/release/control_plane" presemble_bin="target/x86_64-unknown-linux-gnu/release/presemble":
     test -x {{ cp_bin }} || { echo "missing {{ cp_bin }} — run: just alpha-build-cp"; exit 1; }
     test -x {{ presemble_bin }} || { echo "missing {{ presemble_bin }} — run: just alpha-build-presemble"; exit 1; }
@@ -375,9 +423,8 @@ alpha-deploy cp_bin="target/x86_64-unknown-linux-gnu/release/control_plane" pres
     scp -F {{ ssh-config }} {{ presemble_bin }} alpha:/tmp/presemble.new
     ssh -F {{ ssh-config }} alpha 'sudo install -o root -g root -m0755 /tmp/control_plane.new /usr/local/bin/control_plane && sudo install -o root -g root -m0755 /tmp/presemble.new /usr/local/bin/presemble && sudo systemctl restart control-plane && rm -f /tmp/control_plane.new /tmp/presemble.new && sleep 1 && systemctl is-active control-plane'
 
-# --- alpha DNS ---
-
 # Preview the alpha DNS records (app + wildcard) against the live alpha floating IP.
+[group('dns')]
 dns-plan-alpha:
     @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
     @test -n "{{ _alpha-ip }}" || { echo "alpha floating IP not available — provision the alpha box first (just alpha-apply)"; exit 1; }
@@ -385,6 +432,8 @@ dns-plan-alpha:
 
 # Apply the alpha DNS records (app.presemble.pub + *.presemble.pub).
 # Run dns-plan-alpha first as the review gate.
+# Apply the alpha DNS records (run dns-plan-alpha first).
+[group('dns')]
 dns-apply-alpha:
     @test -f {{ secrets-file }} || { echo "missing {{ secrets-file }} — see infra/dns/README.md"; exit 1; }
     @test -n "{{ _alpha-ip }}" || { echo "alpha floating IP not available — provision the alpha box first (just alpha-apply)"; exit 1; }
