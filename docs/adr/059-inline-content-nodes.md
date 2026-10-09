@@ -498,6 +498,10 @@ All addressing stays exact (ADR-056).
      A text suggestion on a quote that survives is never misapplied: it is
      refused or goes Stale. Other suggestions, and accepted, rejected and stale
      records, stay.
+  6. `list-containers` (stage 9): discards every pending suggestion whose
+     payload holds a `list`, in the old single-text shape or the new one and at
+     any depth. Text suggestions against an old list go Stale. Other
+     suggestions, and accepted, rejected and stale records, stay.
 
 ## Implementation plan
 
@@ -627,8 +631,10 @@ Every stage leaves the tree green and shippable.
   - flip `table_alignment_is_lost_on_save_l23` (now
     `table_alignment_survives_a_save_l23`)
 
-**7. References** (§11).
+**7. References** (§11). References are collected through quotes and list
+items.
 - Tests:
+  - `inline_link_in_list_item_counts_as_reference`
   - `body_inline_link_counts_in_refs_to`
   - `body_link_edit_rerenders_pages_whose_refs_to_changes`
   - `inline_link_has_links_to_edge`
@@ -646,19 +652,19 @@ Every stage leaves the tree green and shippable.
   - `comment_inside_blockquote_is_trivia`
   - nested blockquotes in the conservation domain
 
-**9. List container.**
+**9. List container.** Done (9.1 to 9.4, see the stage 9 amendments).
 - Tests:
   - `list_items_are_block_containers`
   - `list_item_text_is_addressable`
-  - `inline_link_in_list_item_counts_as_reference`
   - `ordered_start_and_tightness_round_trip`
   - lists in the conservation domain
-- Decide here whether L10 is fixed with a `<!-- -->` separator.
 
 **10. Cleanup and accept.**
+- Stage 9 removed `inline_children` and kept the `markdown_nodes` text builder
+  only under `#[cfg(test)]`, as a test oracle. Stage 10 decides whether
+  test-only parsing counts as parsing, and removes the builder if it does.
 - Remove:
-  - `inline_children`, `table_cell_nodes`, and every remaining markdown parse
-    in `template`;
+  - `table_cell_nodes`, and every remaining markdown parse in `template`;
   - `pulldown-cmark` from `template`, if nothing else uses it;
   - `TEXT_BLOCK_KINDS`, replaced by `INLINE_CONTAINER_KINDS`.
 - Change this ADR's status to Accepted and update the status lines of the
@@ -667,6 +673,8 @@ Every stage leaves the tree green and shippable.
 
 **Follow-ups:**
 - the split-paragraph command;
+- item-level structural edits: add, remove and move list items as NED targets
+  (stage 9 D6);
 - suggestions follow their target: a pending suggestion is amended (rebased)
   when its target changes by a manual edit or an accepted suggestion, not only
   marked Stale.
@@ -733,6 +741,15 @@ Every stage leaves the tree green and shippable.
 - L16 on the read side (stage 8: extra cells are kept);
 - L19 (resolved by decision, stage 8: canonicalisation);
 - the escaped-paragraph mismatch;
+- L10 (stage 9: the serializer writes `<!-- -->` between adjacent lists of one
+  kind);
+- multi-line list sources (stage 9: lists are no longer raw source, and
+  ordered list slots read their items);
+- an inline comment at a line start turning into visible text on save, and
+  inline HTML at a line start being escaped so that its Error vanished (stage
+  9.2b);
+- a multi-line inline comment in a list item gaining indentation on every save
+  (stage 9.2b);
 - headings rendered as full markdown;
 - link and image kind flips;
 - ADR-056 "table cells not addressable";
@@ -742,7 +759,6 @@ Every stage leaves the tree green and shippable.
 
 - L5 and L7 remain: link-expression labels stay plain, and an href starting
   with `:` reads as a link expression.
-- L10 remains until stage 9 decides it.
 - Thematic breaks (`---` inside a document) are not rendered. This is an
   existing limit; stage 8 only records it.
 - L20 (new): formatting that markdown cannot express is refused, never
@@ -768,7 +784,8 @@ Every stage leaves the tree green and shippable.
 - **ADR-057:**
   - §4: inline containers are normalised inside the transaction before the
     gate. The gate decodes inlines recursively and rejects trees that break
-    normal form or cannot be written.
+    normal form or cannot be written. Lists are normalised in the transaction
+    too (stage 9 amendments, D3).
   - OQ5 is resolved by §0 and §7.
   - OQ6 is resolved: content is structure, with literal Text.
 - **ADR-058:**
@@ -788,6 +805,8 @@ Every stage leaves the tree green and shippable.
   - D5 (comments on Replace and Delete) is generalised in stage 8: comments
     inside a replaced or deleted block are relocated, never dropped (stage 8
     amendments, D3).
+  - The empty comment `<!-- -->` alone between two lists of the same kind is
+    the L10 separator, not trivia (stage 9 amendments, D1).
 - **ADR-063:**
   - §1, §2 and §6 are superseded: headings store inlines, and `MarkdownText`
     and `capitalize_first` are removed.
@@ -992,6 +1011,72 @@ Every stage leaves the tree green and shippable.
     decision.
   - There is no L26: the tab pin showed only the canonical space after `>` on a
     save, with the same meaning.
+
+### Stage 9 amendments (list containers)
+
+- **Model:** `ContentElement::List { list: List }`, with
+  `List { kind: ListKind, spacing: Spacing, items: Vec<Blocks> }`, where
+  `ListKind` is `Bullet` or `Ordered { start }` and `Spacing` is `Tight` or
+  `Loose`. An item is a container of blocks, like a quote. Markers are not
+  stored.
+- **§6, store encoding:** `list {ordered, tight[, start]} > item > block*`.
+  `start` appears only on an ordered list that does not start at 1. An item's
+  children carry `_trivia-before`, and the item carries its own `_trivia-end`;
+  there is no trivia directly under a list. Decoding is strict:
+  - the old single-text shape is `UnexpectedChild("text")`, and so is any child
+    of `list` that is not an `item`;
+  - `start` on a bullet list is `UnexpectedAttribute`;
+  - a payload list marked tight that cannot be written tight is
+    `InvalidAttribute { list, tight }`;
+  - items in a payload hold payload kinds only.
+
+  `TEXT_BLOCK_KINDS` is `["code-block"]` and `BLOCK_CONTAINER_KINDS` is
+  `["blockquote", "item"]`.
+- **Parser:** the stack of open containers holds quotes, lists and items.
+  `container_source` strips quote markers and item indentation from every
+  source reader; it generalises stage 8's `unquoted`. A tight item's inline
+  content is read as an implicit paragraph: the stage 6.1 rule now reads that
+  inline content belongs to the block that holds it, and for a tight item that
+  block is the implicit paragraph. Multi-line inline HTML and comments inside a
+  container have the container prefixes stripped (9.2b).
+- **Markers:** always canonical, `-` for bullets and `N.` counting up from
+  `start`. The indent comes from each item's own marker. A rule as an item's
+  first block is written on its own line.
+- **Spacing (D3), normalised in both directions:** a list is kept tight or
+  loose as written. A tight list that cannot be written tight is read, and
+  kept, as loose; a loose list with no blank line to show it is read, and kept,
+  as tight. The parser normalises on reading. Edits (Delete, Insert, Replace)
+  normalise every enclosing list inside the transaction, before anything reads
+  the store. This is the list counterpart of ADR-057 §4's normalisation of
+  inline containers.
+- **L10, adjacent lists of one kind (D1):** the serializer writes `<!-- -->`
+  between two lists of the same kind that are written one after the other with
+  no comment and no `----` between them. This holds across slot, unassigned and
+  body boundaries and inside every container. The parser reads that exact
+  comment, alone between two such lists, as the separator, and it is never in
+  N. An empty comment `<!-- -->` alone between two lists of the same kind is
+  therefore the separator, not a comment: if N holds one there (after an edit),
+  it is written as it is and dropped on the next read.
+- **D2, list slots:** a list slot's value is `Value::List` of items, each a
+  `Value::Nodes`. Inserting `item` places its blocks, and `(text item)` gives
+  its plain text. There is no `text` field. `parse_list_items` is removed, so
+  ordered list slots now have their items.
+- **D5:** the `list-containers` step (§15).
+- **D6:** an item can be the container of an insert, but not a Block or Text
+  target. Adding, removing or moving items is a Replace of the list;
+  item-level structural edits are a follow-up (paredit-style). Comments inside
+  items are relocated with their list, by index path (stage 8, D3).
+- **Markers in items** read as at the top level, as in quotes (stage 8, D1): a
+  `{#name}` ending an item's paragraph is marker misuse.
+- **Rendering:** `<ul>` or `<ol>` carries the slot attributes and holds `<li>`
+  items; `<ol>` gets `start` only when it is not 1. Blocks in a tight item
+  render with no `<p>`. `inline_children` is removed, which moves part of
+  stage 10 earlier.
+- **9.2b, line starts:** a continuation line that starts with an inline comment
+  or inline HTML is written indented by four spaces, so it stays paragraph
+  text. Literal text starting with `<` keeps `\<`. A paragraph whose first line
+  starts with a tag or comment cannot be written: it is refused when an edit
+  proposes it (L20), and it cannot come from disk.
 
 ## Related
 

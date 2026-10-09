@@ -2776,7 +2776,11 @@ mod tests {
         input.insert("summary", Value::Text("A summary".to_string()));
         input.insert(
             "tags",
-            Value::List(vec![Value::Text("Rust".to_string()), Value::Text("WebAssembly".to_string())]),
+            Value::List(vec![
+                Value::Text("Rust".to_string()),
+                Value::Text("WebAssembly".to_string()),
+                Value::Text("Publishing".to_string()),
+            ]),
         );
         input.insert("author", record(("href", "/author/jo"), ("text", "Jo")));
         input.insert("cover", record(("src", "c.png"), ("alt", "A cat")));

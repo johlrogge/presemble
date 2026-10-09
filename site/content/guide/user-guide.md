@@ -34,7 +34,7 @@ A markdown list item ending with a `{#name}` anchor declares a list slot. The oc
 - Publishing
 ```
 
-In templates, iterate the list with `data-each`; each item exposes a `text` field. To place all items joined with spaces, call `text` on the list (see [Expressions](#expressions)):
+In templates, iterate the list with `data-each`; each item is its content: insert `item` to place it, or call `(text item)` for its plain text. To place all items joined with spaces, call `text` on the list (see [Expressions](#expressions)):
 
 ```html
 <presemble:insert data="(text input.tags)" />
@@ -43,7 +43,7 @@ In templates, iterate the list with `data-each`; each item exposes a `text` fiel
 This places:
 
 ```output
-Rust WebAssembly
+Rust WebAssembly Publishing
 ```
 
 #### Heading slots
@@ -173,6 +173,10 @@ The body section supports the full range of markdown block and inline content:
 | Ordered list | `1. item` |
 | Code block | Triple-backtick fence |
 
+List items can hold any blocks, nested lists and quotes included. Presemble writes list markers as `-` and `N.`, counting from the list's start, and keeps a list tight or loose as it was written.
+
+Two lists of the same kind written one after the other would merge in markdown. Presemble keeps them apart by writing `<!-- -->` between them, and reads that comment back as the separator, not as a comment.
+
 **Inline formatting within paragraphs and headings:**
 
 | Format | Syntax |
@@ -194,6 +198,7 @@ Presemble keeps content free of HTML, even though markdown allows it, like Hugo 
 - **In blockquotes**, HTML is treated as it is anywhere else: a blockquote holds any blocks (paragraphs, headings, code, lists, tables and nested quotes), and HTML in one stops the page from publishing, like HTML in a paragraph. Comments inside a blockquote are kept. A link expression inside a blockquote has no effect.
 - **The fix:** delete the HTML, write `\<` for a literal `<`, or put code in backticks (`` `<div>` ``).
 - **HTML comments** (`<!-- … -->`) are kept in the file, move with the block that follows them, and are never published.
+- **At the start of a line** inside a paragraph, HTML or a comment is kept as it is: Presemble writes that line indented by four spaces, so it stays part of the paragraph.
 
 ### Full schema example
 
