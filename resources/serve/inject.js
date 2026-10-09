@@ -372,7 +372,7 @@ var head=document.createElement('button');
 head.type='button';
 head.className='presemble-diag-panel-head';
 var summary=[];
-if(errors>0){summary.push(errors+(errors===1?' error':' errors')+" on this page. The site can't be published until they're fixed.");}
+if(errors>0){summary.push(errors+(errors===1?' error':' errors')+" on this page. The site can't be published until "+(errors===1?"it's":"they're")+" fixed.");}
 if(warnings>0){summary.push(warnings+(warnings===1?' warning':' warnings')+' on this page.');}
 head.textContent=summary.join(' ');
 var body=document.createElement('div');
