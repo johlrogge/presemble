@@ -349,6 +349,14 @@ const MODEL_STEPS: &[ModelStep] = &[
         kinds: &["blockquote"],
         before: "blockquotes held blocks",
     },
+    // Lists became containers of items of blocks (ADR-059 stage 9): a payload
+    // holding a list in the old shape (one text child) would be refused on
+    // accept, and one in the new shape was made against a model it never saw.
+    ModelStep {
+        name: "list-containers",
+        kinds: &["list"],
+        before: "lists held items of blocks",
+    },
 ];
 
 /// The steps still to run when `recorded` is the last one applied (nothing
@@ -11192,7 +11200,7 @@ mod model_migration_tests {
 
         assert!(!listed(&conductor).contains(&"sug-heading".to_string()), "not listed");
         assert!(!file_exists(&tmp, "sug-heading"), "its file is gone");
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"), "the last step is recorded");
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"), "the last step is recorded");
     }
 
     #[test]
@@ -11230,7 +11238,7 @@ mod model_migration_tests {
 
         assert_eq!(listed(&conductor), vec!["sug-code".to_string()]);
         assert!(file_exists(&tmp, "sug-code"));
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"), "marked all the same");
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"), "marked all the same");
     }
 
     /// The user's decision: every pending suggestion that touches a paragraph
@@ -11284,10 +11292,13 @@ mod model_migration_tests {
         assert!(file_exists(&tmp, "sug-code"));
     }
 
-    /// An absent `MODEL` runs every step. Each recorded step runs every step
-    /// after it, and none before it: `table-cells` runs only
-    /// `blockquote-containers`, and `blockquote-containers` runs none. Each
-    /// step runs once: a suggestion made after the migration survives the next
+    /// An absent `MODEL` runs every step: `heading-inlines`,
+    /// `paragraph-inlines`, `link-image-paragraphs`, `table-cells`,
+    /// `blockquote-containers` and `list-containers`. Each recorded step runs
+    /// every step after it, and none before it: `table-cells` runs
+    /// `blockquote-containers` and `list-containers`, `blockquote-containers`
+    /// runs only `list-containers`, and `list-containers` runs none. Each step
+    /// runs once: a suggestion made after the migration survives the next
     /// start.
     #[test]
     fn migration_runs_each_step_once_in_order() {
@@ -11312,7 +11323,7 @@ mod model_migration_tests {
         let tmp = site();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), Vec::<String>::new());
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // heading-inlines: the paragraph step only; the heading suggestion
         // was made after headings held nodes.
@@ -11321,7 +11332,7 @@ mod model_migration_tests {
         std::fs::write(dir(&tmp).join("MODEL"), "heading-inlines").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // paragraph-inlines: only the link and image step runs; neither
         // suggestion holds a link or an image.
@@ -11330,7 +11341,7 @@ mod model_migration_tests {
         std::fs::write(dir(&tmp).join("MODEL"), "paragraph-inlines").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // link-image-paragraphs: only the table step runs; neither
         // suggestion holds a table.
@@ -11339,24 +11350,33 @@ mod model_migration_tests {
         std::fs::write(dir(&tmp).join("MODEL"), "link-image-paragraphs").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
-        // table-cells: only the blockquote step runs; neither suggestion
-        // holds a blockquote.
+        // table-cells: the blockquote and list steps run; neither suggestion
+        // holds a blockquote or a list.
         let tmp = site();
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "table-cells").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
-        // blockquote-containers: nothing runs.
+        // blockquote-containers: only the list step runs; neither
+        // suggestion holds a list.
         let tmp = site();
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "blockquote-containers").unwrap();
         both(&tmp);
         assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
+
+        // list-containers: nothing runs.
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "list-containers").unwrap();
+        both(&tmp);
+        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // Once: a suggestion made after the migration survives the next start.
         let tmp = site();
@@ -11379,23 +11399,31 @@ mod model_migration_tests {
                 "paragraph-inlines",
                 "link-image-paragraphs",
                 "table-cells",
-                "blockquote-containers"
+                "blockquote-containers",
+                "list-containers"
             ]
         );
         assert_eq!(
             names(Some("heading-inlines")),
-            vec!["paragraph-inlines", "link-image-paragraphs", "table-cells", "blockquote-containers"]
+            vec![
+                "paragraph-inlines",
+                "link-image-paragraphs",
+                "table-cells",
+                "blockquote-containers",
+                "list-containers"
+            ]
         );
         assert_eq!(
             names(Some("paragraph-inlines")),
-            vec!["link-image-paragraphs", "table-cells", "blockquote-containers"]
+            vec!["link-image-paragraphs", "table-cells", "blockquote-containers", "list-containers"]
         );
         assert_eq!(
             names(Some("link-image-paragraphs")),
-            vec!["table-cells", "blockquote-containers"]
+            vec!["table-cells", "blockquote-containers", "list-containers"]
         );
-        assert_eq!(names(Some("table-cells")), vec!["blockquote-containers"]);
-        assert!(names(Some("blockquote-containers")).is_empty());
+        assert_eq!(names(Some("table-cells")), vec!["blockquote-containers", "list-containers"]);
+        assert_eq!(names(Some("blockquote-containers")), vec!["list-containers"]);
+        assert!(names(Some("list-containers")).is_empty());
         // A name this conductor does not know was written by a newer one:
         // nothing runs.
         assert!(names(Some("something-newer")).is_empty());
@@ -11449,7 +11477,7 @@ mod model_migration_tests {
             assert!(!file_exists(&tmp, id), "{id}: its file is gone");
         }
         assert!(file_exists(&tmp, "sug-inline-link") && file_exists(&tmp, "sug-accepted-link"));
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
     }
 
     /// Table cells became inline containers (ADR-059 stage 6): a pending
@@ -11496,7 +11524,7 @@ mod model_migration_tests {
             assert!(!file_exists(&tmp, id), "{id}: its file is gone");
         }
         assert!(file_exists(&tmp, "sug-title") && file_exists(&tmp, "sug-accepted-table"));
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
     }
 
     /// Blockquotes became containers of blocks (ADR-059 stage 8): a pending
@@ -11538,7 +11566,7 @@ mod model_migration_tests {
         }
         assert!(file_exists(&tmp, "sug-title") && file_exists(&tmp, "sug-accepted-quote"));
         assert!(file_exists(&tmp, "sug-paragraph"));
-        assert_eq!(marker(&tmp).as_deref(), Some("blockquote-containers"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
     }
 
     /// Guard: a text suggestion on a blockquote made before stage 8 (its
@@ -11551,7 +11579,7 @@ mod model_migration_tests {
         let content = "# First Post\n\n----\n\n> a\n>\n> b\n";
         std::fs::write(tmp.path().join(FILE), content).unwrap();
         std::fs::create_dir_all(dir(&tmp)).unwrap();
-        std::fs::write(dir(&tmp).join("MODEL"), "blockquote-containers").unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "list-containers").unwrap();
         let quote_text = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "blockquote" 0))"#;
         write_suggestion(
             &tmp,
@@ -11574,6 +11602,95 @@ mod model_migration_tests {
         );
         let map = conductor.ned_suggestions.read().unwrap();
         let status = &map[&SuggestionId::from("sug-quote-text".to_string())].status;
+        assert!(
+            matches!(status, NedSuggestionStatus::Stale { .. } | NedSuggestionStatus::Pending),
+            "{status:?}"
+        );
+        assert_eq!(std::fs::read_to_string(tmp.path().join(FILE)).unwrap(), content);
+        assert!(conductor.dirty_docs.read().unwrap().is_empty(), "nothing was changed");
+    }
+
+    /// Lists became containers of items of blocks (ADR-059 stage 9): a pending
+    /// suggestion whose payload holds a list, in the old shape (one text child)
+    /// or the new one, is discarded once. Other payloads, other pending
+    /// suggestions and history stay.
+    #[test]
+    fn pending_list_payloads_are_discarded() {
+        let tmp = site();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "blockquote-containers").unwrap();
+        let old_list = ned::NodeTree::element("list")
+            .with_attr("ordered", "false")
+            .with_child(ned::NodeTree::text("- a\n- b"));
+        let new_list = ned::NodeTree::element("list")
+            .with_attr("ordered", "false")
+            .with_attr("tight", "true")
+            .with_child(ned::NodeTree::element("item").with_child(
+                ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text("a")),
+            ));
+        let nested = ned::NodeTree::element("blockquote").with_child(new_list.clone());
+        let paragraph = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text("p"));
+        let pending = NedSuggestionStatus::Pending;
+        write_suggestion(&tmp, "sug-old", CODE_BLOCK, NedMutation::InsertAfter(vec![old_list.clone()]), pending.clone());
+        write_suggestion(&tmp, "sug-new", CODE_BLOCK, NedMutation::Replace(vec![new_list]), pending.clone());
+        write_suggestion(&tmp, "sug-nested", CODE_BLOCK, NedMutation::InsertChild(vec![nested]), pending.clone());
+        write_suggestion(&tmp, "sug-paragraph", CODE_BLOCK, NedMutation::InsertAfter(vec![paragraph]), pending.clone());
+        write_suggestion(&tmp, "sug-title", TITLE_TEXT, NedMutation::SetText("Renamed".to_string()), pending);
+        write_suggestion(
+            &tmp,
+            "sug-accepted-list",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![old_list]),
+            NedSuggestionStatus::Accepted,
+        );
+
+        let conductor = start(&tmp);
+
+        assert_eq!(
+            listed(&conductor),
+            vec!["sug-accepted-list".to_string(), "sug-paragraph".to_string(), "sug-title".to_string()]
+        );
+        for id in ["sug-old", "sug-new", "sug-nested"] {
+            assert!(!file_exists(&tmp, id), "{id}: its file is gone");
+        }
+        assert!(file_exists(&tmp, "sug-title") && file_exists(&tmp, "sug-accepted-list"));
+        assert!(file_exists(&tmp, "sug-paragraph"));
+        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
+    }
+
+    /// Guard: a text suggestion on a list made before stage 9 (its selection is
+    /// `ned/text-in` of the list, which then held one text) is never
+    /// misapplied. It is accepted after the migration has run, and is refused
+    /// or goes Stale with the file unchanged.
+    #[test]
+    fn text_suggestion_on_a_list_from_before_stage_9_is_stale() {
+        let tmp = site();
+        let content = "# First Post\n\n----\n\n- a\n- b\n";
+        std::fs::write(tmp.path().join(FILE), content).unwrap();
+        std::fs::create_dir_all(dir(&tmp)).unwrap();
+        std::fs::write(dir(&tmp).join("MODEL"), "list-containers").unwrap();
+        let list_text = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "list" 0))"#;
+        write_suggestion(
+            &tmp,
+            "sug-list-text",
+            list_text,
+            NedMutation::SetText("rewritten".to_string()),
+            NedSuggestionStatus::Pending,
+        );
+
+        let conductor = start(&tmp);
+        assert_eq!(listed(&conductor), vec!["sug-list-text".to_string()], "the migration is done");
+        let result = conductor.handle_command(Command::AcceptNedSuggestion {
+            id: SuggestionId::from("sug-list-text".to_string()),
+        });
+
+        assert!(
+            !matches!(result.response, Response::Applied { .. }),
+            "not applied: {:?}",
+            result.response
+        );
+        let map = conductor.ned_suggestions.read().unwrap();
+        let status = &map[&SuggestionId::from("sug-list-text".to_string())].status;
         assert!(
             matches!(status, NedSuggestionStatus::Stale { .. } | NedSuggestionStatus::Pending),
             "{status:?}"
