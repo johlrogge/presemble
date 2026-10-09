@@ -40,12 +40,6 @@
 //!
 //! - L5-L8: link text is a plain label, plain link hrefs never look like link
 //!   expressions, and link expressions are whole top-level paragraphs;
-//! - L10: lists alternate kinds within section 0 and within the body, so no
-//!   two same-kind lists can become adjacent on save; a list directly after a
-//!   comment may repeat the kind, because the comment (its leading trivia)
-//!   keeps the two apart wherever the list is written. (Lists nested in an
-//!   item or a quote are alone in their container: `gen_item_blocks`.)
-//!   Stage 9.2 removes this exclusion;
 //! - L12 is resolved (ADR-062): HTML blocks and comments are in the domain;
 //! - L14: HTML blocks of types 1–5 always have their end condition, so none
 //!   runs to the end of the file;
@@ -231,6 +225,9 @@ const COMMENTS: &[&str] = &[
     "<!-->",
     "<!--\nmulti\nline\n-->",
     "<!-- a --> <!-- b -->",
+    // The list separator (L10): between two lists of one kind it is not a
+    // comment; anywhere else it is.
+    "<!-- -->",
 ];
 
 /// The text an item starts with: words, links, images, code, a paragraph of
@@ -246,18 +243,19 @@ const ITEM_TEXTS: &[&str] = &[
     "two\nlines",
 ];
 
-/// A list whose kind is the opposite of `previous_ordered` (limit L10),
-/// unless it directly follows a comment, which keeps two same-kind lists
-/// apart; then the kind is random.
-fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
-    let ordered = match *previous_ordered {
-        // A comment keeps two lists of one kind apart: often repeat the kind.
-        Some(previous) if after_comment => previous == rng.chance(80),
-        Some(previous) => !previous,
-        None => rng.chance(50),
-    };
-    *previous_ordered = Some(ordered);
-    gen_list_of_kind(rng, ordered, 0)
+/// A list of a random kind. Two of one kind may end up next to each other in
+/// the model (L10): the serializer keeps them apart with `<!-- -->`.
+fn gen_list(rng: &mut Rng) -> String {
+    let ordered = rng.chance(50);
+    let first = gen_list_of_kind(rng, ordered, 0);
+    // Often a second list of the same kind, with a comment between them: the
+    // separator `<!-- -->` (half the time) or any comment.
+    if rng.chance(40) {
+        let between = if rng.chance(50) { "<!-- -->" } else { rng.pick(COMMENTS) };
+        let second = gen_list_of_kind(rng, ordered, 0);
+        return format!("{first}\n\n{between}\n\n{second}");
+    }
+    first
 }
 
 /// A list of 1 to 3 items (ADR-059 stage 9): tight or loose; with any bullet
@@ -324,7 +322,12 @@ fn gen_item_blocks(rng: &mut Rng, loose: bool, depth: usize, may_be_empty: bool)
     }
     if loose {
         for _ in 0..rng.below(3) {
-            blocks.push(match rng.below(5) {
+            blocks.push(match rng.below(if depth < 2 { 6 } else { 5 }) {
+                // Lists next to each other in an item (L10).
+                5 => {
+                    let ordered = rng.chance(50);
+                    gen_list_of_kind(rng, ordered, depth + 1)
+                }
                 0 => "> see [a](/a) here".to_string(),
                 1 => "```\nlet x = 1;\n```".to_string(),
                 2 => rng.pick(COMMENTS).to_string(),
@@ -352,13 +355,13 @@ fn quote_lines(block: &str) -> String {
 /// paragraphs, headings, code (also with a backtick run in it), lists, tables,
 /// HTML blocks, rules, link expressions, marker misuse and, below `depth`,
 /// nested quotes.
-fn gen_quote_child(rng: &mut Rng, depth: usize, previous_ordered: &mut Option<bool>) -> String {
+fn gen_quote_child(rng: &mut Rng, depth: usize) -> String {
     match rng.below(if depth < 2 { 14 } else { 13 }) {
         0..=2 => rng.pick(&PARAGRAPHS).to_string(),
         3 => rng.pick(&INLINE_PARAGRAPHS).to_string(),
         4 => rng.pick(BODY_HEADINGS).to_string(),
         5 => rng.pick(&["```\nlet x = 1;\n\nlet y = 2;\n```", "````\n```\ninner\n```\n````", "~~~rust\nfn f() {}\n~~~"]).to_string(),
-        6 => gen_list(rng, previous_ordered, false),
+        6 => gen_list(rng),
         7 => rng.pick(&["| a | b |\n|:--|--:|\n| 1 | **2** |", "| `x\\|y` |\n|---|\n| [l](/l) |", "| a | b |\n|---|---|\n| 1 | 2 | 3 |"]).to_string(),
         8 => rng.pick(HTML_BLOCKS).to_string(),
         9 => "----".to_string(),
@@ -374,12 +377,11 @@ fn gen_quote_child(rng: &mut Rng, depth: usize, previous_ordered: &mut Option<bo
 /// continuation. `depth` is how many quotes are open around it.
 fn gen_blockquote(rng: &mut Rng, depth: usize) -> String {
     let mut parts: Vec<String> = Vec::new();
-    let mut previous_ordered = None;
     for _ in 0..rng.below(4) {
         if rng.chance(15) {
             parts.push(rng.pick(COMMENTS).to_string());
         }
-        parts.push(gen_quote_child(rng, depth, &mut previous_ordered));
+        parts.push(gen_quote_child(rng, depth));
     }
     if rng.chance(15) {
         parts.push(rng.pick(COMMENTS).to_string());
@@ -395,14 +397,14 @@ fn gen_blockquote(rng: &mut Rng, depth: usize) -> String {
     quoted
 }
 
-fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
+fn gen_section0_block(rng: &mut Rng) -> String {
     match rng.below(31) {
         29..=30 => gen_blockquote(rng, 1),
         0..=2 => rng.pick(HEADINGS).to_string(),
         3..=5 => rng.pick(&PARAGRAPHS).to_string(),
         6..=7 => rng.pick(&LINKS).to_string(),
         8 => rng.pick(&IMAGES).to_string(),
-        9..=10 => gen_list(rng, previous_ordered, after_comment),
+        9..=10 => gen_list(rng),
         11..=12 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
         13..=14 => rng.pick(MARKED_FOR_LINK_SLOT).to_string(),
         15 => rng.pick(MARKED_FOR_NO_SLOT).to_string(),
@@ -415,13 +417,13 @@ fn gen_section0_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_
     }
 }
 
-fn gen_body_block(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
+fn gen_body_block(rng: &mut Rng) -> String {
     match rng.below(15) {
         13..=14 => gen_blockquote(rng, 1),
         11 => rng.pick(&INLINE_PARAGRAPHS).to_string(),
         0..=1 => rng.pick(BODY_HEADINGS).to_string(),
         2..=4 => rng.pick(&PARAGRAPHS).to_string(),
-        5 => gen_list(rng, previous_ordered, after_comment),
+        5 => gen_list(rng),
         6 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
         7 => rng.pick(&LINKS).to_string(),
         8 => rng.pick(HTML_BLOCKS).to_string(),
@@ -448,24 +450,21 @@ fn gen_comments(rng: &mut Rng, blocks: &mut Vec<String>) -> bool {
 fn gen_source(seed: u64) -> String {
     let mut rng = Rng::new(seed);
     let mut blocks: Vec<String> = Vec::new();
-    let mut previous_ordered = None;
     // Usually start with a title, as real pages do.
-    let commented = gen_comments(&mut rng, &mut blocks);
+    gen_comments(&mut rng, &mut blocks);
     if rng.chance(80) {
         blocks.push("# Home".to_string());
     }
-    let mut commented = commented && blocks.last().is_some_and(|b| b.starts_with("<!--"));
     for _ in 0..rng.below(10) {
-        blocks.push(gen_section0_block(&mut rng, &mut previous_ordered, commented));
-        commented = gen_comments(&mut rng, &mut blocks);
+        blocks.push(gen_section0_block(&mut rng));
+        gen_comments(&mut rng, &mut blocks);
     }
     if rng.chance(70) {
         blocks.push("----".to_string());
-        let mut previous_ordered = None;
-        commented = gen_comments(&mut rng, &mut blocks);
+        gen_comments(&mut rng, &mut blocks);
         for _ in 0..rng.below(6) {
-            blocks.push(gen_body_block(&mut rng, &mut previous_ordered, commented));
-            commented = gen_comments(&mut rng, &mut blocks);
+            blocks.push(gen_body_block(&mut rng));
+            gen_comments(&mut rng, &mut blocks);
         }
     }
     let mut src = blocks.join("\n\n");
@@ -617,6 +616,13 @@ fn byte_coverage() {
             .filter(|(_, c)| !c.is_whitespace())
             .map(|(i, _)| i)
             .filter(|&i| !spans.iter().any(|s| s.start <= i && i < s.end))
+            // The list separator (L10) is read and dropped, not kept: a line
+            // that is only `<!-- -->`, after any `>` and indentation.
+            .filter(|&i| {
+                let line_start = src[..i].rfind('\n').map_or(0, |n| n + 1);
+                let line_end = src[i..].find('\n').map_or(src.len(), |n| i + n);
+                src[line_start..line_end].trim_start_matches(['>', ' ']).trim_end() != "<!-- -->"
+            })
             .collect();
         if uncovered.is_empty() {
             Ok(())
@@ -675,6 +681,7 @@ fn generator_exercises_unassigned_bound_and_body() {
     let mut end_unassigned = 0;
     let mut end_body = 0;
     let mut commented_adjacent_lists = 0;
+    let mut separated_lists = 0;
     let (mut quote_count, mut empty_quotes, mut quote_comments) = (0, 0, 0);
     let (mut multi_block_quotes, mut quoted_non_paragraphs, mut nested_quotes) = (0, 0, 0);
     let mut list_stats = ListStats::default();
@@ -706,8 +713,13 @@ fn generator_exercises_unassigned_bound_and_body() {
                     .comments
                     .iter()
                     .any(|c| c.anchor == CommentAnchor::Before(container.clone(), at + 1));
-                if between && is_ordered(pair[0]).is_some() && is_ordered(pair[0]) == is_ordered(pair[1]) {
-                    commented_adjacent_lists += 1;
+                if is_ordered(pair[0]).is_some() && is_ordered(pair[0]) == is_ordered(pair[1]) {
+                    if between {
+                        commented_adjacent_lists += 1;
+                    } else {
+                        // Kept apart on save by the separator (L10).
+                        separated_lists += 1;
+                    }
                 }
             }
         }
@@ -860,6 +872,10 @@ fn generator_exercises_unassigned_bound_and_body() {
     assert!(
         commented_adjacent_lists > 2,
         "too few same-kind lists kept apart by a comment: {commented_adjacent_lists}"
+    );
+    assert!(
+        separated_lists > 20,
+        "too few same-kind lists with nothing between them: {separated_lists}"
     );
     // The quote domain (ADR-059 stage 8).
     assert!(quote_count > 300, "too few quotes: {quote_count}");

@@ -100,8 +100,8 @@ pub fn unassigned_reason(el: &ContentElement, grammar: &Grammar) -> UnassignedRe
 /// 4. On re-read, every element lands in the same group, R comes back as P
 ///    followed by N, and assignment is deterministic, so the slots,
 ///    `unassigned` and the body come out identical.
-/// 5. Exception, limit L10: two same-kind lists that end up adjacent merge
-///    into one, unless a comment separates them.
+/// 5. Limit L10 is resolved: two same-kind lists that end up adjacent are
+///    kept apart by the separator `<!-- -->` the serializer writes.
 ///
 /// ## Comments (ADR-062)
 ///

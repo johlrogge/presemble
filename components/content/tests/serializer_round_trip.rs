@@ -385,14 +385,10 @@ fn gen_link_expression(rng: &mut Rng) -> ContentElement {
 /// (links and images included).
 ///
 /// All items share one kind: changing between bullets and numbers starts a new
-/// list. `avoid_ordered` is the kind of a directly preceding list, if any;
-/// adjacent lists of the same kind would merge into one (L10), so the other
-/// kind is used.
-fn gen_list(rng: &mut Rng, avoid_ordered: Option<bool>) -> ContentElement {
-    let ordered = match avoid_ordered {
-        Some(previous) => !previous,
-        None => rng.chance(50),
-    };
+/// list. Lists of one kind may end up next to each other (L10): the
+/// serializer keeps them apart with `<!-- -->`.
+fn gen_list(rng: &mut Rng) -> ContentElement {
+    let ordered = rng.chance(50);
     // `--` is left out: an item like `- --` is a thematic break, not a list.
     let words: Vec<&str> = DOMAIN.words.iter().copied().filter(|w| *w != "--").collect();
     let n = 1 + rng.below(4);
@@ -421,19 +417,9 @@ fn gen_list(rng: &mut Rng, avoid_ordered: Option<bool>) -> ContentElement {
     }
 }
 
-/// Whether `block` is an ordered list (`Some(true)`), a bullet list
-/// (`Some(false)`) or not a list (`None`).
-fn list_kind(block: &ContentElement) -> Option<bool> {
-    match block {
-        ContentElement::List { list } => Some(matches!(list.kind, content::ListKind::Ordered { .. })),
-        _ => None,
-    }
-}
-
-/// `previous_list` is the kind of a directly preceding list (see `gen_list`).
-fn gen_block(rng: &mut Rng, previous_list: Option<bool>) -> ContentElement {
+fn gen_block(rng: &mut Rng) -> ContentElement {
     match rng.below(10) {
-        9 => gen_list(rng, previous_list),
+        9 => gen_list(rng),
         0 => gen_heading(rng),
         1 => literal_paragraph(&gen_paragraph_line(rng)),
         7 => gen_multiline_paragraph(rng),
@@ -462,27 +448,15 @@ fn spanned(node: ContentElement) -> Spanned<ContentElement> {
 
 fn gen_document(seed: u64) -> Document {
     let mut rng = Rng::new(seed);
-    // Kind of the previous block if it was a list, in serialized order.
-    let mut previous_list: Option<bool> = None;
-    let next_block = |rng: &mut Rng, previous_list: &mut Option<bool>| {
-        let block = gen_block(rng, *previous_list);
-        *previous_list = list_kind(&block);
-        spanned(block)
-    };
     let slots = rng.below(3);
     let preamble = (0..slots)
         .map(|i| DocumentSlot {
             name: SlotName::new(&format!("slot{i}")),
-            elements: (0..1 + rng.below(2))
-                .map(|_| next_block(&mut rng, &mut previous_list))
-                .collect(),
+            elements: (0..1 + rng.below(2)).map(|_| spanned(gen_block(&mut rng))).collect(),
         })
         .collect();
     let has_separator = rng.chance(60);
-    if has_separator {
-        previous_list = None;
-    }
-    let body = (0..rng.below(6)).map(|_| next_block(&mut rng, &mut previous_list)).collect();
+    let body = (0..rng.below(6)).map(|_| spanned(gen_block(&mut rng))).collect();
     Document { preamble, body, has_separator, ..Document::default() }
 }
 

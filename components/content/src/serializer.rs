@@ -13,8 +13,9 @@ use schema::Spanned;
 /// The output is deterministic — same Document always produces same markdown.
 ///
 /// Writing unassigned elements after the slots is a fixed point for slot
-/// assignment (see [`crate::assign_slots`]), except for limit L10: two
-/// same-kind lists that end up adjacent merge into one on re-read.
+/// assignment (see [`crate::assign_slots`]). Two lists of one kind that end up
+/// adjacent have `<!-- -->` written between them, or markdown would merge them
+/// (L10).
 ///
 /// Comments (ADR-062) are written before the element they are anchored to,
 /// and `End` comments after the container's last element. A `Before` anchor
@@ -22,7 +23,7 @@ use schema::Spanned;
 /// dropped. A comment for a slot the document does not have is written at
 /// the end of the unassigned elements.
 pub fn serialize_document(doc: &Document) -> String {
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts = Parts::default();
     let mut written = vec![false; doc.comments.len()];
 
     for slot in &doc.preamble {
@@ -44,44 +45,78 @@ pub fn serialize_document(doc: &Document) -> String {
         .collect();
     write_container(&mut parts, &Container::Unassigned, &doc.unassigned, doc, &mut written);
     for i in orphans.drain(..) {
-        parts.push(doc.comments[i].comment.node.as_str().to_string());
+        parts.comment(doc.comments[i].comment.node.as_str());
         written[i] = true;
     }
 
     if doc.has_separator {
-        parts.push(serialize_element(&ContentElement::Separator));
+        parts.element(&ContentElement::Separator);
     }
 
     write_container(&mut parts, &Container::Body, &doc.body, doc, &mut written);
 
-    if parts.is_empty() {
+    if parts.parts.is_empty() {
         return String::new();
     }
 
     // Join with blank lines, end with single newline
-    parts.join("\n\n") + "\n"
+    parts.parts.join("\n\n") + "\n"
+}
+
+/// The parts written so far in one flow of markdown (a container's own
+/// sequence, or the whole file), and what the last one was: the list
+/// separator (L10) depends on it.
+#[derive(Default)]
+struct Parts {
+    parts: Vec<String>,
+    /// Whether the last part is a list, and if so whether it is ordered.
+    last_list: Option<bool>,
+}
+
+impl Parts {
+    /// A comment is a part of its own, and keeps lists apart.
+    fn comment(&mut self, source: &str) {
+        self.parts.push(source.to_string());
+        self.last_list = None;
+    }
+
+    /// A block. Markdown merges two lists of one kind written one after the
+    /// other, so a list straight after a list of its kind has the separator
+    /// `<!-- -->` written before it; the parser reads it back as the
+    /// separator it is (see `drop_list_separators`).
+    fn element(&mut self, element: &ContentElement) {
+        let kind = match element {
+            ContentElement::List { list } => Some(matches!(list.kind, ListKind::Ordered { .. })),
+            _ => None,
+        };
+        if kind.is_some() && kind == self.last_list {
+            self.parts.push(crate::parser::LIST_SEPARATOR.to_string());
+        }
+        self.parts.push(serialize_element(element));
+        self.last_list = kind;
+    }
 }
 
 /// Write `container`'s elements, each preceded by its `Before` comments,
 /// then its `End` comments (and `Before` comments past its end).
 fn write_container(
-    parts: &mut Vec<String>,
+    parts: &mut Parts,
     container: &Container,
     elements: &im::Vector<Spanned<ContentElement>>,
     doc: &Document,
     written: &mut [bool],
 ) {
-    let mut write_comments = |parts: &mut Vec<String>, select: &dyn Fn(&CommentAnchor) -> bool| {
+    let mut write_comments = |parts: &mut Parts, select: &dyn Fn(&CommentAnchor) -> bool| {
         for (i, c) in doc.comments.iter().enumerate() {
             if !written[i] && select(&c.anchor) {
-                parts.push(c.comment.node.as_str().to_string());
+                parts.comment(c.comment.node.as_str());
                 written[i] = true;
             }
         }
     };
     for (at, spanned) in elements.iter().enumerate() {
         write_comments(parts, &|a| matches!(a, CommentAnchor::Before(c, i) if c == container && *i == at));
-        parts.push(serialize_element(&spanned.node));
+        parts.element(&spanned.node);
     }
     write_comments(parts, &|a| match a {
         CommentAnchor::Before(c, _) | CommentAnchor::End(c) => c == container,
@@ -99,21 +134,21 @@ pub(crate) fn serialize_blocks(blocks: &Blocks) -> String {
 /// [`serialize_blocks`], with the parts (blocks and comments) joined by
 /// `separator`: a blank line, or a line break in a tight list item.
 fn serialize_blocks_joined(blocks: &Blocks, separator: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts = Parts::default();
     for (at, spanned) in blocks.elements.iter().enumerate() {
         for (index, comment) in &blocks.comments {
             if *index == at {
-                parts.push(comment.node.as_str().to_string());
+                parts.comment(comment.node.as_str());
             }
         }
-        parts.push(serialize_element(&spanned.node));
+        parts.element(&spanned.node);
     }
     for (index, comment) in &blocks.comments {
         if *index >= blocks.elements.len() {
-            parts.push(comment.node.as_str().to_string());
+            parts.comment(comment.node.as_str());
         }
     }
-    parts.join(separator)
+    parts.parts.join(separator)
 }
 
 /// A list: each item is its marker and its blocks, the later lines indented to
@@ -2004,8 +2039,9 @@ headings
     /// elements after the slots (ADR-060 P1). Each is excluded from the
     /// property domain in `tests/conservation.rs`.
     ///
-    /// - L10: two same-kind lists that end up adjacent on save merge into one,
-    ///   unless a comment separates them.
+    /// - L10: resolved (ADR-059 stage 9.2). Two same-kind lists that end up
+    ///   adjacent on save have `<!-- -->` written between them, which the
+    ///   parser reads as the separator it is (`drop_list_separators`).
     /// - L11: a store-originated paragraph whose text is
     ///   `[x](->> :post) {#news}` is written with the expression and the marker
     ///   escaped, and reads back as the same text. Resolved by ADR-059 stage 5:
@@ -2035,17 +2071,170 @@ headings
         let first = parse_and_assign(src, &grammar).expect("parses");
         assert_eq!(first.unassigned.len(), 1);
         let saved = serialize_document(&first);
-        assert_eq!(saved, "# T\n\n[x](->> :post) {#latest}\n\n- a\n\n- b\n\n----\n\nBody.\n");
+        // L10 (resolved, ADR-059 stage 9.2): the lists are adjacent on save,
+        // so the separator is written between them.
+        assert_eq!(
+            saved,
+            "# T\n\n[x](->> :post) {#latest}\n\n- a\n\n<!-- -->\n\n- b\n\n----\n\nBody.\n"
+        );
         let second = parse_and_assign(&saved, &grammar).expect("parses");
-        // L10: the two lists merged into the `tags` list; nothing is unassigned.
-        assert!(second.unassigned.is_empty());
+        // They read back as two lists: `- a` in `tags`, `- b` unassigned.
+        assert!(second.comments.is_empty(), "{:?}", second.comments);
+        assert_eq!(second.unassigned.len(), 1);
         let tags = second.preamble.iter().find(|s| s.name.as_str() == "tags").expect("tags");
         assert_eq!(
             tags.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-            top_level("- a\n\n- b")
+            top_level("- a")
         );
         // Text is a fixed point from then on.
         assert_eq!(serialize_document(&second), saved);
+    }
+
+    /// The lists that `first` and `second` (markdown of one list each) read as.
+    fn two_lists(first: &str, second: &str) -> (ContentElement, ContentElement) {
+        (top_level(first).remove(0), top_level(second).remove(0))
+    }
+
+    /// L10 (stage 9.2): two lists of one kind next to each other in N are
+    /// written with `<!-- -->` between them, read back as two lists with no
+    /// comment, and the second save is byte-identical. At the top level, in a
+    /// quote, in an item, and across the slot/unassigned/body boundaries.
+    #[test]
+    fn adjacent_same_kind_lists_stay_apart_l10() {
+        for (a, b) in [("- a", "- b"), ("1. a", "1. b"), ("1. a", "3. b"), ("- a\n- x", "* b")] {
+            let (first, second) = two_lists(a, b);
+
+            // Top level (a flat sequence).
+            let flat = crate::document::Blocks::from_elements(
+                im::vector![first.clone(), second.clone()]
+                    .into_iter()
+                    .map(|node| Spanned { node, span: Span { start: 0, end: 0 } })
+                    .collect(),
+            );
+            let saved = serialize_blocks(&flat);
+            assert!(saved.contains("\n\n<!-- -->\n\n"), "{a:?} {b:?}: {saved:?}");
+            let back = crate::parser::parse_document(&saved).expect("parses");
+            assert_eq!(back.elements.len(), 2, "{saved:?}");
+            assert!(back.comments.is_empty(), "{saved:?}");
+            assert_eq!(serialize_blocks(&back), saved);
+
+            // In a quote.
+            let quote = ContentElement::Blockquote { blocks: flat.clone() };
+            let saved = serialize_element(&quote);
+            assert!(saved.contains("> <!-- -->"), "{saved:?}");
+            let back = reparse_one(&saved);
+            assert_eq!(serialize_element(&back), saved);
+            assert!(matches!(&back, ContentElement::Blockquote { blocks }
+                if blocks.elements.len() == 2 && blocks.comments.is_empty()), "{saved:?}");
+
+            // In an item (a loose one with a paragraph, so that the blank
+            // lines show).
+            let mut in_item = flat.clone();
+            in_item.elements.push_front(Spanned { node: para("p"), span: Span { start: 0, end: 0 } });
+            let item = ContentElement::List {
+                list: List {
+                    kind: ListKind::Bullet,
+                    spacing: Spacing::Loose,
+                    items: vec![in_item],
+                },
+            };
+            let saved = serialize_element(&item);
+            assert!(saved.contains("  <!-- -->"), "{saved:?}");
+            let back = reparse_one(&saved);
+            assert_eq!(serialize_element(&back), saved);
+            assert!(matches!(&back, ContentElement::List { list }
+                if list.items[0].elements.len() == 3 && list.items[0].comments.is_empty()), "{saved:?}");
+        }
+    }
+
+    /// The same, across the document's boundaries: a list in a slot and one
+    /// unassigned, and a list unassigned and one in a body with no `----`.
+    #[test]
+    fn adjacent_same_kind_lists_stay_apart_across_slots_l10() {
+        let grammar = parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\n- Tags {#tags}\n\n----\n\nBody.\n",
+        )
+        .expect("schema parses");
+        // Slot to unassigned: `- a` fills `tags`, `- b` is unassigned.
+        let doc = parse_and_assign("# T\n\n- a\n\n1. x\n\n- b\n\n----\n\nBody.\n", &grammar).expect("parses");
+        let mut doc = doc;
+        doc.unassigned = doc.unassigned.iter().filter(|e| e.node != top_level("1. x")[0]).cloned().collect();
+        let saved = serialize_document(&doc);
+        assert!(saved.contains("- a\n\n<!-- -->\n\n- b"), "{saved}");
+        let again = parse_and_assign(&saved, &grammar).expect("parses");
+        assert!(again.comments.is_empty(), "{:?}", again.comments);
+        assert_eq!(again.unassigned.len(), 1);
+        assert_eq!(serialize_document(&again), saved);
+
+        // Unassigned to body, with no `----` between them.
+        let mut doc = parse_and_assign("# T\n\n1. x\n\n- b\n\n----\n\nBody.\n", &grammar).expect("parses");
+        doc.unassigned = doc.unassigned.iter().filter(|e| e.node != top_level("1. x")[0]).cloned().collect();
+        doc.has_separator = false;
+        doc.body = im::vector![Spanned { node: top_level("- c")[0].clone(), span: Span { start: 0, end: 0 } }];
+        let saved = serialize_document(&doc);
+        assert!(saved.contains("- b\n\n<!-- -->\n\n- c"), "{saved}");
+        assert_eq!(serialize_document(&parse_and_assign(&saved, &grammar).expect("parses")), saved);
+    }
+
+    /// The separator is not a comment: it is read as the separator it is, and
+    /// written back exactly.
+    #[test]
+    fn list_separator_is_not_a_comment() {
+        let src = "- a\n\n<!-- -->\n\n- b";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        assert_eq!(flat.elements.len(), 2);
+        assert!(flat.comments.is_empty(), "{:?}", flat.comments);
+        assert_eq!(serialize_blocks(&flat), src);
+    }
+
+    /// Guard: `<!-- -->` anywhere but alone between two lists of one kind is a
+    /// comment.
+    #[test]
+    fn empty_comment_elsewhere_is_a_comment() {
+        for src in ["a\n\n<!-- -->\n\nb", "- a\n\n<!-- -->\n\nb", "<!-- -->\n\n- a", "- a\n\n<!-- -->"] {
+            let flat = crate::parser::parse_document(src).expect("parses");
+            assert_eq!(flat.comments.len(), 1, "{src:?}");
+            assert_eq!(serialize_blocks(&flat), src);
+        }
+    }
+
+    /// Guard: a comment between two lists keeps them apart without a separator.
+    #[test]
+    fn a_comment_between_lists_needs_no_separator() {
+        let src = "- a\n\n<!-- note -->\n\n- b";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        assert_eq!(flat.comments.len(), 1);
+        assert_eq!(serialize_blocks(&flat), src);
+    }
+
+    /// Guard: the separator next to another comment is a comment too.
+    #[test]
+    fn separator_with_another_comment_is_a_comment() {
+        let src = "- a\n\n<!-- -->\n\n<!-- note -->\n\n- b";
+        let flat = crate::parser::parse_document(src).expect("parses");
+        assert_eq!(flat.comments.len(), 2, "{:?}", flat.comments);
+        assert_eq!(serialize_blocks(&flat), src);
+    }
+
+    /// Guard: lists of different kinds need no separator.
+    #[test]
+    fn lists_of_different_kinds_need_no_separator() {
+        let (first, second) = two_lists("- a", "1. b");
+        let flat = crate::document::Blocks::from_elements(
+            [first, second].into_iter().map(|node| Spanned { node, span: Span { start: 0, end: 0 } }).collect(),
+        );
+        let saved = serialize_blocks(&flat);
+        assert_eq!(saved, "- a\n\n1. b");
+    }
+
+    /// Guard: a `----` between the lists keeps them apart; no separator.
+    #[test]
+    fn body_separator_keeps_lists_apart() {
+        let grammar = parse_schema("# Title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n")
+            .expect("schema parses");
+        let doc = parse_and_assign("# T\n\n- a\n\n----\n\n- b\n", &grammar).expect("parses");
+        let saved = serialize_document(&doc);
+        assert_eq!(saved, "# T\n\n- a\n\n----\n\n- b\n");
     }
 
     /// L11 (stage 5), for text: a slotted store paragraph whose literal text

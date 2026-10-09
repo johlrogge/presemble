@@ -904,6 +904,38 @@ mod tests {
         assert_eq!(back.comments.len(), 4);
     }
 
+    /// Stage 9.2 (L10): deleting the block between two lists of one kind
+    /// leaves them adjacent, so the save writes the separator between them.
+    #[test]
+    fn deleting_the_block_between_two_lists_writes_the_separator() {
+        let doc = trivia_doc("# Title\n\nSummary.\n\n----\n\n- a\n\n1. mid\n\n- b\n");
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let blocks = store.children(body);
+        assert_eq!(blocks.len(), 3);
+        store.remove_child_edge(body, blocks[1]);
+        store.remove_node(blocks[1]);
+
+        let saved = serialize_from_store(&store, root).unwrap();
+        assert_eq!(saved, "# Title\n\nSummary.\n\n----\n\n- a\n\n<!-- -->\n\n- b\n");
+    }
+
+    /// Guard: the separator is read and dropped, so it is never in the store.
+    #[test]
+    fn separator_is_never_in_the_store() {
+        let src = "# Title\n\nSummary.\n\n----\n\n- a\n\n<!-- -->\n\n- b\n";
+        let doc = trivia_doc(src);
+        assert!(doc.comments.is_empty(), "{:?}", doc.comments);
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").unwrap();
+        let blocks = store.children(body);
+        assert_eq!(blocks.len(), 2);
+        assert!(comment_texts(&store, blocks[1], ned::trivia::ATTR_TRIVIA_BEFORE).is_empty());
+        assert_eq!(serialize_from_store(&store, root).unwrap(), src);
+    }
+
     /// ADR-059 §13: a quote's blocks and their comments live in the store; a
     /// save from the store writes the file back byte for byte.
     #[test]

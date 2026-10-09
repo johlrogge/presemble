@@ -542,7 +542,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     matches!(state, State::Idle),
                     "invariant: a blockquote ends between blocks"
                 );
-                if let Some(Open::Quote { blocks, range: opened, .. }) = open.pop() {
+                if let Some(Open::Quote { mut blocks, range: opened, .. }) = open.pop() {
+                    drop_list_separators(&mut blocks);
                     // An empty quote is kept (ADR-059 §13).
                     current(&mut root, &mut open).elements.push_back(Spanned {
                         node: ContentElement::Blockquote { blocks },
@@ -576,7 +577,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     matches!(state, State::Idle),
                     "invariant: an item ends between blocks"
                 );
-                if let Some(Open::Item { blocks, .. }) = open.pop() {
+                if let Some(Open::Item { mut blocks, .. }) = open.pop() {
+                    drop_list_separators(&mut blocks);
                     if let Some(Open::List { items, .. }) = open.last_mut() {
                         items.push(blocks);
                     } else {
@@ -725,7 +727,37 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     }
 
     debug_assert!(open.is_empty(), "invariant: every blockquote was closed");
+    drop_list_separators(&mut root);
     Ok(root)
+}
+
+/// The comment the serializer writes between two lists of the same kind, which
+/// markdown would otherwise merge into one (L10). It is never content: the
+/// parser reads it as the separator it is and drops it.
+pub(crate) const LIST_SEPARATOR: &str = "<!-- -->";
+
+/// Drop the list separators of `blocks` (not of the blocks inside it): the
+/// comment `<!-- -->`, alone before a list that follows a list of the same
+/// kind (both bullet, or both ordered whatever their start). Any other
+/// comment, and this one anywhere else, is a comment.
+fn drop_list_separators(blocks: &mut Blocks) {
+    let is_list_of_kind = |at: usize| match blocks.elements.get(at).map(|e| &e.node) {
+        Some(ContentElement::List { list }) => Some(matches!(list.kind, ListKind::Ordered { .. })),
+        _ => None,
+    };
+    let drop: Vec<usize> = (1..blocks.elements.len())
+        .filter(|&k| {
+            let alone = blocks.comments.iter().filter(|(i, _)| *i == k).count() == 1;
+            let separator = blocks
+                .comments
+                .iter()
+                .any(|(i, c)| *i == k && c.node.as_str() == LIST_SEPARATOR);
+            alone && separator && is_list_of_kind(k - 1).is_some() && is_list_of_kind(k - 1) == is_list_of_kind(k)
+        })
+        .collect();
+    if !drop.is_empty() {
+        blocks.comments.retain(|(i, _)| !drop.contains(i));
+    }
 }
 
 /// An open container (ADR-059 §13): the blocks read so far, and what the
