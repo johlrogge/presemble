@@ -23,10 +23,11 @@ The command vocabulary lives in `protocol.rs`. Client paths are validated types 
 |---|---|
 | `Ping` / `Shutdown` | Health check and graceful shutdown |
 | `FileChanged { paths: Vec<SitePath> }` | File watcher detected changes; conductor rebuilds affected pages. Paths that resolve outside the site are ignored |
-| `DocumentChanged { path: SitePath, text }` | Editor updated a buffer (does not write to disk) |
-| `DocumentSaved { path: SitePath }` | Editor saved the file itself; the conductor drops its copy of the buffer and records a conflict if the document has unsaved edits |
+| `EditorOpened` / `EditorChanged` / `EditorClosed` `{ path: ContentPath, text }` | An editor opened, changed or closed a content file (only content files have editors; template and schema edits reach the conductor when the file is saved, through the watcher). A change is lowered into N block by block as it is typed (does not write to disk); answered with the drifts and held regions |
+| `KeepMine { path: ContentPath, drift_id }` | Take the editor's version of a region N did not take |
+| `DocumentSaved { path: SitePath }` | Editor saved the file. When the file holds the editor's latest text this is a flush of N (held regions are lowered as they stand; N's text is written if it holds others' changes); a file that reads as N is not a conflict; otherwise a document with unsaved edits is in conflict |
 | `ReloadDocument { path: ContentPath }` | Discard the unsaved edits of one document and load it from disk (`presemble reload`) |
-| `GetDocumentText { path: SitePath }` | Returns editor working copy or disk fallback |
+| `GetDocumentText { path: SitePath }` | Returns the document as it is on disk |
 | `CursorMoved { path: SitePath, line }` | Editor cursor moved; the browser scrolls to follow |
 | `Classify { path: SitePath }` | Classify a file path by its role in the site |
 | `GetBuildErrors` | Returns the most recent build error map |

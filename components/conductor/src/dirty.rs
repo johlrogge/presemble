@@ -78,9 +78,10 @@ impl DiskStamps {
 /// whose NodeStore subtree has been mutated since the last save, each with its
 /// [`Unsaved`] state.
 ///
-/// Separate from `doc_sources`, which is an LSP working-copy buffer keyed on
-/// absolute paths. `DirtyDocs` uses the same content-relative path convention
-/// as the NodeStore's `:file` attribute.
+/// An editor's typing is in the store too (it is lowered into N as it is
+/// typed), so a document an editor changes is dirty here like any other.
+/// `DirtyDocs` uses the same content-relative path convention as the
+/// NodeStore's `:file` attribute.
 #[derive(Debug, Default)]
 pub struct DirtyDocs {
     docs: HashMap<PathBuf, Unsaved>,

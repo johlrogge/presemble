@@ -69,6 +69,18 @@ Proposed
    save must treat a conflict as a refusal to write; only consent given by a
    person, naming the path, overwrites the disk version.
 
+## Amendment (LSP-2, ADR-069)
+
+A disk change whose text reads as what N currently holds for the document
+(compared as documents, not as bytes) is not a conflict: it clears the dirty
+mark and updates the stamp of decision 1. When an editor is attached and the
+file holds exactly the editor's latest text, the write is the editor's own: held
+regions are lowered as they stand, and then, if N reads as the file, it is a
+save; otherwise N holds others' changes and N's text is written over the file.
+Every other disk change follows decisions 1 to 5. The LSP is no longer a
+carve-out for buffers (decision 4): an editor's text is lowered into N as it is
+typed, so it is tracked like any other unsaved edit.
+
 ## Amends
 
 - ADR-043: the `FileChanged` description ("clears in-memory NED state for the

@@ -529,6 +529,10 @@ impl Leaf<'_> {
 
 impl Conductor {
     pub(super) fn editor_opened(&self, path: editorial_types::ContentPath, text: String) -> CommandResult {
+        // A valid content path can still be a symlink out of the site.
+        if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path()) {
+            return CommandResult::error(format!("{path}: {e}"));
+        }
         self.editors
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -564,6 +568,117 @@ impl Conductor {
         node_store_bridge::content_bridge::serialize_from_store(&store, root).ok()
     }
 
+    /// Whether the text `text`, as the file of the document at `rel`, reads as
+    /// what N holds for it.
+    fn n_reads_as_text(&self, rel: &Path, abs: &Path, text: &str) -> bool {
+        let Some(root) = self.doc_root_for_path(rel) else { return false };
+        let Ok((_, _, _, grammar)) = self.document_coordinates(abs) else { return false };
+        let Ok(doc) = content::parse_and_assign(text, &grammar) else { return false };
+        self.n_reads_as(root, &doc)
+    }
+
+    /// The text of the file at `abs` together with its stamp, read so that the
+    /// stamp belongs to exactly that text: the stamp is taken before and after
+    /// the read, and when the two differ something wrote the file in between,
+    /// so it is read again (a fresh disk change). `None` when the file cannot
+    /// be read or keeps changing under us; the caller then treats the file as
+    /// not agreeing with N, which is the safe side.
+    fn read_stable(&self, abs: &Path) -> Option<(String, Option<crate::dirty::DiskStamp>)> {
+        for _ in 0..3 {
+            let before = crate::dirty::DiskStamp::of(abs);
+            let text = std::fs::read_to_string(abs).ok()?;
+            #[cfg(test)]
+            if let Some(hook) = self.after_read_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                hook();
+            }
+            let after = crate::dirty::DiskStamp::of(abs);
+            if before == after {
+                return Some((text, before));
+            }
+        }
+        None
+    }
+
+    /// Remember `stamp` as the version of the file at `rel` our copy is based on.
+    fn record_stamp(&self, rel: &Path, stamp: Option<crate::dirty::DiskStamp>) {
+        self.disk_stamps.write().unwrap_or_else(|e| e.into_inner()).record(rel, stamp);
+    }
+
+    /// Whether the file now at `rel` reads as what N holds for the document.
+    /// When it does, the stamp it was read with is recorded as the version our
+    /// copy is based on (never a stamp taken after the read, which could belong
+    /// to a newer file).
+    pub(super) fn disk_reads_as_n(&self, rel: &Path) -> bool {
+        let Ok(site_path) = editorial_types::SitePath::parse(&rel.to_string_lossy()) else { return false };
+        let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, &site_path) else { return false };
+        let Some((text, stamp)) = self.read_stable(&abs) else { return false };
+        let reads = self.n_reads_as_text(rel, &abs, &text);
+        if reads {
+            self.record_stamp(rel, stamp);
+        }
+        reads
+    }
+
+    /// A write to the file at `rel` that the conductor did not make (a
+    /// `DocumentSaved` or a watcher `FileChanged`, whichever arrives first).
+    /// Returns the events when the write is settled here, and `None` when it is
+    /// an outside write that follows ADR-065.
+    ///
+    /// - The editor wrote its latest text: [`Conductor::editor_wrote`].
+    /// - The file reads as what N holds (the amendment to ADR-065 §1): the
+    ///   document is not unsaved any more, and nothing conflicts.
+    pub(super) fn settle_disk_write(&self, rel: &Path) -> Option<Vec<ConductorEvent>> {
+        if let Some(events) = self.editor_wrote(rel) {
+            return Some(events);
+        }
+        let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(rel);
+        if dirty && self.disk_reads_as_n(rel) {
+            // (`disk_reads_as_n` recorded the stamp the text was read with.)
+            self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(rel);
+            return Some(vec![saved_event([&rel.to_path_buf()])]);
+        }
+        None
+    }
+
+    /// The editor of the document at `rel` wrote the file, if the file holds
+    /// exactly the latest text the editor sent. The write is a flush of N:
+    ///
+    /// 1. any held region is lowered as it stands (the text is final);
+    /// 2. if N then reads as the file, it is a save: the dirty mark is cleared
+    ///    and the file stays as the editor wrote it;
+    /// 3. otherwise N holds changes the editor has not seen, and N's canonical
+    ///    text is written over the file.
+    ///
+    /// `None` when no editor is attached or the file is not the editor's text.
+    fn editor_wrote(&self, rel: &Path) -> Option<Vec<ConductorEvent>> {
+        let key = editorial_types::ContentPath::parse(&rel.to_string_lossy()).ok()?;
+        let abs = crate::site_resolve::resolve_in_site(&self.site_dir, key.as_site_path()).ok()?;
+        let mut state = self.editors.read().unwrap_or_else(|e| e.into_inner()).get(&key).cloned()?;
+        let (disk, stamp) = self.read_stable(&abs)?;
+        if disk != state.last {
+            return None;
+        }
+        let mut events = Vec::new();
+        if state.base != state.last {
+            events.extend(self.sync_editor(&key, &abs, &mut state, true).ok()?);
+        }
+        let was_dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(rel);
+        let reads_as_n = self.n_reads_as_text(rel, &abs, &disk);
+        if reads_as_n {
+            self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(rel);
+            self.record_stamp(rel, stamp);
+        } else {
+            let canonical = self.canonical_text(&key)?;
+            self.write_document(rel, canonical.as_bytes()).ok()?;
+            self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(rel);
+        }
+        if was_dirty || !reads_as_n {
+            events.push(saved_event([&rel.to_path_buf()]));
+        }
+        self.editors.write().unwrap_or_else(|e| e.into_inner()).insert(key, state);
+        Some(events)
+    }
+
     pub(super) fn editor_changed(&self, path: editorial_types::ContentPath, text: String) -> CommandResult {
         let abs = match crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path()) {
             Ok(abs) => abs,
@@ -575,7 +690,7 @@ impl Conductor {
             EditorState::opened(self.canonical_text(&path).unwrap_or_else(|| text.clone()))
         });
         state.last = text;
-        let result = self.sync_editor(&path, &abs, &mut state);
+        let result = self.sync_editor(&path, &abs, &mut state, false);
         self.finish_sync(path, state, result)
     }
 
@@ -615,7 +730,7 @@ impl Conductor {
             },
         }
         state.base = sync::apply_edits(&state.base, std::slice::from_ref(&record.base_edit));
-        let result = self.sync_editor(&path, &abs, &mut state).map(|more| {
+        let result = self.sync_editor(&path, &abs, &mut state, false).map(|more| {
             events.extend(more);
             events
         });
@@ -664,11 +779,14 @@ impl Conductor {
     }
 
     /// Lower the difference between the editor's text and the base into N.
+    /// `lower_held`: the editor's text is final (it wrote the file), so a
+    /// construct it has not closed is lowered as it stands, not held.
     fn sync_editor(
         &self,
         path: &editorial_types::ContentPath,
         abs: &Path,
         state: &mut EditorState,
+        lower_held: bool,
     ) -> Result<Vec<ConductorEvent>, String> {
         state.drifts.clear();
         state.held.clear();
@@ -689,7 +807,7 @@ impl Conductor {
         let mut groups = Vec::new();
         if !structure_changed {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-            self.groups(&store, root, &base_doc, &new_doc, &state.base, &state.last, &mut groups);
+            self.groups(&store, root, &base_doc, &new_doc, &state.base, &state.last, lower_held, &mut groups);
         }
 
         // Held regions are not lowered; the rest of the document is read as it
@@ -818,6 +936,7 @@ impl Conductor {
         new_doc: &Document,
         base_text: &str,
         new_text: &str,
+        lower_held: bool,
         out: &mut Vec<Group>,
     ) {
         let base_containers = sync::document_containers(base_doc);
@@ -871,7 +990,7 @@ impl Conductor {
                 // An unterminated construct is held back, as the parser sees
                 // the region: without what the containers it is in take from
                 // its lines.
-                let held = if new_elements.is_empty() {
+                let held = if new_elements.is_empty() || lower_held {
                     None
                 } else {
                     let prefixes = sync::path_prefixes(new_text, &new_blocks, &located.path);
@@ -1607,8 +1726,8 @@ mod tests {
     }
 
     /// Timing (the gate of 2.3): p50 and p95 of `EditorChanged`, for an edit in
-    /// place and for a new paragraph, against `DocumentChanged` on the same
-    /// document, on a site of 1000 pages with one document of 500 blocks. Run
+    /// place and for a new paragraph, against re-ingesting the whole document
+    /// (what `DocumentChanged` did) on the same document, on a site of 1000 pages with one document of 500 blocks. Run
     /// with `just perf-editor` (release; the three cases are interleaved).
     #[test]
     #[ignore = "timing, run by hand"]
@@ -1639,7 +1758,6 @@ mod tests {
         let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
 
         let path = ContentPath::parse("content/post/big.md").unwrap();
-        let site_path = editorial_types::SitePath::parse("content/post/big.md").unwrap();
         // The three cases run one after the other in every round, so that
         // whatever drifts in the machine's speed drifts for all of them. Each
         // round starts from the text N has and ends with N having the next.
@@ -1663,11 +1781,12 @@ mod tests {
             ms
         };
         for round in 0..rounds {
-            // DocumentChanged: the whole text, N re-ingests it.
+            // The old way (DocumentChanged, removed in 2.4): the whole text,
+            // N re-ingests it.
             paragraphs[250] = format!("Paragraph 250 round {round} document of the big document.");
             let text = render(&paragraphs);
             let at = std::time::Instant::now();
-            conductor.handle_command(Command::DocumentChanged { path: site_path.clone(), text: text.clone() });
+            conductor.rebuild_page(&root.join("content/post/big.md"), &text).expect("re-ingested");
             old.push(at.elapsed().as_secs_f64() * 1000.0);
 
             // An edit in place: the editor has what N has, and types a character.
@@ -1687,9 +1806,244 @@ mod tests {
                 percentile(&mut samples.to_vec(), 0.95)
             );
         };
-        report("DocumentChanged", &old);
+        report("re-ingest (old way)", &old);
         report("EditorChanged in place", &in_place);
         report("EditorChanged new paragraph", &structural);
+    }
+
+    // ── saving, and disk changes, with an editor attached (2.4) ────────────
+
+    fn site_path() -> editorial_types::SitePath {
+        editorial_types::SitePath::parse(FILE).expect("valid")
+    }
+
+    /// The editor writes `text` to the file, as an editor's save does.
+    fn editor_writes(w: &World, text: &str) {
+        std::fs::write(w.tmp.path().join(FILE), text).unwrap();
+    }
+
+    fn editor_saved(w: &World) -> CommandResult {
+        w.conductor.handle_command(Command::DocumentSaved { path: site_path() })
+    }
+
+    fn watcher_saw(w: &World) -> CommandResult {
+        w.conductor.handle_command(Command::FileChanged { paths: vec![site_path()] })
+    }
+
+    fn conflicts(w: &World) -> Vec<String> {
+        match w.conductor.handle_command(Command::GetConflicts).response {
+            Response::Conflicts(files) => files,
+            other => panic!("expected Conflicts, got {other:?}"),
+        }
+    }
+
+    fn dirty_buffers(w: &World) -> Vec<String> {
+        match w.conductor.handle_command(Command::GetDirtyBuffers).response {
+            Response::DirtyBuffers(files) => files,
+            other => panic!("expected DirtyBuffers, got {other:?}"),
+        }
+    }
+
+    /// The browser sets the first paragraph of the body.
+    fn browser_sets_alpha(w: &World, markdown: &str) {
+        other_channel_sets(w, body_blocks(w)[0], markdown);
+    }
+
+    /// The editor's write of its latest text is a flush of N: what others
+    /// changed meanwhile is in N, so N's text is what ends up in the file.
+    #[test]
+    fn editor_write_is_a_flush_and_writes_others_edits() {
+        let w = world();
+        open(&w, CONTENT);
+        browser_sets_alpha(&w, "Alpha browser.");
+        let text = CONTENT.replace("Beta para.", "Beta typed.");
+        let (drifts, held) = synced(&change(&w, &text));
+        assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
+
+        editor_writes(&w, &text);
+        let result = editor_saved(&w);
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+
+        let canonical = w.conductor.canonical_text(&path()).expect("N serializes");
+        assert!(canonical.contains("Alpha browser.") && canonical.contains("Beta typed."), "{canonical}");
+        assert_eq!(on_disk(&w), canonical, "the file holds N, with the browser's edit");
+        assert!(!dirty(&w), "a flush is a save");
+        assert!(conflicts(&w).is_empty(), "{:?}", conflicts(&w));
+    }
+
+    /// When N already reads as what the editor wrote, the write is just a
+    /// save: the file stays as the editor wrote it.
+    #[test]
+    fn editor_write_of_ns_content_just_clears_dirty() {
+        let w = world();
+        open(&w, CONTENT);
+        // Blank lines the canonical text would not have.
+        let text = CONTENT.replace("Alpha para.\n\n", "Alpha changed.\n\n\n\n");
+        let (drifts, held) = synced(&change(&w, &text));
+        assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
+        assert!(dirty(&w));
+
+        editor_writes(&w, &text);
+        let result = editor_saved(&w);
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert_eq!(on_disk(&w), text, "the editor's text is not rewritten");
+        assert!(!dirty(&w));
+        assert!(conflicts(&w).is_empty());
+        assert!(dirty_buffers(&w).is_empty(), "{:?}", dirty_buffers(&w));
+    }
+
+    /// The watcher may report the editor's write before the editor says it
+    /// saved: whichever comes first, the write is the editor's.
+    #[test]
+    fn editor_write_seen_by_the_watcher_first_is_not_a_conflict() {
+        let w = world();
+        open(&w, CONTENT);
+        let text = CONTENT.replace("Alpha para.\n\n", "Alpha changed.\n\n\n\n");
+        change(&w, &text);
+
+        editor_writes(&w, &text);
+        watcher_saw(&w);
+        assert!(conflicts(&w).is_empty(), "{:?}", conflicts(&w));
+        assert!(!dirty(&w), "the write cleared the dirty mark");
+        assert_eq!(on_disk(&w), text);
+
+        // The save notice that follows changes nothing.
+        let result = editor_saved(&w);
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert!(conflicts(&w).is_empty());
+        assert!(!dirty(&w));
+        assert_eq!(on_disk(&w), text);
+    }
+
+    /// The same with others' edits in N: whichever notice comes first, the
+    /// file ends as N, and the second notice is not a conflict either.
+    #[test]
+    fn editor_write_seen_by_the_watcher_first_flushes_others_edits() {
+        let w = world();
+        open(&w, CONTENT);
+        browser_sets_alpha(&w, "Alpha browser.");
+        let text = CONTENT.replace("Beta para.", "Beta typed.");
+        change(&w, &text);
+
+        editor_writes(&w, &text);
+        watcher_saw(&w);
+        let canonical = w.conductor.canonical_text(&path()).expect("N serializes");
+        assert_eq!(on_disk(&w), canonical);
+        editor_saved(&w);
+        assert!(conflicts(&w).is_empty(), "{:?}", conflicts(&w));
+        assert!(!dirty(&w));
+        assert_eq!(on_disk(&w), canonical);
+    }
+
+    /// A construct the editor had not closed yet is the editor's final word
+    /// when it writes the file: it is lowered as it stands.
+    #[test]
+    fn editor_write_lowers_held_regions_as_they_stand() {
+        let w = world();
+        open(&w, CONTENT);
+        let before = body_blocks(&w);
+        let (drifts, held) = synced(&change(&w, OPEN_FENCE));
+        assert!(drifts.is_empty() && held.len() == 1, "{drifts:?} {held:?}");
+        assert_eq!(body_blocks(&w), before, "held: N is unchanged until the write");
+
+        editor_writes(&w, OPEN_FENCE);
+        let result = editor_saved(&w);
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+
+        let names: Vec<String> = body_blocks(&w).into_iter().map(|b| element_name(&w, b)).collect();
+        assert_eq!(names, ["paragraph", "code-block"], "the open fence is a code block now");
+        assert_eq!(on_disk(&w), OPEN_FENCE, "N reads as the file, which stays as written");
+        assert!(!dirty(&w));
+        assert!(conflicts(&w).is_empty());
+    }
+
+    /// A disk change whose text reads as what N holds is not a conflict (the
+    /// amendment to ADR-065 §1): it clears the dirty mark.
+    #[test]
+    fn disk_change_that_reads_as_n_is_not_a_conflict() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        assert!(dirty(&w));
+        // The same document, spelled differently: extra blank lines.
+        let spelled = CONTENT.replace("Alpha para.\n\n", "Alpha browser.\n\n\n\n");
+        editor_writes(&w, &spelled);
+        watcher_saw(&w);
+        assert!(conflicts(&w).is_empty(), "{:?}", conflicts(&w));
+        assert!(!dirty(&w), "N and the file agree: nothing is unsaved");
+        assert_eq!(on_disk(&w), spelled);
+        assert_eq!(body_markdown(&w)[0], "Alpha browser.");
+    }
+
+    /// An outside write that lands after the file was read but before it was
+    /// stamped must not be recorded as the version N agrees with: the stamp is
+    /// taken before and after the read, and a difference is a fresh disk change.
+    #[test]
+    fn a_write_between_reading_and_stamping_is_not_lost() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        // A file that reads as N: no conflict, if nothing else happens.
+        editor_writes(&w, &CONTENT.replace("Alpha para.\n\n", "Alpha browser.\n\n\n\n"));
+        // And just after it was read, something else writes the file.
+        let file = w.tmp.path().join(FILE);
+        let outside = CONTENT.replace("Gamma para.", "Gamma sed.");
+        *w.conductor.after_read_hook.lock().unwrap() =
+            Some(Box::new(move || std::fs::write(file, outside).unwrap()));
+
+        watcher_saw(&w);
+
+        assert_eq!(conflicts(&w), [FILE], "the newer file is a conflict, not N's version");
+        assert!(dirty(&w), "the unsaved edit is kept");
+        assert_eq!(body_markdown(&w)[0], "Alpha browser.");
+        // The next save of N is refused without consent, so it cannot
+        // overwrite what was written.
+        let saved = w.conductor.handle_command(Command::SaveAllBuffers {
+            consent: editorial_types::ConflictConsent::None,
+        });
+        assert!(matches!(saved.response, Response::ConflictsNeedConfirmation(_)), "{:?}", saved.response);
+        assert!(on_disk(&w).contains("Gamma sed."));
+    }
+
+    /// GUARD: any other write over unsaved edits (a `sed`, a `git checkout`)
+    /// is still a conflict (ADR-065), with or without an editor attached.
+    #[test]
+    fn outside_write_over_unsaved_edits_is_still_a_conflict() {
+        // Without an editor.
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        editor_writes(&w, &CONTENT.replace("Gamma para.", "Gamma sed."));
+        watcher_saw(&w);
+        assert_eq!(conflicts(&w), [FILE]);
+        assert_eq!(body_markdown(&w)[0], "Alpha browser.", "the unsaved edit stays");
+
+        // With an editor whose text the file does not hold.
+        let w = world();
+        open(&w, CONTENT);
+        change(&w, &CONTENT.replace("Alpha para.", "Alpha typed."));
+        editor_writes(&w, &CONTENT.replace("Gamma para.", "Gamma sed."));
+        watcher_saw(&w);
+        assert_eq!(conflicts(&w), [FILE]);
+        assert_eq!(body_markdown(&w)[0], "Alpha typed.", "the unsaved edit stays");
+    }
+
+    /// The browser's save-all saves N. What the editor holds that N does not
+    /// (a held region) is not saveable text.
+    #[test]
+    fn browser_save_all_never_writes_editor_text() {
+        let w = world();
+        open(&w, CONTENT);
+        change(&w, &CONTENT.replace("Alpha para.", "Alpha typed."));
+        let (_, held) = synced(&change(&w, &OPEN_FENCE.replace("Alpha para.", "Alpha typed.")));
+        assert_eq!(held.len(), 1);
+        assert_eq!(dirty_buffers(&w), [FILE], "N holds an unsaved edit; the editor's text adds nothing");
+
+        let result = w.conductor.handle_command(Command::SaveAllBuffers {
+            consent: editorial_types::ConflictConsent::None,
+        });
+        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        let saved = on_disk(&w);
+        assert!(saved.contains("Alpha typed."), "{saved}");
+        assert!(!saved.contains("```"), "the held fence is not written: {saved}");
+        assert!(dirty_buffers(&w).is_empty());
     }
 
     /// GUARD: no editor command writes the file.

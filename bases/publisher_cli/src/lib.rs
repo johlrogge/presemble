@@ -490,21 +490,12 @@ pub fn run() -> Result<(), CliError> {
 }
 
 /// What `presemble reload` tells the user.
-///
-/// An editor buffer is the editor's, not the conductor's: it is never claimed
-/// as discarded, only pointed out.
-fn reload_message(file: &str, discarded: bool, editor_buffer: bool) -> String {
-    let mut message = if discarded {
+fn reload_message(file: &str, discarded: bool) -> String {
+    if discarded {
         format!("Reloaded {file} from disk; discarded unsaved edits.")
     } else {
         format!("Reloaded {file} from disk (it had no unsaved edits).")
-    };
-    if editor_buffer {
-        message.push_str(&format!(
-            "\nNote: {file} also has unsaved changes in your editor. They stay there; save or discard them in the editor."
-        ));
     }
-    message
 }
 
 /// Ask the running conductor to reload one document from disk.
@@ -527,8 +518,8 @@ fn reload_document(site_dir: &Path, file: &str) -> Result<(), CliError> {
         .send(&conductor::Command::ReloadDocument { path })
         .map_err(CliError::Render)?
     {
-        conductor::Response::Reloaded { discarded, editor_buffer } => {
-            println!("{}", reload_message(file, discarded, editor_buffer));
+        conductor::Response::Reloaded { discarded } => {
+            println!("{}", reload_message(file, discarded));
             Ok(())
         }
         conductor::Response::Error(e) => Err(CliError::Render(e)),
@@ -906,20 +897,13 @@ mod tests {
     #[test]
     fn reload_messages_say_what_happened() {
         assert_eq!(
-            reload_message("content/x.md", true, false),
+            reload_message("content/x.md", true),
             "Reloaded content/x.md from disk; discarded unsaved edits."
         );
         assert_eq!(
-            reload_message("content/x.md", false, false),
+            reload_message("content/x.md", false),
             "Reloaded content/x.md from disk (it had no unsaved edits)."
         );
-        // An editor buffer is noted, never claimed as discarded.
-        assert_eq!(
-            reload_message("content/x.md", false, true),
-            "Reloaded content/x.md from disk (it had no unsaved edits).\n\
-             Note: content/x.md also has unsaved changes in your editor. They stay there; save or discard them in the editor."
-        );
-        assert!(reload_message("content/x.md", true, true).contains("discarded unsaved edits."));
     }
 
     #[test]

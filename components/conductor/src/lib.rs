@@ -34,6 +34,10 @@ mod tests {
         editorial_types::SitePath::parse(s).expect("a valid site path")
     }
 
+    fn cp(s: &str) -> editorial_types::ContentPath {
+        editorial_types::ContentPath::parse(s).expect("a valid content path")
+    }
+
     fn empty_conductor() -> Conductor {
         let repo = site_repository::SiteRepository::builder().build();
         Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap()
@@ -86,127 +90,6 @@ mod tests {
         match result.response {
             Response::DocumentText(None) => {}
             other => panic!("expected DocumentText(None), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn document_changed_stores_in_memory() {
-        let conductor = empty_conductor();
-        let path = sp("content/article/test.md");
-        let text = "# My Title\n".to_string();
-
-        let result = conductor.handle_command(Command::DocumentChanged {
-            path: path.clone(),
-            text: text.clone(),
-        });
-        assert!(matches!(result.response, Response::Ok));
-        // Rebuild will fail (no schema) and emit a BuildFailed event if the path is classifiable.
-        // Either no events or a single BuildFailed event is acceptable here.
-        for event in &result.events {
-            assert!(
-                matches!(event, ConductorEvent::BuildFailed { .. }),
-                "unexpected event type: {event:?}"
-            );
-        }
-
-        // GetDocumentText should return the in-memory version
-        let result2 = conductor.handle_command(Command::GetDocumentText { path });
-        match result2.response {
-            Response::DocumentText(Some(got)) => assert_eq!(got, text),
-            other => panic!("expected DocumentText(Some(...)), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn document_changed_does_not_write_to_disk() {
-        let conductor = empty_conductor();
-        let path = "content/article/test.md";
-        let result = conductor.handle_command(Command::DocumentChanged {
-            path: sp(path),
-            text: "# Hello\n".to_string(),
-        });
-        assert!(matches!(result.response, Response::Ok));
-        // File should NOT exist on disk
-        assert!(
-            !std::path::Path::new("/test-site").join(path).exists(),
-            "DocumentChanged should not write to disk"
-        );
-    }
-
-    #[test]
-    fn document_saved_clears_memory() {
-        let conductor = empty_conductor();
-        let path = sp("content/article/test.md");
-        let text = "# My Title\n".to_string();
-
-        // Store in memory
-        conductor.handle_command(Command::DocumentChanged {
-            path: path.clone(),
-            text: text.clone(),
-        });
-
-        // Verify in memory
-        let result = conductor.handle_command(Command::GetDocumentText { path: path.clone() });
-        assert!(matches!(result.response, Response::DocumentText(Some(_))));
-
-        // Save clears memory
-        conductor.handle_command(Command::DocumentSaved { path: path.clone() });
-
-        // After save, no in-memory copy, no file on disk → None
-        let result2 = conductor.handle_command(Command::GetDocumentText { path });
-        assert!(matches!(result2.response, Response::DocumentText(None)));
-    }
-
-    #[test]
-    fn document_changed_emits_pages_rebuilt_when_site_has_schema_and_template() {
-        let dir = tempfile::tempdir().unwrap();
-        // Write schema and template to disk so the fresh repo in rebuild_page finds them
-        let schema_dir = dir.path().join("schemas/post");
-        std::fs::create_dir_all(&schema_dir).unwrap();
-        std::fs::write(schema_dir.join("item.md"), POST_SCHEMA_SRC).unwrap();
-        let tmpl_dir = dir.path().join("templates/post");
-        std::fs::create_dir_all(&tmpl_dir).unwrap();
-        std::fs::write(tmpl_dir.join("item.html"), POST_TEMPLATE_SRC).unwrap();
-
-        let repo = site_repository::SiteRepository::builder()
-            .schema("post", POST_SCHEMA_SRC)
-            .item_template("post", POST_TEMPLATE_SRC, false)
-            .build();
-        let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
-
-        let text = "# My Post Title\n\n----\n\nSome body content.\n".to_string();
-        let result = conductor.handle_command(Command::DocumentChanged {
-            path: sp("content/post/hello.md"),
-            text,
-        });
-
-        assert!(matches!(result.response, Response::Ok), "expected Ok response");
-        assert_eq!(result.events.len(), 1, "expected one PagesRebuilt event");
-        match &result.events[0] {
-            ConductorEvent::PagesRebuilt { pages, anchor } => {
-                assert_eq!(pages, &vec!["/post/hello".to_string()]);
-                assert!(anchor.is_none());
-            }
-            other => panic!("expected PagesRebuilt, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn document_changed_emits_build_failed_when_no_template_exists() {
-        let conductor = minimal_post_conductor();
-        let result = conductor.handle_command(Command::DocumentChanged {
-            path: sp("content/post/hello.md"),
-            text: "# My Title\n".to_string(),
-        });
-
-        assert!(matches!(result.response, Response::Ok));
-        // When rebuild fails and we can derive a URL, a BuildFailed event is emitted.
-        assert_eq!(result.events.len(), 1, "expected one BuildFailed event");
-        match &result.events[0] {
-            ConductorEvent::BuildFailed { error_pages } => {
-                assert!(error_pages.contains(&"/post/hello".to_string()));
-            }
-            other => panic!("expected BuildFailed, got {other:?}"),
         }
     }
 
@@ -310,7 +193,7 @@ mod tests {
     fn cursor_moved_in_body_emits_cursor_scroll_to() {
         let conductor = minimal_post_conductor();
 
-        // Store content in memory via DocumentChanged.
+        // The editor opens the file with this text.
         // Line 0: "# My Post Title"   (title heading)
         // Line 1: ""
         // Line 2: "----"              (separator)
@@ -320,8 +203,8 @@ mod tests {
         // Line 6: "Second paragraph." (body element 1)
         let text = "# My Post Title\n\n----\n\nFirst paragraph.\n\nSecond paragraph.\n".to_string();
 
-        conductor.handle_command(Command::DocumentChanged {
-            path: sp("content/post/my-post.md"),
+        conductor.handle_command(Command::EditorOpened {
+            path: cp("content/post/my-post.md"),
             text,
         });
 
@@ -352,8 +235,8 @@ mod tests {
         // in preamble falls through to the nearest body element.
         let text = "# My Post Title\n\n----\n\nSome body.\n".to_string();
 
-        conductor.handle_command(Command::DocumentChanged {
-            path: sp("content/post/my-post.md"),
+        conductor.handle_command(Command::EditorOpened {
+            path: cp("content/post/my-post.md"),
             text,
         });
 
@@ -400,7 +283,7 @@ mod tests {
             "Third.\n\n",
             "Fourth.\n",
         ).to_string();
-        conductor.handle_command(Command::DocumentChanged { path: sp("content/post/my-post.md"), text: text.clone() });
+        conductor.handle_command(Command::EditorOpened { path: cp("content/post/my-post.md"), text: text.clone() });
 
         // Count lines to the "Fourth." paragraph
         let fourth_line = text.lines().enumerate()

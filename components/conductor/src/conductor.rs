@@ -226,7 +226,6 @@ pub struct Conductor {
     output_dir: PathBuf,
     dep_graph: RwLock<dep_graph::DependencyGraph>,
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
-    doc_sources: RwLock<HashMap<editorial_types::SitePath, String>>, // site path -> in-memory text
     /// The documents an editor has open, each with the text N and the editor
     /// last agreed on (LSP-2).
     editors: RwLock<HashMap<editorial_types::ContentPath, editor_sync::EditorState>>,
@@ -249,6 +248,10 @@ pub struct Conductor {
     // save-time check that catches a change the watcher has not reported yet
     // (ADR-065). Not the self-write tracker: that one forgets after a second.
     disk_stamps: RwLock<crate::dirty::DiskStamps>,
+    /// Test hook: run once, between reading a file and taking its second
+    /// stamp, to write the file there (the race the double stamp closes).
+    #[cfg(test)]
+    after_read_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     // Map from content file path (relative to site_dir, matching `file` attribute on doc root)
     // to the NodeId of the document root. Populated alongside url_to_root.
     path_to_doc_root: RwLock<HashMap<PathBuf, node_store::NodeId>>,
@@ -442,7 +445,6 @@ impl Conductor {
             output_dir,
             dep_graph: RwLock::new(dep_graph::DependencyGraph::new()),
             schema_cache: RwLock::new(schema_cache),
-            doc_sources: RwLock::new(HashMap::new()),
             editors: RwLock::new(HashMap::new()),
             site_index: RwLock::new(site_index),
             repo,
@@ -456,6 +458,8 @@ impl Conductor {
             cached_node_stem_index: RwLock::new(HashMap::new()),
             dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
             disk_stamps: RwLock::new(crate::dirty::DiskStamps::new()),
+            #[cfg(test)]
+            after_read_hook: std::sync::Mutex::new(None),
             path_to_doc_root: RwLock::new(HashMap::new()),
             ned_suggestions: RwLock::new(HashMap::new()),
             self_write_tracker: crate::self_write_tracker::SelfWriteTracker::new(
@@ -691,7 +695,16 @@ impl Conductor {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .changed(rel, current);
-        if changed { self.record_disk_conflict(rel) } else { None }
+        if !changed {
+            return None;
+        }
+        // A file that reads as what we hold is no conflict (the amendment to
+        // ADR-065 §1): it is the version our copy is based on now (the check
+        // records the stamp the text was read with).
+        if self.disk_reads_as_n(rel) {
+            return None;
+        }
+        self.record_disk_conflict(rel)
     }
 
     /// If the document at site-relative `rel` has unsaved edits, record that
@@ -1988,13 +2001,10 @@ impl Conductor {
             .collect()
     }
 
-    /// Get in-memory document text, falling back to disk.
+    /// The text of a document on disk.
     ///
     /// A path that resolves outside the site is not found.
     pub fn document_text(&self, path: &editorial_types::SitePath) -> Option<String> {
-        if let Some(text) = self.doc_sources.read().unwrap_or_else(|e| e.into_inner()).get(path) {
-            return Some(text.clone());
-        }
         let abs = crate::site_resolve::resolve_in_site(&self.site_dir, path).ok()?;
         std::fs::read_to_string(abs).ok()
     }
@@ -3543,55 +3553,17 @@ impl Conductor {
             Command::EditorChanged { path, text } => self.editor_changed(path, text),
             Command::EditorClosed { path } => self.editor_closed(&path),
             Command::KeepMine { path, drift_id } => self.keep_mine(path, drift_id),
-            Command::DocumentChanged { path, text } => {
-                let path_buf = match crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
-                    Ok(abs) => abs,
-                    Err(e) => return CommandResult::error(format!("{path}: {e}")),
-                };
-                // Store in memory — do NOT write to disk.
-                // Disk writes happen on explicit save (DocumentSaved, save-all).
-                self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).insert(path.clone(), text.clone());
-
-                // Rebuild the page from in-memory text and broadcast PagesRebuilt.
-                match self.rebuild_page(&path_buf, &text) {
-                    Ok(pages) if !pages.is_empty() => {
-                        // Clear any previous build errors for these pages
-                        {
-                            let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
-                            for page in &pages {
-                                let bare = page.trim_end_matches('/').to_string();
-                                errors.remove(&bare);
-                                errors.remove(&format!("{bare}/"));
-                            }
-                        }
-                        CommandResult::ok_with_events(vec![
-                            ConductorEvent::PagesRebuilt { pages, anchor: None },
-                        ])
-                    }
-                    Ok(_) => CommandResult::ok(),
-                    Err(e) => {
-                        eprintln!("conductor: rebuild failed for {path}: {e}");
-                        // Record the error
-                        if let Some(url) = self.url_for_content_path(&path_buf) {
-                            self.build_errors.write().unwrap_or_else(|e| e.into_inner())
-                                .insert(url.clone(), vec![e]);
-                            CommandResult::ok_with_events(vec![
-                                ConductorEvent::BuildFailed { error_pages: vec![url] },
-                            ])
-                        } else {
-                            CommandResult::ok()
-                        }
-                    }
-                }
-            }
             Command::DocumentSaved { path } => {
                 if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
                     return CommandResult::error(format!("{path}: {e}"));
                 }
-                // Clear in-memory version — disk is now authoritative
-                self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
-                // The editor wrote the file itself. If the store holds unsaved
-                // edits for it, they now conflict with what was written.
+                // The editor wrote the file. If it holds the editor's latest
+                // text, or reads as what N holds, that is a save (or a flush
+                // of N); otherwise, if the store holds unsaved edits for it,
+                // they now conflict with what was written (ADR-065).
+                if let Some(events) = self.settle_disk_write(path.as_path()) {
+                    return CommandResult::ok_with_events(events);
+                }
                 match self.record_disk_conflict(path.as_path()) {
                     Some(event) => CommandResult::ok_with_events(vec![event]),
                     None => CommandResult::ok(),
@@ -3619,11 +3591,6 @@ impl Conductor {
                     return CommandResult::ok();
                 }
 
-                // 1. Clear in-memory versions (only for genuinely external paths)
-                for p in &external_paths {
-                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(p);
-                }
-
                 // Rebind so the rest of this handler uses the filtered set.
                 let paths = external_paths;
 
@@ -3647,7 +3614,12 @@ impl Conductor {
                 let mut conflict_events: Vec<ConductorEvent> = Vec::new();
                 for p in &paths {
                     let rel = p.as_path().to_path_buf();
-                    if let Some(event) = self.record_disk_conflict(&rel) {
+                    if let Some(events) = self.settle_disk_write(&rel) {
+                        // The editor's own write, or a file that reads as N:
+                        // N already holds what the file does (or was written
+                        // over it), so the disk version is not loaded.
+                        conflict_events.extend(events);
+                    } else if let Some(event) = self.record_disk_conflict(&rel) {
                         conflict_events.push(event);
                     } else if !self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel) {
                         disk_wins.push(rel);
@@ -3678,8 +3650,8 @@ impl Conductor {
                 }
             }
             Command::ReloadDocument { path } => {
-                // Throw away this document's unsaved edits (the NED copy and
-                // the LSP mirror) and load it from disk. Every other document
+                // Throw away this document's unsaved edits and load it from
+                // disk (an editor attached is given the disk text). Every other document
                 // keeps its unsaved edits (the repopulate rule).
                 if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path()) {
                     return CommandResult::error(format!("{path}: {e}"));
@@ -3691,10 +3663,6 @@ impl Conductor {
                     dirty.clear(&rel);
                     was
                 };
-                let had_mirror = {
-                    let mut sources = self.doc_sources.write().unwrap_or_else(|e| e.into_inner());
-                    sources.remove(path.as_site_path()).is_some()
-                };
                 self.populate_node_store(&[rel]);
                 // An editor of it is given what N has now.
                 self.editor_follows_reload(&path);
@@ -3705,10 +3673,7 @@ impl Conductor {
                     self.build_all_pages(template::OutputMode::Editorial);
                 let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, false);
                 CommandResult {
-                    response: Response::Reloaded {
-                        discarded: was_dirty,
-                        editor_buffer: had_mirror,
-                    },
+                    response: Response::Reloaded { discarded: was_dirty },
                     events,
                 }
             }
@@ -3820,24 +3785,16 @@ impl Conductor {
                 }
             }
             Command::GetDirtyBuffers => {
-                // Union of NED dirty_docs (NodeStore edits) and LSP doc_sources (editor buffer edits).
-                // - dirty_docs uses site-relative paths (e.g. "content/post/first.md")
-                // - doc_sources is keyed by site path as well
-                let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-
-                // NED dirty_docs (site-relative)
-                let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
-                for p in dirty.iter() {
-                    paths.insert(p.to_string_lossy().to_string());
-                }
-                drop(dirty);
-
-                // LSP doc_sources
-                let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
-                for path in sources.keys() {
-                    paths.insert(path.to_string());
-                }
-                drop(sources);
+                // The documents N holds unsaved edits for, site-relative
+                // (e.g. "content/post/first.md"). An editor's text is not a
+                // buffer of its own: what it types is in N.
+                let paths: std::collections::BTreeSet<String> = self
+                    .dirty_docs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
 
                 CommandResult::with_response(Response::DirtyBuffers(paths.into_iter().collect()))
             }
@@ -3873,7 +3830,7 @@ impl Conductor {
                     };
                 }
 
-                // Try NED path first: serialize from NodeStore and write.
+                // Serialize from NodeStore and write.
                 if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel_path) {
                     let text = match self.doc_root_for_path(&rel_path) {
                         Some(root) => {
@@ -3895,20 +3852,7 @@ impl Conductor {
                     self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(&rel_path);
                     return CommandResult::ok_with_events(vec![saved_event([&rel_path])]);
                 }
-
-                // LSP-owned buffer (site path in doc_sources)
-                let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
-                if let Some(text) = sources.get(&path) {
-                    let text = text.clone();
-                    drop(sources);
-                    if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
-                        return CommandResult::error(format!("write error: {e}"));
-                    }
-                    self.doc_sources.write().unwrap_or_else(|e| e.into_inner()).remove(&path);
-                    CommandResult::ok_with_events(vec![saved_event([&rel_path])])
-                } else {
-                    CommandResult::error(format!("buffer not dirty: {path}"))
-                }
+                CommandResult::error(format!("buffer not dirty: {path}"))
             }
             Command::SaveAllBuffers { consent } => {
                 // The check comes first (ADR-065): if any document we would
@@ -3991,30 +3935,6 @@ impl Conductor {
                     }
                     saved.push(rel_path.clone());
                 }
-
-                // Save LSP-owned buffers (doc_sources → disk)
-                let sources = self.doc_sources.read().unwrap_or_else(|e| e.into_inner());
-                let buffers: Vec<(editorial_types::SitePath, String)> = sources.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                drop(sources);
-                let mut written: Vec<editorial_types::SitePath> = Vec::new();
-                for (path, text) in buffers {
-                    match self.write_document(path.as_path(), text.as_bytes()) {
-                        Ok(_) => {
-                            saved.push(path.as_path().to_path_buf());
-                            written.push(path);
-                        }
-                        Err(e) => {
-                            failures.push(format!("write error for {path}: {e}"));
-                        }
-                    }
-                }
-                let mut sources = self.doc_sources.write().unwrap_or_else(|e| e.into_inner());
-                for path in written {
-                    sources.remove(&path);
-                }
-                drop(sources);
 
                 if !failures.is_empty() {
                     return CommandResult::error(failures.join("; "));
@@ -4625,35 +4545,6 @@ mod smoke_tests {
         );
     }
 
-    #[test]
-    fn document_changed_updates_in_memory_source() {
-        let tmp = build_minimal_site();
-        let conductor = make_conductor(&tmp);
-
-        let path = editorial_types::SitePath::parse("content/post/hello.md").expect("valid");
-        let new_text = "title: Changed\n---\nNew body\n".to_string();
-
-        // Notify conductor of the in-memory change
-        let changed_cmd = Command::DocumentChanged {
-            path: path.clone(),
-            text: new_text.clone(),
-        };
-        conductor.handle_command(changed_cmd);
-
-        // Retrieve the in-memory text
-        let get_cmd = Command::GetDocumentText { path };
-        let get_result = conductor.handle_command(get_cmd);
-
-        match get_result.response {
-            Response::DocumentText(Some(text)) => {
-                assert_eq!(
-                    text, new_text,
-                    "in-memory document text should match what was sent via DocumentChanged"
-                );
-            }
-            other => panic!("expected DocumentText(Some(_)), got {:?}", other),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -7222,7 +7113,7 @@ mod suggestion_accept_tests {
         let result = reload(&conductor, FILE);
 
         assert!(
-            matches!(result.response, Response::Reloaded { discarded: true, editor_buffer: false }),
+            matches!(result.response, Response::Reloaded { discarded: true }),
             "{:?}",
             result.response
         );
@@ -7241,38 +7132,11 @@ mod suggestion_accept_tests {
         let conductor = make_conductor(&tmp);
         let result = reload(&conductor, FILE);
         assert!(
-            matches!(result.response, Response::Reloaded { discarded: false, editor_buffer: false }),
+            matches!(result.response, Response::Reloaded { discarded: false }),
             "{:?}",
             result.response
         );
         assert_eq!(title(&conductor), "First Post");
-    }
-
-    /// An editor buffer belongs to the editor: reload drops the conductor's
-    /// copy (so pages show the disk text) but does not claim to have
-    /// discarded what the editor still holds.
-    #[test]
-    fn reload_with_only_an_editor_buffer_does_not_claim_to_discard_it() {
-        let tmp = build_site();
-        let conductor = make_conductor(&tmp);
-        let key = editorial_types::SitePath::parse(FILE).expect("valid");
-        conductor.handle_command(Command::DocumentChanged {
-            path: key.clone(),
-            text: "# Buffer Title\n\n----\n\nBody.\n".to_string(),
-        });
-        assert!(!is_dirty(&conductor), "no store edit");
-
-        let result = reload(&conductor, FILE);
-
-        assert!(
-            matches!(result.response, Response::Reloaded { discarded: false, editor_buffer: true }),
-            "{:?}",
-            result.response
-        );
-        assert!(
-            conductor.doc_sources.read().unwrap().get(&key).is_none(),
-            "the conductor's copy of the buffer is gone"
-        );
     }
 
     #[test]
@@ -7287,7 +7151,7 @@ mod suggestion_accept_tests {
         let result = reload(&conductor, FILE);
 
         assert!(
-            matches!(result.response, Response::Reloaded { discarded: true, editor_buffer: false }),
+            matches!(result.response, Response::Reloaded { discarded: true }),
             "{:?}",
             result.response
         );
@@ -10605,17 +10469,13 @@ mod link_expression_pipeline_tests {
             .collect()
     }
 
+    /// The pages re-rendered when the document `rel` is read again from `text`
+    /// (the fallback of an editor change, and a change on disk): the page
+    /// rebuild these tests pin.
     fn document_changed(conductor: &Conductor, _tmp: &tempfile::TempDir, rel: &str, text: &str) -> BTreeSet<String> {
-        let result = conductor.handle_command(Command::DocumentChanged {
-            path: editorial_types::SitePath::parse(rel).expect("valid"),
-            text: text.to_string(),
-        });
-        assert!(
-            !result.events.iter().any(|e| matches!(e, ConductorEvent::BuildFailed { .. })),
-            "build failed: {:?}",
-            result.events.iter().map(|e| format!("{e:?}")).collect::<Vec<_>>()
-        );
-        pages_of(&result)
+        let site_path = editorial_types::SitePath::parse(rel).expect("valid");
+        let abs = crate::site_resolve::resolve_in_site(&conductor.site_dir, &site_path).expect("inside the site");
+        conductor.rebuild_page(&abs, text).unwrap_or_else(|e| panic!("build failed: {e}")).into_iter().collect()
     }
 
     fn count(list: &[String], url: &str) -> usize {
@@ -12439,8 +12299,8 @@ mod path_boundary_tests {
         let w = world();
         let before = w.outside_bytes();
         for spelling in spellings_of_outside(&w) {
-            let Ok(path) = SitePath::parse(&spelling) else { continue };
-            w.conductor.handle_command(Command::DocumentChanged { path, text: BUFFER.to_string() });
+            let Ok(path) = ContentPath::parse(&spelling) else { continue };
+            w.conductor.handle_command(Command::EditorChanged { path, text: BUFFER.to_string() });
             w.conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() });
             assert_eq!(w.outside_bytes(), before, "{spelling} overwrote a file outside the site");
         }
@@ -12453,10 +12313,12 @@ mod path_boundary_tests {
         let before = w.outside_bytes();
         let spelling = w.outside_file().to_string_lossy().into_owned();
         if let Ok(path) = SitePath::parse(&spelling) {
-            w.conductor.handle_command(Command::DocumentChanged {
-                path: path.clone(),
-                text: BUFFER.to_string(),
-            });
+            if let Ok(content_path) = ContentPath::parse(&spelling) {
+                w.conductor.handle_command(Command::EditorChanged {
+                    path: content_path,
+                    text: BUFFER.to_string(),
+                });
+            }
             let saved = w
                 .conductor
                 .handle_command(Command::SaveBuffer { path, consent: Default::default() });
@@ -12475,10 +12337,12 @@ mod path_boundary_tests {
         let before = w.outside_bytes();
         for spelling in ["../outside.md", "content/../../outside.md", "content/post/../../../outside.md"] {
             if let Ok(path) = SitePath::parse(spelling) {
-                w.conductor.handle_command(Command::DocumentChanged {
-                    path: path.clone(),
-                    text: BUFFER.to_string(),
-                });
+                if let Ok(content_path) = ContentPath::parse(spelling) {
+                    w.conductor.handle_command(Command::EditorChanged {
+                        path: content_path,
+                        text: BUFFER.to_string(),
+                    });
+                }
                 let saved = w
                     .conductor
                     .handle_command(Command::SaveBuffer { path, consent: Default::default() });
@@ -12550,8 +12414,8 @@ mod path_boundary_tests {
         let w = world();
         link_out(&w);
         let path = SitePath::parse("content/escape/note.md").expect("a plain site path");
-        w.conductor.handle_command(Command::DocumentChanged {
-            path: path.clone(),
+        w.conductor.handle_command(Command::EditorChanged {
+            path: ContentPath::parse("content/escape/note.md").expect("a content path"),
             text: BUFFER.to_string(),
         });
         w.conductor.handle_command(Command::SaveBuffer { path, consent: Default::default() });
@@ -12559,6 +12423,41 @@ mod path_boundary_tests {
         assert!(
             !w.outside_dir().join("note.md").exists(),
             "the buffer was written through a symlink out of the site"
+        );
+    }
+
+    /// GUARD: a content path the type accepts, that is a symlink out of the
+    /// site, is refused by the editor commands too: the type cannot see it,
+    /// only `resolve_in_site` can.
+    #[cfg(unix)]
+    #[test]
+    fn editor_commands_refuse_a_content_symlink_out_of_the_site() {
+        let w = world();
+        std::fs::write(w.outside_dir().join("secret.md"), "# Secret\n\n----\n\nBody.\n").unwrap();
+        // Under `content/post/`, which names the `post` schema, so a read would
+        // parse and answer with an anchor.
+        std::os::unix::fs::symlink(w.outside_dir(), w.site().join("content/post/escape")).expect("symlink");
+        let spelling = "content/post/escape/secret.md";
+        let content_path = ContentPath::parse(spelling).expect("a valid content path");
+
+        for command in [
+            Command::EditorOpened { path: content_path.clone(), text: BUFFER.to_string() },
+            Command::EditorChanged { path: content_path.clone(), text: BUFFER.to_string() },
+        ] {
+            let answer = w.conductor.handle_command(command).response;
+            assert!(response_is_error(&answer), "must be refused: {answer:?}");
+        }
+        assert!(w.conductor.editors.read().unwrap().is_empty(), "no editor was attached");
+
+        let moved = w.conductor.handle_command(Command::CursorMoved {
+            path: SitePath::parse(spelling).expect("a plain site path"),
+            line: 4,
+        });
+        assert!(moved.events.is_empty(), "read through a symlink out of the site: {:?}", moved.events);
+        assert_eq!(
+            std::fs::read_to_string(w.outside_dir().join("secret.md")).unwrap(),
+            "# Secret\n\n----\n\nBody.\n",
+            "nothing was written through the link"
         );
     }
 

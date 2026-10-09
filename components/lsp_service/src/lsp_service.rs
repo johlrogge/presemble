@@ -54,6 +54,16 @@ fn site_path_for(
     conductor::editorial_types::SitePath::from_absolute(site_dir, abs).ok()
 }
 
+/// The content path of the file at `abs`, or `None` when it is not a content
+/// file inside `site_dir`: only those have an editor in the conductor.
+fn content_path_for(
+    site_dir: &std::path::Path,
+    abs: &std::path::Path,
+) -> Option<conductor::editorial_types::ContentPath> {
+    let site_path = site_path_for(site_dir, abs)?;
+    conductor::editorial_types::ContentPath::parse(site_path.as_str()).ok()
+}
+
 const DISK_CONFLICT_MESSAGE: &str = "Unsaved edits from the browser or REPL conflict with this file on disk. Save them from the browser (you will be asked to confirm), or run `presemble reload <site-dir> <file>` to keep the file.";
 
 struct StoredDiagnostic {
@@ -177,8 +187,7 @@ impl PresembleLsp {
 
     /// Get document text for a URI.
     ///
-    /// Delegates to the conductor's `GetDocumentText` (which returns the
-    /// in-memory editor buffer if dirty, otherwise falls back to the on-disk file).
+    /// Delegates to the conductor's `GetDocumentText` (the on-disk file).
     #[allow(dead_code)] // will be wired to remaining fs::read_to_string call sites incrementally
     async fn document_text(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
@@ -458,6 +467,12 @@ impl LanguageServer for PresembleLsp {
         let uri = p.text_document.uri;
         let src = p.text_document.text;
         let path = uri.to_file_path().unwrap_or_default();
+        // The conductor keeps the text of an open content file, to compare the
+        // changes that follow with it. Fire-and-forget.
+        if let Some(content_path) = content_path_for(&self.site_dir, &path) {
+            let cond = self.conductor.lock().await;
+            let _ = cond.send(&conductor::Command::EditorOpened { path: content_path, text: src.clone() });
+        }
         let kind = self.classify_path(&path).await;
         match kind {
             conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, src).await,
@@ -471,17 +486,26 @@ impl LanguageServer for PresembleLsp {
         }
     }
 
+    async fn did_close(&self, p: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
+        let path = p.text_document.uri.to_file_path().unwrap_or_default();
+        if let Some(content_path) = content_path_for(&self.site_dir, &path) {
+            let cond = self.conductor.lock().await;
+            let _ = cond.send(&conductor::Command::EditorClosed { path: content_path });
+        }
+    }
+
     async fn did_change(&self, p: DidChangeTextDocumentParams) {
         if let Some(c) = p.content_changes.into_iter().last() {
             let uri = p.text_document.uri;
             let path = uri.to_file_path().unwrap_or_default();
             let kind = self.classify_path(&path).await;
-            // Notify conductor of the change (triggers rebuild + browser reload).
-            // Fire-and-forget: if it fails, the LSP still works locally.
-            if let Some(site_path) = site_path_for(&self.site_dir, &path) {
+            // Notify conductor of the change (lowered into N, then the browser
+            // reloads). Fire-and-forget: if it fails, the LSP still works
+            // locally. Only content files have an editor in the conductor.
+            if let Some(content_path) = content_path_for(&self.site_dir, &path) {
                 let cond = self.conductor.lock().await;
-                let _ = cond.send(&conductor::Command::DocumentChanged {
-                    path: site_path,
+                let _ = cond.send(&conductor::Command::EditorChanged {
+                    path: content_path,
                     text: c.text.clone(),
                 });
             }

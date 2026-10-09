@@ -111,9 +111,9 @@ pub enum Command {
     /// Take the editor's version of a region N did not take (a drift that
     /// still exists), over N's.
     KeepMine { path: editorial_types::ContentPath, drift_id: DriftId },
-    /// Editor updated a document's text (from LSP did_change). Does NOT write to disk.
-    DocumentChanged { path: editorial_types::SitePath, text: String },
-    /// Editor saved a document (from LSP did_save).
+    /// Editor saved a document (from LSP did_save). When the file holds the
+    /// editor's latest text this is a flush of N (held regions are lowered as
+    /// they stand; N's text is written if it holds others' changes).
     DocumentSaved { path: editorial_types::SitePath },
     /// Files changed on disk (from file watcher).
     FileChanged { paths: Vec<editorial_types::SitePath> },
@@ -122,7 +122,7 @@ pub enum Command {
     ReloadDocument { path: editorial_types::ContentPath },
     /// Request a cached grammar for a schema stem.
     GetGrammar { stem: String },
-    /// Request in-memory document text (editor's working copy or disk fallback).
+    /// Request a document's text as it is on disk.
     GetDocumentText { path: editorial_types::SitePath },
     /// Request current build errors.
     GetBuildErrors,
@@ -243,9 +243,8 @@ pub enum Response {
     /// created, and nothing is wrong.
     AlreadyInPlace,
     /// A document was reloaded from disk. `discarded`: it had unsaved edits in
-    /// the conductor, now gone. `editor_buffer`: an editor also holds unsaved
-    /// text for it; that is the editor's, and stays there.
-    Reloaded { discarded: bool, editor_buffer: bool },
+    /// the conductor, now gone.
+    Reloaded { discarded: bool },
     /// A save would overwrite files that changed on disk while they have
     /// unsaved edits, and the consent does not name them. Nothing was written.
     /// Sorted site-relative paths.
@@ -588,8 +587,9 @@ mod protocol_tests {
     #[test]
     fn commands_with_unsafe_paths_fail_to_decode() {
         for json in [
-            r#"{"DocumentChanged":{"path":"/etc/passwd","text":"x"}}"#,
-            r#"{"DocumentChanged":{"path":"../x.md","text":"x"}}"#,
+            r#"{"EditorChanged":{"path":"/etc/passwd","text":"x"}}"#,
+            r#"{"EditorOpened":{"path":"../x.md","text":"x"}}"#,
+            r#"{"EditorClosed":{"path":"schemas/x.md"}}"#,
             r#"{"DocumentSaved":{"path":"content/../../x.md"}}"#,
             r#"{"GetDocumentText":{"path":"/tmp/x.md"}}"#,
             r#"{"CursorMoved":{"path":"./content/a.md","line":1}}"#,
@@ -607,8 +607,8 @@ mod protocol_tests {
 
     #[test]
     fn commands_with_site_paths_decode() {
-        let json = r#"{"DocumentChanged":{"path":"content/post/a.md","text":"x"}}"#;
+        let json = r#"{"EditorChanged":{"path":"content/post/a.md","text":"x"}}"#;
         let decoded: Command = serde_json::from_str(json).expect("a plain site path decodes");
-        assert!(matches!(decoded, Command::DocumentChanged { .. }));
+        assert!(matches!(decoded, Command::EditorChanged { .. }));
     }
 }
