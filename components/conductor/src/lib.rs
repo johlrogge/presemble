@@ -11,7 +11,7 @@ pub use conductor::{CommandResult, Conductor, ProgramError, ProgramOutcome};
 pub use content_store::edit::Plan;
 pub use dirty::DirtyDocs;
 pub use protocol::{
-    Command, ConductorEvent, DependentFile, Drift, DriftId, FileClassification, HeldRegion, LinkOption,
+    Command, ConductorEvent, DependentFile, Drift, DriftId, DriftKind, FileClassification, HeldRegion, LinkOption,
     PathStep, RenderMode, Response,
 };
 pub use editorial_types;

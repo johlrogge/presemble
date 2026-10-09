@@ -6,7 +6,7 @@
 //!
 //! Positions are LSP positions: lines, and UTF-16 code units in a line.
 
-use conductor::{Drift, DriftId, HeldRegion};
+use conductor::{Drift, DriftId, DriftKind, HeldRegion};
 use content::sync::BufferEdit;
 use serde_json::json;
 use tower_lsp::lsp_types::*;
@@ -188,8 +188,15 @@ pub fn sync_diagnostics(synced: &Synced) -> Vec<Diagnostic> {
         range: lsp_range(&synced.text, &drift.range),
         severity: Some(DiagnosticSeverity::WARNING),
         source: Some("presemble".to_string()),
-        message: "This block was changed elsewhere since you started editing it, so your version was not applied."
-            .to_string(),
+        message: match drift.kind {
+            DriftKind::Blocks => {
+                "This block was changed elsewhere since you started editing it, so your version was not applied."
+            }
+            DriftKind::ListSpacing => {
+                "This list's spacing changed here while one of its items was changed elsewhere."
+            }
+        }
+        .to_string(),
         ..Default::default()
     });
     let held = synced.held.iter().map(|region| Diagnostic {
@@ -575,6 +582,7 @@ mod tests {
             text: "one\n\nmine here\n\nthree\n".to_string(),
             drifts: vec![Drift {
                 id: DriftId(0xab),
+                kind: DriftKind::Blocks,
                 path: vec![],
                 range: 5..14,
                 current: "theirs".to_string(),
@@ -613,6 +621,20 @@ mod tests {
     }
 
     #[test]
+    fn a_list_spacing_drift_says_what_it_is_about() {
+        let mut synced = drifted();
+        synced.drifts[0].kind = DriftKind::ListSpacing;
+        let diagnostics = sync_diagnostics(&synced);
+        assert_eq!(
+            diagnostics[0].message,
+            "This list's spacing changed here while one of its items was changed elsewhere."
+        );
+        // The same two ways out.
+        let actions = sync_actions(&uri(), &synced, &diagnostics[0].range);
+        assert_eq!(actions.iter().map(title).collect::<Vec<_>>(), [TAKE_CURRENT, KEEP_MINE_TITLE]);
+    }
+
+    #[test]
     fn held_region_becomes_an_information_diagnostic() {
         let synced = Synced {
             version: 1,
@@ -647,7 +669,13 @@ mod tests {
         let synced = Synced {
             version: 7,
             text: "\u{1F600} mine\n".to_string(),
-            drifts: vec![Drift { id: DriftId(1), path: vec![], range: 5..9, current: "theirs".to_string() }],
+            drifts: vec![Drift {
+                id: DriftId(1),
+                kind: DriftKind::Blocks,
+                path: vec![],
+                range: 5..9,
+                current: "theirs".to_string(),
+            }],
             held: vec![],
         };
         let request = Range {

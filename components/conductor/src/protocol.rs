@@ -71,11 +71,24 @@ impl From<&content::sync::Step> for PathStep {
     }
 }
 
+/// What a drift is about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DriftKind {
+    /// Blocks that were changed elsewhere since the editor began editing them.
+    #[default]
+    Blocks,
+    /// A list whose spacing the editor changed while one of its items was
+    /// changed elsewhere: the spacing cannot be applied without the items.
+    ListSpacing,
+}
+
 /// A region of the editor's text that N did not take, because N's blocks for
 /// it no longer read as what the editor started from (LSP-2 §0.3, §0.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Drift {
     pub id: DriftId,
+    #[serde(default)]
+    pub kind: DriftKind,
     /// The containers down to the one the region is in; empty for a region of
     /// a slot, `unassigned` or the body itself.
     pub path: Vec<PathStep>,

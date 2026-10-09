@@ -9,8 +9,9 @@
 //! common subsequence. What is not aligned is a [`Region`].
 //!
 //! A region that is a single blockquote on both sides, or a single list of the
-//! same kind and spacing with the same number of items, is compared inside, so
-//! a keystroke in a list item or a quote touches only the block that changed.
+//! same kind with the same number of items (whatever its spacing), is compared
+//! inside, so a keystroke in a list item or a quote touches only the block that
+//! changed.
 //! Such a region has a [`Located::path`] down to the container it sits in.
 //!
 //! Two adjacent changed blocks form one region, and a region of several blocks
@@ -210,13 +211,41 @@ pub struct Located {
     pub region: Region,
 }
 
+/// A list that was compared item by item, and where it is: the path down to
+/// the container it sits in, and its part index on each side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListSite {
+    pub path: Vec<Step>,
+    pub base: usize,
+    pub new: usize,
+}
+
+/// The lists that differ and were compared item by item (see
+/// [`block_regions`]), wherever they are. A list whose items are all equal but
+/// whose spacing differs is one of them, though it has no region of its own.
+pub fn compared_lists(base: &Blocks, new: &Blocks) -> Vec<ListSite> {
+    compare(base, new).1
+}
+
 /// The regions between two containers, descending into a region that is a
-/// single blockquote on both sides, or a single list of the same kind and
-/// spacing with the same number of items (item by item). Anything else that
-/// differs, a list whose item count, kind or spacing changed included, is a
-/// region of the container it is in: a Replace of the block.
+/// single blockquote on both sides, or a single list of the same kind with the
+/// same number of items (item by item), whatever its spacing: spacing is a model
+/// rule (an item with a paragraph and a code block cannot be written tight), so
+/// a change inside one item can change it for the whole list. Anything else
+/// that differs, a list whose item count or kind changed included, is a region
+/// of the container it is in: a Replace of the block.
 pub fn block_regions(base: &Blocks, new: &Blocks) -> Vec<Located> {
-    fn go(base: &Blocks, new: &Blocks, path: &mut Vec<Step>, out: &mut Vec<Located>) {
+    compare(base, new).0
+}
+
+fn compare(base: &Blocks, new: &Blocks) -> (Vec<Located>, Vec<ListSite>) {
+    fn go(
+        base: &Blocks,
+        new: &Blocks,
+        path: &mut Vec<Step>,
+        out: &mut Vec<Located>,
+        lists: &mut Vec<ListSite>,
+    ) {
         let (base_parts, new_parts) = (container_parts(base), container_parts(new));
         for region in regions(&base_parts, &new_parts) {
             if let ([b], [n]) = (&base_parts[region.base.clone()], &new_parts[region.new.clone()])
@@ -229,19 +258,18 @@ pub fn block_regions(base: &Blocks, new: &Blocks) -> Vec<Located> {
                         ContentElement::Blockquote { blocks: inner_new },
                     ) => {
                         path.push(Step::Quote { base: bi, new: ni });
-                        go(inner_base, inner_new, path, out);
+                        go(inner_base, inner_new, path, out, lists);
                         path.pop();
                         continue;
                     }
                     (ContentElement::List { list: lb }, ContentElement::List { list: ln })
-                        if lb.kind == ln.kind
-                            && lb.spacing == ln.spacing
-                            && lb.items.len() == ln.items.len() =>
+                        if lb.kind == ln.kind && lb.items.len() == ln.items.len() =>
                     {
+                        lists.push(ListSite { path: path.clone(), base: bi, new: ni });
                         for (item, (item_base, item_new)) in lb.items.iter().zip(&ln.items).enumerate() {
                             if item_base != item_new {
                                 path.push(Step::Item { base: bi, new: ni, item });
-                                go(item_base, item_new, path, out);
+                                go(item_base, item_new, path, out, lists);
                                 path.pop();
                             }
                         }
@@ -253,9 +281,9 @@ pub fn block_regions(base: &Blocks, new: &Blocks) -> Vec<Located> {
             out.push(Located { path: path.clone(), region });
         }
     }
-    let mut out = Vec::new();
-    go(base, new, &mut Vec::new(), &mut out);
-    out
+    let (mut out, mut lists) = (Vec::new(), Vec::new());
+    go(base, new, &mut Vec::new(), &mut out, &mut lists);
+    (out, lists)
 }
 
 /// The regions of one container of two documents.
@@ -803,15 +831,54 @@ mod tests {
         assert_eq!(block_regions(&base, &base), vec![]);
     }
 
-    /// Guard: a list whose item count, kind or spacing changed is a Replace of
-    /// the list: a region of the container, with no path.
+    /// Spacing is a model rule, not markdown's (an item with a paragraph and a
+    /// code block cannot be written tight), so lists are compared item by item
+    /// whatever their spacing.
     #[test]
-    fn a_list_that_changed_shape_is_a_region_of_its_container() {
+    fn lists_of_different_spacing_are_compared_item_by_item() {
+        let item = |base: usize, new: usize, item: usize| Step::Item { base, new, item };
+        // Tight on one side, loose on the other, and one item changed: just that item.
+        assert_eq!(
+            block_regions(&blocks("- a\n- b\n- c\n"), &blocks("- a\n\n- B\n\n- c\n")),
+            vec![located(vec![item(0, 0, 1)], 0..1, 0..1)]
+        );
+        assert_eq!(
+            block_regions(&blocks("- a\n\n- b\n\n- c\n"), &blocks("- a\n- b\n- C\n")),
+            vec![located(vec![item(0, 0, 2)], 0..1, 0..1)]
+        );
+        // A paragraph and a code block in an item makes the list loose: the other
+        // items are not part of the change.
+        assert_eq!(
+            block_regions(&blocks("- a\n- b\n- c\n"), &blocks("- a\n- b\n  ```\n  x\n  ```\n- c\n")),
+            vec![located(vec![item(0, 0, 1)], 1..1, 1..2)]
+        );
+        // Only the spacing changed: no item differs, so no region; the list is
+        // reported as one compared by its items.
+        let (base, new) = (blocks("- a\n- b\n"), blocks("- a\n\n- b\n"));
+        assert_eq!(block_regions(&base, &new), vec![]);
+        assert_eq!(compared_lists(&base, &new), vec![ListSite { path: vec![], base: 0, new: 0 }]);
+        // Inside a quote too.
+        let (base, new) = (blocks("> - a\n> - b\n"), blocks("> - a\n>\n> - b\n"));
+        assert_eq!(
+            compared_lists(&base, &new),
+            vec![ListSite { path: vec![Step::Quote { base: 0, new: 0 }], base: 0, new: 0 }]
+        );
+    }
+
+    /// Guard: a list whose item count or kind changed is a Replace of the list:
+    /// a region of the container, with no path.
+    #[test]
+    fn a_list_whose_kind_or_item_count_changed_is_a_replace() {
         let base = blocks("- a\n- b\n");
-        for new in ["- a\n- b\n- c\n", "1. a\n2. b\n", "- a\n\n- b\n"] {
+        for new in ["- a\n- b\n- c\n", "1. a\n2. b\n", "- a\n\n- b\n\n- c\n"] {
             assert_eq!(block_regions(&base, &blocks(new)), vec![located(vec![], 0..1, 0..1)], "{new:?}");
+            assert_eq!(compared_lists(&base, &blocks(new)), vec![], "{new:?}: not compared item by item");
         }
-        // A paragraph that became a list, and a quote that became a paragraph.
+    }
+
+    /// Guard: a paragraph that became a list, and a quote that became a paragraph.
+    #[test]
+    fn a_block_that_changed_kind_is_a_region_of_its_container() {
         assert_eq!(block_regions(&blocks("a\n"), &blocks("- a\n")), vec![located(vec![], 0..1, 0..1)]);
         assert_eq!(block_regions(&blocks("> a\n"), &blocks("a\n")), vec![located(vec![], 0..1, 0..1)]);
     }

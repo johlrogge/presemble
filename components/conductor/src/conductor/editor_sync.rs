@@ -27,12 +27,12 @@ use super::*;
 use std::ops::Range;
 
 use content::sync::{self, BufferEdit, Part, Step};
-use content::{Blocks, Container, ContentElement, Document, Projection};
+use content::{Blocks, Container, ContentElement, Document, Projection, Spacing};
 use editorial_types::CommentPlace;
 use node_store::{Node, NodeId, NodeStore};
 use schema::Spanned;
 
-use crate::protocol::{Drift, DriftId, HeldRegion, PathStep};
+use crate::protocol::{Drift, DriftId, DriftKind, HeldRegion, PathStep};
 
 /// What the conductor keeps for a document an editor has open.
 #[derive(Debug, Clone)]
@@ -805,9 +805,20 @@ impl Conductor {
         // The containers of both documents, with what changed in each.
         let structure_changed = structure_differs(&base_doc, &new_doc);
         let mut groups = Vec::new();
+        let mut sites = Vec::new();
         if !structure_changed {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-            self.groups(&store, root, &base_doc, &new_doc, &state.base, &state.last, lower_held, &mut groups);
+            self.groups(
+                &store,
+                root,
+                &base_doc,
+                &new_doc,
+                &state.base,
+                &state.last,
+                lower_held,
+                &mut groups,
+                &mut sites,
+            );
         }
 
         // Held regions are not lowered; the rest of the document is read as it
@@ -837,7 +848,7 @@ impl Conductor {
                 let range = 0..state.last.len();
                 let id = drift_id(&[], &state.base, &[root]);
                 state.drifts.push(DriftRecord {
-                    drift: Drift { id, path: Vec::new(), range, current },
+                    drift: Drift { id, kind: DriftKind::Blocks, path: Vec::new(), range, current },
                     action: KeepAction::Reread { text: held_text.clone() },
                     base_edit: BufferEdit { range: 0..state.base.len(), text: state.last.clone() },
                 });
@@ -898,6 +909,7 @@ impl Conductor {
                     };
                     state.drifts.push(DriftRecord {
                         drift: Drift {
+                            kind: DriftKind::Blocks,
                             path: group.path.clone(),
                             id: drift_id(&group.path, &group.base_text, &aligned),
                             range: group.new_range.clone(),
@@ -910,11 +922,95 @@ impl Conductor {
                 _ => {}
             }
         }
+        // A list whose spacing the text changed and N did not follow (the items
+        // do not explain it) is replaced, once nothing inside it is held or
+        // drifted. Until then the base keeps the old spacing, so the list is
+        // looked at again on the next sync, whatever else changes.
+        if !reread_needed {
+            events.extend(self.settle_spacing(&sites, &groups, &mut unsettled, &mut state.drifts));
+        }
         // A document that could not be read again keeps its text as the base.
         if !reread_needed || reread_done {
             state.base = sync::apply_edits(&state.last, &unsettled);
         }
         Ok(events)
+    }
+
+    /// Replace the lists whose spacing the text changed and N does not follow,
+    /// when nothing inside them is held or drifted. Whatever waits adds its
+    /// `gap_edits` to `unsettled`, so the base keeps the old spacing.
+    fn settle_spacing(
+        &self,
+        sites: &[SpacingSite],
+        groups: &[Group],
+        unsettled: &mut Vec<BufferEdit>,
+        drifts: &mut Vec<DriftRecord>,
+    ) -> Vec<ConductorEvent> {
+        let mut plans: Vec<(edit::PlannedMutation, &SpacingSite)> = Vec::new();
+        {
+            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+            for site in sites {
+                let blocked = groups
+                    .iter()
+                    .any(|g| matches!(g.outcome, Outcome::Held(_) | Outcome::Drift) && inside(&g.path, site));
+                let n_list = site.list.and_then(|n| {
+                    node_store_bridge::content_bridge::block_from_node(&store, n).ok().map(|el| (n, el))
+                });
+                match (blocked, n_list, &site.new_list) {
+                    (false, Some((node, ContentElement::List { list: n })), ContentElement::List { list: new }) => {
+                        if n.spacing == site.new_spacing {
+                            // N follows the text: the items explained it.
+                            continue;
+                        }
+                        let trees = payload(&[&site.new_list]);
+                        // Only a list whose items are the text's is replaced.
+                        if n.kind == new.kind && n.items == new.items
+                            && let Some(trees) = trees
+                        {
+                            plans.push((step(node, editorial_types::NedMutation::Replace(trees)), site));
+                            continue;
+                        }
+                        // An item N changed elsewhere is not overwritten here:
+                        // the list is reported, and resolved by one of the two
+                        // ways. The base keeps the old spacing, so it is
+                        // reported again until it is.
+                        unsettled.extend(site.gap_edits.iter().cloned());
+                        let Some(trees) = payload(&[&site.new_list]) else { continue };
+                        let current = node_store_bridge::content_bridge::block_from_node(&store, node)
+                            .ok()
+                            .and_then(|el| content::project_markdown(&el, site.projection))
+                            .unwrap_or_default();
+                        drifts.push(DriftRecord {
+                            drift: Drift {
+                                id: drift_id(&site.path, &site.base_text, &[node]),
+                                kind: DriftKind::ListSpacing,
+                                path: site.path.clone(),
+                                range: site.range.clone(),
+                                current,
+                            },
+                            action: KeepAction::Replace { nodes: vec![node], trees },
+                            // Nothing to put in the base: once N has the list, the
+                            // next sync finds it following the text.
+                            base_edit: BufferEdit { range: 0..0, text: String::new() },
+                        });
+                    }
+                    _ => unsettled.extend(site.gap_edits.iter().cloned()),
+                }
+            }
+        }
+        if plans.is_empty() {
+            return Vec::new();
+        }
+        let combined: edit::Plan = plans.iter().map(|(s, _)| s.clone()).collect();
+        match self.execute_plan(combined) {
+            Ok((_, events)) => events,
+            Err(_) => {
+                for (_, site) in plans {
+                    unsettled.extend(site.gap_edits.iter().cloned());
+                }
+                Vec::new()
+            }
+        }
     }
 
     /// Whether N's document reads as `base`, container by container.
@@ -938,6 +1034,7 @@ impl Conductor {
         new_text: &str,
         lower_held: bool,
         out: &mut Vec<Group>,
+        sites: &mut Vec<SpacingSite>,
     ) {
         let base_containers = sync::document_containers(base_doc);
         let empty = Blocks::default();
@@ -947,7 +1044,8 @@ impl Conductor {
                 .find(|(c, _)| *c == container)
                 .map_or(&empty, |(_, b)| b);
             let located = sync::block_regions(base_blocks, &new_blocks);
-            if located.is_empty() {
+            let lists = sync::compared_lists(base_blocks, &new_blocks);
+            if located.is_empty() && lists.is_empty() {
                 continue;
             }
             let projection = match container {
@@ -955,6 +1053,14 @@ impl Conductor {
                 _ => Projection::Block,
             };
             let cn = n_container(store, root, &container);
+            // The lists compared item by item whose spacing the text changed.
+            for site in &lists {
+                if let Some(site) =
+                    spacing_site(store, cn, base_blocks, &new_blocks, base_text, new_text, projection, site)
+                {
+                    sites.push(site);
+                }
+            }
             let leaf = Leaf { store, projection };
             // Every region is dealt with where it was found, at whatever depth:
             // a drift, a held region or a lowering in one list item does not
@@ -996,10 +1102,24 @@ impl Conductor {
                     let prefixes = sync::path_prefixes(new_text, &new_blocks, &located.path);
                     held_reason(&sync::container_source(&new_text[new_range.clone()], &prefixes))
                 };
+                // N already reads as the editor's text here (the editor took
+                // N's version, or the same edit was made elsewhere): nothing to
+                // lower, and nothing to report.
+                let n_has_it = |sub: NodeId| {
+                    let only_blocks = base_parts[region.base.clone()].iter().all(|p| matches!(p.node, Part::Block(_)))
+                        && new_parts[region.new.clone()].iter().all(|p| matches!(p.node, Part::Block(_)));
+                    only_blocks
+                        && n_blocks_of(store, sub, sub_base, first, count)
+                            .iter()
+                            .map(|n| node_store_bridge::content_bridge::block_from_node(store, *n).ok())
+                            .collect::<Option<Vec<_>>>()
+                            .is_some_and(|now| now == new_elements)
+                };
                 let outcome = match (held, cn, sub_node) {
                     (Some(reason), _, _) => Outcome::Held(reason),
                     (None, None, _) => Outcome::Reread,
                     (None, Some(_), None) => Outcome::Drift,
+                    (None, Some(_), Some(sub)) if n_has_it(sub) => Outcome::Done,
                     (None, Some(_), Some(sub)) => leaf.lower(sub, sub_base, sub_new, region),
                 };
                 out.push(Group {
@@ -1033,6 +1153,126 @@ impl Conductor {
             }
         }
     }
+}
+
+/// A list compared item by item whose spacing the text changed (against the
+/// base). Spacing is a model rule, so the items usually explain it: a list with
+/// an item that holds a paragraph and a code block is loose. When N's list does
+/// not follow the text after the item edits (blank lines were added or removed
+/// by hand), the list is replaced; that waits while anything inside it is held
+/// or drifted.
+struct SpacingSite {
+    /// The containers down to the one the list is in.
+    path: Vec<PathStep>,
+    /// The list's part index in that container of the base.
+    base_part: usize,
+    /// N's node for the list.
+    list: Option<NodeId>,
+    /// The list as the text has it, and its spacing.
+    new_list: ContentElement,
+    new_spacing: Spacing,
+    /// What gives the base the old spacing back while the list waits: the base
+    /// then still differs from the text, and the list is looked at again on the
+    /// next sync.
+    gap_edits: Vec<BufferEdit>,
+    /// The list's span in the text, and its text in the base (for a drift).
+    range: Range<usize>,
+    base_text: String,
+    projection: Projection,
+}
+
+/// The site of a list compared item by item, if its spacing differs from the base's.
+#[allow(clippy::too_many_arguments)]
+fn spacing_site(
+    store: &NodeStore,
+    cn: Option<NodeId>,
+    base: &Blocks,
+    new: &Blocks,
+    base_text: &str,
+    new_text: &str,
+    projection: Projection,
+    site: &sync::ListSite,
+) -> Option<SpacingSite> {
+    let (node, sub_base, sub_new) = descend(store, cn, base, new, &site.path)?;
+    let new_list = block_at_part(sub_new, site.new)?;
+    let (ContentElement::List { list: before }, ContentElement::List { list: after }) =
+        (block_at_part(sub_base, site.base)?, new_list)
+    else {
+        return None;
+    };
+    if before.spacing == after.spacing {
+        return None;
+    }
+    let at_base = blocks_before(&sync::container_parts(sub_base), site.base);
+    let list = node.and_then(|n| match n_blocks_of(store, n, sub_base, at_base, 1).as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    });
+    Some(SpacingSite {
+        path: site.path.iter().map(PathStep::from).collect(),
+        base_part: site.base,
+        list,
+        new_list: new_list.clone(),
+        new_spacing: after.spacing,
+        gap_edits: gap_edits(new_text, after, before.spacing),
+        range: parts_range(new_text, &sync::container_parts(sub_new), &(site.new..site.new + 1)),
+        base_text: base_text[parts_range(base_text, &sync::container_parts(sub_base), &(site.base..site.base + 1))]
+            .to_string(),
+        projection,
+    })
+}
+
+/// The block at part index `part` of `blocks`.
+fn block_at_part(blocks: &Blocks, part: usize) -> Option<&ContentElement> {
+    let parts = sync::container_parts(blocks);
+    if !matches!(parts.get(part)?.node, Part::Block(_)) {
+        return None;
+    }
+    blocks.elements.get(blocks_before(&parts, part)).map(|e| &e.node)
+}
+
+/// The edits that give the items of `list` (in `text`) the gaps of `spacing`:
+/// one line break between two items when tight, a blank line as well when
+/// loose. The marker and the prefix of the container stay as they are.
+fn gap_edits(text: &str, list: &content::List, spacing: Spacing) -> Vec<BufferEdit> {
+    let trim = |span: schema::Span| -> Range<usize> {
+        let slice = &text[span.start..span.end];
+        let lead = slice.len() - slice.trim_start().len();
+        span.start + lead..span.start + lead + slice.trim().len()
+    };
+    let ends: Vec<Option<(usize, usize)>> = list
+        .items
+        .iter()
+        .map(|item| Some((trim(item.elements.front()?.span).start, trim(item.elements.back()?.span).end)))
+        .collect();
+    let mut edits = Vec::new();
+    for pair in ends.windows(2) {
+        let (Some((_, end)), Some((start, _))) = (pair[0], pair[1]) else { continue };
+        if end >= start {
+            continue;
+        }
+        let gap = &text[end..start];
+        let Some(last_break) = gap.rfind('\n') else { continue };
+        let tail = &gap[last_break + 1..];
+        let wanted = match spacing {
+            Spacing::Tight => format!("\n{tail}"),
+            Spacing::Loose => {
+                let blank: String = tail.chars().map(|c| if c == '>' || c == '\t' { c } else { ' ' }).collect();
+                format!("\n{}\n{tail}", blank.trim_end())
+            }
+        };
+        if wanted != gap {
+            edits.push(BufferEdit { range: end..start, text: wanted });
+        }
+    }
+    edits
+}
+
+/// Whether the region at `group_path` is inside the list of `site`.
+fn inside(group_path: &[PathStep], site: &SpacingSite) -> bool {
+    group_path.len() > site.path.len()
+        && group_path[..site.path.len()] == site.path[..]
+        && matches!(group_path[site.path.len()], PathStep::Item { base, .. } if base == site.base_part)
 }
 
 /// The blocks `path` leads to in `base` and `new`, and N's node for the
@@ -1339,6 +1579,25 @@ mod tests {
         assert_eq!(drifts_again[0].id, drifts[0].id, "the id is the same across keystrokes elsewhere");
     }
 
+    /// "Take the current version": the editor's text now holds, for the region,
+    /// what N holds. The drift ends, and the base has moved on with the text.
+    #[test]
+    fn taking_the_current_version_of_a_block_drift_ends_it() {
+        let (w, text, drifts) = drifted_world();
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        let mut taken = text.clone();
+        taken.replace_range(drifts[0].range.clone(), &drifts[0].current);
+        assert_eq!(taken, CONTENT.replace("Alpha para.", "Alpha browser."));
+
+        let (remaining, held) = synced(&change(&w, &taken));
+        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        assert_eq!(body_markdown(&w)[0], "Alpha browser.", "N is as it was");
+        assert_eq!(base_of(&w), taken, "the base has advanced to the text");
+        // And it stays ended on the next change elsewhere.
+        let (later, _) = synced(&change(&w, &format!("{taken}\nMore.\n")));
+        assert!(later.is_empty(), "{later:?}");
+    }
+
     #[test]
     fn keep_mine_applies_a_current_drift() {
         let (w, _text, drifts) = drifted_world();
@@ -1531,6 +1790,189 @@ mod tests {
             assert_eq!(held.len(), 1, "{name}: {held:?}");
             assert_eq!(base_of(&w), start, "{name}: the base is the text the editor started from");
         }
+    }
+
+    // ── lists, whatever their spacing (FU-1) ────────────────────────────────
+
+    fn list_spacing(w: &World, list: NodeId) -> content::Spacing {
+        match block(w, list) {
+            content::ContentElement::List { list } => list.spacing,
+            other => panic!("expected a list, got {other:?}"),
+        }
+    }
+
+    const TIGHT: &str = "- one\n- two\n- three";
+
+    #[test]
+    fn an_open_fence_in_a_tight_list_item_holds_only_that_item() {
+        let w = world();
+        open(&w, CONTENT);
+        let (list, items) = list_and_items(&w);
+        // A fence is open in item 2 (which makes the list loose in the text)
+        // while item 3 is being edited.
+        let text = CONTENT.replace(TIGHT, "- one\n- two\n  ```rust\n  let x = 1;\n- three typed");
+        let (drifts, held) = synced(&change(&w, &text));
+        assert!(drifts.is_empty(), "{drifts:?}");
+        assert_eq!(held.len(), 1, "only item 2 is held: {held:?}");
+        assert_eq!(held[0].path.len(), 1, "{:?}", held[0].path);
+        assert_eq!(the_item(&held[0].path[0]), 1, "the path points at item 2");
+        assert!(text[held[0].range.clone()].starts_with("```rust"), "{:?}", &text[held[0].range.clone()]);
+        assert_eq!(item_texts(&w), ["one", "two", "three typed"], "item 3 reached N");
+        assert_eq!(item_blocks(&w, items[1]).len(), 1, "item 2 got no code block");
+        assert_eq!(list_and_items(&w), (list, items), "the list and its items are the same nodes");
+    }
+
+    #[test]
+    fn closing_the_fence_in_a_tight_list_keeps_the_other_items_ids() {
+        let w = world();
+        open(&w, CONTENT);
+        let (list, items) = list_and_items(&w);
+        let open_fence = CONTENT.replace(TIGHT, "- one\n- two\n  ```rust\n  let x = 1;\n- three typed");
+        change(&w, &open_fence);
+        let closed = CONTENT.replace(TIGHT, "- one\n- two\n  ```rust\n  let x = 1;\n  ```\n- three typed");
+        let (drifts, held) = synced(&change(&w, &closed));
+        assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
+
+        // The list is loose in N through the normaliser, with nothing replaced.
+        assert_eq!(list_and_items(&w), (list, items.clone()), "the list and every item keep their ids");
+        assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
+        assert_eq!(item_texts(&w), ["one", "two", "three typed"]);
+        let two = item_blocks(&w, items[1]);
+        assert_eq!(two.len(), 2);
+        assert_eq!(element_name(&w, two[1]), "code-block");
+    }
+
+    #[test]
+    fn making_a_list_loose_by_hand_reaches_n() {
+        let w = world();
+        open(&w, CONTENT);
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Tight);
+        let text = CONTENT.replace(TIGHT, "- one\n\n- two\n\n- three");
+        let (drifts, held) = synced(&change(&w, &text));
+        assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
+        assert_eq!(item_texts(&w), ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn making_a_list_tight_by_hand_reaches_n() {
+        let loose = CONTENT.replace(TIGHT, "- one\n\n- two\n\n- three");
+        let w = world_with(&loose);
+        open(&w, &loose);
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
+        let (drifts, held) = synced(&change(&w, &CONTENT));
+        assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Tight);
+        assert_eq!(item_texts(&w), ["one", "two", "three"]);
+    }
+
+    /// GUARD: while a region inside the list is held, a spacing change waits;
+    /// once the region is released it is applied.
+    #[test]
+    fn a_spacing_change_waits_while_a_region_inside_is_held() {
+        let w = world();
+        open(&w, CONTENT);
+        // Loose by hand, with a fence open in item 2.
+        let held_text = CONTENT.replace(TIGHT, "- one\n\n- two\n\n  ```rust\n  let x = 1;\n\n- three");
+        let (drifts, held) = synced(&change(&w, &held_text));
+        assert!(drifts.is_empty() && held.len() == 1, "{drifts:?} {held:?}");
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Tight, "waits: the list does not agree yet");
+
+        // The fence goes; the blank lines stay. Nothing is held, so the spacing is applied.
+        let released = CONTENT.replace(TIGHT, "- one\n\n- two\n\n- three");
+        let (drifts, held) = synced(&change(&w, &released));
+        assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
+        assert_eq!(item_texts(&w), ["one", "two", "three"]);
+    }
+
+    /// GUARD: the same while an item drifts; resolving the drift applies it.
+    #[test]
+    fn a_spacing_change_waits_while_a_region_inside_drifts() {
+        let w = world();
+        open(&w, CONTENT);
+        let (_, items) = list_and_items(&w);
+        other_channel_sets(&w, item_blocks(&w, items[1])[0], "two browser");
+
+        let text = CONTENT.replace(TIGHT, "- one\n\n- two mine\n\n- three");
+        let (drifts, held) = synced(&change(&w, &text));
+        assert!(held.is_empty(), "{held:?}");
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        assert_eq!(the_item(&drifts[0].path[0]), 1);
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Tight, "waits while item 2 drifts");
+        assert_eq!(item_texts(&w), ["one", "two browser", "three"]);
+
+        let result = w.conductor.handle_command(Command::KeepMine { path: path(), drift_id: drifts[0].id });
+        let (remaining, held) = synced(&result);
+        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Loose, "applied once the drift is resolved");
+        assert_eq!(item_texts(&w), ["one", "two mine", "three"]);
+    }
+
+    /// The editor made the list loose; the browser changed item 2 meanwhile, so
+    /// N's items are not the text's and the spacing cannot be applied.
+    fn spacing_over_an_item_changed_elsewhere() -> (World, String, Vec<Drift>) {
+        let w = world();
+        open(&w, CONTENT);
+        let (_, items) = list_and_items(&w);
+        other_channel_sets(&w, item_blocks(&w, items[1])[0], "two browser");
+        let text = CONTENT.replace(TIGHT, "- one\n\n- two\n\n- three");
+        let (drifts, held) = synced(&change(&w, &text));
+        assert!(held.is_empty(), "{held:?}");
+        (w, text, drifts)
+    }
+
+    #[test]
+    fn a_spacing_change_over_an_item_changed_elsewhere_drifts() {
+        let (w, text, drifts) = spacing_over_an_item_changed_elsewhere();
+        assert_eq!(drifts.len(), 1, "the editor must be told: {drifts:?}");
+        assert!(drifts[0].path.is_empty(), "the path is the list's (in the body): {:?}", drifts[0].path);
+        assert_eq!(&text[drifts[0].range.clone()], "- one\n\n- two\n\n- three", "the list's span in the text");
+        assert!(drifts[0].current.contains("two browser"), "N's list: {:?}", drifts[0].current);
+        // Nothing was applied: N keeps its list as it is.
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Tight);
+        assert_eq!(item_texts(&w), ["one", "two browser", "three"]);
+
+        // It is reported again on the next sync, with the same id, until resolved.
+        let (again, _) = synced(&change(&w, &format!("{text}\nMore.\n")));
+        assert_eq!(again.len(), 1, "{again:?}");
+        assert_eq!(again[0].id, drifts[0].id);
+    }
+
+    #[test]
+    fn keep_mine_on_a_spacing_drift_replaces_the_list() {
+        let (w, _text, drifts) = spacing_over_an_item_changed_elsewhere();
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        let result = w.conductor.handle_command(Command::KeepMine { path: path(), drift_id: drifts[0].id });
+        let (remaining, held) = synced(&result);
+        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
+        assert_eq!(item_texts(&w), ["one", "two", "three"], "the editor's list; the other edit is overwritten");
+    }
+
+    /// GUARD: the buffer takes N's list (what "Take the current version" does);
+    /// the next sync reports no drift.
+    #[test]
+    fn taking_the_current_version_of_a_spacing_drift_ends_it() {
+        let (w, text, drifts) = spacing_over_an_item_changed_elsewhere();
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        let mut taken = text.clone();
+        taken.replace_range(drifts[0].range.clone(), &drifts[0].current);
+        let (remaining, held) = synced(&change(&w, taken.trim_end_matches('\n')));
+        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        let (list, _) = list_and_items(&w);
+        assert_eq!(list_spacing(&w, list), content::Spacing::Tight);
+        assert_eq!(item_texts(&w), ["one", "two browser", "three"]);
     }
 
     // ── what is typed ───────────────────────────────────────────────────────

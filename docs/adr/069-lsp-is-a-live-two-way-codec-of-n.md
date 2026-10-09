@@ -107,8 +107,8 @@ canonical push before a save are not part of LSP-2.
   at once.
 - **Per-container regions.** A document is compared slot by slot, `unassigned`
   and body, by content, not by spelling. A region that is one blockquote on both
-  sides, or one list of the same kind and spacing with the same number of
-  items, is compared inside (descent), so a keystroke in a list item touches
+  sides, or one list of the same kind with the same number of items (whatever
+  its spacing), is compared inside (descent), so a keystroke in a list item touches
   only that block. Anything else that differs is a region of the container it is
   in.
 - **The lowering table.**
@@ -157,10 +157,13 @@ canonical push before a save are not part of LSP-2.
 - **Flag errors as locally as possible.** Drift and held regions are reported
   and resolved at the depth where they arise, in the list item or the quote, not
   in the top-level block around it. Known exceptions:
-  - FU-1: a tight list holds the whole list while a fence is open in one item
-    (a code block after a paragraph makes the parser read the list as loose, so
-    the list changes as a whole).
   - The re-read cases above.
+  - Lists are compared item by item whatever their spacing; a spacing change
+    not explained by the items is a `Replace` of the list, applied once nothing
+    inside it is held or drifted (FU-1). A spacing change applies only when the
+    editor made it, and only while N's items equal the text's; if an item was
+    changed elsewhere, the list is reported as a drift. A `SetListSpacing`
+    mutation that kept item ids would narrow it further.
   - Conflicts are per file until F2.
 - **Cost.** Release build, a site of 1000 pages and one document of 500 blocks,
   40 rounds with the cases interleaved:
