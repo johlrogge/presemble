@@ -144,12 +144,26 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
             attrs.push(attr("hidden", ""));
             vec![el("span", attrs, Vec::new())]
         }
-        // Never rendered (ADR-062 D2): a placeholder that is not a slot.
-        ContentElement::HtmlBlock { .. } => vec![el(
-            "div",
-            vec![attr("class", CLASS_HTML_REMOVED)],
-            vec![Node::Text(MSG_HTML_REMOVED.to_string())],
-        )],
+        // Never rendered (ADR-062 D2): a placeholder that is not a slot. In
+        // editorial output it knows where it is (its address, or its path
+        // inside a quote or list) so its error can sit on it, but it carries no
+        // slot attribute: it is not editable (ADR-062 D4).
+        ContentElement::HtmlBlock { .. } => {
+            let mut attrs = vec![attr("class", CLASS_HTML_REMOVED)];
+            match role {
+                BlockRole::BodySlot { address, .. } => {
+                    if let Some(address) = address {
+                        attrs.push(attr(ATTR_ADDRESS, *address));
+                    }
+                }
+                BlockRole::Nested { .. } | BlockRole::TightItem { .. } => {
+                    if let Some(path) = role.path() {
+                        attrs.push(attr(ATTR_PATH, path));
+                    }
+                }
+            }
+            vec![el("div", attrs, vec![Node::Text(MSG_HTML_REMOVED.to_string())])]
+        }
         // A quote renders its blocks, none of them a slot (the whole quote is
         // the editable block). Comments are never rendered.
         ContentElement::Blockquote { blocks } => vec![el(
@@ -293,14 +307,17 @@ pub(crate) fn render_body_nodes(
 }
 
 /// Finish the file-dependent attributes of every top-level element that
-/// carries `data-presemble-slot`: add `data-presemble-file` and fill the file
-/// into `data-presemble-address`. When `file` is empty there is no file to
-/// add, and an address without a file is dropped.
+/// carries `data-presemble-slot` or `data-presemble-address`: fill the file
+/// into `data-presemble-address`, and (slot elements only) add
+/// `data-presemble-file`. When `file` is empty there is no file to add, and an
+/// address without a file is dropped. A raw HTML block's placeholder is
+/// addressed but not a slot, so it gets the address and no file attribute.
 pub(crate) fn stamp_file(nodes: &mut [Node], file: &str) {
     for node in nodes {
         if let Node::Element(e) = node
-            && e.attr(ATTR_SLOT).is_some()
+            && (e.attr(ATTR_SLOT).is_some() || e.attr(ATTR_ADDRESS).is_some())
         {
+            let is_slot = e.attr(ATTR_SLOT).is_some();
             if let Some(pos) = e.attrs.iter().position(|(name, _)| name == ATTR_ADDRESS) {
                 let filled = match &e.attrs[pos].1 {
                     Form::Str(address) => content::address::with_file(address, file),
@@ -313,7 +330,7 @@ pub(crate) fn stamp_file(nodes: &mut [Node], file: &str) {
                     }
                 }
             }
-            if !file.is_empty() {
+            if is_slot && !file.is_empty() {
                 e.attrs.push(attr(ATTR_FILE, file));
             }
         }
@@ -446,6 +463,27 @@ mod tests {
         let html = render(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() });
         assert!(html.contains("presemble-html-removed") && !html.contains("data-presemble-slot"), "{html}");
         assert!(!html.contains("x</div>"), "{html}");
+    }
+
+    #[test]
+    fn editorial_html_placeholder_is_addressed_and_stamped_but_not_a_slot() {
+        let mut nodes = render_body_nodes(
+            &im::vector![spanned(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() })],
+            true,
+        );
+        stamp_file(&mut nodes, "content/p.md");
+        let html = serialize_nodes(&nodes);
+        assert!(html.contains("data-presemble-address=") && html.contains("content/p.md"), "{html}");
+        assert!(!html.contains("data-presemble-slot") && !html.contains(ATTR_FILE), "{html}");
+
+        let quote = ContentElement::Blockquote {
+            blocks: content::Blocks {
+                elements: im::vector![spanned(ContentElement::HtmlBlock { source: "<b>".to_string() })],
+                ..Default::default()
+            },
+        };
+        let html = serialize_nodes(&block_nodes(&quote, &BlockRole::BodySlot { md: None, address: None, editorial: true }));
+        assert!(html.contains(r#"<div class="presemble-html-removed" data-presemble-path="b0">"#), "{html}");
     }
 
     #[test]

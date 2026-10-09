@@ -12011,6 +12011,9 @@ mod emitted_address_tests {
             "img" => "image",
             "table" => "table",
             "ul" | "ol" => "list",
+            // The raw HTML block's placeholder (not a slot, so only its
+            // address says it is a block).
+            "div" if tag.contains("presemble-html-removed") => "html-block",
             "span" if tag.contains("hidden=") => "separator",
             // A synthesized title link stands for the title heading.
             "a" if tag.contains("data-presemble-source-slot=\"title\"") => "heading",
@@ -12118,6 +12121,11 @@ mod emitted_address_tests {
     #[test]
     fn every_emitted_address_resolves_to_its_block() {
         let tmp = example_site();
+        // A raw HTML block: its placeholder is addressed too.
+        let guide = tmp.path().join("content/guide/getting-started.md");
+        let mut text = std::fs::read_to_string(&guide).expect("the guide");
+        text.push_str("\n<div>raw</div>\n");
+        std::fs::write(&guide, text).unwrap();
         let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
         let conductor = Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor");
 
@@ -12127,6 +12135,7 @@ mod emitted_address_tests {
         let mut with_md = 0;
         let mut editable_count = 0;
         let mut reference_links = 0;
+        let mut placeholders = 0;
         let mut missing: Vec<String> = Vec::new();
         for url in urls {
             let Ok(html) = conductor.render_page(&url, &RenderMode::View) else {
@@ -12174,12 +12183,19 @@ mod emitted_address_tests {
                     }
                 }
                 let Some(address) = attr(tag, "data-presemble-address") else { continue };
-                checked += 1;
-                let file = attr(tag, "data-presemble-file").unwrap_or_default();
-                assert!(
-                    address.contains(&format!("(ned/doc-by-path \"{file}\")")),
-                    "{url}: the address names the file {file}: {address}"
-                );
+                // A raw HTML block's placeholder is addressed but is no slot:
+                // it names no file of its own, and is not counted as editable.
+                let placeholder = tag.contains("presemble-html-removed");
+                if placeholder {
+                    placeholders += 1;
+                } else {
+                    checked += 1;
+                    let file = attr(tag, "data-presemble-file").unwrap_or_default();
+                    assert!(
+                        address.contains(&format!("(ned/doc-by-path \"{file}\")")),
+                        "{url}: the address names the file {file}: {address}"
+                    );
+                }
 
                 // It resolves to exactly one node.
                 let selection = conductor
@@ -12195,7 +12211,9 @@ mod emitted_address_tests {
                 let kind = content::address::kind_name(&element);
                 // Only a body block's tag says what it is; a template may render
                 // a slot with any tag (`as="p"` for a heading slot).
-                let rendered_kind = if attr(tag, "data-presemble-slot").as_deref() == Some("body") {
+                let rendered_kind = if placeholder
+                    || attr(tag, "data-presemble-slot").as_deref() == Some("body")
+                {
                     kind_of(tag)
                 } else {
                     ""
@@ -12228,6 +12246,7 @@ mod emitted_address_tests {
             }
         }
         assert!(checked > 20, "only {checked} addresses were emitted");
+        assert!(placeholders >= 1, "the raw HTML block's placeholder carries an address");
         assert!(with_md > 20, "only {with_md} elements carried md");
         assert!(
             missing.is_empty(),

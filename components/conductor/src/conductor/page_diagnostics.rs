@@ -421,6 +421,70 @@ mod tests {
         assert!(messages(&carried(&tags[0]))[0].contains("inline HTML"));
     }
 
+    /// The raw HTML block's placeholder (`div.presemble-html-removed`) is the
+    /// element its Error belongs to, not the panel.
+    #[test]
+    fn the_raw_html_placeholder_carries_its_error() {
+        let html = editorial_page("# Title\n\n----\n\nBefore.\n\n<div class=\"x\">raw</div>\n\nAfter.\n");
+        let tags = tags_with(&html, "data-presemble-diagnostics");
+        assert_eq!(tags.len(), 1, "{tags:#?}");
+        assert!(
+            tags[0].starts_with("<div ") && tags[0].contains("presemble-html-removed"),
+            "the placeholder: {}",
+            tags[0]
+        );
+        assert_eq!(carried(&tags[0])[0]["severity"], "error");
+        let script = page_script(&html);
+        assert!(script["unplaced"].as_array().expect("a list").is_empty(), "{script}");
+        assert_eq!(script["errors"], 1, "{script}");
+    }
+
+    /// The same inside a quote: the placeholder knows its path.
+    #[test]
+    fn a_nested_raw_html_placeholder_carries_its_error() {
+        let html = editorial_page("# Title\n\n----\n\n> fine q\n>\n> <div>raw</div>\n");
+        let tags = tags_with(&html, "data-presemble-diagnostics");
+        assert_eq!(tags.len(), 1, "{tags:#?}");
+        assert!(
+            tags[0].starts_with("<div ") && tags[0].contains("presemble-html-removed"),
+            "the placeholder: {}",
+            tags[0]
+        );
+        assert!(tags[0].contains("data-presemble-path=\"b1\""), "{}", tags[0]);
+        assert!(page_script(&html)["unplaced"].as_array().expect("a list").is_empty());
+    }
+
+    /// GUARD: the placeholder is addressed (so its Error finds it) but is not
+    /// a slot, so the browser cannot edit it (ADR-062 D4).
+    #[test]
+    fn the_raw_html_placeholder_is_not_editable() {
+        let html = editorial_page("# Title\n\n----\n\n<div>raw</div>\n");
+        let tags: Vec<String> = tags_with(&html, "class")
+            .into_iter()
+            .filter(|t| t.contains("presemble-html-removed"))
+            .collect();
+        assert_eq!(tags.len(), 1, "{tags:#?}");
+        assert!(tags[0].contains("data-presemble-address=\""), "{}", tags[0]);
+        assert!(tags[0].contains("html-block"), "{}", tags[0]);
+        assert!(!tags[0].contains("data-presemble-slot"), "{}", tags[0]);
+        assert!(!tags[0].contains("data-presemble-md"), "{}", tags[0]);
+    }
+
+    /// GUARD: published output holds the placeholder with no editor data.
+    #[test]
+    fn published_placeholder_carries_no_editor_attributes() {
+        let (_tmp, conductor) = conductor_with("# Title\n\n----\n\n> q\n>\n> <div>in</div>\n\n<div>raw</div>\n");
+        conductor.build_all_pages(template::OutputMode::Published);
+        let path = site_index::output_path_for_stem_slug(&conductor.output_dir, "post", "x");
+        let html = std::fs::read_to_string(path).expect("the page");
+        let placeholders = tags_with(&html, "class");
+        let placeholders: Vec<_> = placeholders.iter().filter(|t| t.contains("presemble-html-removed")).collect();
+        assert_eq!(placeholders.len(), 2, "{html}");
+        for tag in placeholders {
+            assert!(!tag.contains("data-presemble-"), "no editor attribute: {tag}");
+        }
+    }
+
     /// GUARD: a page with nothing to report has no attribute, and a page
     /// script with zero counts.
     #[test]
