@@ -623,7 +623,7 @@ presemble serve <site-dir>
 presemble serve <site-dir> --dev-session
 ```
 
-Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors and warnings for the whole site are reported to the terminal at startup; pages still render. Reporting them on every rebuild, and showing them in the browser, is future work. Plain `presemble serve` is preview-only. To edit in the browser (Edit and Suggest modes, creating content, the site wizard), start the server with `--dev-session` and open the Login URL it prints. Without the flag the editor shows "Editing is disabled on this server. Restart presemble serve with --dev-session to enable it."
+Starts a local server on port 3000. The server watches `schemas/`, `content/`, and `templates/` for changes and rebuilds affected pages incrementally. Validation errors and warnings for the whole site are reported to the terminal at startup; pages still render. The editor's browser also shows each page's own errors (see [Seeing a page's errors](#seeing-a-pages-errors)); reporting them in the terminal on every rebuild is future work. Plain `presemble serve` is preview-only. To edit in the browser (Edit and Suggest modes, creating content, the site wizard), start the server with `--dev-session` and open the Login URL it prints. Without the flag the editor shows "Editing is disabled on this server. Restart presemble serve with --dev-session to enable it."
 
 ### What readers and editors see
 
@@ -646,6 +646,14 @@ A reader's browser reloads only when the published site changes: after a save, o
 In serve mode, missing or invalid content slots render as inline suggestion nodes instead of error pages. Each suggestion node is derived from the schema: it shows the slot's hint text and indicates what is expected. The page is always browsable — a content file with no fields renders as a fully scaffolded guide. Suggestion nodes never appear in a published build; `presemble build` still fails on missing required slots.
 
 When the server runs with `--dev-session`, suggestion nodes are interactive: clicking one in the browser opens an inline editing form for that slot. This is Phase A of the browser editing feature (M5). The suggestion UI has dedicated CSS polish to distinguish editing state from normal content.
+
+### Seeing a page's errors
+
+In the editorial view (a session started with `--dev-session`), a page shows its own validation problems where they arise. Errors and warnings are outlined on the element they belong to: red for an error, amber for a warning, and red when an element has both. A small badge on the outlined element shows how many problems it has; hover over it or click it to read the messages. A paragraph with inline HTML is outlined on that paragraph, and a list item or a quote with inline HTML is outlined on that item or quote child, not on the whole list. A missing required heading is outlined on its placeholder.
+
+Some problems have no place on the page, such as content outside any slot of the schema. These are listed in a panel at the bottom left of the page, under a summary such as "1 error on this page. The site can't be published until it's fixed." Warnings are counted separately. Click the panel's heading to collapse it. A page with neither errors nor warnings has no panel and no outlines.
+
+The site is published only when no page has an error, so a single outlined element anywhere keeps readers on the last published version. Every page can still be previewed with its errors in the editorial view, so you can find and fix them there. When you fix the problem in the browser editor or in your text editor, the page reloads and the outline and the panel update without a manual refresh. Readers never see any of this: the published pages carry no outlines, badges or panel.
 
 ### Mascot overlay
 
