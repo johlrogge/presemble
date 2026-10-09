@@ -3,6 +3,7 @@ name: Release Binaries
 on:
   push:
     tags: ['[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,12 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
+      - uses: cachix/install-nix-action@v31
 
-      - name: Install cargo-polylith
-        run: cargo install --git https://github.com/johlrogge/cargo-polylith cargo-polylith
+      - uses: cachix/cachix-action@v16
+        with:
+          name: devenv
+
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
 
       - uses: actions/cache@v4
         with:
@@ -40,7 +43,7 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-release-
 
       - name: Build release binary
-        run: cargo polylith cargo --profile live build --release -p publisher
+        run: devenv shell -- cargo polylith cargo --profile live build --release -p publisher
 
       - name: Package binary
         run: |
@@ -54,6 +57,7 @@ jobs:
 
   release:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
