@@ -1,4 +1,4 @@
-use crate::document::{ContentElement, Document, Keyword, LinkText};
+use crate::document::{Container, ContentElement, Document, Keyword, LinkText};
 use crate::inline::AsPlainText;
 use crate::link_expression::{diagnose_paragraph, LinkExpressionDiagnostic};
 use crate::parser::diagnose_paragraph_marker;
@@ -35,6 +35,32 @@ pub struct ValidationDiagnostic {
     /// element, ADR-060 P1). `None` for slot-level diagnostics and for
     /// documents built from the store (they carry no source spans).
     pub span: Option<schema::Span>,
+    /// Where in the document's structure the diagnostic belongs, when it
+    /// concerns one block. `None` for slot-level diagnostics (missing slot,
+    /// counts), which name the slot instead.
+    pub location: Option<Location>,
+}
+
+/// Where in a document a diagnostic belongs (ADR-059 containers): the
+/// container, the top-level block in it, and the path into quotes and list
+/// items from there. Structure, not bytes: a document rebuilt from the store
+/// has no spans, but it has this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    pub container: Container,
+    /// The top-level block in the container.
+    pub index: usize,
+    /// Into quotes and list items, from that block.
+    pub path: Vec<NestedStep>,
+}
+
+/// One step into a quote or a list item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestedStep {
+    /// Child `n` of a quote or of a list item.
+    Block(usize),
+    /// Item `n` of a list.
+    Item(usize),
 }
 
 /// Severity level for a validation diagnostic.
@@ -74,6 +100,7 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
                         ),
                         slot: Some(grammar_slot.name.clone()),
                         span: None,
+                        location: None,
                     });
                 }
                 continue;
@@ -118,10 +145,10 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 
     // ── Inline HTML in every container (ADR-062 D3) ────────────────────────
     for slot in &doc.preamble {
-        validate_inline_html(&slot.elements, Some(&slot.name), &mut diagnostics);
+        validate_inline_html(&slot.elements, &Container::Slot(slot.name.clone()), &mut diagnostics);
     }
-    validate_inline_html(&doc.unassigned, None, &mut diagnostics);
-    validate_inline_html(&doc.body, None, &mut diagnostics);
+    validate_inline_html(&doc.unassigned, &Container::Unassigned, &mut diagnostics);
+    validate_inline_html(&doc.body, &Container::Body, &mut diagnostics);
 
     // ── Body validation ────────────────────────────────────────────────────
     match &grammar.body {
@@ -132,6 +159,7 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
                 .to_string(),
             slot: None,
             span: None,
+            location: None,
         }),
         None => {}
     }
@@ -144,10 +172,10 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 
     // ── Slot markers on headings ───────────────────────────────────────────
     for slot in &doc.preamble {
-        validate_heading_markers(&slot.elements, Some(&slot.name), &mut diagnostics);
+        validate_heading_markers(&slot.elements, &Container::Slot(slot.name.clone()), &mut diagnostics);
     }
-    validate_heading_markers(&doc.unassigned, None, &mut diagnostics);
-    validate_heading_markers(&doc.body, None, &mut diagnostics);
+    validate_heading_markers(&doc.unassigned, &Container::Unassigned, &mut diagnostics);
+    validate_heading_markers(&doc.body, &Container::Body, &mut diagnostics);
 
     ValidationResult { diagnostics }
 }
@@ -155,24 +183,52 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 /// `elements` and every block nested in a blockquote or a list item among
 /// them, in document order (a container before its children). The validator
 /// reads nested blocks exactly as top-level ones (ADR-059 §13).
-fn walk(elements: &im::Vector<Spanned<ContentElement>>) -> Vec<&Spanned<ContentElement>> {
-    fn collect<'a>(elements: &'a im::Vector<Spanned<ContentElement>>, out: &mut Vec<&'a Spanned<ContentElement>>) {
-        for spanned in elements {
-            out.push(spanned);
-            match &spanned.node {
-                ContentElement::Blockquote { blocks } => collect(&blocks.elements, out),
-                ContentElement::List { list } => {
-                    for item in &list.items {
-                        collect(&item.elements, out);
-                    }
-                }
-                _ => {}
+///
+/// Each block comes with its [`Location`] in `container`.
+fn walk<'a>(
+    container: &Container,
+    elements: &'a im::Vector<Spanned<ContentElement>>,
+) -> Vec<(Location, &'a Spanned<ContentElement>)> {
+    fn visit<'a>(
+        container: &Container,
+        index: usize,
+        path: &mut Vec<NestedStep>,
+        spanned: &'a Spanned<ContentElement>,
+        out: &mut Vec<(Location, &'a Spanned<ContentElement>)>,
+    ) {
+        out.push((Location { container: container.clone(), index, path: path.clone() }, spanned));
+        let mut children = |blocks: &'a im::Vector<Spanned<ContentElement>>, path: &mut Vec<NestedStep>| {
+            for (j, child) in blocks.iter().enumerate() {
+                path.push(NestedStep::Block(j));
+                visit(container, index, path, child, out);
+                path.pop();
             }
+        };
+        match &spanned.node {
+            ContentElement::Blockquote { blocks } => children(&blocks.elements, path),
+            ContentElement::List { list } => {
+                for (k, item) in list.items.iter().enumerate() {
+                    path.push(NestedStep::Item(k));
+                    children(&item.elements, path);
+                    path.pop();
+                }
+            }
+            _ => {}
         }
     }
     let mut out = Vec::new();
-    collect(elements, &mut out);
+    for (index, spanned) in elements.iter().enumerate() {
+        visit(container, index, &mut Vec::new(), spanned, &mut out);
+    }
     out
+}
+
+/// The slot a container is, if it is one.
+fn slot_of(container: &Container) -> Option<&SlotName> {
+    match container {
+        Container::Slot(name) => Some(name),
+        Container::Unassigned | Container::Body => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,10 +240,11 @@ fn walk(elements: &im::Vector<Spanned<ContentElement>>) -> Vec<&Spanned<ContentE
 /// slot assignment put it; elements of a slot are reported against the slot.
 fn validate_heading_markers(
     elements: &im::Vector<Spanned<ContentElement>>,
-    slot: Option<&SlotName>,
+    container: &Container,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for spanned in walk(elements) {
+    let slot = slot_of(container);
+    for (location, spanned) in walk(container, elements) {
         let ContentElement::Heading { marker: Some(name), .. } = &spanned.node else {
             continue;
         };
@@ -206,6 +263,7 @@ fn validate_heading_markers(
             message,
             slot: slot.cloned(),
             span,
+            location: Some(location),
         });
     }
 }
@@ -221,7 +279,7 @@ fn validate_unassigned(
     grammar: &Grammar,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for spanned in &doc.unassigned {
+    for (index, spanned) in doc.unassigned.iter().enumerate() {
         let el = &spanned.node;
         let message = match unassigned_reason(el, grammar) {
             UnassignedReason::MarkerNamesNoSlot(name) => {
@@ -286,6 +344,7 @@ fn validate_unassigned(
             message,
             slot: None,
             span,
+            location: Some(Location { container: Container::Unassigned, index, path: Vec::new() }),
         });
     }
 }
@@ -301,7 +360,7 @@ fn validate_html(
     elements: &im::Vector<Spanned<ContentElement>>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for spanned in walk(elements) {
+    for (location, spanned) in walk(&Container::Body, elements) {
         if matches!(spanned.node, ContentElement::HtmlBlock { .. }) {
             diagnostics.push(ValidationDiagnostic {
                 severity: Severity::Error,
@@ -309,6 +368,7 @@ fn validate_html(
                 slot: None,
                 // Store-built documents carry zero spans.
                 span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
+                location: Some(location),
             });
         }
     }
@@ -321,10 +381,11 @@ fn validate_html(
 /// the slot. Blocks inside a blockquote are read like any other (L13).
 fn validate_inline_html(
     elements: &im::Vector<Spanned<ContentElement>>,
-    slot: Option<&SlotName>,
+    container: &Container,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    for spanned in walk(elements) {
+    let slot = slot_of(container);
+    for (location, spanned) in walk(container, elements) {
         let html = match &spanned.node {
             // A heading's or paragraph's HTML is in its nodes (a list's is in
             // the paragraphs of its items, which `walk` reaches).
@@ -357,6 +418,7 @@ fn validate_inline_html(
             message,
             slot: slot.cloned(),
             span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
+            location: Some(location),
         });
     }
 }
@@ -452,26 +514,34 @@ fn validate_link_expressions(
     grammar: &Grammar,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    let mut push = |severity: Severity, message: String| {
+    let mut push = |severity: Severity, message: String, location: Location| {
         let message = match slot {
             Some(name) => format!("slot '{name}': {message}"),
             None => message,
         };
-        diagnostics.push(ValidationDiagnostic { severity, message, slot: slot.cloned(), span: None });
+        diagnostics.push(ValidationDiagnostic {
+            severity,
+            message,
+            slot: slot.cloned(),
+            span: None,
+            location: Some(location),
+        });
     };
-    for spanned in walk(elements) {
+    // Only slots and the body are checked here.
+    let container = slot.map_or(Container::Body, |name| Container::Slot(name.clone()));
+    for (location, spanned) in walk(&container, elements) {
         match &spanned.node {
             // Marker misuse is an error in any section (ADR-060 P1).
             ContentElement::Paragraph { content, marker: Some(marker) } => {
-                push(Severity::Error, diagnose_paragraph_marker(content, marker).to_string());
+                push(Severity::Error, diagnose_paragraph_marker(content, marker).to_string(), location);
             }
             ContentElement::Paragraph { content, marker: None } => match diagnose_paragraph(
                 &crate::inline::paragraph_diagnosis_source(content, None),
             ) {
                 Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
-                    push(Severity::Warning, d.to_string());
+                    push(Severity::Warning, d.to_string(), location);
                 }
-                Some(d) => push(Severity::Error, d.to_string()),
+                Some(d) => push(Severity::Error, d.to_string(), location),
                 None => {}
             },
             ContentElement::LinkExpression { .. } if slot.is_none() => {
@@ -479,13 +549,14 @@ fn validate_link_expressions(
                     Severity::Warning,
                     "link expressions only take effect in preamble slots; move it above `----`"
                         .to_string(),
+                    location,
                 );
             }
             ContentElement::LinkExpression { text, slot: marker, .. } => {
                 if let Some(slot_name) = slot
                     && let Some(message) = slot_marker_message(text, marker.as_ref(), slot_name, grammar)
                 {
-                    push(Severity::Warning, message);
+                    push(Severity::Warning, message, location);
                 }
             }
             _ => {}
@@ -592,6 +663,7 @@ fn check_count_against_range(
             ),
             slot: Some(slot.name.clone()),
             span: None,
+            location: None,
         });
     }
 }
@@ -618,7 +690,7 @@ fn validate_headings(
 ) -> usize {
     let mut count = 0usize;
 
-    for spanned in elements {
+    for (index, spanned) in elements.iter().enumerate() {
         if let ContentElement::Heading { level, content, marker } = &spanned.node {
             if level.value() >= level_range.min.value()
                 && level.value() <= level_range.max.value()
@@ -627,7 +699,7 @@ fn validate_headings(
                 // Constraints read the plain text; messages quote the
                 // heading's markdown.
                 let quoted = crate::inline::heading_source_text(content, marker.as_ref());
-                check_content_constraints(&content.plain_text(), &quoted, slot, diagnostics);
+                check_content_constraints(&content.plain_text(), &quoted, slot, index, diagnostics);
             } else {
                 diagnostics.push(ValidationDiagnostic {
                     severity: Severity::Error,
@@ -640,6 +712,7 @@ fn validate_headings(
                     ),
                     slot: Some(slot.name.clone()),
                     span: None,
+                    location: slot_element(slot, index),
                 });
             }
         }
@@ -657,6 +730,7 @@ fn validate_headings(
             ),
             slot: Some(slot.name.clone()),
             span: None,
+            location: None,
         });
     }
 
@@ -667,13 +741,20 @@ fn validate_headings(
 /// (ADR-059 §12): the paragraph stays where it is, editable and saveable, and
 /// is reassigned when the file is read again. `expected` is `a link`,
 /// `an image` or `a paragraph`.
-fn wrong_shape(slot: &Slot, expected: &str, diagnostics: &mut Vec<ValidationDiagnostic>) {
+fn wrong_shape(slot: &Slot, expected: &str, index: usize, diagnostics: &mut Vec<ValidationDiagnostic>) {
     diagnostics.push(ValidationDiagnostic {
         severity: Severity::Error,
         message: format!("slot '{}': expected {expected}", slot.name),
         slot: Some(slot.name.clone()),
         span: None,
+        location: slot_element(slot, index),
     });
+}
+
+/// The location of element `index` of `slot`: a diagnostic about one element
+/// of a slot says which, not just the slot.
+fn slot_element(slot: &Slot, index: usize) -> Option<Location> {
+    Some(Location { container: Container::Slot(slot.name.clone()), index, path: Vec::new() })
 }
 
 /// Validate paragraphs in a slot's elements. Returns count consumed.
@@ -683,12 +764,12 @@ fn validate_paragraphs(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
     let mut count = 0usize;
-    for spanned in elements {
+    for (index, spanned) in elements.iter().enumerate() {
         if spanned.node.is_text_paragraph() {
             count += 1;
         } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
             // A lone link or image: text a paragraph slot does not take.
-            wrong_shape(slot, "a paragraph", diagnostics);
+            wrong_shape(slot, "a paragraph", index, diagnostics);
         }
     }
     count
@@ -713,6 +794,7 @@ fn check_occurs_count_paragraphs(
             ),
             slot: Some(slot.name.clone()),
             span: None,
+            location: None,
         });
     } else if let Some(limit) = max && count > limit {
         diagnostics.push(ValidationDiagnostic {
@@ -723,6 +805,7 @@ fn check_occurs_count_paragraphs(
             ),
             slot: Some(slot.name.clone()),
             span: None,
+            location: None,
         });
     }
 }
@@ -736,13 +819,13 @@ fn validate_links(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
     let mut count = 0usize;
-    for spanned in elements {
+    for (index, spanned) in elements.iter().enumerate() {
         if spanned.node.is_sole_link()
             || matches!(spanned.node, ContentElement::LinkExpression { .. })
         {
             count += 1;
         } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
-            wrong_shape(slot, "a link", diagnostics);
+            wrong_shape(slot, "a link", index, diagnostics);
         }
     }
 
@@ -752,6 +835,7 @@ fn validate_links(
             message: format!("slot '{}': missing required link", slot.name),
             slot: Some(slot.name.clone()),
             span: None,
+            location: None,
         });
     }
 
@@ -766,13 +850,13 @@ fn validate_images(
 ) -> usize {
     let mut count = 0usize;
 
-    for spanned in elements {
+    for (index, spanned) in elements.iter().enumerate() {
         if let Some(image) = spanned.node.sole_image() {
             count += 1;
             let alt = image.alt.plain_text();
-            check_alt_constraints((!alt.is_empty()).then_some(alt.as_str()), slot, diagnostics);
+            check_alt_constraints((!alt.is_empty()).then_some(alt.as_str()), slot, index, diagnostics);
         } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
-            wrong_shape(slot, "an image", diagnostics);
+            wrong_shape(slot, "an image", index, diagnostics);
         }
     }
 
@@ -782,6 +866,7 @@ fn validate_images(
             message: format!("slot '{}': missing required image", slot.name),
             slot: Some(slot.name.clone()),
             span: None,
+            location: None,
         });
     }
 
@@ -812,6 +897,7 @@ fn validate_list(
                     message: format!("slot '{}': missing required list", slot.name),
                     slot: Some(slot.name.clone()),
                     span: None,
+                    location: None,
                 });
             }
             0
@@ -832,6 +918,7 @@ fn check_content_constraints(
     text: &str,
     quoted: &str,
     slot: &Slot,
+    index: usize,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     for constraint in &slot.constraints {
@@ -852,6 +939,7 @@ fn check_content_constraints(
                             ),
                             slot: Some(slot.name.clone()),
                             span: None,
+                            location: slot_element(slot, index),
                         });
                     }
                 }
@@ -864,6 +952,7 @@ fn check_content_constraints(
 fn check_alt_constraints(
     alt: Option<&str>,
     slot: &Slot,
+    index: usize,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     for constraint in &slot.constraints {
@@ -880,6 +969,7 @@ fn check_alt_constraints(
                             ),
                             slot: Some(slot.name.clone()),
                             span: None,
+                            location: slot_element(slot, index),
                         });
                     }
                 }
@@ -900,7 +990,7 @@ fn validate_body(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     if let Some(heading_range) = &body_rules.heading_range {
-        for spanned in elements.iter() {
+        for (index, spanned) in elements.iter().enumerate() {
             if let ContentElement::Heading { level, content, marker } = &spanned.node {
                 let text = crate::inline::heading_source_text(content, marker.as_ref());
                 let in_range = level.value() >= heading_range.min.value()
@@ -917,6 +1007,11 @@ fn validate_body(
                         ),
                         slot: None,
                         span: None,
+                        location: Some(Location {
+                            container: Container::Body,
+                            index,
+                            path: Vec::new(),
+                        }),
                     });
                 }
             }
@@ -1952,6 +2047,141 @@ mod tests {
         assert!(
             !result.is_valid(),
             "list with 6 items (max 5) should be invalid"
+        );
+    }
+
+    // ── Where a diagnostic belongs (FU-7b) ───────────────────────────────
+
+    fn located(container: Container, index: usize, path: Vec<NestedStep>) -> Option<Location> {
+        Some(Location { container, index, path })
+    }
+
+    #[test]
+    fn a_body_paragraph_diagnostic_has_its_location() {
+        let d = body_diagnostics("Fine one.\n\nFine two.\n\na <b>x</b> b");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].location, located(Container::Body, 2, vec![]));
+    }
+
+    #[test]
+    fn a_list_item_diagnostic_has_its_nested_location() {
+        let d = body_diagnostics("Intro.\n\n- fine\n- a <b>x</b> b");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        // The list is the second block; the paragraph is the first block of its second item.
+        assert_eq!(
+            d[0].location,
+            located(Container::Body, 1, vec![NestedStep::Item(1), NestedStep::Block(0)])
+        );
+    }
+
+    #[test]
+    fn a_quote_diagnostic_has_its_nested_location() {
+        let d = body_diagnostics("Intro.\n\n> fine\n>\n> a <b>x</b> b");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].location, located(Container::Body, 1, vec![NestedStep::Block(1)]));
+    }
+
+    #[test]
+    fn an_unassigned_block_diagnostic_is_located_in_unassigned() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for("# Title\n\nOne.\n\nTwo.\n\nThree.\n\n----\n\nBody.\n", &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].location, located(Container::Unassigned, 0, vec![]));
+    }
+
+    /// Guard: a diagnostic about a slot as a whole names the slot and is
+    /// located nowhere.
+    #[test]
+    fn a_missing_slot_has_no_location_but_names_the_slot() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for("# Title\n\n----\n\nBody.\n", &g);
+        let missing: Vec<&ValidationDiagnostic> =
+            d.iter().filter(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary")).collect();
+        assert!(!missing.is_empty(), "{d:#?}");
+        assert!(missing.iter().all(|d| d.location.is_none()), "{missing:#?}");
+    }
+
+    // ── Element-level slot diagnostics name their element ────────────────
+
+    fn hello_world_doc(edit: impl FnOnce(&str) -> String) -> (Document, Grammar) {
+        let grammar = article_grammar();
+        let src = edit(include_str!("../../../fixtures/blog-site/content/article/hello-world.md"));
+        (parse_and_assign(&src, &grammar).expect("parses"), grammar)
+    }
+
+    fn slot_location(slot: &str, index: usize) -> Option<Location> {
+        located(Container::Slot(SlotName::new(slot)), index, vec![])
+    }
+
+    /// The diagnostics of the document whose message contains `part`.
+    fn about(doc: &Document, grammar: &Grammar, part: &str) -> Vec<ValidationDiagnostic> {
+        validate(doc, grammar).diagnostics.into_iter().filter(|d| d.message.contains(part)).collect()
+    }
+
+    #[test]
+    fn a_heading_level_out_of_range_is_located_on_its_heading() {
+        let (mut doc, grammar) = hello_world_doc(str::to_string);
+        let h2 = crate::parser::parse_document("## Hello\n").expect("parses").elements[0].node.clone();
+        let title = doc.preamble.iter_mut().find(|s| s.name.as_str() == "title").expect("title");
+        title.elements.front_mut().expect("a heading").node = h2;
+        let d = about(&doc, &grammar, "is not in allowed range");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].location, slot_location("title", 0));
+    }
+
+    #[test]
+    fn a_capitalization_error_is_located_on_its_heading() {
+        let (doc, grammar) = hello_world_doc(|s| s.replace("# Hello, World", "# hello, World"));
+        let d = about(&doc, &grammar, "uppercase");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].location, slot_location("title", 0));
+    }
+
+    #[test]
+    fn a_wrong_shape_error_is_located_on_its_element() {
+        // The summary slot holds three paragraphs; the second is a lone link.
+        let (mut doc, grammar) = hello_world_doc(str::to_string);
+        let summary = doc.preamble.iter_mut().find(|s| s.name.as_str() == "summary").expect("summary");
+        assert_eq!(summary.elements.len(), 3);
+        summary.elements.get_mut(1).expect("a second paragraph").node =
+            ContentElement::paragraph_from_markdown("[Jo](/author/jo)");
+        let d = about(&doc, &grammar, "expected a paragraph");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].location, slot_location("summary", 1));
+    }
+
+    #[test]
+    fn an_alt_constraint_error_is_located_on_its_image() {
+        let (doc, grammar) = hello_world_doc(|s| {
+            s.replace("![A landscape photo of a desk with a laptop and notebook open side by side]", "![]")
+        });
+        let d = about(&doc, &grammar, "non-empty alt text");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].location, slot_location("cover", 0));
+    }
+
+    /// Guard: a count is about the slot as a whole.
+    #[test]
+    fn an_occurs_count_error_has_no_location_but_names_the_slot() {
+        let (mut doc, grammar) = hello_world_doc(str::to_string);
+        let summary = doc.preamble.iter_mut().find(|s| s.name.as_str() == "summary").expect("summary");
+        let extra = summary.elements.back().cloned().expect("a paragraph");
+        summary.elements.push_back(extra);
+        let d = about(&doc, &grammar, "expected at most 3");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].slot.as_ref().map(SlotName::as_str), Some("summary"));
+        assert_eq!(d[0].location, None);
+    }
+
+    /// A diagnostic in a slot is located in that slot.
+    #[test]
+    fn a_slot_diagnostic_is_located_in_its_slot() {
+        let g = summary_grammar(true);
+        let d = diagnostics_for("# Title\n\nOne <b>x</b>.\n\n----\n\nBody.\n", &g);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(
+            d[0].location,
+            located(Container::Slot(SlotName::new("summary")), 0, vec![])
         );
     }
 }

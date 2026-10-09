@@ -44,5 +44,5 @@ pub use slot_assignment::{assign_slots, unassigned_reason, UnassignedReason};
 pub use transform::{
     Capitalize, CompositeTransform, InsertSeparator, InsertSlot, Transform, TransformError,
 };
-pub use validator::{validate, Severity, ValidationDiagnostic, ValidationResult};
+pub use validator::{validate, Location, NestedStep, Severity, ValidationDiagnostic, ValidationResult};
 
