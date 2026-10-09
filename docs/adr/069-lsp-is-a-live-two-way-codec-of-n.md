@@ -95,6 +95,85 @@ until they are held in N.
 ADR-032 (NED), ADR-056 (exact addressing), ADR-057 (transactions), ADR-059
 §10 (block edits), ADR-065 (conflicts), ADR-070 (auto-save).
 
+## Done in LSP-2 (2.1 to 2.5)
+
+Decisions 2 and 3 and the `:w` flush are built (the conductor commands
+`EditorOpened`, `EditorChanged`, `EditorClosed`, `KeepMine`; `DocumentChanged`
+and `doc_sources` are gone). Decision 1 (N pushes to the buffer) and the
+canonical push before a save are not part of LSP-2.
+
+- **Every keystroke is lowered live.** No debounce: each `didChange` is
+  compared with the text N and the editor last agreed on (the base) and lowered
+  at once.
+- **Per-container regions.** A document is compared slot by slot, `unassigned`
+  and body, by content, not by spelling. A region that is one blockquote on both
+  sides, or one list of the same kind and spacing with the same number of
+  items, is compared inside (descent), so a keystroke in a list item touches
+  only that block. Anything else that differs is a region of the container it is
+  in.
+- **The lowering table.**
+  - One block for one block: `block_edit::lower` with a typed target (the
+    block, the text of a code block, or an empty container).
+  - A run of blocks for a run: a Replace of the first aligned block and a
+    delete of the rest.
+  - Inserted blocks: `InsertAfter`, `InsertBefore` or `InsertChild`.
+  - Removed blocks: Delete, under the base check.
+  - Comments only: `SetComments` with place `Before` or `End`.
+- **The re-read fallback.** Some changes are lowered by reading the whole
+  document again from the editor's text. It happens only while N reads as the
+  parsed base; otherwise the region drifts. The cases, each with its reason:
+  - Separators, HTML blocks and link expressions: no payload may carry them
+    (ADR-062 D4, ADR-058). Follow-up: an editor-only payload.
+  - Comments changed together with blocks, and a paragraph typed directly after
+    a comment: comments in payloads are not built (§0.8), and no single plan can
+    move a comment onto a block that does not exist yet. Follow-up.
+  - Changes to the slots of section 0: slot assignment is a function of the
+    whole section. Inherent.
+- **Held regions.** A region that opens a code fence, or an HTML block of
+  CommonMark types 1 to 5, that is not closed is not lowered; the base keeps its
+  old text and the editor shows an information diagnostic. Whether it is open
+  is decided on the region's text with what the containers it is in take from
+  its lines removed, as the parser sees it. `:w` lowers a held region as it
+  stands (it is the editor's final word).
+- **Drift.** A region whose aligned blocks in N no longer read as the base is
+  reported, not applied. Its id (`DriftId`) hashes the path down to the region,
+  its base text and the ids of the aligned N blocks, so it is stable while the
+  editor types elsewhere. `KeepMine { drift_id }` replaces just those blocks
+  with the editor's version, and is refused once the drift has changed (the
+  editor then sees the new drift).
+- **`editor_wrote`.** `:w` is a flush. A `DocumentSaved` or a watcher
+  `FileChanged`, whichever comes first, for a file that holds the editor's
+  latest text: held regions are lowered; if N then reads as the file, the dirty
+  mark is cleared and the file stays as written; otherwise N holds others'
+  changes and its canonical text is written. The file's stamp is taken before
+  and after the read and the read is repeated if they differ, so a write that
+  lands in between is a fresh disk change and is never recorded as N's version.
+- **The sender in the LSP.** All traffic to the conductor goes through one
+  queue and one worker thread, so a handler returns at once. A new text of a
+  file replaces the one before it while that still waits; a save or a close
+  queued in between stops the merge, so the order the editor acted in is kept.
+- **Comments in payloads are left out (§0.8).** Blocks inserted or replaced
+  carry no comments; comments move only through `SetComments`.
+- **Flag errors as locally as possible.** Drift and held regions are reported
+  and resolved at the depth where they arise, in the list item or the quote, not
+  in the top-level block around it. Known exceptions:
+  - FU-1: a tight list holds the whole list while a fence is open in one item
+    (a code block after a paragraph makes the parser read the list as loose, so
+    the list changes as a whole).
+  - The re-read cases above.
+  - Conflicts are per file until F2.
+- **Cost.** Release build, a site of 1000 pages and one document of 500 blocks,
+  40 rounds with the cases interleaved:
+
+  | Case | p50 | p95 |
+  |---|---|---|
+  | Re-reading the whole document (the old way) | 12.5 ms | 13.4 ms |
+  | `EditorChanged`, an edit in place | 11.2 ms | 11.6 ms |
+  | `EditorChanged`, a new paragraph | 11.2 ms | 11.9 ms |
+
+  Both lowered cases are within the cost of the old way, which paid the same
+  page rebuild. That rebuild is what the time is made of.
+
 ## Amendment (2026-10-09): the open question, and what the decisions need
 
 The user's answer: Helix does not flag a file as changed on disk when its

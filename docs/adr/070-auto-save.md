@@ -28,6 +28,10 @@ Proposed
      sends one when its page is hidden or closed, or loses focus.
    - Auto-save goes through the same save path as an explicit save; there is
      no second writer.
+   - A document with a held editor region (an unterminated code fence or HTML
+     block, ADR-069) is not auto-saved until the region is lowered: N does not
+     yet hold what the author is typing there, and a save would write the file
+     without it. An explicit `:w` lowers the region as it stands.
 2. **Scope.** Every edit to N: browser, MCP, REPL and nREPL, accepted
    suggestions, and editor buffers (through ADR-069). An explicit save (`:w`,
    SaveBuffer) is a flush of that document. For a document open in an editor,

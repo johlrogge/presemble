@@ -756,15 +756,29 @@ args = ["lsp", "site/"]
 
 Replace `site/` with the path to your site directory.
 
+### Typing in the editor
+
+What you type in a content file reaches the site as you type it.
+
+- **Live in the browser.** Every keystroke is lowered into the document the browser shows, with no delay and no save. The page in the browser changes as you type.
+- **Only the block you change is replaced.** An edit inside a paragraph, a list item or a quote touches that block and nothing else. Edits made elsewhere (in the browser, through a suggestion, from the REPL) to other blocks survive your typing, and your edits to other blocks survive theirs.
+- **A block changed in two places is a drift.** If you edit a block that was changed elsewhere since you began editing it, your version is not applied. The block gets a warning with two code actions: *Take the current version* replaces your text with the current one, and *Keep mine* makes your version the document's.
+- **An unfinished construct is held.** While a code fence (or an HTML block that has no end yet) is open, the editor shows an information message: the fence is not closed yet, and the blocks after it are unchanged until you close it. Closing the fence inserts one code block. Saving with the fence still open takes it as it stands.
+- **`:w` saves.** Saving writes the document. If something else changed the document meanwhile, the file gets the document's text, which includes those changes. If the document already reads as what you saved, the file stays exactly as you wrote it.
+- **A change from outside is a conflict.** If a program that is not Presemble (a `sed`, a `git checkout`) rewrites the file while the document has unsaved edits, the file shows a warning. Code actions, offered on any line, resolve it: *Take the file on disk (discard unsaved edits)* replaces the buffer with the file, and *Keep the unsaved edits (overwrite the file)* writes the document over it.
+- **Match the file on disk.** When the buffer and the file mean the same but are spelled differently (`*` and `-` list markers, say), this code action makes the buffer the file's text. It is not offered when the content differs.
+- **Formatting.** Formatting a content file rewrites it as the canonical markdown Presemble writes. With format on save, what you save is what Presemble would write.
+
 ### Content file capabilities
 
 | Capability | Description |
 |---|---|
 | Completions | Slot names from the schema; for link slots, actual content files formatted as `[Title](/type/slug)` |
-| Diagnostics | Schema violations — missing slots, occurrence counts, capitalization, broken link references |
+| Diagnostics | Schema violations — missing slots, occurrence counts, capitalization, broken link references; blocks that were changed elsewhere (drift); constructs not closed yet; a conflict with the file on disk |
 | Hover | Schema hint text for the slot at the cursor |
 | Go-to-definition | Navigates to the linked content file |
-| Code actions | Quickfix: capitalize first letter; insert missing slot snippet |
+| Code actions | Quickfix: capitalize first letter; insert missing slot snippet; resolve a drift; resolve a conflict; match the file on disk |
+| Formatting | Canonical markdown |
 
 ### Template file capabilities
 
