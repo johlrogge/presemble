@@ -30,7 +30,10 @@ Proposed
      no second writer.
 2. **Scope.** Every edit to N: browser, MCP, REPL and nREPL, accepted
    suggestions, and editor buffers (through ADR-069). An explicit save (`:w`,
-   SaveBuffer) is a flush of that document.
+   SaveBuffer) is a flush of that document. For a document open in an editor,
+   the save first brings the buffer to the canonical text (ADR-069 amendment)
+   and writes once the editor holds it; while the user is typing it waits for
+   the next idle.
 3. **Conflicts.**
    - A document in conflict with disk (ADR-065) is never auto-saved. Its edits
      stay in memory and it shows the Conflict state until a person resolves
@@ -57,8 +60,7 @@ Proposed
      `ConductorEvent::SaveState { file, state }` on the editorial channel.
    - A failed save shows a banner that stays until a Retry succeeds.
    - Hovering shows the last save time.
-   - The LSP shows the state as a status message and Save failed as a
-     diagnostic.
+   - The LSP shows Save failed and Conflict as diagnostics.
 9. **Configuration.** `.presemble/config.json` holds
    `autosave: { enabled, idle_ms }`. It is on by default locally. Builds never
    read or write it differently.
@@ -78,6 +80,8 @@ N.
   `presemble fmt` first to keep the history readable.
 - A conflict is the only thing that keeps edits off the disk, and it is
   always visible.
+- A text editor flags a file as changed on disk only when something outside
+  Presemble wrote it (sed, git).
 
 ## Amends
 

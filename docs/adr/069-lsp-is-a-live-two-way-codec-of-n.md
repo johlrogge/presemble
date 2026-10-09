@@ -94,3 +94,43 @@ until they are held in N.
 
 ADR-032 (NED), ADR-056 (exact addressing), ADR-057 (transactions), ADR-059
 §10 (block edits), ADR-065 (conflicts), ADR-070 (auto-save).
+
+## Amendment (2026-10-09): the open question, and what the decisions need
+
+The user's answer: Helix does not flag a file as changed on disk when its
+contents match the buffer; only a write Presemble did not make (sed, git)
+is flagged. So §1 (push) and §2 (lowering) both stand, with auto-save.
+
+- **The buffer matches the file before every write.** Presemble writes
+  canonical markdown; a buffer holds the user's own spelling. Before saving a
+  document open in an editor, the conductor sends the editor the edits that
+  make the buffer the canonical text (a minimal line diff, versioned
+  `workspace/applyEdit`), and writes the file only once the editor reports
+  that text. If the version has moved (the user is typing), that save waits
+  for the next idle. The canonical text lands in the buffer exactly as a
+  refactor does.
+- **Match the file on disk (code action).** When a buffer and its file read
+  as the same content but differ as text (a format run, a checkout, an editor
+  that flagged the file anyway), the language server offers "Match the file on
+  disk": it applies the minimal edits that make the buffer the file's text.
+  It is not offered when the contents differ; that is a change on disk or a
+  conflict (ADR-065).
+- **Lowering carries comments.** `NedMutation::SetComments(Vec<String>)` sets
+  a block's leading comments or a container's end comments; each must be
+  comment-only. Without it a comment typed in the editor would be removed from
+  the buffer at the next save.
+- **An echo needs no suppression.** The `didChange` that reports a pushed edit
+  is lowered like any other, and lowers to nothing, because every block
+  already reads as N.
+- **`:w` is a flush.** An editor's write of the text it last sent is not a
+  change on disk: anything pending is lowered, and N's canonical text is
+  written if the file differs (it is pushed to the buffer first, as above).
+  Any other write is a change on disk (ADR-065).
+- **Closing a buffer changes nothing in N.** Its edits are already in N and,
+  after an idle, on disk.
+- **Conflict code actions** are worded "Take the file on disk (discard
+  unsaved edits)" and "Keep the unsaved edits (overwrite the file)", since
+  every channel edits the same N.
+- **If the check shows that Helix compares modification times, not contents:**
+  auto-save leaves documents open in an editor to the editor's `:w`, which is
+  then the only writer of those files; everything else stands.
