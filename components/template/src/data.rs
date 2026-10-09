@@ -215,7 +215,7 @@ pub enum OutputMode {
 /// are, and `(text item)` reads its plain text. The blocks of a tight list's
 /// items have no `<p>`.
 pub fn list_item_values(list: &content::List) -> Vec<Value> {
-    crate::body_nodes::list_items_nodes(list)
+    crate::body_nodes::list_items_nodes(list, None)
         .into_iter()
         .map(|nodes| Value::Nodes(nodes.into()))
         .collect()

@@ -9,6 +9,7 @@ use crate::suggestion_apply::{self, DOCUMENT_KIND};
 use content_store::edit;
 
 mod editor_sync;
+mod page_diagnostics;
 
 /// Element kind given to a document root that has been superseded by a
 /// re-ingest of the same file (ADR-056). See `Conductor::retire_document_root`.
@@ -226,6 +227,10 @@ pub struct Conductor {
     output_dir: PathBuf,
     dep_graph: RwLock<dep_graph::DependencyGraph>,
     schema_cache: RwLock<HashMap<String, String>>, // stem -> schema source
+    /// The grammar parsed from each schema source in `schema_cache`, by the same
+    /// key, with the source it was parsed from (a changed source is parsed
+    /// again): a page's diagnostics do not parse its schema once per page.
+    parsed_grammars: RwLock<HashMap<String, (String, Arc<schema::Grammar>)>>,
     /// The documents an editor has open, each with the text N and the editor
     /// last agreed on (LSP-2).
     editors: RwLock<HashMap<editorial_types::ContentPath, editor_sync::EditorState>>,
@@ -445,6 +450,7 @@ impl Conductor {
             output_dir,
             dep_graph: RwLock::new(dep_graph::DependencyGraph::new()),
             schema_cache: RwLock::new(schema_cache),
+            parsed_grammars: RwLock::new(HashMap::new()),
             editors: RwLock::new(HashMap::new()),
             site_index: RwLock::new(site_index),
             repo,
@@ -1785,6 +1791,8 @@ impl Conductor {
 
         // Iterate over semantic content roots instead of DataGraphs.
         let semantic_pairs = self.semantic_pairs_by_url();
+        // The document of each page, for the diagnostics of editorial pages.
+        let url_roots = self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).clone();
 
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
 
@@ -1865,7 +1873,14 @@ impl Conductor {
 
                 match template::transform(nodes, &prefixed, &ctx) {
                     Ok(transformed) => {
-                        let html = template::serialize_nodes(&transformed);
+                        // Editorial pages carry their diagnostics where they
+                        // arise; published pages carry nothing editor-only.
+                        let html = match (output, url_roots.get(url)) {
+                            (template::OutputMode::Editorial, Some(&doc_root)) => {
+                                self.editorial_html(&store, doc_root, transformed)
+                            }
+                            _ => template::serialize_nodes(&transformed),
+                        };
                         let output_path =
                             site_index::output_path_for_stem_slug(&self.output_dir, &stem, slug);
                         if let Some(parent) = output_path.parent() {
@@ -2194,7 +2209,8 @@ impl Conductor {
 
         let transformed = template::transform(nodes, &prefixed, &ctx)
             .map_err(|e| format!("render error: {e}"))?;
-        let html = template::serialize_nodes(&transformed);
+        // Editorial pages carry their diagnostics where they arise.
+        let html = self.editorial_html(&store, doc_root, transformed);
         drop(store);
 
         // Write output

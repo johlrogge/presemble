@@ -4985,6 +4985,9 @@ mod tests {
         assert!(text.contains("Test Title"), "{text}");
         assert!(!text.contains("data-presemble-address"), "a reader's page carries no editor data: {text}");
         assert!(!text.contains("data-presemble-md"), "{text}");
+        for editor_only in ["data-presemble-diagnostics", "data-presemble-path", "presemble-diagnostics"] {
+            assert!(!text.contains(editor_only), "{editor_only}: {text}");
+        }
     }
 
     #[tokio::test]

@@ -5089,7 +5089,13 @@ mod tests {
         let (head, tail) = native.split_once('>').expect("a start tag");
         assert!(head.starts_with("<blockquote data-presemble-slot=\"body\""), "{native}");
         assert_eq!(head.matches("data-presemble-").count(), 4, "slot, md, address and file: {native}");
-        assert_eq!(tail, "<p>a</p><p>b</p><h1>H</h1></blockquote>", "no editor data on the children");
+        // The children carry no slot data of their own, only where they are in
+        // the quote (editorial output; FU-7b).
+        assert_eq!(
+            tail,
+            "<p data-presemble-path=\"b0\">a</p><p data-presemble-path=\"b1\">b</p><h1 data-presemble-path=\"b2\">H</h1></blockquote>",
+            "only their path on the children"
+        );
     }
 
     #[test]

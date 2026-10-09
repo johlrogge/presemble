@@ -42,6 +42,10 @@ pub const ATTR_MD: &str = "data-presemble-md";
 /// The NED selection that resolves to exactly this block (editorial output).
 pub const ATTR_ADDRESS: &str = "data-presemble-address";
 pub const ATTR_SOURCE_SLOT: &str = "data-presemble-source-slot";
+/// Where a block nested in a quote or a list item sits inside its top-level
+/// block, as text: `i1/b0` is block 0 of item 1, `b1` block 1 of a quote
+/// (editorial output; the diagnostics of the page are placed by it).
+pub const ATTR_PATH: &str = "data-presemble-path";
 
 /// Class and message of the placeholder `serve` renders in place of a body
 /// HTML block (ADR-062 D2). The placeholder is not a slot.

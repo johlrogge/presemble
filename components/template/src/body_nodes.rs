@@ -6,7 +6,9 @@
 //! decoded from the store. Escaping and void-element syntax belong to the
 //! HTML serializer; nothing here builds an HTML string.
 
-use crate::constants::{ATTR_ADDRESS, ATTR_FILE, ATTR_MD, ATTR_SLOT, CLASS_HTML_REMOVED, MSG_HTML_REMOVED};
+use crate::constants::{
+    ATTR_ADDRESS, ATTR_FILE, ATTR_MD, ATTR_PATH, ATTR_SLOT, CLASS_HTML_REMOVED, MSG_HTML_REMOVED,
+};
 use crate::dom::{Element, Form, Node};
 use content::inline::Inlines;
 use content::{Align, BlockShape, ContentElement, List, ListKind, Spacing};
@@ -23,18 +25,38 @@ pub(crate) enum BlockRole<'a> {
         /// The block's address, emitted as `data-presemble-address`. Editorial
         /// output only; built without a file (see [`stamp_file`]).
         address: Option<&'a str>,
+        /// Whether the output is editorial: the blocks nested in it carry
+        /// their path.
+        editorial: bool,
     },
-    /// Carries no `data-presemble-*` attribute.
-    Nested,
-    /// A block directly in an item of a tight list: carries no
-    /// `data-presemble-*` attribute either, and a paragraph renders its inline
-    /// nodes without a `<p>` (CommonMark).
-    TightItem,
+    /// Carries no slot attribute. In editorial output it carries its `path`
+    /// inside the top-level block, as `data-presemble-path`.
+    Nested { path: Option<String> },
+    /// A block directly in an item of a tight list: carries no slot attribute
+    /// either (its `path` in editorial output, as for `Nested`), and a
+    /// paragraph renders its inline nodes without a `<p>` (CommonMark).
+    TightItem { path: Option<String> },
 }
 
 impl BlockRole<'_> {
     /// A body slot element without editor data (published output).
-    const PLAIN: BlockRole<'static> = BlockRole::BodySlot { md: None, address: None };
+    const PLAIN: BlockRole<'static> =
+        BlockRole::BodySlot { md: None, address: None, editorial: false };
+
+    /// This block's own path inside its top-level block: empty for the
+    /// top-level block, `None` in published output.
+    fn path(&self) -> Option<&str> {
+        match self {
+            BlockRole::BodySlot { editorial: true, .. } => Some(""),
+            BlockRole::BodySlot { .. } => None,
+            BlockRole::Nested { path } | BlockRole::TightItem { path } => path.as_deref(),
+        }
+    }
+}
+
+/// `path` extended by one step (`i1`, `b0`); `None` stays `None`.
+fn step(path: Option<&str>, step: String) -> Option<String> {
+    path.map(|p| if p.is_empty() { step } else { format!("{p}/{step}") })
 }
 
 fn attr(name: &str, value: impl Into<String>) -> (String, Form) {
@@ -48,8 +70,9 @@ fn el(name: &str, attrs: Vec<(String, Form)>, children: Vec<Node>) -> Node {
 /// The attributes that make an element the `body` slot: the slot marker, then
 /// the editor attributes when there are any. A nested block has none.
 fn slot_attrs(role: &BlockRole) -> Vec<(String, Form)> {
-    let BlockRole::BodySlot { md, address } = role else {
-        return Vec::new();
+    let BlockRole::BodySlot { md, address, .. } = role else {
+        // A nested block is not a slot; in editorial output it knows its path.
+        return role.path().map(|path| vec![attr(ATTR_PATH, path)]).unwrap_or_default();
     };
     let mut attrs = vec![attr(ATTR_SLOT, "body")];
     if let Some(md) = md {
@@ -80,7 +103,7 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
         // `<a>`, a lone image an `<img>`, never wrapped in a `<p>`; anything
         // else is a `<p>` of its inline nodes. A paragraph with a marker is
         // misuse and is text.
-        ContentElement::Paragraph { content, .. } if matches!(role, BlockRole::TightItem) => {
+        ContentElement::Paragraph { content, .. } if matches!(role, BlockRole::TightItem { .. }) => {
             crate::inline_nodes::inline_nodes(content)
         }
         ContentElement::Paragraph { content, marker } => match BlockShape::of(content) {
@@ -135,7 +158,11 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
             blocks
                 .elements
                 .iter()
-                .flat_map(|block| block_nodes(&block.node, &BlockRole::Nested))
+                .enumerate()
+                .flat_map(|(j, block)| {
+                    let path = step(role.path(), format!("b{j}"));
+                    block_nodes(&block.node, &BlockRole::Nested { path })
+                })
                 .collect(),
         )],
         // `<ul>` or `<ol>` (with `start` unless it is 1) of `<li>`s, each its
@@ -152,9 +179,17 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
                     "ol"
                 }
             };
-            let items = list_items_nodes(list)
+            // In editorial output an item knows its path too: the diagnostic
+            // of a tight item's paragraph (which has no element) belongs to it.
+            let items = list_items_nodes(list, role.path())
                 .into_iter()
-                .map(|blocks| el("li", Vec::new(), blocks))
+                .enumerate()
+                .map(|(k, blocks)| {
+                    let attrs = step(role.path(), format!("i{k}"))
+                        .map(|path| vec![attr(ATTR_PATH, path)])
+                        .unwrap_or_default();
+                    el("li", attrs, blocks)
+                })
                 .collect();
             vec![el(name, attrs, items)]
         }
@@ -193,11 +228,26 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
 /// The blocks of each item of `list` as nodes, one `Vec` per item: how a
 /// template sees a list slot (an item is its blocks, as in the page). The
 /// blocks of a tight list's items render without a `<p>`.
-pub(crate) fn list_items_nodes(list: &List) -> Vec<Vec<Node>> {
-    let role = if list.spacing == Spacing::Tight { BlockRole::TightItem } else { BlockRole::Nested };
+///
+/// `path` is the list's own path in editorial output (`None` otherwise): the
+/// blocks of item `k` carry `…/i{k}/b{j}`.
+pub(crate) fn list_items_nodes(list: &List, path: Option<&str>) -> Vec<Vec<Node>> {
+    let tight = list.spacing == Spacing::Tight;
     list.items
         .iter()
-        .map(|item| item.elements.iter().flat_map(|block| block_nodes(&block.node, &role)).collect())
+        .enumerate()
+        .map(|(k, item)| {
+            let item_path = step(path, format!("i{k}"));
+            item.elements
+                .iter()
+                .enumerate()
+                .flat_map(|(j, block)| {
+                    let path = step(item_path.as_deref(), format!("b{j}"));
+                    let role = if tight { BlockRole::TightItem { path } } else { BlockRole::Nested { path } };
+                    block_nodes(&block.node, &role)
+                })
+                .collect()
+        })
         .collect()
 }
 
@@ -216,7 +266,7 @@ pub(crate) fn body_block_nodes(
         return block_nodes(element, &BlockRole::PLAIN);
     }
     let md = content::project_markdown(element, content::Projection::Block);
-    block_nodes(element, &BlockRole::BodySlot { md: md.as_deref(), address })
+    block_nodes(element, &BlockRole::BodySlot { md: md.as_deref(), address, editorial: true })
 }
 
 /// The editor addresses of body blocks, one per block, built without a file.
