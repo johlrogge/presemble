@@ -12,6 +12,7 @@ mod serializer;
 mod shape;
 mod slot_assignment;
 pub mod slot_editor;
+pub mod sync;
 mod transform;
 mod validator;
 

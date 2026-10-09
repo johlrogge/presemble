@@ -663,6 +663,146 @@ fn text_is_a_fixed_point() {
     });
 }
 
+// ── Editor sync (LSP-2, `content::sync`) ────────────────────────────────────
+
+/// The documents of two neighbouring seeds, as the editor's base text and the
+/// text it is compared with.
+fn seed_pairs(property: &str, check: impl Fn(&str, &str, &Grammar) -> Result<(), String>) {
+    let mut failures = Vec::new();
+    let mut runs = 0;
+    for (name, grammar) in grammars() {
+        for seed in SEEDS {
+            let (a, b) = (gen_source(seed), gen_source(seed + 1));
+            runs += 1;
+            if let Err(e) = check(&a, &b, &grammar) {
+                failures.push(format!("[{name}] seed {seed}\n--- a ---\n{a}\n--- b ---\n{b}\n--- {e}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{property}: {} of {runs} failed; first:\n{}",
+        failures.len(),
+        failures[0]
+    );
+}
+
+/// Applying the regions of two documents to the base gives the new parts, in
+/// every container: the regions say exactly what differs.
+#[test]
+fn sync_regions_applied_to_the_base_give_the_new_parts() {
+    use content::sync::{apply_regions, container_parts, document_containers, regions};
+    seed_pairs("regions applied", |a, b, grammar| {
+        let (base, new) = (assign(a, grammar), assign(b, grammar));
+        let (base_containers, new_containers) = (document_containers(&base), document_containers(&new));
+        for (container, new_blocks) in &new_containers {
+            let empty = content::Blocks::default();
+            let base_blocks = base_containers
+                .iter()
+                .find(|(c, _)| c == container)
+                .map_or(&empty, |(_, blocks)| blocks);
+            let (bp, np) = (container_parts(base_blocks), container_parts(new_blocks));
+            let got = apply_regions(&bp, &np, &regions(&bp, &np));
+            let want: Vec<_> = np.iter().map(|p| p.node.clone()).collect();
+            if got != want {
+                return Err(format!("{container:?}: regions applied give\n{got:#?}\nnot\n{want:#?}"));
+            }
+            if !regions(&np, &np).is_empty() {
+                return Err(format!("{container:?}: a container differs from itself"));
+            }
+        }
+        // The same documents with descent: nothing panics, and a document has
+        // no regions against itself.
+        let _ = content::sync::document_regions(&base, &new);
+        if !content::sync::document_regions(&new, &new).is_empty() {
+            return Err("a document differs from itself".to_string());
+        }
+        Ok(())
+    });
+}
+
+/// `format_edits` reaches the canonical text byte for byte, from any buffer.
+#[test]
+fn sync_format_edits_reach_the_canonical_text_exactly() {
+    use content::sync::{apply_edits, format_edits};
+    seed_pairs("format edits", |a, b, grammar| {
+        let canonical = serialize_document(&assign(b, grammar));
+        let edits = format_edits(a, &canonical);
+        let got = apply_edits(a, &edits);
+        if got != canonical {
+            return Err(format!("format edits give\n{got}\n--- not\n{canonical}"));
+        }
+        Ok(())
+    });
+}
+
+/// `changed_block_edits` rewrites the blocks that differ: the buffer then
+/// reads as the model, block for block, and an unchanged buffer is left alone.
+#[test]
+fn sync_changed_block_edits_make_the_buffer_read_as_the_model() {
+    use content::sync::{apply_edits, changed_block_edits, container_parts, regions};
+    seed_pairs("changed block edits", |a, b, grammar| {
+        let model = serialize_document(&assign(b, grammar));
+        let edits = changed_block_edits(a, &model);
+        let got = apply_edits(a, &edits);
+        // Both are read flat, as the function reads them.
+        let parts = |text: &str| container_parts(&parse_document(text).expect("parses"));
+        if !regions(&parts(&got), &parts(&model)).is_empty() {
+            return Err(format!("edits give\n{got}\n--- which does not read as\n{model}"));
+        }
+        if !changed_block_edits(&model, &model).is_empty() {
+            return Err("a text differs from itself".to_string());
+        }
+        Ok(())
+    });
+}
+
+/// L10 on the model side: the model has a second list of the same kind right
+/// after each list of the buffer's (so its canonical text holds the `<!-- -->`
+/// separator the parser reads away). The edits carry the separator, and the
+/// buffer reads as the model. The count says how many seeds exercise the pair.
+#[test]
+fn sync_changed_block_edits_keep_list_separators() {
+    use content::sync::{apply_edits, changed_block_edits, container_parts, regions};
+    type Elements = im::Vector<schema::Spanned<ContentElement>>;
+    fn duplicate_lists(elements: &Elements, count: &mut usize) -> Elements {
+        let mut out = Elements::new();
+        for element in elements {
+            out.push_back(element.clone());
+            if matches!(element.node, ContentElement::List { .. }) {
+                out.push_back(element.clone());
+                *count += 1;
+            }
+        }
+        out
+    }
+    let parts = |text: &str| container_parts(&parse_document(text).expect("parses"));
+    let (mut exercised, mut runs) = (0, 0);
+    let mut failures = Vec::new();
+    for (name, grammar) in grammars() {
+        for seed in SEEDS {
+            let src = gen_source(seed);
+            let mut doc = assign(&src, &grammar);
+            let mut duplicated = 0;
+            doc.unassigned = duplicate_lists(&doc.unassigned, &mut duplicated);
+            doc.body = duplicate_lists(&doc.body, &mut duplicated);
+            let model = serialize_document(&doc);
+            runs += 1;
+            // The pair is exercised when the model writes a separator.
+            if duplicated > 0 && model.contains("\n<!-- -->\n") {
+                exercised += 1;
+            }
+            let edits = changed_block_edits(&src, &model);
+            let got = apply_edits(&src, &edits);
+            if !regions(&parts(&got), &parts(&model)).is_empty() {
+                failures.push(format!("[{name}] seed {seed}\n--- buffer ---\n{src}\n--- model ---\n{model}\n--- edits give ---\n{got}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} of {runs} failed; first:\n{}", failures.len(), failures[0]);
+    assert!(exercised > 500, "too few seeds with a separator in the model: {exercised} of {runs}");
+}
+
 /// Guard against a generator change silently shrinking the domain.
 #[test]
 fn generator_exercises_unassigned_bound_and_body() {
