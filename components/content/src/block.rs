@@ -41,10 +41,9 @@ impl ContentElement {
     /// - Paragraph, Link → `text`
     /// - Heading → its markdown source (canonical inlines plus ` {#marker}`;
     ///   stage 4e replaces this with node edits)
-    /// - List → `source`
     /// - CodeBlock → `code`
     ///
-    /// A blockquote holds blocks (ADR-059 §13), not a text.
+    /// A blockquote and a list hold blocks (ADR-059 §13), not a text.
     pub fn text(&self) -> Option<Cow<'_, str>> {
         match self {
             ContentElement::Heading { content, marker, .. } => {
@@ -53,9 +52,9 @@ impl ContentElement {
             ContentElement::Paragraph { content, marker } => {
                 Some(Cow::Owned(crate::inline::paragraph_source_text(content, marker.as_ref())))
             }
-            ContentElement::List { source } => Some(Cow::Borrowed(source)),
             ContentElement::CodeBlock { code, .. } => Some(Cow::Borrowed(code)),
             ContentElement::Blockquote { .. }
+            | ContentElement::List { .. }
             | ContentElement::Table { .. }
             | ContentElement::Separator
             | ContentElement::HtmlBlock { .. }
@@ -90,12 +89,12 @@ impl ContentElement {
                 Some(ContentElement::heading_from_markdown(*level, &text))
             }
             ContentElement::Paragraph { .. } => Some(ContentElement::paragraph_from_markdown(&text)),
-            ContentElement::List { .. } => Some(ContentElement::List { source: text }),
             ContentElement::CodeBlock { language, .. } => Some(ContentElement::CodeBlock {
                 language: language.clone(),
                 code: text,
             }),
             ContentElement::Blockquote { .. }
+            | ContentElement::List { .. }
             | ContentElement::Table { .. }
             | ContentElement::Separator
             | ContentElement::HtmlBlock { .. }
@@ -413,11 +412,9 @@ mod tests {
     }
 
     #[test]
-    fn text_and_with_text_cover_list_and_paragraph() {
+    fn text_and_with_text_cover_code_and_paragraph() {
         let cases = [
-            ContentElement::List {
-                source: "- a".to_string(),
-            },
+            ContentElement::CodeBlock { language: None, code: "x".to_string() },
             paragraph("p"),
         ];
         for el in cases {
@@ -431,8 +428,9 @@ mod tests {
     fn with_text_and_text_none_for_non_text_kinds() {
         let cases = [
             table(&["h"], &[&["c"]]),
-            // A quote holds blocks, not a text (ADR-059 §13).
+            // A quote and a list hold blocks, not a text (ADR-059 §13).
             quote_of_text("q"),
+            parse_one("- a\n- b"),
             ContentElement::Separator,
             ContentElement::LinkExpression {
                 text: LinkText::Empty,

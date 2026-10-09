@@ -8,9 +8,8 @@
 
 use crate::constants::{ATTR_ADDRESS, ATTR_FILE, ATTR_MD, ATTR_SLOT, CLASS_HTML_REMOVED, MSG_HTML_REMOVED};
 use crate::dom::{Element, Form, Node};
-use crate::markdown_nodes::inline_children;
 use content::inline::Inlines;
-use content::{Align, BlockShape, ContentElement};
+use content::{Align, BlockShape, ContentElement, List, ListKind, Spacing};
 use schema::Spanned;
 
 /// What a block is in the page: a block directly under the body, which is a
@@ -27,6 +26,10 @@ pub(crate) enum BlockRole<'a> {
     },
     /// Carries no `data-presemble-*` attribute.
     Nested,
+    /// A block directly in an item of a tight list: carries no
+    /// `data-presemble-*` attribute either, and a paragraph renders its inline
+    /// nodes without a `<p>` (CommonMark).
+    TightItem,
 }
 
 impl BlockRole<'_> {
@@ -77,6 +80,9 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
         // `<a>`, a lone image an `<img>`, never wrapped in a `<p>`; anything
         // else is a `<p>` of its inline nodes. A paragraph with a marker is
         // misuse and is text.
+        ContentElement::Paragraph { content, .. } if matches!(role, BlockRole::TightItem) => {
+            crate::inline_nodes::inline_nodes(content)
+        }
         ContentElement::Paragraph { content, marker } => match BlockShape::of(content) {
             BlockShape::SoleLink(parts) if marker.is_none() => {
                 let mut attrs = slot_attrs(role);
@@ -132,8 +138,25 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
                 .flat_map(|block| block_nodes(&block.node, &BlockRole::Nested))
                 .collect(),
         )],
-        ContentElement::List { source } => {
-            vec![el("div", slot_attrs(role), inline_children(source))]
+        // `<ul>` or `<ol>` (with `start` unless it is 1) of `<li>`s, each its
+        // blocks. The list carries the slot attributes; the blocks in a tight
+        // item render without a `<p>`.
+        ContentElement::List { list } => {
+            let mut attrs = slot_attrs(role);
+            let name = match list.kind {
+                ListKind::Bullet => "ul",
+                ListKind::Ordered { start } => {
+                    if start != 1 {
+                        attrs.push(attr("start", start.to_string()));
+                    }
+                    "ol"
+                }
+            };
+            let items = list_items_nodes(list)
+                .into_iter()
+                .map(|blocks| el("li", Vec::new(), blocks))
+                .collect();
+            vec![el(name, attrs, items)]
         }
         ContentElement::LinkExpression { .. } => Vec::new(),
         // Cells render through their inline nodes; a column that declares an
@@ -165,6 +188,17 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
             vec![el("table", slot_attrs(role), vec![head, body])]
         }
     }
+}
+
+/// The blocks of each item of `list` as nodes, one `Vec` per item: how a
+/// template sees a list slot (an item is its blocks, as in the page). The
+/// blocks of a tight list's items render without a `<p>`.
+pub(crate) fn list_items_nodes(list: &List) -> Vec<Vec<Node>> {
+    let role = if list.spacing == Spacing::Tight { BlockRole::TightItem } else { BlockRole::Nested };
+    list.items
+        .iter()
+        .map(|item| item.elements.iter().flat_map(|block| block_nodes(&block.node, &role)).collect())
+        .collect()
 }
 
 /// The nodes for one body block. In editorial output the block carries its
@@ -283,6 +317,60 @@ mod tests {
             assert!(html.contains(&expected), "{expected} in {html}");
         }
         assert!(html.contains("<th>d</th>") && html.contains("<td>4</td>"), "{html}");
+    }
+
+    /// The list `md` reads as, rendered as a body block.
+    fn list_html(md: &str) -> String {
+        let el = content::parse_document(md).unwrap().elements[0].node.clone();
+        assert!(matches!(el, ContentElement::List { .. }), "{md:?}: {el:?}");
+        render(el)
+    }
+
+    /// A list is a `<ul>` or an `<ol>` of `<li>`s; the list carries the slot
+    /// attributes (the `<div>` wrapper is gone), a loose list's items hold
+    /// `<p>`s, and an item holds its blocks, nested lists and quotes included.
+    #[test]
+    fn list_renders_ul_ol_and_li() {
+        assert_eq!(list_html("- a\n- b"), r#"<ul data-presemble-slot="body"><li>a</li><li>b</li></ul>"#);
+        assert_eq!(list_html("1. a\n2. b"), r#"<ol data-presemble-slot="body"><li>a</li><li>b</li></ol>"#);
+        assert_eq!(
+            list_html("- a\n\n- b"),
+            r#"<ul data-presemble-slot="body"><li><p>a</p></li><li><p>b</p></li></ul>"#
+        );
+        assert_eq!(
+            list_html("- a\n  - b"),
+            r#"<ul data-presemble-slot="body"><li>a<ul><li>b</li></ul></li></ul>"#
+        );
+        // A paragraph and a quote are two blocks that are not lists: loose.
+        assert_eq!(
+            list_html("- a\n  > q"),
+            r#"<ul data-presemble-slot="body"><li><p>a</p><blockquote><p>q</p></blockquote></li></ul>"#
+        );
+        assert_eq!(
+            list_html("- a\n\n  b\n- c"),
+            r#"<ul data-presemble-slot="body"><li><p>a</p><p>b</p></li><li><p>c</p></li></ul>"#
+        );
+    }
+
+    /// CommonMark: the paragraph of a tight item has no `<p>`; the inline nodes
+    /// are the item's content. Blocks other than the paragraph render as they
+    /// do anywhere.
+    #[test]
+    fn tight_item_paragraph_has_no_p() {
+        let html = list_html("- a *b* [c](/c)\n- ```\n  x\n  ```");
+        assert_eq!(
+            html,
+            r#"<ul data-presemble-slot="body"><li>a <em>b</em> <a href="/c">c</a></li><li><pre><code>x</code></pre></li></ul>"#
+        );
+        assert!(!html.contains("<p>"), "{html}");
+    }
+
+    /// The `start` of an ordered list is written only when it is not 1.
+    #[test]
+    fn ordered_start_renders_only_when_not_1() {
+        assert_eq!(list_html("3. a"), r#"<ol data-presemble-slot="body" start="3"><li>a</li></ol>"#);
+        assert_eq!(list_html("0. a"), r#"<ol data-presemble-slot="body" start="0"><li>a</li></ol>"#);
+        assert_eq!(list_html("1. a"), r#"<ol data-presemble-slot="body"><li>a</li></ol>"#);
     }
 
     #[test]

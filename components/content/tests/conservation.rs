@@ -43,7 +43,9 @@
 //! - L10: lists alternate kinds within section 0 and within the body, so no
 //!   two same-kind lists can become adjacent on save; a list directly after a
 //!   comment may repeat the kind, because the comment (its leading trivia)
-//!   keeps the two apart wherever the list is written;
+//!   keeps the two apart wherever the list is written. (Lists nested in an
+//!   item or a quote are alone in their container: `gen_item_blocks`.)
+//!   Stage 9.2 removes this exclusion;
 //! - L12 is resolved (ADR-062): HTML blocks and comments are in the domain;
 //! - L14: HTML blocks of types 1–5 always have their end condition, so none
 //!   runs to the end of the file;
@@ -53,6 +55,10 @@
 //!
 //! Containers (table cells, list items, blockquotes) hold links and images:
 //! those stay inside their container (`OTHER_BLOCKS`, `gen_list`).
+//!
+//! Lists hold items of blocks (ADR-059 stage 9): tight and loose, any bullet
+//! and numbering, nested, with quotes, code, headings, comments and empty
+//! items in them (`gen_list_of_kind`); the guard test counts each.
 //!
 //! Paragraphs hold inline nodes (ADR-059 stage 5), so the domain has inline
 //! pools: images and links inside text, a leading link followed by text, and
@@ -227,23 +233,109 @@ const COMMENTS: &[&str] = &[
     "<!-- a --> <!-- b -->",
 ];
 
+/// The text an item starts with: words, links, images, code, a paragraph of
+/// two lines.
+const ITEM_TEXTS: &[&str] = &[
+    "a",
+    "b c",
+    "[l](/post/l)",
+    "`code`",
+    "![i](a.png)",
+    "see [l](/post/l) now",
+    "*em* and **strong**",
+    "two\nlines",
+];
+
 /// A list whose kind is the opposite of `previous_ordered` (limit L10),
 /// unless it directly follows a comment, which keeps two same-kind lists
 /// apart; then the kind is random.
 fn gen_list(rng: &mut Rng, previous_ordered: &mut Option<bool>, after_comment: bool) -> String {
     let ordered = match *previous_ordered {
-        Some(previous) if !after_comment => !previous,
-        _ => rng.chance(50),
+        // A comment keeps two lists of one kind apart: often repeat the kind.
+        Some(previous) if after_comment => previous == rng.chance(80),
+        Some(previous) => !previous,
+        None => rng.chance(50),
     };
     *previous_ordered = Some(ordered);
+    gen_list_of_kind(rng, ordered, 0)
+}
+
+/// A list of 1 to 3 items (ADR-059 stage 9): tight or loose; with any bullet
+/// (`-`, `*`, `+`) or any numbering (`.` or `)`, from 0, 1, 3, 9 or 10, counting
+/// or all the same number); each item holding a paragraph and then, below
+/// `depth` 2, sometimes a list of its own, and in a loose item quotes, code,
+/// comments and more paragraphs. `depth` is how many lists are open around it.
+fn gen_list_of_kind(rng: &mut Rng, ordered: bool, depth: usize) -> String {
+    let loose = rng.chance(30);
+    let bullet = rng.pick(&["-", "-", "*", "+"]);
+    let delimiter = rng.pick(&[".", ".", ")"]);
+    // A nested list straight after an item's paragraph must be able to
+    // interrupt it (CommonMark): an ordered one starts at 1 and its first item
+    // is not empty. (Otherwise it is paragraph text, and its lines hold
+    // whatever the generator put there, an inline comment at the start of a
+    // line included, which a paragraph cannot write back.)
+    let start: u64 = if depth > 0 { 1 } else { [1, 1, 1, 0, 3, 9, 10][rng.below(7)] };
+    let constant = ordered && rng.chance(15);
     let n = 1 + rng.below(3);
+    let separator = if loose { "\n\n" } else { "\n" };
     (0..n)
         .map(|i| {
-            let item = rng.pick(&["a", "b c", "[l](/post/l)", "`code`", "![i](a.png)", "see [l](/post/l) now"]);
-            if ordered { format!("{}. {item}", i + 1) } else { format!("- {item}") }
+            let marker = if ordered {
+                let number = if constant { start } else { start + i as u64 };
+                format!("{number}{delimiter}")
+            } else {
+                bullet.to_string()
+            };
+            let indent = " ".repeat(marker.len() + 1);
+            let body = gen_item_blocks(rng, loose, depth, i > 0 || depth == 0).join(separator);
+            let mut item = marker;
+            for (at, line) in body.split('\n').enumerate() {
+                if at == 0 {
+                    if !line.is_empty() {
+                        item.push(' ');
+                        item.push_str(line);
+                    }
+                } else {
+                    item.push('\n');
+                    if !line.is_empty() {
+                        item.push_str(&indent);
+                        item.push_str(line);
+                    }
+                }
+            }
+            item
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(separator)
+}
+
+/// The blocks of one item, as markdown not yet indented. A tight item is a
+/// paragraph, maybe a nested list and maybe a comment; an empty item is
+/// possible.
+fn gen_item_blocks(rng: &mut Rng, loose: bool, depth: usize, may_be_empty: bool) -> Vec<String> {
+    let mut blocks = Vec::new();
+    if may_be_empty && rng.chance(5) {
+        return blocks;
+    }
+    blocks.push(rng.pick(ITEM_TEXTS).to_string());
+    if depth < 2 && rng.chance(25) {
+        let ordered = rng.chance(50);
+        blocks.push(gen_list_of_kind(rng, ordered, depth + 1));
+    }
+    if loose {
+        for _ in 0..rng.below(3) {
+            blocks.push(match rng.below(5) {
+                0 => "> see [a](/a) here".to_string(),
+                1 => "```\nlet x = 1;\n```".to_string(),
+                2 => rng.pick(COMMENTS).to_string(),
+                3 => rng.pick(&["a", "b c"]).to_string(),
+                _ => "### Section".to_string(),
+            });
+        }
+    } else if rng.chance(10) {
+        blocks.push(rng.pick(COMMENTS).to_string());
+    }
+    blocks
 }
 
 /// Prefix every line of `block` as a blockquote line: `> text`, or `>` for a
@@ -585,6 +677,8 @@ fn generator_exercises_unassigned_bound_and_body() {
     let mut commented_adjacent_lists = 0;
     let (mut quote_count, mut empty_quotes, mut quote_comments) = (0, 0, 0);
     let (mut multi_block_quotes, mut quoted_non_paragraphs, mut nested_quotes) = (0, 0, 0);
+    let mut list_stats = ListStats::default();
+    let (mut star_bullets, mut plus_bullets, mut paren_numbers) = (0, 0, 0);
     let is_html =|e: &schema::Spanned<ContentElement>| matches!(e.node, ContentElement::HtmlBlock { .. });
     for seed in SEEDS {
         let src = gen_source(seed);
@@ -598,22 +692,21 @@ fn generator_exercises_unassigned_bound_and_body() {
         end_body +=
             doc.comments.iter().filter(|c| c.anchor == CommentAnchor::End(Container::Body)).count();
         // Two same-kind lists with only comments between them.
-        let blocks: Vec<&str> = src.split("\n\n").collect();
-        for (i, block) in blocks.iter().enumerate() {
-            let kind = |b: &str| {
-                if b.starts_with("- ") {
-                    Some(false)
-                } else if b.starts_with("1. ") {
-                    Some(true)
-                } else {
-                    None
+        for (container, elements) in
+            [(Container::Unassigned, &doc.unassigned), (Container::Body, &doc.body)]
+        {
+            let is_ordered = |e: &schema::Spanned<ContentElement>| match &e.node {
+                ContentElement::List { list } => {
+                    Some(matches!(list.kind, content::ListKind::Ordered { .. }))
                 }
+                _ => None,
             };
-            if let Some(k) = kind(block) {
-                let rest = &blocks[i + 1..];
-                let after_comments = rest.iter().skip_while(|b| b.starts_with("<!--")).next();
-                let skipped = rest.iter().take_while(|b| b.starts_with("<!--")).count();
-                if skipped > 0 && after_comments.and_then(|b| kind(b)) == Some(k) {
+            for (at, pair) in elements.iter().collect::<Vec<_>>().windows(2).enumerate() {
+                let between = doc
+                    .comments
+                    .iter()
+                    .any(|c| c.anchor == CommentAnchor::Before(container.clone(), at + 1));
+                if between && is_ordered(pair[0]).is_some() && is_ordered(pair[0]) == is_ordered(pair[1]) {
                     commented_adjacent_lists += 1;
                 }
             }
@@ -629,6 +722,61 @@ fn generator_exercises_unassigned_bound_and_body() {
                     quotes(blocks.elements.iter(), out);
                 }
             }
+        }
+        // Lists, wherever they are (ADR-059 stage 9): in a quote, in an item.
+        fn lists<'a>(
+            elements: impl Iterator<Item = &'a schema::Spanned<ContentElement>>,
+            in_quote: bool,
+            in_item: bool,
+            out: &mut ListStats,
+        ) {
+            for e in elements {
+                match &e.node {
+                    ContentElement::Blockquote { blocks } => {
+                        out.quotes_in_items += usize::from(in_item);
+                        lists(blocks.elements.iter(), true, in_item, out);
+                    }
+                    ContentElement::List { list } => {
+                        out.lists += 1;
+                        out.in_quotes += usize::from(in_quote);
+                        out.nested += usize::from(in_item);
+                        out.loose += usize::from(list.spacing == content::Spacing::Loose);
+                        out.starts_other_than_1 += usize::from(matches!(
+                            list.kind,
+                            content::ListKind::Ordered { start } if start != 1
+                        ));
+                        for item in &list.items {
+                            out.empty_items += usize::from(item.elements.is_empty() && item.comments.is_empty());
+                            out.multi_block_items += usize::from(item.elements.len() > 1);
+                            out.item_comments += item.comments.len();
+                            out.items_with_non_paragraphs += item
+                                .elements
+                                .iter()
+                                .filter(|b| {
+                                    !matches!(b.node, ContentElement::Paragraph { .. } | ContentElement::List { .. })
+                                })
+                                .count();
+                            lists(item.elements.iter(), in_quote, true, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        lists(
+            doc.preamble.iter().flat_map(|s| s.elements.iter()).chain(doc.unassigned.iter()).chain(doc.body.iter()),
+            false,
+            false,
+            &mut list_stats,
+        );
+        for line in src.lines() {
+            let t = line.trim_start().trim_start_matches(['>', ' ']);
+            star_bullets += usize::from(t.starts_with("* "));
+            plus_bullets += usize::from(t.starts_with("+ "));
+            paren_numbers += usize::from(
+                t.trim_start_matches(|c: char| c.is_ascii_digit()).starts_with(") ")
+                    && t.starts_with(|c: char| c.is_ascii_digit()),
+            );
         }
         let mut all_quotes: Vec<&content::Blocks> = Vec::new();
         quotes(doc.unassigned.iter().chain(doc.body.iter()), &mut all_quotes);
@@ -720,6 +868,35 @@ fn generator_exercises_unassigned_bound_and_body() {
     assert!(multi_block_quotes > 100, "too few quotes of several blocks: {multi_block_quotes}");
     assert!(quoted_non_paragraphs > 200, "too few non-paragraph blocks in quotes: {quoted_non_paragraphs}");
     assert!(nested_quotes > 30, "too few nested quotes: {nested_quotes}");
+    // The list domain (ADR-059 stage 9).
+    let s = &list_stats;
+    assert!(s.lists > 1000, "too few lists: {s:?}");
+    assert!(s.nested > 100, "too few lists inside items: {s:?}");
+    assert!(s.in_quotes > 50, "too few lists inside quotes: {s:?}");
+    assert!(s.loose > 200, "too few loose lists: {s:?}");
+    assert!(s.starts_other_than_1 > 100, "too few ordered lists that do not start at 1: {s:?}");
+    assert!(s.multi_block_items > 100, "too few items of several blocks: {s:?}");
+    assert!(s.items_with_non_paragraphs > 100, "too few items holding a quote, code, heading...: {s:?}");
+    assert!(s.quotes_in_items > 20, "too few quotes inside items: {s:?}");
+    assert!(s.item_comments > 20, "too few comments inside items: {s:?}");
+    assert!(s.empty_items > 10, "too few empty items: {s:?}");
+    assert!(star_bullets > 100 && plus_bullets > 100, "too few `*` and `+` bullets: {star_bullets} {plus_bullets}");
+    assert!(paren_numbers > 50, "too few `1)` numbers: {paren_numbers}");
+}
+
+/// What the generated lists hold, counted over the model.
+#[derive(Debug, Default)]
+struct ListStats {
+    lists: usize,
+    nested: usize,
+    in_quotes: usize,
+    loose: usize,
+    starts_other_than_1: usize,
+    multi_block_items: usize,
+    items_with_non_paragraphs: usize,
+    quotes_in_items: usize,
+    item_comments: usize,
+    empty_items: usize,
 }
 
 /// A literal marker is never marker misuse: in section 0 every

@@ -72,6 +72,16 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                         }
                         // Does not decode — fall through to Record
                     }
+                    // A list slot is its items, each the item's blocks as
+                    // nodes (ADR-059 stage 9), as on the data path.
+                    "list" => {
+                        if let Ok(content::ContentElement::List { list }) =
+                            content_store::block_from_node(store, id)
+                        {
+                            return template::Value::List(template::data::list_item_values(&list));
+                        }
+                        // Does not decode — fall through to Record
+                    }
                     _ => {}
                 }
 
@@ -442,6 +452,28 @@ mod tests {
         let html = template::serialize_nodes(nodes);
         assert!(html.starts_with("Body <em>text</em> with <code>&lt;div&gt;</code> and <img "), "{html}");
         assert_eq!(val.display_text().as_deref(), Some("Body text with <div> and ."));
+    }
+
+    /// A stored list is its items, each the item's blocks as nodes (ADR-059
+    /// stage 9), as the data path gives them.
+    #[test]
+    fn node_to_value_list_is_its_items_as_nodes() {
+        let mut store = NodeStore::new();
+        let list = content::parse_document("3. one\n4. **two**\n   - nested")
+            .unwrap()
+            .elements[0]
+            .node
+            .clone();
+        let id = content_store::block_to_store(&list, &mut store);
+
+        let val = node_to_value(&store, id);
+        let template::Value::List(items) = &val else { panic!("{val:?}") };
+        assert_eq!(items.len(), 2);
+        let text = |v: &template::Value| v.display_text();
+        assert_eq!(text(&items[0]).as_deref(), Some("one"));
+        assert_eq!(text(&items[1]).as_deref(), Some("twonested"));
+        let template::Value::Nodes(nodes) = &items[1] else { panic!("{:?}", items[1]) };
+        assert_eq!(template::serialize_nodes(nodes), "<strong>two</strong><ul><li>nested</li></ul>");
     }
 
     #[test]

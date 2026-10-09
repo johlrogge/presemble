@@ -1,6 +1,6 @@
 use crate::document::{
     Align, Blocks, Column, Comment, ContentElement, Document, FlatDocument, Keyword, LinkTarget,
-    LinkText,
+    LinkText, List, ListKind, Spacing,
 };
 use std::borrow::Cow;
 use crate::error::ContentError;
@@ -314,11 +314,11 @@ fn read_pulldown_link_expression(expr: &str) -> Option<(LinkText, LinkTarget)> {
 /// For the structured slotted form, use [`parse_and_assign`] instead.
 pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     let event_iter = Parser::new_ext(input, MARKDOWN_OPTIONS).into_offset_iter();
-    // The blocks read so far at the top level, and the open blockquotes
-    // (innermost last) with the range of their opening: blocks go to the
-    // innermost open container (ADR-059 §13).
+    // The blocks read so far at the top level, and the open containers
+    // (innermost last): blocks go to the innermost open blockquote or list
+    // item (ADR-059 §13).
     let mut root = Blocks::default();
-    let mut open: Vec<(Blocks, std::ops::Range<usize>)> = Vec::new();
+    let mut open: Vec<Open> = Vec::new();
 
     enum State {
         /// Between blocks of the innermost open container.
@@ -329,12 +329,17 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             level: HeadingLevel,
             byte_range: std::ops::Range<usize>,
         },
-        /// A paragraph, at the top level or directly in a blockquote, keeps its events (with their source ranges)
-        /// until it ends: its content is read from them, and nothing is
-        /// extracted or dropped (ADR-059 §5).
+        /// A paragraph, at the top level or directly in a container, keeps its
+        /// events (with their source ranges) until it ends: its content is
+        /// read from them, and nothing is extracted or dropped (ADR-059 §5).
+        ///
+        /// In a tight list item the paragraph has no tag of its own (CommonMark
+        /// leaves it out): it is `implicit`, starts at the first inline event
+        /// and ends at the next block or at the end of the item.
         Paragraph {
             events: Vec<(Event<'static>, std::ops::Range<usize>)>,
             byte_range: std::ops::Range<usize>,
+            implicit: bool,
         },
         CodeBlock {
             language: Option<String>,
@@ -358,12 +363,9 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         HtmlBlock {
             byte_range: std::ops::Range<usize>,
         },
-        List {
-            byte_range: std::ops::Range<usize>,
-            depth: u32,
-        },
-        /// A whole paragraph (top level or directly in a blockquote) recognised from its source as a link
-        /// expression (ADR-058); every event up to its end is ignored.
+        /// A whole paragraph (top level or directly in a container) recognised
+        /// from its source as a link expression (ADR-058); every event up to
+        /// its end is ignored.
         LinkExpression {
             text: LinkText,
             target: LinkTarget,
@@ -391,36 +393,6 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             continue;
         }
 
-        // A list is captured as raw source: every event inside it (links,
-        // images, headings, code, tables, nested lists, ...) is consumed here
-        // so none of them can replace the list state and lose its content.
-        if let State::List { byte_range, depth } = &mut state {
-            let nesting = match event {
-                Event::Start(Tag::List(_)) => Nesting::Opens,
-                Event::End(TagEnd::List(_)) => Nesting::Closes,
-                _ => Nesting::Inside,
-            };
-            let closed = capture_closes(depth, nesting);
-            if closed {
-                // Extract raw markdown source for the list block (without the
-                // quote markers of the quotes it sits in).
-                let start = byte_range.start;
-                let end = range.end;
-                let source = input
-                    .get(start..end)
-                    .map(|s| unquoted(s, open.len()).trim().to_string())
-                    .unwrap_or_default();
-                if !source.is_empty() {
-                    current(&mut root, &mut open).elements.push_back(Spanned {
-                        node: ContentElement::List { source },
-                        span: Span { start, end },
-                    });
-                }
-                state = State::Idle;
-            }
-            continue;
-        }
-
         // A table cell collects its inline events up to the cell's end; the
         // table's own structure events are handled below.
         if let State::Table { cell_events, .. } = &mut state
@@ -436,25 +408,37 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             continue;
         }
 
-        // A paragraph collects its events up to its end.
-        if let State::Paragraph { events, .. } = &mut state {
-            if matches!(event, Event::End(TagEnd::Paragraph)) {
-                if let State::Paragraph { events, byte_range } =
+        // A paragraph collects its events up to its end. One without a tag of
+        // its own (in a tight list item) also ends where the next block
+        // starts, or where its item ends; that event is then handled below.
+        if let State::Paragraph { implicit, .. } = &state {
+            let ends = matches!(event, Event::End(TagEnd::Paragraph))
+                || (*implicit && ends_implicit_paragraph(&event));
+            if ends {
+                let explicit_end = matches!(event, Event::End(TagEnd::Paragraph));
+                if let State::Paragraph { events, byte_range, implicit } =
                     std::mem::replace(&mut state, State::Idle)
                 {
-                    let depth = open.len();
-                    finish_paragraph(
-                        input,
-                        events,
-                        byte_range,
-                        depth,
-                        &mut current(&mut root, &mut open).elements,
-                    );
+                    let prefixes = open_prefixes(&open);
+                    let elements = &mut current(&mut root, &mut open).elements;
+                    if implicit {
+                        finish_implicit_paragraph(input, events, byte_range, &prefixes, elements);
+                    } else {
+                        finish_paragraph(input, events, byte_range, &prefixes, elements);
+                    }
+                }
+                if explicit_end {
+                    continue;
                 }
             } else {
-                events.push((event.into_static(), range));
+                if let State::Paragraph { events, byte_range, implicit } = &mut state {
+                    if *implicit {
+                        byte_range.end = range.end;
+                    }
+                    events.push((event.into_static(), range));
+                }
+                continue;
             }
-            continue;
         }
 
         // A heading is captured as source: its inline events (text, code,
@@ -462,7 +446,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         if let State::Heading { level, byte_range } = &state {
             if matches!(event, Event::End(TagEnd::Heading(_))) {
                 let raw = input.get(byte_range.clone()).unwrap_or_default();
-                let source = heading_source(&unquoted(raw, open.len()));
+                let source = heading_source(&container_source(raw, &open_prefixes(&open)));
                 // The heading's own line read as one heading's content: a
                 // failure here is a bug in the reading, not a parse error.
                 // Disk input must never take the server down, so release
@@ -498,22 +482,45 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
 
             Event::Start(Tag::Paragraph) => {
+                // A paragraph directly in a list item: the list is loose
+                // (pulldown leaves the tag out of a tight list's items).
+                if let [.., Open::List { loose, .. }, Open::Item { .. }] = open.as_mut_slice() {
+                    *loose = true;
+                }
                 // A paragraph whose whole source is a link expression
-                // (ADR-058), at the top level or directly in a blockquote
-                // (the quote markers are not part of the source). If it does
-                // not parse it stays a paragraph; the validator reports it.
-                let link_expression = input
-                    .get(range.clone())
-                    .and_then(|raw| read_link_expression_paragraph(&unquoted(raw, open.len())));
+                // (ADR-058), at the top level or directly in a container
+                // (the container prefixes are not part of the source). If it
+                // does not parse it stays a paragraph; the validator reports
+                // it.
+                let link_expression = input.get(range.clone()).and_then(|raw| {
+                    read_link_expression_paragraph(&container_source(raw, &open_prefixes(&open)))
+                });
                 if let Some((text, target, slot)) = link_expression {
                     state = State::LinkExpression { text, target, slot, byte_range: range };
                 } else {
-                    state = State::Paragraph { events: Vec::new(), byte_range: range };
+                    state = State::Paragraph { events: Vec::new(), byte_range: range, implicit: false };
                 }
             }
 
-            // Inline content is captured by the block that holds it (a
-            // paragraph, heading, table cell or list item), so a link or an
+            // Inline content in a tight list item has no paragraph tag around
+            // it: the paragraph starts with the first inline event.
+            Event::Text(_)
+            | Event::Code(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::InlineHtml(_)
+            | Event::Start(
+                Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. },
+            ) if matches!(state, State::Idle) && matches!(open.last(), Some(Open::Item { .. })) => {
+                state = State::Paragraph {
+                    events: vec![(event.into_static(), range.clone())],
+                    byte_range: range,
+                    implicit: true,
+                };
+            }
+
+            // Anywhere else, inline content is captured by the block that
+            // holds it (a paragraph, heading, table cell), so a link or an
             // image never reaches here: there is no block of its own to start.
             Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
                 debug_assert!(
@@ -527,31 +534,84 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     matches!(state, State::Idle),
                     "invariant: a blockquote starts between blocks"
                 );
-                open.push((Blocks::default(), range));
+                let col = column_of(input, range.start) + 1 + usize::from(input[range.start..].starts_with("> "));
+                open.push(Open::Quote { blocks: Blocks::default(), range, col });
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 debug_assert!(
                     matches!(state, State::Idle),
                     "invariant: a blockquote ends between blocks"
                 );
-                if let Some((blocks, opened)) = open.pop() {
+                if let Some(Open::Quote { blocks, range: opened, .. }) = open.pop() {
                     // An empty quote is kept (ADR-059 §13).
                     current(&mut root, &mut open).elements.push_back(Spanned {
                         node: ContentElement::Blockquote { blocks },
                         span: Span::from(opened),
                     });
+                } else {
+                    debug_assert!(false, "invariant: a blockquote ends the blockquote that is open");
                 }
             }
 
-            // An HTML block becomes an element at any depth; lists and link
-            // expressions consume their events at the top of the loop.
+            // A list is a container of items, each a container of blocks
+            // (ADR-059 §13). The list frame holds the items; blocks go to the
+            // item.
+            Event::Start(Tag::List(first)) => {
+                debug_assert!(
+                    matches!(state, State::Idle),
+                    "invariant: a list starts between blocks"
+                );
+                let kind = match first {
+                    Some(start) => ListKind::Ordered { start },
+                    None => ListKind::Bullet,
+                };
+                open.push(Open::List { kind, loose: false, items: Vec::new(), range });
+            }
+            Event::Start(Tag::Item) => {
+                let col = item_content_column(input, range.start);
+                open.push(Open::Item { blocks: Blocks::default(), col });
+            }
+            Event::End(TagEnd::Item) => {
+                debug_assert!(
+                    matches!(state, State::Idle),
+                    "invariant: an item ends between blocks"
+                );
+                if let Some(Open::Item { blocks, .. }) = open.pop() {
+                    if let Some(Open::List { items, .. }) = open.last_mut() {
+                        items.push(blocks);
+                    } else {
+                        debug_assert!(false, "invariant: an item is in a list");
+                    }
+                } else {
+                    debug_assert!(false, "invariant: an item ends the item that is open");
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                debug_assert!(
+                    matches!(state, State::Idle),
+                    "invariant: a list ends between blocks"
+                );
+                if let Some(Open::List { kind, loose, items, range: opened }) = open.pop() {
+                    let spacing = if loose { Spacing::Loose } else { Spacing::Tight };
+                    let list = List { kind, spacing, items }.normalised();
+                    current(&mut root, &mut open).elements.push_back(Spanned {
+                        node: ContentElement::List { list },
+                        span: Span::from(opened),
+                    });
+                } else {
+                    debug_assert!(false, "invariant: a list ends the list that is open");
+                }
+            }
+
+            // An HTML block becomes an element at any depth; link expressions
+            // consume their events at the top of the loop.
             Event::Start(Tag::HtmlBlock) if matches!(state, State::Idle) => {
                 state = State::HtmlBlock { byte_range: range };
             }
             Event::End(TagEnd::HtmlBlock) => {
                 if let State::HtmlBlock { byte_range } = state {
                     let raw = input.get(byte_range.clone()).unwrap_or_default();
-                    let source = unquoted(raw, open.len());
+                    let source = container_source(raw, &open_prefixes(&open));
                     let source = source.trim();
                     // Comment-only HTML is trivia of the element that follows
                     // it (ADR-062 D1), not content.
@@ -568,15 +628,6 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     }
                     state = State::Idle;
                 }
-            }
-
-            Event::Start(Tag::List(_)) => {
-                // Everything up to the matching end is consumed by the list
-                // capture at the top of the loop.
-                state = State::List {
-                    byte_range: range,
-                    depth: 1,
-                };
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -628,13 +679,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 }
             }
             Event::End(TagEnd::TableRow) => {
-                let depth = open.len();
+                let prefixes = open_prefixes(&open);
                 if let State::Table { ref mut rows, ref mut current_row, ref headers, .. } = state {
                     let mut row = std::mem::take(current_row);
                     // GFM keeps no cell beyond the header's width: the rest
                     // are read from the row's source (L16).
                     let raw = input.get(range.clone()).unwrap_or_default();
-                    let source = unquoted(raw, depth);
+                    let source = container_source(raw, &prefixes);
                     let cells = table_row_cells(&source);
                     if cells.len() > headers.len() {
                         row.resize_with(headers.len(), empty_cell);
@@ -677,25 +728,96 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
     Ok(root)
 }
 
-/// The container blocks are being added to: the innermost open blockquote, or
-/// the top level.
-fn current<'a>(root: &'a mut Blocks, open: &'a mut [(Blocks, std::ops::Range<usize>)]) -> &'a mut Blocks {
-    match open.last_mut() {
-        Some((blocks, _)) => blocks,
+/// An open container (ADR-059 §13): the blocks read so far, and what the
+/// source of a block inside it has to lose to read as a block of its own.
+enum Open {
+    /// A blockquote. `col` is the column its content starts at, on its first
+    /// line.
+    Quote { blocks: Blocks, range: std::ops::Range<usize>, col: usize },
+    /// A list: it holds items, never blocks. `loose` is set when an item
+    /// holds a paragraph directly (pulldown leaves that tag out of a tight
+    /// list).
+    List { kind: ListKind, loose: bool, items: Vec<Blocks>, range: std::ops::Range<usize> },
+    /// A list item. `col` is its content column, on its first line.
+    Item { blocks: Blocks, col: usize },
+}
+
+/// The container blocks are being added to: the innermost open blockquote or
+/// item, or the top level.
+fn current<'a>(root: &'a mut Blocks, open: &'a mut [Open]) -> &'a mut Blocks {
+    match open.iter_mut().rev().find_map(|frame| match frame {
+        Open::Quote { blocks, .. } | Open::Item { blocks, .. } => Some(blocks),
+        Open::List { .. } => None,
+    }) {
+        Some(blocks) => blocks,
         None => root,
     }
 }
 
-/// `raw` (the source range of a block nested in `depth` blockquotes) with the
-/// quote markers of every line but the first removed: per level, up to three
-/// spaces, `>`, and one optional space. A line without the marker (a lazy
-/// continuation) is kept from where the markers stop. The first line starts
+/// What a line of a block inside a container loses to the container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Prefix {
+    /// A blockquote: up to three spaces, `>`, and one optional space.
+    Quote,
+    /// A list item: up to this many spaces, the item's content column
+    /// relative to the container it is in.
+    Indent(usize),
+}
+
+/// The prefixes of the open containers, outermost first.
+fn open_prefixes(open: &[Open]) -> Vec<Prefix> {
+    let mut prefixes = Vec::new();
+    let mut outer = 0;
+    for frame in open {
+        match frame {
+            Open::Quote { col, .. } => {
+                prefixes.push(Prefix::Quote);
+                outer = *col;
+            }
+            Open::Item { col, .. } => {
+                prefixes.push(Prefix::Indent(col.saturating_sub(outer)));
+                outer = *col;
+            }
+            Open::List { .. } => {}
+        }
+    }
+    prefixes
+}
+
+/// The column (in characters) of `offset` on its line.
+fn column_of(input: &str, offset: usize) -> usize {
+    let line_start = input[..offset].rfind('\n').map_or(0, |p| p + 1);
+    input[line_start..offset].chars().count()
+}
+
+/// The content column of the list item whose marker starts at `at`: the
+/// marker's column and width, and the spaces after it. With five or more
+/// spaces after the marker (indented code), or none before the end of the
+/// line, the content column is one past the marker.
+fn item_content_column(input: &str, at: usize) -> usize {
+    let rest = &input[at..];
+    let lead = rest.bytes().take_while(|b| *b == b' ').count();
+    let marker = &rest[lead..];
+    let digits = marker.bytes().take_while(u8::is_ascii_digit).count();
+    let marker_len = if digits > 0 { digits + 1 } else { 1 };
+    let after = marker.get(marker_len..).unwrap_or_default();
+    let spaces = after.bytes().take_while(|b| *b == b' ' || *b == b'\t').count();
+    let blank = after[spaces..].is_empty() || after[spaces..].starts_with(['\n', '\r']);
+    let pad = if blank || spaces >= 5 { 1 } else { spaces.max(1) };
+    column_of(input, at) + lead + marker_len + pad
+}
+
+/// `raw` (the source range of a block nested in containers) with what the
+/// containers took from every line but the first removed, outermost first:
+/// for a quote up to three spaces, `>` and one optional space; for an item up
+/// to its indentation in spaces. A line that lacks a prefix (a lazy
+/// continuation) is kept from where the prefixes stop. The first line starts
 /// where the block does, so it has none.
 ///
 /// Tabs are not expanded: a tab after `>` stays (CommonMark would count part
 /// of it as the marker's space), which is pinned by a test.
-pub(crate) fn unquoted(raw: &str, depth: usize) -> Cow<'_, str> {
-    if depth == 0 {
+pub(crate) fn container_source<'a>(raw: &'a str, prefixes: &[Prefix]) -> Cow<'a, str> {
+    if prefixes.is_empty() {
         return Cow::Borrowed(raw);
     }
     let mut out = String::with_capacity(raw.len());
@@ -705,16 +827,49 @@ pub(crate) fn unquoted(raw: &str, depth: usize) -> Cow<'_, str> {
             continue;
         }
         let mut rest = line;
-        for _ in 0..depth {
-            let spaces = rest.bytes().take_while(|b| *b == b' ').count().min(3);
-            match rest[spaces..].strip_prefix('>') {
-                Some(after) => rest = after.strip_prefix(' ').unwrap_or(after),
-                None => break,
+        for prefix in prefixes {
+            match prefix {
+                Prefix::Quote => {
+                    let spaces = rest.bytes().take_while(|b| *b == b' ').count().min(3);
+                    match rest[spaces..].strip_prefix('>') {
+                        Some(after) => rest = after.strip_prefix(' ').unwrap_or(after),
+                        None => break,
+                    }
+                }
+                Prefix::Indent(width) => {
+                    let spaces = rest.bytes().take_while(|b| *b == b' ').count();
+                    let taken = spaces.min(*width);
+                    // Less indentation than the item has, on a line with
+                    // content, is a lazy line: nothing more is taken.
+                    let lazy = taken < *width && !rest[taken..].trim().is_empty();
+                    rest = &rest[taken..];
+                    if lazy {
+                        break;
+                    }
+                }
             }
         }
         out.push_str(rest);
     }
     Cow::Owned(out)
+}
+
+/// Whether `event` starts a block, or ends the list item, so that the
+/// paragraph a tight item holds without a tag ends before it.
+fn ends_implicit_paragraph(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::End(TagEnd::Item)
+            | Event::Start(
+                Tag::List(_)
+                    | Tag::BlockQuote(_)
+                    | Tag::CodeBlock(_)
+                    | Tag::Heading { .. }
+                    | Tag::Table(_)
+                    | Tag::HtmlBlock
+            )
+            | Event::Rule
+    )
 }
 
 /// Parse a markdown content document and assign its elements to grammar slots.
@@ -725,36 +880,6 @@ pub(crate) fn unquoted(raw: &str, depth: usize) -> Cow<'_, str> {
 pub fn parse_and_assign(input: &str, grammar: &Grammar) -> Result<Document, ContentError> {
     let flat = parse_document(input)?;
     Ok(assign_slots(&flat, grammar))
-}
-
-/// How an event inside a raw-source capture relates to the captured kind.
-enum Nesting {
-    /// The event starts another construct of the captured kind.
-    Opens,
-    /// The event ends a construct of the captured kind.
-    Closes,
-    /// Any other event inside the capture.
-    Inside,
-}
-
-/// Advance the nesting depth of a construct captured as raw source (a list,
-/// later a blockquote) by one event.
-///
-/// Returns `true` when the event closes the outermost construct, i.e. the
-/// capture is complete.
-fn capture_closes(depth: &mut u32, nesting: Nesting) -> bool {
-    match nesting {
-        Nesting::Opens => {
-            *depth += 1;
-            false
-        }
-        Nesting::Closes => {
-            debug_assert!(*depth > 0, "capture closed more constructs than it opened");
-            *depth -= 1;
-            *depth == 0
-        }
-        Nesting::Inside => false,
-    }
 }
 
 /// Return true when the href should be treated as a link expression (not a plain URL).
@@ -898,7 +1023,29 @@ fn without_marker(events: ParagraphEvents, cut: usize, literal: &str) -> Option<
     Some(out)
 }
 
-/// A finished paragraph, at the top level or directly in a blockquote: a
+/// A finished paragraph that had no tag of its own (in a tight list item): a
+/// link expression when its whole source is one, otherwise as
+/// [`finish_paragraph`].
+fn finish_implicit_paragraph(
+    input: &str,
+    events: ParagraphEvents,
+    byte_range: std::ops::Range<usize>,
+    prefixes: &[Prefix],
+    elements: &mut im::Vector<Spanned<ContentElement>>,
+) {
+    let raw = input.get(byte_range.clone()).unwrap_or_default();
+    let source = container_source(raw, prefixes);
+    if let Some((text, target, slot)) = read_link_expression_paragraph(&source) {
+        elements.push_back(Spanned {
+            node: ContentElement::LinkExpression { text, target, slot },
+            span: Span::from(byte_range),
+        });
+        return;
+    }
+    finish_paragraph(input, events, byte_range, prefixes, elements);
+}
+
+/// A finished paragraph, at the top level or directly in a container: a
 /// paragraph of all its inline content and its trailing marker (ADR-059 §5), or
 /// a link expression when it is exactly one link written in a legacy spelling.
 /// Nothing is dropped. A paragraph that holds only a link or only an image is a
@@ -907,13 +1054,13 @@ fn finish_paragraph(
     input: &str,
     events: ParagraphEvents,
     byte_range: std::ops::Range<usize>,
-    depth: usize,
+    prefixes: &[Prefix],
     elements: &mut im::Vector<Spanned<ContentElement>>,
 ) {
     use crate::inline::{inlines_from_events, InlineContext};
     let raw = input.get(byte_range.clone()).unwrap_or_default();
-    // Inside blockquotes the quote markers of later lines are not content.
-    let source = unquoted(raw, depth);
+    // Inside containers the prefixes of later lines are not content.
+    let source = container_source(raw, prefixes);
     let trimmed = source.trim();
     if trimmed.is_empty() {
         return;
@@ -1275,6 +1422,32 @@ mod tests {
         }
     }
 
+    /// A list of these items (each the blocks of one item).
+    fn list(kind: ListKind, spacing: Spacing, items: Vec<Vec<ContentElement>>) -> ContentElement {
+        ContentElement::List {
+            list: List {
+                kind,
+                spacing,
+                items: items
+                    .into_iter()
+                    .map(|blocks| {
+                        Blocks::from_elements(
+                            blocks
+                                .into_iter()
+                                .map(|node| Spanned { node, span: Span { start: 0, end: 0 } })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    /// A tight bullet list with one paragraph per item.
+    fn tight_bullets(items: &[&str]) -> ContentElement {
+        list(ListKind::Bullet, Spacing::Tight, items.iter().map(|s| vec![para(s)]).collect())
+    }
+
     /// A paragraph of only inline HTML has no text events; it is kept.
     #[test]
     fn inline_html_only_paragraph_is_kept_and_round_trips() {
@@ -1511,25 +1684,42 @@ mod tests {
         );
     }
 
+    /// Guard (a link or an image in an item stays inside the item).
     #[test]
-    fn a_link_in_a_list_item_keeps_the_whole_list() {
+    fn a_link_in_a_list_item_stays_in_the_item() {
         let els = nodes("- [a](/a)\n- b\n- see [c](/c)\n");
-        assert_eq!(els.len(), 1, "{els:?}");
-        assert!(matches!(&els[0], ContentElement::List { source } if source == "- [a](/a)\n- b\n- see [c](/c)"), "{els:?}");
+        assert_eq!(els, vec![tight_bullets(&["[a](/a)", "b", "see [c](/c)"])]);
     }
 
+    /// Guard.
     #[test]
-    fn an_image_in_a_list_item_keeps_the_whole_list() {
+    fn an_image_in_a_list_item_stays_in_the_item() {
         let els = nodes("1. ![i](a.png)\n2. b\n");
-        assert_eq!(els.len(), 1, "{els:?}");
-        assert!(matches!(&els[0], ContentElement::List { source } if source == "1. ![i](a.png)\n2. b"), "{els:?}");
+        assert_eq!(
+            els,
+            vec![list(
+                ListKind::Ordered { start: 1 },
+                Spacing::Tight,
+                vec![vec![para("![i](a.png)")], vec![para("b")]]
+            )]
+        );
     }
 
+    /// Guard.
     #[test]
-    fn a_link_in_a_nested_list_item_keeps_the_list() {
+    fn a_link_in_a_nested_list_item_stays_in_the_item() {
         let els = nodes("- a\n  - [n](/n)\n  - m\n- b\n");
-        assert_eq!(els.len(), 1, "{els:?}");
-        assert!(matches!(&els[0], ContentElement::List { source } if source.contains("[n](/n)") && source.ends_with("- b")), "{els:?}");
+        assert_eq!(
+            els,
+            vec![list(
+                ListKind::Bullet,
+                Spacing::Tight,
+                vec![
+                    vec![para("a"), tight_bullets(&["[n](/n)", "m"])],
+                    vec![para("b")],
+                ]
+            )]
+        );
     }
 
     #[test]
@@ -1564,25 +1754,27 @@ mod tests {
             vec![
                 ContentElement::paragraph_from_markdown("a"),
                 ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "H"),
-                ContentElement::List { source: "- l".to_string() },
+                tight_bullets(&["l"]),
                 ContentElement::Separator,
                 quote(vec![ContentElement::paragraph_from_markdown("n")]),
             ]
         );
     }
 
-    /// The list source is the list as written, without the quote markers.
+    /// An item's paragraph is read without the quote markers and the item's
+    /// indentation of its later lines.
     #[test]
-    fn list_inside_a_blockquote_keeps_its_source_without_quote_markers() {
+    fn list_inside_a_blockquote_is_read_without_the_container_prefixes() {
         let els = nodes("> - a\n>   b\n> - c\n");
-        assert_eq!(
-            quote_children(&els[0]),
-            vec![ContentElement::List { source: "- a\n  b\n- c".to_string() }]
-        );
+        assert_eq!(quote_children(&els[0]), vec![tight_bullets(&["a\nb", "c"])]);
         let els = nodes("> > 1. a\n> >    b\n> > 2. c\n");
         assert_eq!(
             quote_children(&quote_children(&els[0])[0]),
-            vec![ContentElement::List { source: "1. a\n   b\n2. c".to_string() }]
+            vec![list(
+                ListKind::Ordered { start: 1 },
+                Spacing::Tight,
+                vec![vec![para("a\nb")], vec![para("c")]]
+            )]
         );
     }
 
@@ -1652,16 +1844,28 @@ mod tests {
     }
 
     #[test]
-    fn unquoted_strips_the_markers_of_every_line_but_the_first() {
-        // Depth 0 borrows.
-        assert!(matches!(unquoted("a\n> b", 0), Cow::Borrowed(_)));
-        assert_eq!(unquoted("a\n> b\n>   c\n>d\n", 1), "a\nb\n  c\nd\n");
+    fn container_source_strips_the_prefixes_of_every_line_but_the_first() {
+        use Prefix::{Indent, Quote};
+        // No container: borrowed.
+        assert!(matches!(container_source("a\n> b", &[]), Cow::Borrowed(_)));
+        assert_eq!(container_source("a\n> b\n>   c\n>d\n", &[Quote]), "a\nb\n  c\nd\n");
         // Up to three spaces before the marker; four make it text.
-        assert_eq!(unquoted("a\n   > b\n    > c", 1), "a\nb\n    > c");
+        assert_eq!(container_source("a\n   > b\n    > c", &[Quote]), "a\nb\n    > c");
         // Two levels, and a line that stops at the first.
-        assert_eq!(unquoted("a\n> > b\n> c\nd", 2), "a\nb\nc\nd");
+        assert_eq!(container_source("a\n> > b\n> c\nd", &[Quote, Quote]), "a\nb\nc\nd");
         // A lazy line has no marker and is kept.
-        assert_eq!(unquoted("a\nlazy", 1), "a\nlazy");
+        assert_eq!(container_source("a\nlazy", &[Quote]), "a\nlazy");
+        // An item takes its indentation, and no more.
+        assert_eq!(container_source("a\n  b\n    c\n", &[Indent(2)]), "a\nb\n  c\n");
+        // A blank line may have less than the indentation.
+        assert_eq!(container_source("a\n\n  b", &[Indent(2)]), "a\n\nb");
+        // A quote, then an item in it; an item, then a quote in it.
+        assert_eq!(container_source("a\n>   b\n> c", &[Quote, Indent(2)]), "a\nb\nc");
+        assert_eq!(container_source("a\n  > b\n  > c", &[Indent(2), Quote]), "a\nb\nc");
+        // A line with less indentation than the item has, and content, is lazy:
+        // what is left is kept, and no prefix after it is applied.
+        assert_eq!(container_source("a\n lazy\n  > x", &[Indent(2), Quote]), "a\nlazy\nx");
+        assert_eq!(container_source("a\nlazy", &[Indent(2)]), "a\nlazy");
     }
 
     /// A tab after `>` is not expanded, so the quoted line keeps it (CommonMark
@@ -1669,22 +1873,16 @@ mod tests {
     /// the whitespace; see the document-level test below.
     #[test]
     fn a_tab_after_the_quote_marker_is_kept_as_it_is() {
-        assert_eq!(unquoted("a\n>\tb", 1), "a\n\tb");
+        assert_eq!(container_source("a\n>\tb", &[Prefix::Quote]), "a\n\tb");
     }
 
-    /// Document level: a list in a quote whose second line is `>\t  b`. The
-    /// tab is kept in the list's source; a save writes the quote's canonical
-    /// `> ` prefix, so the only change is the space after the marker, and the
-    /// saved text reads back as the same quote.
+    /// Document level: a list in a quote whose second line is `>\t  b`. A save
+    /// writes the quote's canonical `> ` prefix and the list's own indentation,
+    /// and the saved text reads back as the same quote.
     #[test]
     fn a_tab_after_the_quote_marker_only_gets_the_canonical_prefix_on_save() {
         let md = "> - a\n>\t  b\n";
-        assert_eq!(
-            nodes(md),
-            vec![quote(vec![ContentElement::List { source: "- a\n\t  b".to_string() }])]
-        );
         let saved = written(md);
-        assert_eq!(saved, "> - a\n> \t  b");
         assert_eq!(nodes(&saved), nodes(md));
         assert_eq!(written(&saved), saved);
     }
@@ -2275,37 +2473,45 @@ headings
         );
     }
 
-    // ── Lists capture their whole source ────────────────────────────────────
+    // ── Lists are containers of items ───────────────────────────────────────
 
+    /// `input` is exactly one list, and the markdown it is saved as reads back
+    /// as that list and is saved as itself.
     fn assert_single_list(input: &str) {
-        let doc = parse_document(input).unwrap();
-        let nodes: Vec<_> = doc.elements.iter().map(|e| e.node.clone()).collect();
-        assert_eq!(
-            nodes,
-            vec![ContentElement::List { source: input.to_string() }],
-            "input {input:?} should be exactly one List"
+        let els = nodes(input);
+        assert!(
+            matches!(els.as_slice(), [ContentElement::List { .. }]),
+            "input {input:?} should be exactly one List, got {els:?}"
         );
+        let saved = written(input);
+        assert_eq!(nodes(&saved), els, "saved {saved:?}");
+        assert_eq!(written(&saved), saved);
     }
 
     #[test]
     fn nested_list_stays_one_list() {
         assert_single_list("- a\n  - b\n    - [c](/c)\n- d");
+        assert_eq!(written("- a\n  - b\n    - [c](/c)\n- d"), "- a\n  - b\n    - [c](/c)\n- d");
     }
 
     #[test]
     fn loose_list_stays_one_list() {
         assert_single_list("- a\n\n- b\n\n  more");
+        assert_eq!(written("- a\n\n- b\n\n  more"), "- a\n\n- b\n\n  more");
     }
 
     #[test]
-    fn capture_ends_at_outer_list_end() {
-        let doc = parse_document("- a\n  - b\n\nafter").unwrap();
-        let nodes: Vec<_> = doc.elements.iter().map(|e| e.node.clone()).collect();
+    fn list_ends_at_the_outer_list_end() {
+        let els = nodes("- a\n  - b\n\nafter");
         assert_eq!(
-            nodes,
+            els,
             vec![
-                ContentElement::List { source: "- a\n  - b".to_string() },
-                ContentElement::paragraph_from_markdown("after"),
+                list(
+                    ListKind::Bullet,
+                    Spacing::Tight,
+                    vec![vec![para("a"), tight_bullets(&["b"])]]
+                ),
+                para("after"),
             ]
         );
     }
@@ -2340,16 +2546,202 @@ headings
         assert_single_list("1. x\n\n   | a | b |\n   |---|---|");
     }
 
+    // ── Lists hold items of blocks (ADR-059 stage 9.1) ──────────────────────
+
+    /// `md` is saved as `expected`, which reads back as the same blocks and is
+    /// saved as itself.
+    fn assert_saved_as(md: &str, expected: &str) {
+        assert_eq!(written(md), expected, "{md:?}");
+        assert_eq!(nodes(expected), nodes(md), "{md:?} reads as {expected:?}");
+        assert_eq!(written(expected), expected, "{expected:?} is a fixed point");
+    }
+
+    fn bullets(spacing: Spacing, items: Vec<Vec<ContentElement>>) -> ContentElement {
+        list(ListKind::Bullet, spacing, items)
+    }
+
+    #[test]
+    fn list_items_are_block_containers() {
+        assert_eq!(
+            nodes("- a\n\n  b\n- c"),
+            vec![bullets(Spacing::Loose, vec![vec![para("a"), para("b")], vec![para("c")]])]
+        );
+        // An item holds any blocks.
+        assert_eq!(
+            nodes("- # H\n- ```\n  x\n  ```\n- > q"),
+            vec![bullets(
+                Spacing::Tight,
+                vec![
+                    vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "H")],
+                    vec![ContentElement::CodeBlock { language: None, code: "x".to_string() }],
+                    vec![quote(vec![para("q")])],
+                ]
+            )]
+        );
+        // An empty item is an item without blocks.
+        assert_eq!(nodes("-\n- b"), vec![bullets(Spacing::Tight, vec![vec![], vec![para("b")]])]);
+        assert_saved_as("-\n- b", "-\n- b");
+    }
+
+    /// The start and the spacing are read, and written back as they were.
+    #[test]
+    fn ordered_start_and_tightness_round_trip() {
+        assert_eq!(
+            nodes("3. a\n4. b"),
+            vec![list(
+                ListKind::Ordered { start: 3 },
+                Spacing::Tight,
+                vec![vec![para("a")], vec![para("b")]]
+            )]
+        );
+        assert_saved_as("3. a\n4. b", "3. a\n4. b");
+        // Loose.
+        assert_eq!(
+            nodes("3. a\n\n4. b"),
+            vec![list(
+                ListKind::Ordered { start: 3 },
+                Spacing::Loose,
+                vec![vec![para("a")], vec![para("b")]]
+            )]
+        );
+        assert_saved_as("3. a\n\n4. b", "3. a\n\n4. b");
+        // Zero, and a start that gives numbers of more digits.
+        assert_saved_as("0. a\n1. b", "0. a\n1. b");
+        assert_saved_as("9. a\n10. b\n11. c", "9. a\n10. b\n11. c");
+        // A later item's number does not matter: the numbers count from the
+        // first.
+        assert_saved_as("2. a\n7. b", "2. a\n3. b");
+    }
+
+    /// Markers are not stored: `*`, `+` and `)` are written as `-` and `.`.
+    #[test]
+    fn non_canonical_markers_are_written_canonically() {
+        assert_saved_as("* a\n* b", "- a\n- b");
+        assert_saved_as("+ a", "- a");
+        assert_saved_as("1) a\n2) b", "1. a\n2. b");
+        assert_saved_as("1. a\n1. b\n1. c", "1. a\n2. b\n3. c");
+        // Indentation is derived from the markers.
+        assert_saved_as("  -   a\n      b", "- a\n  b");
+        assert_saved_as("10.  a\n     b", "10. a\n    b");
+    }
+
+    #[test]
+    fn nested_lists_and_quotes_inside_items_round_trip() {
+        assert_saved_as("- a\n  - b\n    - c\n- d", "- a\n  - b\n    - c\n- d");
+        assert_saved_as("1. a\n   1. b\n   2. c\n2. d", "1. a\n   1. b\n   2. c\n2. d");
+        // A quote in an item, a list in a quote, a list in a quote in an item.
+        assert_saved_as("- > q\n  > r\n- b", "- > q\n  > r\n- b");
+        assert_saved_as("> - a\n>   - b\n> - c", "> - a\n>   - b\n> - c");
+        assert_saved_as("- > - a\n  >   - b", "- > - a\n  >   - b");
+        // Several blocks in an item, loose; a nested list, loose.
+        assert_saved_as("- a\n\n  > q\n\n  - n\n\n  ```\n  x\n  ```", "- a\n\n  > q\n\n  - n\n\n  ```\n  x\n  ```");
+        assert_saved_as("- a\n\n  - b\n\n  - c", "- a\n\n  - b\n\n  - c");
+        assert_eq!(
+            nodes("- a\n  > q"),
+            vec![bullets(
+                Spacing::Loose,
+                vec![vec![para("a"), quote(vec![para("q")])]]
+            )],
+            "a paragraph and a quote are two blocks that are not lists: not tight"
+        );
+    }
+
+    /// The spacing is what the markdown can say: a tight list whose item
+    /// cannot be written tight reads back loose, and the other way round.
+    #[test]
+    fn spacing_is_what_the_markdown_can_say() {
+        // Two blocks that are not lists in one item: loose.
+        assert_saved_as("- a\n  ```\n  x\n  ```", "- a\n\n  ```\n  x\n  ```");
+        // A list that cannot interrupt a paragraph (it is text there): the
+        // item is loose; as the first block it is fine.
+        let after_paragraph = list(
+            ListKind::Bullet,
+            Spacing::Tight,
+            vec![vec![para("a"), list(ListKind::Ordered { start: 2 }, Spacing::Tight, vec![vec![para("b")]])]],
+        );
+        assert_eq!(
+            written_element(&after_paragraph),
+            "- a\n\n  2. b",
+            "a list that cannot interrupt the paragraph before it is written after a blank line"
+        );
+        assert_saved_as("- 2. b", "- 2. b");
+        // A loose list with nothing to show it is tight.
+        assert_eq!(nodes("- a\n\n"), vec![tight_bullets(&["a"])]);
+        // An empty first item cannot interrupt a paragraph either.
+        let empty_first = list(
+            ListKind::Bullet,
+            Spacing::Tight,
+            vec![vec![para("a"), list(ListKind::Bullet, Spacing::Tight, vec![vec![]])]],
+        );
+        assert_eq!(written_element(&empty_first), "- a\n\n  -");
+    }
+
+    /// Comments inside an item are trivia of the item's blocks, and of the
+    /// item for the ones after its last block (ADR-062).
+    #[test]
+    fn comments_inside_items_are_trivia() {
+        let doc = parse_document("- a\n  <!-- c -->\n  - b\n  <!-- end -->\n").unwrap();
+        assert!(doc.comments.is_empty(), "{:?}", doc.comments);
+        let ContentElement::List { list } = &doc.elements[0].node else { panic!() };
+        assert_eq!(list.items.len(), 1);
+        let comments: Vec<_> =
+            list.items[0].comments.iter().map(|(i, c)| (*i, c.node.as_str().to_string())).collect();
+        assert_eq!(comments, vec![(1, "<!-- c -->".to_string()), (2, "<!-- end -->".to_string())]);
+        assert_eq!(list.items[0].elements.len(), 2);
+        assert_saved_as("- a\n  <!-- c -->\n  - b\n  <!-- end -->", "- a\n  <!-- c -->\n  - b\n  <!-- end -->");
+        // Loose.
+        assert_saved_as("- a\n\n  <!-- c -->\n\n  b\n\n- c", "- a\n\n  <!-- c -->\n\n  b\n\n- c");
+    }
+
+    /// The paragraph of a tight item has no tag in pulldown's events; it is
+    /// read like any paragraph: a marker, a link expression, a link or image.
+    #[test]
+    fn the_paragraph_of_a_tight_item_is_read_like_any_paragraph() {
+        let els = nodes("- a {#x}\n- [posts](:post)\n- [l](/l) and ![i](a.png)\n- a\n  b");
+        let ContentElement::List { list } = &els[0] else { panic!("{els:?}") };
+        assert_eq!(list.spacing, Spacing::Tight);
+        let first = |i: usize| list.items[i].elements[0].node.clone();
+        assert!(matches!(first(0), ContentElement::Paragraph { marker: Some(_), .. }), "{:?}", first(0));
+        assert!(matches!(first(1), ContentElement::LinkExpression { .. }), "{:?}", first(1));
+        assert_eq!(first(2), para("[l](/l) and ![i](a.png)"));
+        // The lines of a paragraph, without the item's indentation.
+        assert_eq!(first(3), para("a\nb"));
+    }
+
+    /// Guard: a list is one block of its container; the blocks inside it do
+    /// not take part in the body numbering.
+    #[test]
+    fn body_numbering_ignores_blocks_inside_a_list() {
+        let els = nodes("- a\n\n  b\n- c\n\nd\n");
+        assert_eq!(els.len(), 2, "{els:?}");
+        assert_eq!(els[1], para("d"));
+    }
+
+    /// A rule straight after the marker would be a rule, not an item.
+    #[test]
+    fn an_item_that_starts_with_a_rule_keeps_it() {
+        let els = nodes("-\n  ----\n- b");
+        assert_eq!(
+            els,
+            vec![bullets(Spacing::Tight, vec![vec![ContentElement::Separator], vec![para("b")]])]
+        );
+        assert_saved_as("-\n  ----\n- b", "-\n  ----\n- b");
+    }
+
+    fn written_element(el: &ContentElement) -> String {
+        crate::serializer::serialize_element(el)
+    }
+
     #[test]
     fn getting_started_keeps_list_with_links() {
         let input = include_str!("../../../site/content/guide/getting-started.md");
         let doc = parse_document(input).unwrap();
+        let written = crate::serializer::serialize_elements(&doc.elements);
         assert!(
-            doc.elements.iter().any(|e| matches!(
-                &e.node,
-                ContentElement::List { source } if source.contains("[schemas](/feature/schemas-as-contracts)")
-            )),
-            "expected a List containing the schemas link; got {:#?}",
+            doc.elements.iter().any(|e| matches!(&e.node, ContentElement::List { .. })
+                && crate::serializer::serialize_element(&e.node)
+                    .contains("[schemas](/feature/schemas-as-contracts)")),
+            "expected a List containing the schemas link; got {:#?}\n{written}",
             doc.elements
         );
     }

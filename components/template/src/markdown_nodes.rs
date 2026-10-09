@@ -1,17 +1,22 @@
-//! Markdown to template nodes (ADR-064).
+//! Markdown to template nodes (ADR-064), and the helpers the node renderers
+//! share.
 //!
-//! Templates receive node trees, never HTML. Content markdown becomes
-//! [`dom::Node`]s only here: the pulldown-cmark event stream is first passed
-//! through [`neutralise_html`] (ADR-062: comment-only HTML is dropped, any
-//! other HTML becomes text), then [`events_to_nodes`] builds the tree.
-//! Escaping and void-element syntax belong to the HTML serializer.
+//! Templates receive node trees, never HTML, and since stage 9 nothing in a
+//! build reads markdown here: every block and inline is a node of the content
+//! model ([`crate::body_nodes`], [`crate::inline_nodes`]). The markdown
+//! reader below (events to nodes, with ADR-062 HTML neutralised) is kept as
+//! the oracle the renderers' parity tests compare with, and is compiled for
+//! tests only. Escaping and void-element syntax belong to the HTML
+//! serializer.
 
-use crate::dom::{Element, Form, Node};
+use crate::dom::Node;
+#[cfg(test)]
+use crate::dom::{Element, Form};
+#[cfg(test)]
 use content::html::is_comment_only;
-use content::MARKDOWN_OPTIONS;
+#[cfg(test)]
 use pulldown_cmark::{
-    Alignment, BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Parser, Tag,
-    TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
 };
 
 /// Build template nodes from raw markdown parser events.
@@ -19,6 +24,7 @@ use pulldown_cmark::{
 /// HTML is neutralised here ([`neutralise_html`], ADR-062): there is no path
 /// that builds nodes from un-neutralised events. Neutralising is idempotent,
 /// so already-neutralised input is fine too.
+#[cfg(test)]
 pub(crate) fn events_to_nodes<'a>(events: impl IntoIterator<Item = Event<'a>>) -> Vec<Node> {
     let mut builder = Builder::default();
     for event in neutralise_html(events) {
@@ -74,21 +80,6 @@ pub(crate) fn percent_encode_url(url: &str) -> String {
     out
 }
 
-/// Nodes for a content text's markdown source, parsed as a whole document.
-///
-/// A result that is exactly one `p` is unwrapped to its children, so inline
-/// content can go straight into a slot element (the `<p>` strip of the former
-/// HTML path, parity difference D4).
-pub(crate) fn inline_children(src: &str) -> Vec<Node> {
-    let mut nodes = events_to_nodes(Parser::new_ext(src, MARKDOWN_OPTIONS));
-    if let [Node::Element(p)] = nodes.as_mut_slice()
-        && p.name == "p"
-    {
-        return std::mem::take(&mut p.children);
-    }
-    nodes
-}
-
 /// The concatenated text of every `Text` node, in document order.
 pub(crate) fn text_content(nodes: &[Node]) -> String {
     fn walk(nodes: &[Node], out: &mut String) {
@@ -105,6 +96,7 @@ pub(crate) fn text_content(nodes: &[Node]) -> String {
 }
 
 /// Builds the node tree from balanced start/end events.
+#[cfg(test)]
 #[derive(Default)]
 struct Builder {
     /// Top-level nodes.
@@ -122,12 +114,14 @@ struct Builder {
     metadata: usize,
 }
 
+#[cfg(test)]
 struct TableState {
     alignments: Vec<Alignment>,
     in_head: bool,
     cell: usize,
 }
 
+#[cfg(test)]
 struct ImageState {
     /// Tags opened inside the image and not yet closed.
     depth: usize,
@@ -136,14 +130,17 @@ struct ImageState {
     alt: String,
 }
 
+#[cfg(test)]
 fn element(name: &str, attrs: Vec<(String, Form)>) -> Element {
     Element { name: name.to_string(), attrs, children: Vec::new() }
 }
 
+#[cfg(test)]
 fn attr(name: &str, value: impl Into<String>) -> (String, Form) {
     (name.to_string(), Form::Str(value.into()))
 }
 
+#[cfg(test)]
 impl Builder {
     fn event(&mut self, event: Event<'_>) {
         if self.image.is_some() {
@@ -412,6 +409,7 @@ impl Builder {
     }
 }
 
+#[cfg(test)]
 fn heading_name(level: HeadingLevel) -> &'static str {
     match level {
         HeadingLevel::H1 => "h1",
@@ -423,6 +421,7 @@ fn heading_name(level: HeadingLevel) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn blockquote_class(kind: BlockQuoteKind) -> &'static str {
     match kind {
         BlockQuoteKind::Note => "markdown-alert-note",
@@ -446,6 +445,7 @@ fn blockquote_class(kind: BlockQuoteKind) -> &'static str {
 ///   event arrives is emitted as text.
 ///
 /// Node building calls this itself ([`events_to_nodes`]).
+#[cfg(test)]
 fn neutralise_html<'a>(input: impl IntoIterator<Item = Event<'a>>) -> Vec<Event<'a>> {
     let mut events: Vec<Event<'a>> = Vec::new();
     let mut html_block: Option<String> = None;
@@ -497,11 +497,13 @@ fn neutralise_html<'a>(input: impl IntoIterator<Item = Event<'a>>) -> Vec<Event<
 
 /// True for an inline HTML piece that opens a comment and does not close it.
 /// `-->` is searched from offset 2, as in `content::html::is_comment_only`.
+#[cfg(test)]
 fn opens_unclosed_comment(piece: &str) -> bool {
     piece.starts_with("<!--") && !piece[2..].contains("-->")
 }
 
 /// Drop comment-only HTML; turn any other HTML into text so it is escaped.
+#[cfg(test)]
 fn push_neutralised<'a>(events: &mut Vec<Event<'a>>, source: CowStr<'a>) {
     if !is_comment_only(&source) {
         events.push(Event::Text(source));
@@ -851,24 +853,20 @@ pub(crate) mod tests {
     fn escaped_angle_brackets_stay_text() {
         // Moved from transformer's `parse_html_fragment` test: entities are
         // characters in text nodes, never markup.
-        assert_eq!(inline_children("a &lt;script&gt; &amp; b"), vec![text("a <script> & b")]);
+        let nodes = |src: &str| events_to_nodes(Parser::new_ext(src, MARKDOWN_OPTIONS));
+        let paragraph = |src: &str| match nodes(src).as_slice() {
+            [Node::Element(p)] if p.name == "p" => p.children.clone(),
+            other => panic!("expected one paragraph, got {other:?}"),
+        };
+        assert_eq!(paragraph("a &lt;script&gt; &amp; b"), vec![text("a <script> & b")]);
         assert_eq!(
-            inline_children("*a* &lt;script&gt; b"),
+            paragraph("*a* &lt;script&gt; b"),
             vec![elem("em", vec![text("a")]), text(" <script> b")]
         );
         assert_eq!(
-            serialize_nodes(&inline_children("*a* &lt;script&gt; b")),
+            serialize_nodes(&paragraph("*a* &lt;script&gt; b")),
             "<em>a</em> &lt;script&gt; b"
         );
-    }
-
-    #[test]
-    fn inline_children_unwraps_only_a_single_paragraph() {
-        assert_eq!(inline_children("**b**"), vec![elem("strong", vec![text("b")])]);
-        let got = inline_children("- a\n");
-        assert_eq!(got, vec![elem("ul", vec![elem("li", vec![text("a")])])]);
-        let got = inline_children("a\n\nb\n");
-        assert_eq!(got, vec![elem("p", vec![text("a")]), elem("p", vec![text("b")])]);
     }
 
     #[test]

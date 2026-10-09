@@ -192,8 +192,8 @@ pub enum ContentElement {
     /// blockquotes included, with the comments between them. An empty quote
     /// is kept.
     Blockquote { blocks: Blocks },
-    /// A list (ordered or unordered) stored as raw markdown source.
-    List { source: String },
+    /// A list (ADR-059 §13): a container of items, each holding blocks.
+    List { list: List },
     /// A link expression: `[text](target)`, optionally followed by a slot
     /// marker `{#slot}` (ADR-058, decision 9).
     LinkExpression {
@@ -202,6 +202,105 @@ pub enum ContentElement {
         /// The preamble link slot this expression is marked for, if any.
         slot: Option<Keyword>,
     },
+}
+
+/// A list: its kind, its spacing, and its items (ADR-059 §13, stage 9).
+///
+/// Markers are not stored; they are always canonical: `-` for a bullet list,
+/// and `N.` counting from the start for an ordered one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct List {
+    pub kind: ListKind,
+    pub spacing: Spacing,
+    /// Each item's blocks, with the comments between them (an item is a
+    /// container, as a blockquote is).
+    pub items: Vec<Blocks>,
+}
+
+/// Bullet or ordered list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListKind {
+    Bullet,
+    /// Numbered from `start`.
+    Ordered { start: u64 },
+}
+
+/// Whether the items of a list are written on consecutive lines (tight) or
+/// separated by blank lines (loose).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Spacing {
+    Tight,
+    Loose,
+}
+
+impl List {
+    /// Whether every item of the list can be written tight: at most one block
+    /// that is not a list, and that block comes first; and a list straight
+    /// after a paragraph is one that can interrupt it. A tight list that has
+    /// an item that cannot is read back loose.
+    pub fn can_be_tight(&self) -> bool {
+        self.items.iter().all(Blocks::can_be_a_tight_item)
+    }
+
+    /// Whether a blank line shows when the list is written loose: between two
+    /// items, or between two parts (blocks and comments) of an item. A loose
+    /// list without one is written, and read back, tight.
+    fn has_a_blank_line_when_loose(&self) -> bool {
+        self.items.len() > 1
+            || self.items.iter().any(|item| item.elements.len() + item.comments.len() > 1)
+    }
+
+    /// The same list as it reads back from its markdown: loose if it is tight
+    /// but cannot be written tight, tight if it is loose but has no blank line
+    /// to show it.
+    pub fn normalised(mut self) -> List {
+        match self.spacing {
+            Spacing::Tight if !self.can_be_tight() => self.spacing = Spacing::Loose,
+            Spacing::Loose if !self.has_a_blank_line_when_loose() => self.spacing = Spacing::Tight,
+            _ => {}
+        }
+        self
+    }
+
+    /// Whether this list, written straight after a paragraph, interrupts it
+    /// (CommonMark): a bullet list, or an ordered one that starts at 1, and
+    /// whose first item is not empty.
+    fn interrupts_a_paragraph(&self) -> bool {
+        let starts_so = match self.kind {
+            ListKind::Bullet => true,
+            ListKind::Ordered { start } => start == 1,
+        };
+        starts_so && self.items.first().is_some_and(|item| !item.elements.is_empty())
+    }
+}
+
+impl Blocks {
+    /// Whether these blocks, as an item's, can be written tight: at most one
+    /// block that is not a list, that block comes first, and a list straight
+    /// after a paragraph can interrupt it.
+    pub fn can_be_a_tight_item(&self) -> bool {
+        let non_lists = self
+            .elements
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !matches!(e.node, ContentElement::List { .. }))
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        let one_first = match non_lists.as_slice() {
+            [] => true,
+            [at] => *at == 0,
+            _ => false,
+        };
+        one_first
+            && self.elements.iter().enumerate().skip(1).all(|(at, e)| {
+                let ContentElement::List { list } = &e.node else { return true };
+                let after_paragraph = matches!(
+                    self.elements[at - 1].node,
+                    ContentElement::Paragraph { .. } | ContentElement::LinkExpression { .. }
+                ) && !self.comments.iter().any(|(index, _)| *index == at);
+                !after_paragraph || list.interrupts_a_paragraph()
+            })
+    }
 }
 
 /// How a table column is aligned (`---`, `:---`, `:---:`, `---:`).

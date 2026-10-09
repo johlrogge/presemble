@@ -3825,12 +3825,8 @@ mod tests {
             ContentElement::Heading { .. }
             | ContentElement::Paragraph { .. }
             | ContentElement::Table { .. }
-            | ContentElement::Blockquote { .. } => content_store::block_to_store(el, store),
-            ContentElement::List { source } => {
-                let b = element(store, "list");
-                text_child(store, b, source);
-                b
-            }
+            | ContentElement::Blockquote { .. }
+            | ContentElement::List { .. } => content_store::block_to_store(el, store),
             ContentElement::HtmlBlock { source } => {
                 let b = element(store, "html-block");
                 text_child(store, b, source);
@@ -3894,7 +3890,9 @@ mod tests {
             C::lone_image("", "/j.png"),
             table_of(&["`a\\|b`", "**H**"], &[&["x", "<i>y</i>"], &["-", ""]]),
             table_of(&["only"], &[]),
-            C::List { source: "- one\n- **two**\n\n3. x\n".to_string() },
+            content::parse_document("- one\n- **two**\n").unwrap().elements[0].node.clone(),
+            content::parse_document("3. x\n\n4. *y*\n").unwrap().elements[0].node.clone(),
+            content::parse_document("- a\n  - b\n  > q\n\n  c\n").unwrap().elements[0].node.clone(),
             content::parse_document("> quoted *x*\n> more\n").unwrap().elements[0].node.clone(),
             C::CodeBlock { language: Some("rust".to_string()), code: "fn x() { 1 < 2 }\n".to_string() },
             C::CodeBlock { language: None, code: "plain\n".to_string() },
@@ -4789,11 +4787,11 @@ mod tests {
                 &content::ContentElement::paragraph_from_markdown(text),
                 &mut store,
             )
-        } else if kind == "blockquote" {
-            // A quote as the store holds it: blocks (ADR-059 §13); `text` is
-            // the quote's markdown, markers included.
-            let quote = content::parse_document(text).unwrap().elements[0].node.clone();
-            content_store::block_to_store(&quote, &mut store)
+        } else if kind == "blockquote" || kind == "list" {
+            // A quote or a list as the store holds it: blocks (ADR-059 §13);
+            // `text` is its markdown, markers included.
+            let container = content::parse_document(text).unwrap().elements[0].node.clone();
+            content_store::block_to_store(&container, &mut store)
         } else {
             let kind_name = store.intern(kind);
             let block = store.add_node(node_store::Node::Element(kind_name));
@@ -4878,10 +4876,10 @@ mod tests {
     }
 
     #[test]
-    fn native_body_list_with_nested_html_block_renders_escaped() {
+    fn native_body_list_with_nested_html_block_renders_the_placeholder() {
         let html = render_native_body_block("list", "- item\n\n  <div>inner</div>\n", None);
-        assert!(!html.contains("<div>inner"), "nested HTML block must not be rendered; got: {html}");
-        assert!(html.contains("&lt;div&gt;inner"), "nested HTML block must render escaped; got: {html}");
+        assert!(!html.contains("inner"), "nested HTML block must not be rendered; got: {html}");
+        assert!(html.contains("presemble-html-removed"), "expected the placeholder; got: {html}");
     }
 
     #[test]
@@ -5057,7 +5055,7 @@ mod tests {
     fn characterise_native_list() {
         assert_renders_as(
             &render_native_body_block("list", "- one\n- **two**\n", None),
-            "<div data-presemble-slot=\"body\"><ul>\n<li>one</li>\n<li><strong>two</strong></li>\n</ul></div>",
+            "<ul data-presemble-slot=\"body\"><li>one</li><li><strong>two</strong></li></ul>",
         );
     }
 

@@ -2,15 +2,15 @@
 //! [`ned::NodeTree`] payloads.
 
 use crate::access::{
-    add_child_element, add_child_text, add_int_attr, add_text_attr, child_text,
+    add_bool_attr, add_child_element, add_child_text, add_int_attr, add_text_attr, child_text,
     element_name_of, find_attr_int, find_attr_node, find_attr_text,
     find_child_by_name, make_element,
 };
 use crate::inline_store::{inlines_from_store, inlines_to_store};
 use content::inline::InlineContext;
 use content::{
-    Align, Blocks, Column, Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget,
-    SlotMarker, SortDirection,
+    Align, Blocks, Column, Comment, ContentElement, Keyword, LinkOp, LinkTarget, LinkText, List,
+    ListKind, RefsToTarget, SlotMarker, SortDirection, Spacing,
 };
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::{HeadingLevel, Span, Spanned};
@@ -88,29 +88,27 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
         // `block_to_tree` leaves them out.
         ContentElement::Blockquote { blocks } => {
             let node = make_element(store, "blockquote");
-            for (at, spanned) in blocks.elements.iter().enumerate() {
-                let child = content_element_to_store(&spanned.node, store);
-                store.add_edge(node, Edge::Child(child));
-                let before: Vec<&str> = blocks
-                    .comments
-                    .iter()
-                    .filter(|(index, _)| *index == at)
-                    .map(|(_, comment)| comment.node.as_str())
-                    .collect();
-                add_trivia(store, child, ned::trivia::ATTR_TRIVIA_BEFORE, &before);
-            }
-            let end: Vec<&str> = blocks
-                .comments
-                .iter()
-                .filter(|(index, _)| *index >= blocks.elements.len())
-                .map(|(_, comment)| comment.node.as_str())
-                .collect();
-            add_trivia(store, node, ned::trivia::ATTR_TRIVIA_END, &end);
+            blocks_to_store(store, node, blocks);
             node
         }
-        ContentElement::List { source } => {
+        // `list > item > block*` (ADR-059 §13, stage 9): `ordered` and `tight`
+        // are always written, `start` only on an ordered list that does not
+        // start at 1. An item is a container like a quote: its blocks carry
+        // their leading comments, and its own trailing comments are its
+        // `_trivia-end`. There is no trivia between items.
+        ContentElement::List { list } => {
             let node = make_element(store, "list");
-            add_child_text(store, node, source);
+            add_bool_attr(store, node, "ordered", matches!(list.kind, ListKind::Ordered { .. }));
+            if let ListKind::Ordered { start } = list.kind
+                && start != 1
+            {
+                add_int_attr(store, node, "start", start as i64);
+            }
+            add_bool_attr(store, node, "tight", list.spacing == Spacing::Tight);
+            for item in &list.items {
+                let item_node = add_child_element(store, node, "item");
+                blocks_to_store(store, item_node, item);
+            }
             node
         }
         ContentElement::LinkExpression { text, target, slot } => {
@@ -123,6 +121,30 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
             node
         }
     }
+}
+
+/// Write the blocks of a container (a quote or a list item) as its children,
+/// each with its leading comments as `_trivia-before` (ADR-062); the comments
+/// after the last block are the container's `_trivia-end`.
+fn blocks_to_store(store: &mut NodeStore, container: NodeId, blocks: &Blocks) {
+    for (at, spanned) in blocks.elements.iter().enumerate() {
+        let child = content_element_to_store(&spanned.node, store);
+        store.add_edge(container, Edge::Child(child));
+        let before: Vec<&str> = blocks
+            .comments
+            .iter()
+            .filter(|(index, _)| *index == at)
+            .map(|(_, comment)| comment.node.as_str())
+            .collect();
+        add_trivia(store, child, ned::trivia::ATTR_TRIVIA_BEFORE, &before);
+    }
+    let end: Vec<&str> = blocks
+        .comments
+        .iter()
+        .filter(|(index, _)| *index >= blocks.elements.len())
+        .map(|(_, comment)| comment.node.as_str())
+        .collect();
+    add_trivia(store, container, ned::trivia::ATTR_TRIVIA_END, &end);
 }
 
 fn link_text_to_store(text: &LinkText, store: &mut NodeStore, parent: NodeId) {
@@ -235,11 +257,12 @@ pub fn decode_trivia(
 /// Element names of single-text blocks: exactly one `Text` child carries the
 /// block's text (see `ContentElement::text`). `html-block` also stores its
 /// source as one `Text` child, but cannot be text-edited (ADR-062 D4).
-pub const TEXT_BLOCK_KINDS: &[&str] = &["list", "code-block"];
+pub const TEXT_BLOCK_KINDS: &[&str] = &["code-block"];
 
 /// Element names of block containers: their children are blocks, each with
-/// its leading comments as trivia (ADR-059 §13). Stage 9 adds list items.
-pub const BLOCK_CONTAINER_KINDS: &[&str] = &["blockquote"];
+/// its leading comments as trivia (ADR-059 §13). A list holds items, not
+/// blocks, so it is not one itself.
+pub const BLOCK_CONTAINER_KINDS: &[&str] = &["blockquote", "item"];
 
 /// Element names of inline containers: their children are inline nodes
 /// (ADR-059 §6), at any depth. A Text node inside one is addressed through
@@ -516,6 +539,77 @@ fn slot_marker(
     }
 }
 
+/// The blocks of a container (`kind`: a quote or a list item): its children,
+/// each a block with its leading comments, then its own trailing comments. A
+/// child that is not a block (the old text shape, say) is
+/// [`BlockDecodeError::UnexpectedChild`].
+fn blocks_from_node(store: &NodeStore, id: NodeId, kind: &str) -> Result<Blocks, BlockDecodeError> {
+    let zero = Span { start: 0, end: 0 };
+    let mut blocks = Blocks::default();
+    for child in store.children(id) {
+        match element_name_of(store, child) {
+            Some(name) if BLOCK_KINDS.contains(&name.as_str()) => {}
+            other => {
+                return Err(BlockDecodeError::UnexpectedChild {
+                    kind: kind.to_string(),
+                    child: other.unwrap_or_else(|| "text".to_string()),
+                });
+            }
+        }
+        for comment in decode_trivia(store, child, ned::trivia::ATTR_TRIVIA_BEFORE)? {
+            blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
+        }
+        let node = block_from_node(store, child)?;
+        blocks.elements.push_back(Spanned { node, span: zero });
+    }
+    for comment in decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_END)? {
+        blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
+    }
+    Ok(blocks)
+}
+
+/// A required boolean attribute: a `Boolean` node, or its text (`true` or
+/// `false`), as a tree payload has it.
+fn bool_attr(
+    store: &NodeStore,
+    node: NodeId,
+    kind: &str,
+    attr: &str,
+) -> Result<bool, BlockDecodeError> {
+    match find_attr_node(store, node, attr) {
+        Some(Node::Boolean(b)) => Ok(*b),
+        Some(Node::Text(s)) if s == "true" => Ok(true),
+        Some(Node::Text(s)) if s == "false" => Ok(false),
+        Some(other) => Err(BlockDecodeError::InvalidAttribute {
+            kind: kind.to_string(),
+            attr: attr.to_string(),
+            value: format!("{other:?}"),
+        }),
+        None => Err(BlockDecodeError::MissingAttribute {
+            kind: kind.to_string(),
+            attr: attr.to_string(),
+        }),
+    }
+}
+
+/// The number an ordered list starts at: its `start` attribute (an integer or
+/// its text), or 1. A bullet list takes no `start`.
+fn list_start(store: &NodeStore, node: NodeId, ordered: bool) -> Result<u64, BlockDecodeError> {
+    let invalid = |value: String| BlockDecodeError::InvalidAttribute {
+        kind: "list".to_string(),
+        attr: "start".to_string(),
+        value,
+    };
+    let start = match find_attr_node(store, node, "start") {
+        None => return Ok(1),
+        Some(_) if !ordered => return Err(unexpected_attribute("list", "start")),
+        Some(Node::Integer(n)) => u64::try_from(*n).map_err(|_| invalid(n.to_string()))?,
+        Some(Node::Text(s)) => s.parse().map_err(|_| invalid(s.clone()))?,
+        Some(other) => return Err(invalid(format!("{other:?}"))),
+    };
+    Ok(start)
+}
+
 /// Decode a block element node into a [`ContentElement`].
 ///
 /// Accepts every kind in [`BLOCK_KINDS`]; never panics on malformed input.
@@ -596,12 +690,17 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
         }),
         // The quote's children, all blocks, each with its leading comments;
         // the old shape (one Text child) and any other child is refused.
-        "blockquote" => {
-            let zero = Span { start: 0, end: 0 };
-            let mut blocks = Blocks::default();
+        "blockquote" => Ok(ContentElement::Blockquote { blocks: blocks_from_node(store, id, kind)? }),
+        // `ordered` and `tight` are required, `start` only on an ordered list;
+        // every child is an `item`, which holds blocks like a quote does. The
+        // old shape (one Text child) is refused. A tight list whose items
+        // cannot be written tight is not well formed.
+        "list" => {
+            // The children first: the old shape is a list with one Text child.
+            let mut items = Vec::new();
             for child in store.children(id) {
                 match element_name_of(store, child) {
-                    Some(name) if BLOCK_KINDS.contains(&name.as_str()) => {}
+                    Some(name) if name == "item" => {}
                     other => {
                         return Err(BlockDecodeError::UnexpectedChild {
                             kind: kind.to_string(),
@@ -609,20 +708,25 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
                         });
                     }
                 }
-                for comment in decode_trivia(store, child, ned::trivia::ATTR_TRIVIA_BEFORE)? {
-                    blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
-                }
-                let node = block_from_node(store, child)?;
-                blocks.elements.push_back(Spanned { node, span: zero });
+                items.push(blocks_from_node(store, child, "item")?);
             }
-            for comment in decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_END)? {
-                blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
+            let ordered = bool_attr(store, id, kind, "ordered")?;
+            let tight = bool_attr(store, id, kind, "tight")?;
+            let start = list_start(store, id, ordered)?;
+            let list = List {
+                kind: if ordered { ListKind::Ordered { start } } else { ListKind::Bullet },
+                spacing: if tight { Spacing::Tight } else { Spacing::Loose },
+                items,
+            };
+            if tight && !list.can_be_tight() {
+                return Err(BlockDecodeError::InvalidAttribute {
+                    kind: kind.to_string(),
+                    attr: "tight".to_string(),
+                    value: "true".to_string(),
+                });
             }
-            Ok(ContentElement::Blockquote { blocks })
+            Ok(ContentElement::List { list })
         }
-        "list" => Ok(ContentElement::List {
-            source: try_child_text(store, id, kind)?,
-        }),
         "link-expression" => {
             let text_node = try_child_by_name(store, id, kind, "link-text")?;
             let target_node = try_child_by_name(store, id, kind, "link-target")?;
@@ -760,12 +864,33 @@ fn check_payload_tree(tree: &ned::NodeTree) -> Result<(), BlockDecodeError> {
     if name == "table" {
         check_table_children(children)?;
     }
-    if BLOCK_CONTAINER_KINDS.contains(&name.as_str()) {
+    if name == "blockquote" {
+        check_payload_blocks(name, children)?;
+    }
+    // A list holds items only, and an item payload blocks only.
+    if name == "list" {
         for child in children {
             match child {
-                ned::NodeTree::Element { .. } => check_payload_tree(child)?,
+                ned::NodeTree::Element { name: item, attrs, children: blocks } if item == "item" => {
+                    if let Some((attr, _)) = attrs.first() {
+                        return Err(unexpected_attribute("item", attr));
+                    }
+                    check_payload_blocks(item, blocks)?;
+                }
                 other => return Err(unexpected_child(name, other)),
             }
+        }
+    }
+    Ok(())
+}
+
+/// The children of the container `kind` (a quote or an item), all payload
+/// blocks themselves; a text child is refused.
+fn check_payload_blocks(kind: &str, children: &[ned::NodeTree]) -> Result<(), BlockDecodeError> {
+    for child in children {
+        match child {
+            ned::NodeTree::Element { .. } => check_payload_tree(child)?,
+            other => return Err(unexpected_child(kind, other)),
         }
     }
     Ok(())
@@ -778,6 +903,7 @@ fn payload_attributes(kind: &str) -> &'static [&'static str] {
         "heading" => &["level", "marker"],
         "paragraph" => &["marker"],
         "code-block" => &["language"],
+        "list" => &["ordered", "start", "tight"],
         _ => &[],
     }
 }

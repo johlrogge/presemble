@@ -1,6 +1,6 @@
 use crate::document::{
-    Blocks, CommentAnchor, Container, ContentElement, Document, LinkOp, LinkTarget, LinkText,
-    RefsToTarget, SortDirection,
+    Blocks, CommentAnchor, Container, ContentElement, Document, LinkOp, LinkTarget, LinkText, List,
+    ListKind, RefsToTarget, SortDirection, Spacing,
 };
 use crate::parser::read_link_expression_paragraph;
 use schema::Spanned;
@@ -93,6 +93,12 @@ fn write_container(
 /// by blank lines (ADR-062). A comment is never dropped: one anchored past the
 /// end is written at the end.
 pub(crate) fn serialize_blocks(blocks: &Blocks) -> String {
+    serialize_blocks_joined(blocks, "\n\n")
+}
+
+/// [`serialize_blocks`], with the parts (blocks and comments) joined by
+/// `separator`: a blank line, or a line break in a tight list item.
+fn serialize_blocks_joined(blocks: &Blocks, separator: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (at, spanned) in blocks.elements.iter().enumerate() {
         for (index, comment) in &blocks.comments {
@@ -107,7 +113,54 @@ pub(crate) fn serialize_blocks(blocks: &Blocks) -> String {
             parts.push(comment.node.as_str().to_string());
         }
     }
-    parts.join("\n\n")
+    parts.join(separator)
+}
+
+/// A list: each item is its marker and its blocks, the later lines indented to
+/// the item's content column. Markers are canonical (`-`, or `N.` counting
+/// from the start). A tight list has its items on consecutive lines, and the
+/// blocks of an item too; a loose one has a blank line between both.
+fn serialize_list(list: &List) -> String {
+    let tight = list.spacing == Spacing::Tight && list.can_be_tight();
+    let separator = if tight { "\n" } else { "\n\n" };
+    let items: Vec<String> = list
+        .items
+        .iter()
+        .enumerate()
+        .map(|(at, item)| {
+            let marker = match list.kind {
+                ListKind::Bullet => "-".to_string(),
+                ListKind::Ordered { start } => format!("{}.", start + at as u64),
+            };
+            let indent = " ".repeat(marker.len() + 1);
+            let body = serialize_blocks_joined(item, separator);
+            if body.is_empty() {
+                return marker;
+            }
+            // A rule straight after the marker would make the line a rule.
+            let own_line = matches!(
+                item.elements.front().map(|e| &e.node),
+                Some(ContentElement::Separator)
+            ) && !item.comments.iter().any(|(index, _)| *index == 0);
+            let mut out = marker;
+            for (line_no, line) in body.split('\n').enumerate() {
+                if line_no == 0 && !own_line {
+                    if !line.is_empty() {
+                        out.push(' ');
+                        out.push_str(line);
+                    }
+                    continue;
+                }
+                out.push('\n');
+                if !line.is_empty() {
+                    out.push_str(&indent);
+                    out.push_str(line);
+                }
+            }
+            out
+        })
+        .collect();
+    items.join(separator)
 }
 
 pub(crate) fn serialize_elements(elements: &im::Vector<Spanned<ContentElement>>) -> String {
@@ -171,7 +224,7 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
                     .join("\n")
             }
         }
-        ContentElement::List { source } => source.clone(),
+        ContentElement::List { list } => serialize_list(list),
         ContentElement::LinkExpression { text, target, slot } => {
             let text_part = match text {
                 LinkText::Empty => "",
@@ -1989,7 +2042,7 @@ headings
         let tags = second.preamble.iter().find(|s| s.name.as_str() == "tags").expect("tags");
         assert_eq!(
             tags.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-            vec![ContentElement::List { source: "- a\n\n- b".to_string() }]
+            top_level("- a\n\n- b")
         );
         // Text is a fixed point from then on.
         assert_eq!(serialize_document(&second), saved);

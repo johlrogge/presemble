@@ -1,7 +1,6 @@
 use crate::document::{ContentElement, Document, Keyword, LinkText};
 use crate::inline::AsPlainText;
 use crate::link_expression::{diagnose_paragraph, LinkExpressionDiagnostic};
-use crate::parse_list_items;
 use crate::parser::diagnose_paragraph_marker;
 use crate::serializer::serialize_element;
 use crate::slot_assignment::{element_matches_slot, unassigned_reason, UnassignedReason};
@@ -153,15 +152,21 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     ValidationResult { diagnostics }
 }
 
-/// `elements` and every block nested in a blockquote among them, in document
-/// order (a quote before its children). The validator reads quoted blocks
-/// exactly as top-level ones (ADR-059 §13).
+/// `elements` and every block nested in a blockquote or a list item among
+/// them, in document order (a container before its children). The validator
+/// reads nested blocks exactly as top-level ones (ADR-059 §13).
 fn walk(elements: &im::Vector<Spanned<ContentElement>>) -> Vec<&Spanned<ContentElement>> {
     fn collect<'a>(elements: &'a im::Vector<Spanned<ContentElement>>, out: &mut Vec<&'a Spanned<ContentElement>>) {
         for spanned in elements {
             out.push(spanned);
-            if let ContentElement::Blockquote { blocks } = &spanned.node {
-                collect(&blocks.elements, out);
+            match &spanned.node {
+                ContentElement::Blockquote { blocks } => collect(&blocks.elements, out),
+                ContentElement::List { list } => {
+                    for item in &list.items {
+                        collect(&item.elements, out);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -320,8 +325,8 @@ fn validate_inline_html(
 ) {
     for spanned in walk(elements) {
         let html = match &spanned.node {
-            ContentElement::List { source } => crate::html::first_inline_html(source),
-            // A heading's or paragraph's HTML is in its nodes.
+            // A heading's or paragraph's HTML is in its nodes (a list's is in
+            // the paragraphs of its items, which `walk` reaches).
             ContentElement::Heading { content, .. } | ContentElement::Paragraph { content, .. } => {
                 first_html_node(content.as_slice())
             }
@@ -790,15 +795,15 @@ fn validate_list(
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) -> usize {
     // Find the first ContentElement::List in the assigned elements.
-    let list_source = elements.iter().find_map(|s| {
-        if let ContentElement::List { source } = &s.node {
-            Some(source.as_str())
+    let first_list = elements.iter().find_map(|s| {
+        if let ContentElement::List { list } = &s.node {
+            Some(list)
         } else {
             None
         }
     });
 
-    match list_source {
+    match first_list {
         None => {
             if expected_count_for_slot(slot).min() > 0 {
                 diagnostics.push(ValidationDiagnostic {
@@ -810,7 +815,7 @@ fn validate_list(
             }
             0
         }
-        Some(source) => parse_list_items(source).len(),
+        Some(list) => list.items.len(),
     }
 }
 
@@ -1509,19 +1514,53 @@ mod tests {
         assert!(d.is_empty(), "{d:#?}");
     }
 
-    /// Lists ending in `{#name}` are not covered by marker misuse; see ADR-060
-    /// open questions. (A blockquote reads its paragraphs as the top level
-    /// does: see `markers_and_link_expressions_in_a_blockquote_read_as_at_top_level`.)
+    /// Stage 9: inline HTML in a list item is an Error, as in any paragraph,
+    /// tight or loose, nested or not, and an HTML block in an item is too. The
+    /// check reads the item's nodes, not the list's source.
     #[test]
-    fn lists_ending_in_a_marker_are_not_marker_misuse() {
+    fn inline_html_in_a_list_item_is_an_error() {
+        for md in [
+            "- a <b>x</b> b",
+            "1. a <i>y</i>",
+            "- a\n\n  b <u>z</u>",
+            "- a\n  - n <b>x</b>",
+            "> - q <b>x</b>",
+        ] {
+            let d = body_diagnostics(md);
+            assert_eq!(d.len(), 1, "{md:?}: {d:#?}");
+            assert_eq!(d[0].severity, Severity::Error, "{md:?}");
+            assert!(d[0].message.starts_with("paragraph `"), "{md:?}: {}", d[0].message);
+            assert!(d[0].message.contains("inline HTML"), "{md:?}: {}", d[0].message);
+        }
+        let d = body_diagnostics("- a\n\n  <div>x</div>");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(d[0].message.starts_with("HTML block"), "{}", d[0].message);
+        // Code spans and escapes are never reported.
+        assert!(body_diagnostics("- a `<b>` \\<i>").is_empty());
+    }
+
+    /// The reading is uniform: a list item holds blocks, and its paragraphs are
+    /// read exactly as at the top level, as a blockquote's are (stage 8 D1, see
+    /// `markers_and_link_expressions_in_a_blockquote_read_as_at_top_level`).
+    /// A marker ending a paragraph in an item is that paragraph's structure,
+    /// and its misuse is an Error, tight or loose, at any nesting depth.
+    #[test]
+    fn markers_in_a_list_item_read_as_at_top_level() {
         let g = summary_grammar(true);
-        let md = "- a {#tags}";
-        let src = format!("# Title\n\nOne.\n\n----\n\n{md}\n");
-        let doc = parse_and_assign(&src, &g).expect("parses");
-        assert_eq!(doc.body.len(), 1, "{md:?}: {doc:#?}");
-        assert!(matches!(doc.body[0].node, ContentElement::List { .. }), "{md:?}: {:?}", doc.body[0].node);
-        let d = validate(&doc, &g).diagnostics;
-        assert!(!d.iter().any(|d| d.message.contains("slot marker")), "{md:?}: {d:#?}");
+        let body_diagnostics = |md: &str| {
+            let src = format!("# Title\n\nOne.\n\n----\n\n{md}\n");
+            let doc = parse_and_assign(&src, &g).expect("parses");
+            assert_eq!(doc.body.len(), 1, "{md:?}: {doc:#?}");
+            validate(&doc, &g).diagnostics
+        };
+        let top = body_diagnostics("a {#tags}");
+        assert_eq!(top.len(), 1, "{top:#?}");
+        for md in ["- a {#tags}", "1. a {#tags}", "- a\n\n  b {#tags}", "- x\n  - a {#tags}"] {
+            let d = body_diagnostics(md);
+            assert_eq!(d.len(), 1, "{md:?}: {d:#?}");
+            assert_eq!(d[0].severity, Severity::Error, "{md:?}");
+            assert_eq!(d[0].message, top[0].message, "{md:?}");
+        }
     }
 
     /// D1: a quote's paragraphs are read exactly as at the top level. A

@@ -952,4 +952,58 @@ mod rendering_tests {
         let err = hiccup(&g, r#"[:a {:href (draft)} "x"]"#).expect_err("unknown function");
         assert!(err.to_string().contains("draft"), "{err}");
     }
+
+    /// The graph of a post whose `tags` slot holds the list in `list_md`.
+    fn list_slot_graph(list_md: &str) -> DataGraph {
+        let grammar = schema::parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\n- Tags {#tags}\n\n----\n\nBody.\n",
+        )
+        .expect("schema");
+        let doc = content::parse_and_assign(&format!("# T\n\n{list_md}\n\n----\n\nBody.\n"), &grammar)
+            .expect("parses");
+        crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Published)
+    }
+
+    /// ADR-059 stage 9 (D2): a list slot is a list of items, each the item's
+    /// blocks as nodes. Inserting an item places its blocks as they are,
+    /// `(text item)` reads its plain text (a nested list included), and an
+    /// ordered list has one item per entry.
+    #[test]
+    fn list_slot_items_are_nodes_and_text_reads_them() {
+        let g = list_slot_graph("1. one\n2. **two**\n   - nested\n3. three");
+        let Some(Value::List(items)) = g.resolve(&["tags"]) else { panic!("a list: {:?}", g.resolve(&["tags"])) };
+        assert_eq!(items.len(), 3, "one item per entry, ordered or not");
+        assert!(items.iter().all(|item| matches!(item, Value::Nodes(_))), "{items:?}");
+
+        // Inserting an item places its blocks (tight: no <p>).
+        assert_eq!(
+            html(
+                &g,
+                r#"<ol><template data-each="(ref tags)"><li><presemble:insert data="(ref item)" /></li></template></ol>"#
+            )
+            .unwrap(),
+            "<ol><li>one</li><li><strong>two</strong><ul><li>nested</li></ul></li><li>three</li></ol>"
+        );
+        // `(text item)` is the plain text.
+        assert_eq!(
+            html(
+                &g,
+                r#"<ul><template data-each="(ref tags)"><li><presemble:insert data="(text item)" /></li></template></ul>"#
+            )
+            .unwrap(),
+            "<ul><li>one</li><li>twonested</li><li>three</li></ul>"
+        );
+        // A bullet list is the same, and a loose item keeps its paragraphs.
+        let g = list_slot_graph("- a\n\n  b\n- c");
+        let Some(Value::List(items)) = g.resolve(&["tags"]) else { panic!("a list") };
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            html(
+                &g,
+                r#"<div><template data-each="(ref tags)"><section><presemble:insert data="(ref item)" /></section></template></div>"#
+            )
+            .unwrap(),
+            "<div><section><p>a</p><p>b</p></section><section><p>c</p></section></div>"
+        );
+    }
 }

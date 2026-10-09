@@ -806,7 +806,8 @@ mod tests {
             },
             ContentElement::HtmlBlock { source: "<b>bold</b>".to_string() },
             quote_of("A quote"),
-            ContentElement::List { source: "- item one\n- item two".to_string() },
+            list_of("- item one\n- item two"),
+            list_of("3. one\n\n   two\n4. three\n   - four"),
         ];
 
         let doc = Document {
@@ -1017,7 +1018,7 @@ mod tests {
             table_of(&["a"], &[&["1"]]),
             ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
             quote_of("q"),
-            ContentElement::List { source: "- a".to_string() },
+            list_of("- a"),
             ContentElement::LinkExpression {
                 text: LinkText::Label("N".to_string()),
                 target: LinkTarget::ThreadExpr {
@@ -1858,6 +1859,13 @@ mod tests {
         content::parse_document(&format!("> {text}\n")).unwrap().elements[0].node.clone()
     }
 
+    /// The list `md` reads as.
+    fn list_of(md: &str) -> ContentElement {
+        let el = content::parse_document(md).unwrap().elements[0].node.clone();
+        assert!(matches!(el, ContentElement::List { .. }), "{md:?} is not a list: {el:?}");
+        el
+    }
+
     fn table_of(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
         if headers.is_empty() {
             return ContentElement::Table { columns: vec![], rows: vec![] };
@@ -1930,13 +1938,13 @@ mod tests {
 
     #[test]
     fn tree_to_block_rejects_text_kind_with_two_children() {
-        let tree = ned::NodeTree::element("list")
+        let tree = ned::NodeTree::element("code-block")
             .with_child(ned::NodeTree::text("a"))
             .with_child(ned::NodeTree::text("b"));
         assert_eq!(
             tree_to_block(&tree),
             Err(BlockDecodeError::TextChildCount {
-                kind: "list".to_string(),
+                kind: "code-block".to_string(),
                 found: 2
             })
         );
@@ -1944,7 +1952,7 @@ mod tests {
 
     #[test]
     fn tree_to_block_rejects_text_kind_with_element_child() {
-        let tree = ned::NodeTree::element("list").with_child(ned::NodeTree::element("span"));
+        let tree = ned::NodeTree::element("code-block").with_child(ned::NodeTree::element("span"));
         assert!(matches!(
             tree_to_block(&tree),
             Err(BlockDecodeError::TextChildCount { .. })
@@ -1990,7 +1998,8 @@ mod tests {
             table_of(&["A"], &[&["1"]]),
             ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
             quote_of("Q"),
-            ContentElement::List { source: "- a".to_string() },
+            list_of("- a"),
+            list_of("3. a\n\n   b\n4. c\n   > q"),
             ContentElement::LinkExpression {
                 text: LinkText::Label("posts".to_string()),
                 target: LinkTarget::ThreadExpr {
@@ -2040,7 +2049,7 @@ mod tests {
             table_of(&[], &[]),
             ContentElement::HtmlBlock { source: "h".to_string() },
             quote_of("q"),
-            ContentElement::List { source: "- a".to_string() },
+            list_of("- a"),
             ContentElement::LinkExpression {
                 text: LinkText::Empty,
                 target: LinkTarget::PathRef("p".to_string()),
@@ -2077,10 +2086,12 @@ mod tests {
         expected_text.sort_unstable();
         assert_eq!(text_kinds, expected_text);
 
-        // The payload kinds: the inline containers that are blocks, the block
-        // containers, the single-text kinds and the table.
+        // The payload kinds: the inline containers that are blocks, the quote
+        // (a block container; an item is not a block), the list, the
+        // single-text kinds and the table.
         let mut payload = block_containers;
-        payload.extend_from_slice(content_store::BLOCK_CONTAINER_KINDS);
+        payload.extend(content_store::BLOCK_CONTAINER_KINDS.iter().filter(|kind| **kind != "item"));
+        payload.push("list");
         payload.extend_from_slice(TEXT_BLOCK_KINDS);
         payload.push("table");
         assert_eq!(payload, PAYLOAD_BLOCK_KINDS);

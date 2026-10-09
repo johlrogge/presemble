@@ -230,9 +230,16 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
                 ))
             }
         }
-        Element::List => Ok(ContentElement::List {
-            source: new_value.to_string(),
-        }),
+        // The value is the list's markdown; its first block must be a list.
+        Element::List => {
+            let flat = crate::parser::parse_document(new_value).map_err(|e| e.to_string())?;
+            match flat.elements.front() {
+                Some(first) if matches!(first.node, ContentElement::List { .. }) => {
+                    Ok(first.node.clone())
+                }
+                _ => Err(format!("list slot value must be a markdown list, got: {new_value:?}")),
+            }
+        }
     }
 }
 

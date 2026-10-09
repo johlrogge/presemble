@@ -250,11 +250,11 @@ fn non_element_is_error() {
 #[test]
 fn missing_text_child_is_error() {
     let mut store = NodeStore::new();
-    let id = make_element(&mut store, "list");
+    let id = make_element(&mut store, "code-block");
     assert_eq!(
         block_from_node(&store, id),
         Err(BlockDecodeError::MissingTextChild {
-            kind: "list".to_string()
+            kind: "code-block".to_string()
         })
     );
 }
@@ -394,8 +394,195 @@ fn blockquote_payload_attribute_is_refused() {
 fn blockquote_payload_decodes_its_blocks() {
     let tree = NodeTree::element("blockquote")
         .with_child(NodeTree::element("paragraph").with_child(NodeTree::text("a")))
-        .with_child(NodeTree::element("list").with_child(NodeTree::text("- l")));
+        .with_child(list_tree(
+            false,
+            true,
+            None,
+            vec![vec![NodeTree::element("paragraph").with_child(NodeTree::text("l"))]],
+        ));
     assert_eq!(tree_to_block(&tree), Ok(quote("> a\n>\n> - l\n")));
+}
+
+// ── Lists hold items of blocks (ADR-059 §13, stage 9.1) ──────────────────────
+
+/// The list `md` reads as.
+fn list_el(md: &str) -> ContentElement {
+    let el = content::parse_document(md).unwrap().elements[0].node.clone();
+    assert!(matches!(el, ContentElement::List { .. }), "{md:?}: {el:?}");
+    el
+}
+
+/// A list payload: `ordered`, optionally `start`, `tight`, and one `item` per
+/// entry of `items`, holding those blocks.
+fn list_tree(ordered: bool, tight: bool, start: Option<u64>, items: Vec<Vec<NodeTree>>) -> NodeTree {
+    let mut list = NodeTree::element("list")
+        .with_attr("ordered", ordered.to_string())
+        .with_attr("tight", tight.to_string());
+    if let Some(start) = start {
+        list = list.with_attr("start", start.to_string());
+    }
+    for blocks in items {
+        let item = blocks.into_iter().fold(NodeTree::element("item"), |item, b| item.with_child(b));
+        list = list.with_child(item);
+    }
+    list
+}
+
+fn paragraph_tree(text: &str) -> NodeTree {
+    NodeTree::element("paragraph").with_child(NodeTree::text(text))
+}
+
+/// `list > item > block*`, `ordered` and `tight` always, `start` only when an
+/// ordered list does not start at 1; an item's blocks carry their leading
+/// comments and the item its trailing ones; nothing sits between items.
+#[test]
+fn list_holds_items_in_the_store() {
+    use crate::access::{element_name_of, find_attr_bool, find_attr_int};
+    let el = list_el("3. a\n\n   <!-- c -->\n\n   b\n\n   <!-- end -->\n\n4. c\n");
+    let mut store = NodeStore::new();
+    let id = block_to_store(&el, &mut store);
+    assert_eq!(element_name_of(&store, id).as_deref(), Some("list"));
+    assert_eq!(find_attr_bool(&store, id, "ordered"), Some(true));
+    assert_eq!(find_attr_int(&store, id, "start"), Some(3));
+    assert_eq!(find_attr_bool(&store, id, "tight"), Some(false));
+    let items = store.children(id);
+    let names = |parent| -> Vec<String> {
+        store.children(parent).iter().map(|c| element_name_of(&store, *c).unwrap()).collect()
+    };
+    assert_eq!(items.iter().map(|i| element_name_of(&store, *i).unwrap()).collect::<Vec<_>>(), vec!["item", "item"]);
+    assert_eq!(names(items[0]), vec!["paragraph", "paragraph"]);
+    assert_eq!(names(items[1]), vec!["paragraph"]);
+    let texts = |host, attr| -> Vec<String> {
+        ned::trivia::trivia_texts(&store, host, attr)
+            .into_iter()
+            .map(|t| match store.get(t) {
+                Some(Node::Text(s)) => s.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    let first_item = store.children(items[0]);
+    assert_eq!(texts(first_item[1], ned::trivia::ATTR_TRIVIA_BEFORE), vec!["<!-- c -->"]);
+    assert_eq!(texts(items[0], ned::trivia::ATTR_TRIVIA_END), vec!["<!-- end -->"]);
+    assert!(texts(items[0], ned::trivia::ATTR_TRIVIA_BEFORE).is_empty());
+    assert_eq!(block_from_node(&store, id), Ok(el));
+
+    // A bullet list has no `start`, a start of 1 is not written.
+    for md in ["- a\n- b", "1. a\n2. b"] {
+        let el = list_el(md);
+        let mut store = NodeStore::new();
+        let id = block_to_store(&el, &mut store);
+        assert_eq!(find_attr_int(&store, id, "start"), None, "{md:?}");
+        assert_eq!(find_attr_bool(&store, id, "tight"), Some(true), "{md:?}");
+        assert_eq!(block_from_node(&store, id), Ok(el));
+    }
+}
+
+/// The old shape, one Text child, is refused: with the old attribute-less
+/// element, as a store node with the new attributes, and as a payload.
+#[test]
+fn old_text_list_is_refused() {
+    let old = BlockDecodeError::UnexpectedChild { kind: "list".to_string(), child: "text".to_string() };
+    let mut store = NodeStore::new();
+    let id = make_element(&mut store, "list");
+    add_child_text(&mut store, id, "- a");
+    assert_eq!(block_from_node(&store, id), Err(old.clone()));
+
+    let id = make_element(&mut store, "list");
+    crate::add_bool_attr(&mut store, id, "ordered", false);
+    crate::add_bool_attr(&mut store, id, "tight", true);
+    add_child_text(&mut store, id, "- a");
+    assert_eq!(block_from_node(&store, id), Err(old.clone()));
+
+    let tree = NodeTree::element("list").with_child(NodeTree::text("- a"));
+    assert_eq!(tree_to_block(&tree), Err(old));
+}
+
+/// `start` belongs to an ordered list.
+#[test]
+fn start_on_a_bullet_list_is_refused() {
+    let tree = list_tree(false, true, Some(2), vec![vec![paragraph_tree("a")]]);
+    assert_eq!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedAttribute { kind: "list".to_string(), attr: "start".to_string() })
+    );
+    // An ordered list takes it, and a missing `ordered` or `tight` is refused.
+    let ok = list_tree(true, true, Some(2), vec![vec![paragraph_tree("a")]]);
+    assert_eq!(tree_to_block(&ok), Ok(list_el("2. a")));
+    let no_tight = NodeTree::element("list")
+        .with_attr("ordered", "false")
+        .with_child(NodeTree::element("item"));
+    assert_eq!(
+        tree_to_block(&no_tight),
+        Err(BlockDecodeError::MissingAttribute { kind: "list".to_string(), attr: "tight".to_string() })
+    );
+}
+
+/// A tight list is written on consecutive lines, so an item that holds more
+/// than one block that is not a list, or whose second block is not a list, or
+/// a list that cannot interrupt the paragraph before it, cannot be tight.
+#[test]
+fn tight_list_that_cannot_be_written_tight_is_refused_as_payload() {
+    let tight_refused = Err(BlockDecodeError::InvalidAttribute {
+        kind: "list".to_string(),
+        attr: "tight".to_string(),
+        value: "true".to_string(),
+    });
+    let code = NodeTree::element("code-block").with_child(NodeTree::text("x"));
+    let two_blocks = vec![vec![paragraph_tree("a"), code]];
+    assert_eq!(tree_to_block(&list_tree(false, true, None, two_blocks.clone())), tight_refused);
+    // The same items, loose, are fine.
+    assert!(tree_to_block(&list_tree(false, false, None, two_blocks)).is_ok());
+
+    // A list straight after a paragraph that cannot interrupt it.
+    let nested = list_tree(true, true, Some(2), vec![vec![paragraph_tree("b")]]);
+    let after_paragraph = vec![vec![paragraph_tree("a"), nested.clone()]];
+    assert_eq!(tree_to_block(&list_tree(false, true, None, after_paragraph.clone())), tight_refused);
+    assert!(tree_to_block(&list_tree(false, false, None, after_paragraph)).is_ok());
+    // As the first block of an item it is fine, tight.
+    assert!(tree_to_block(&list_tree(false, true, None, vec![vec![nested]])).is_ok());
+
+    // The same gate on the store.
+    let mut store = NodeStore::new();
+    let id = block_to_store(&list_el("- a\n\n  ```\n  x\n  ```\n"), &mut store);
+    let tight = store.attributes(id).into_iter().find(|(n, _)| store.resolve_name(*n) == "tight").unwrap().1;
+    store.replace_node(tight, Node::Boolean(true));
+    assert_eq!(block_from_node(&store, id), tight_refused);
+}
+
+/// A list holds items, an item holds payload blocks only, and an item has no
+/// attributes.
+#[test]
+fn nested_non_payload_kinds_in_a_list_are_refused() {
+    for kind in ["separator", "html-block", "link-expression"] {
+        let tree = list_tree(false, false, None, vec![vec![NodeTree::element(kind)]]);
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind(kind.to_string())),
+            "{kind}"
+        );
+    }
+    let text_in_item = list_tree(false, false, None, vec![vec![NodeTree::text("x")]]);
+    assert_eq!(
+        tree_to_block(&text_in_item),
+        Err(BlockDecodeError::UnexpectedChild { kind: "item".to_string(), child: "text".to_string() })
+    );
+    let not_an_item = NodeTree::element("list")
+        .with_attr("ordered", "false")
+        .with_attr("tight", "true")
+        .with_child(paragraph_tree("a"));
+    assert_eq!(
+        tree_to_block(&not_an_item),
+        Err(BlockDecodeError::UnexpectedChild { kind: "list".to_string(), child: "paragraph".to_string() })
+    );
+    let item_with_attr = NodeTree::element("list")
+        .with_attr("ordered", "false")
+        .with_attr("tight", "true")
+        .with_child(NodeTree::element("item").with_attr("x", "y"));
+    assert_eq!(
+        tree_to_block(&item_with_attr),
+        Err(BlockDecodeError::UnexpectedAttribute { kind: "item".to_string(), attr: "x".to_string() })
+    );
 }
 
 /// A paragraph with no children is an empty paragraph (a marker-only one is

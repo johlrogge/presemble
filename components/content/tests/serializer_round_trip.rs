@@ -381,23 +381,22 @@ fn gen_link_expression(rng: &mut Rng) -> ContentElement {
     ContentElement::LinkExpression { text, target, slot }
 }
 
-/// A list of 1-4 items, each words or inline markup (links and images
-/// included). A list is stored as its source, so it must read back exactly.
+/// A tight list of 1-4 items, each a paragraph of words or inline markup
+/// (links and images included).
 ///
-/// All items share one marker: changing between `- ` and `1. ` starts a new
-/// list. `avoid_ordered` is the marker kind of a directly preceding list, if
-/// any; adjacent lists of the same kind would merge into one, so the other
+/// All items share one kind: changing between bullets and numbers starts a new
+/// list. `avoid_ordered` is the kind of a directly preceding list, if any;
+/// adjacent lists of the same kind would merge into one (L10), so the other
 /// kind is used.
 fn gen_list(rng: &mut Rng, avoid_ordered: Option<bool>) -> ContentElement {
     let ordered = match avoid_ordered {
         Some(previous) => !previous,
         None => rng.chance(50),
     };
-    let marker = if ordered { "1. " } else { "- " };
     // `--` is left out: an item like `- --` is a thematic break, not a list.
     let words: Vec<&str> = DOMAIN.words.iter().copied().filter(|w| *w != "--").collect();
     let n = 1 + rng.below(4);
-    let source = (0..n)
+    let items = (0..n)
         .map(|_| {
             let tokens = 1 + rng.below(3);
             let text = (0..tokens)
@@ -410,18 +409,23 @@ fn gen_list(rng: &mut Rng, avoid_ordered: Option<bool>) -> ContentElement {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!("{marker}{text}")
+            content::Blocks::from_elements(im::vector![spanned(ContentElement::paragraph_from_markdown(&text))])
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    ContentElement::List { source }
+        .collect();
+    ContentElement::List {
+        list: content::List {
+            kind: if ordered { content::ListKind::Ordered { start: 1 } } else { content::ListKind::Bullet },
+            spacing: content::Spacing::Tight,
+            items,
+        },
+    }
 }
 
 /// Whether `block` is an ordered list (`Some(true)`), a bullet list
 /// (`Some(false)`) or not a list (`None`).
 fn list_kind(block: &ContentElement) -> Option<bool> {
     match block {
-        ContentElement::List { source } => Some(source.starts_with("1. ")),
+        ContentElement::List { list } => Some(matches!(list.kind, content::ListKind::Ordered { .. })),
         _ => None,
     }
 }

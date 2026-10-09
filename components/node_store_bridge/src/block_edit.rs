@@ -1426,7 +1426,8 @@ mod tests {
             paragraph("Some **text**."),
             ContentElement::lone_link("t", "/x"),
             content::parse_document("> q\n").unwrap().elements[0].node.clone(),
-            ContentElement::List { source: "- a\n- b".to_string() },
+            content::parse_document("- a\n- b").unwrap().elements[0].node.clone(),
+            content::parse_document("3. a\n\n   b\n4. c\n   - d").unwrap().elements[0].node.clone(),
             ContentElement::CodeBlock {
                 language: Some("rust".to_string()),
                 code: "fn main() {}".to_string(),

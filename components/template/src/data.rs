@@ -210,6 +210,17 @@ pub enum OutputMode {
 // Synthesized records
 // ---------------------------------------------------------------------------
 
+/// The values a list slot gives a template (ADR-059 stage 9): one per item,
+/// each the item's blocks as nodes. Inserting an item places its blocks as they
+/// are, and `(text item)` reads its plain text. The blocks of a tight list's
+/// items have no `<p>`.
+pub fn list_item_values(list: &content::List) -> Vec<Value> {
+    crate::body_nodes::list_items_nodes(list)
+        .into_iter()
+        .map(|nodes| Value::Nodes(nodes.into()))
+        .collect()
+}
+
 /// The record a link slot gives a template: `{href, text}` (ADR-059 §12). `href`
 /// is the destination as written; `text` is the link's text as inline content,
 /// which reads as its plain text in a string context.
@@ -433,21 +444,12 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
             }
 
             Element::List => {
-                // Extract items from the first ContentElement::List in the slot.
-                // Each item is wrapped as a Record({"text": item_text}) so
-                // `data-each` templates can access `${item.text}`.
+                // The items of the first ContentElement::List in the slot:
+                // each item is its blocks as nodes (ADR-059 stage 9).
                 if let Some(spanned) = elements.front()
-                    && let ContentElement::List { source } = &spanned.node
+                    && let ContentElement::List { list } = &spanned.node
                 {
-                    let items: Vec<Value> = content::parse_list_items(source)
-                        .into_iter()
-                        .map(|text| {
-                            let mut record = DataGraph::new();
-                            record.insert("text", Value::Text(text));
-                            Value::Record(record)
-                        })
-                        .collect();
-                    graph.insert(slot_key, Value::List(items));
+                    graph.insert(slot_key, Value::List(list_item_values(list)));
                 }
             }
         }
@@ -1478,13 +1480,13 @@ mod tests {
     }
 
     #[test]
-    fn body_list_with_nested_html_block_renders_escaped() {
-        let list = spanned(ContentElement::List {
-            source: "- item\n\n  <div>inner</div>\n".to_string(),
-        });
+    fn body_list_with_nested_html_block_renders_the_placeholder() {
+        let list = spanned(
+            content::parse_document("- item\n\n  <div>inner</div>\n").unwrap().elements[0].node.clone(),
+        );
         let html = body_html(&im::vector![list], false);
-        assert!(!html.contains("<div>inner"), "nested HTML block must not be rendered; got: {html}");
-        assert!(html.contains("&lt;div&gt;inner"), "nested HTML block must render escaped; got: {html}");
+        assert!(!html.contains("inner"), "nested HTML block must not be rendered; got: {html}");
+        assert!(html.contains("presemble-html-removed"), "expected the placeholder; got: {html}");
     }
 
     #[test]

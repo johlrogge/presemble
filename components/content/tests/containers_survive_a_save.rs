@@ -44,10 +44,6 @@ fn a_list_with_an_image_survives_a_save() {
     let src = "# T\n\n----\n\n- ![i](a.png)\n- b [c](/c)\n";
     let (body, saved) = body_after_save(src);
     assert_eq!(body.len(), 1, "{body:#?}");
-    match &body[0] {
-        ContentElement::List { source } => {
-            assert!(source.contains("![i](a.png)") && source.contains("[c](/c)"), "{source}");
-        }
-        other => panic!("expected a list, got {other:?}; saved:\n{saved}"),
-    }
+    assert!(matches!(body[0], ContentElement::List { .. }), "expected a list; saved:\n{saved}");
+    assert!(saved.contains("![i](a.png)") && saved.contains("[c](/c)"), "{saved}");
 }

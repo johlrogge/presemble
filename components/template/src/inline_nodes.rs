@@ -90,9 +90,23 @@ fn push_text(out: &mut Vec<Node>, s: &str) {
 mod tests {
     use super::*;
     use crate::dom::Element;
-    use crate::markdown_nodes::inline_children;
     use content::inline::{parse_inlines, InlineContext};
     use content::AsPlainText;
+
+    /// The old markdown path as an oracle: the nodes of a paragraph's markdown,
+    /// unwrapped from their `<p>`.
+    fn inline_children(src: &str) -> Vec<Node> {
+        let mut nodes = crate::markdown_nodes::events_to_nodes(pulldown_cmark::Parser::new_ext(
+            src,
+            content::MARKDOWN_OPTIONS,
+        ));
+        if let [Node::Element(p)] = nodes.as_mut_slice()
+            && p.name == "p"
+        {
+            return std::mem::take(&mut p.children);
+        }
+        nodes
+    }
 
     const CORPUS_JSON: &str = include_str!("../../../resources/test/inline-corpus.json");
 
