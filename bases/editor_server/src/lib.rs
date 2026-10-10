@@ -447,6 +447,11 @@ fn serve_rep_socket(rep_socket: &nng::Socket, jobs: &Sender<Job>) {
     }
 }
 
+/// Legacy stub — kept so existing callers continue to compile.
+pub fn serve() -> Result<(), String> {
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,8 +522,7 @@ mod tests {
         fn finish(mut self) -> Vec<ConductorEvent> {
             let _ = self.ipc(Command::Shutdown);
             self.writer.take().unwrap().join().expect("the writer ends");
-            let events = self.published.lock().unwrap().clone();
-            events
+            self.published.lock().unwrap().clone()
         }
     }
 
@@ -543,7 +547,7 @@ mod tests {
     fn nrepl_plan_runs_on_the_writer_and_publishes_its_events() {
         let harness = Harness::start();
 
-        let result = harness.handler().eval("s", &set_title("Via nREPL")).ok().expect("evals");
+        let result = harness.handler().eval("s", &set_title("Via nREPL")).expect("evals");
         assert!(
             result.out.as_deref().is_some_and(|m| m.contains("1 edit(s) applied")),
             "{:?}",
@@ -568,7 +572,7 @@ mod tests {
         let site = harness._site.path().display().to_string();
 
         // The plain path reads (so the refusals below are about the path).
-        let read = handler.eval("s", &format!(r#"(get-content "{FILE}")"#)).ok().expect("reads");
+        let read = handler.eval("s", &format!(r#"(get-content "{FILE}")"#)).expect("reads");
         // Multi-line text comes back as the nREPL "out".
         assert!(read.out.as_deref().is_some_and(|o| o.contains("First Post")), "{:?}", read.out);
 
@@ -593,11 +597,11 @@ mod tests {
         let handler = harness.handler();
 
         // An nREPL edit, then an IPC save that must see it, then another edit.
-        handler.eval("s", &set_title("One")).ok().expect("evals");
+        handler.eval("s", &set_title("One")).expect("evals");
         let on_disk = saved_text(&harness);
         assert!(on_disk.starts_with("# One"), "the save saw the earlier edit: {on_disk}");
 
-        handler.eval("s", &set_title("Two")).ok().expect("evals");
+        handler.eval("s", &set_title("Two")).expect("evals");
         let on_disk = saved_text(&harness);
         assert!(on_disk.starts_with("# Two"), "the later edit came after: {on_disk}");
         harness.finish();
@@ -621,9 +625,4 @@ mod tests {
         writer.unwrap().join().expect("the writer ends on a closed queue");
         drop(_site);
     }
-}
-
-/// Legacy stub — kept so existing callers continue to compile.
-pub fn serve() -> Result<(), String> {
-    todo!()
 }

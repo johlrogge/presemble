@@ -141,10 +141,10 @@ mod tests {
 
         // Replicate find_attr_text logic from content_bridge
         let found = store.attributes(id).into_iter().find_map(|(name, val_id)| {
-            if store.resolve_name(name) == "href" {
-                if let Some(Node::Text(s)) = store.get(val_id) {
-                    return Some(s.clone());
-                }
+            if store.resolve_name(name) == "href"
+                && let Some(Node::Text(s)) = store.get(val_id)
+            {
+                return Some(s.clone());
             }
             None
         });

@@ -1863,7 +1863,7 @@ mod tests {
         open(&w, &loose);
         let (list, _) = list_and_items(&w);
         assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
-        let (drifts, held) = synced(&change(&w, &CONTENT));
+        let (drifts, held) = synced(&change(&w, CONTENT));
         assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
         let (list, _) = list_and_items(&w);
         assert_eq!(list_spacing(&w, list), content::Spacing::Tight);

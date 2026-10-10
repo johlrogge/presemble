@@ -451,7 +451,7 @@ fn gen_document(seed: u64) -> Document {
     let slots = rng.below(3);
     let preamble = (0..slots)
         .map(|i| DocumentSlot {
-            name: SlotName::new(&format!("slot{i}")),
+            name: SlotName::new(format!("slot{i}")),
             elements: (0..1 + rng.below(2)).map(|_| spanned(gen_block(&mut rng))).collect(),
         })
         .collect();

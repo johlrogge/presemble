@@ -20,15 +20,9 @@ pub use editorial_types;
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
-    use template;
-    use node_store_bridge;
-    use node_store;
 
     const POST_SCHEMA_SRC: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
-
-    const POST_TEMPLATE_SRC: &str =
-        r#"<html><body><presemble:insert data="(ref post.title)" as="h1"></presemble:insert></body></html>"#;
 
     fn sp(s: &str) -> editorial_types::SitePath {
         editorial_types::SitePath::parse(s).expect("a valid site path")
@@ -833,6 +827,7 @@ mod tests {
     /// This test builds a NodeStore with:
     /// - a heading node for "title"
     /// - a constraint record node for "_presemble_schema_constraints_title"
+    ///
     /// both as references from the semantic root, then renders via PrefixedGraphView
     /// (which implements resolve_node()) to exercise render_insert_native.
     #[test]

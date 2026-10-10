@@ -582,15 +582,19 @@ mod tests {
 
     // ── Test AppState builder ─────────────────────────────────────────────────
 
-    /// Returns `(ControlPlaneState, Arc<FakeProvisioner>, Arc<SiteRegistry>, Arc<Mutex<Vec<String>>>, TempDir)`.
-    /// `TempDir` must be kept alive for the duration of the test.
-    fn test_state() -> (
+    /// What [`test_state`] builds: the state, the fake provisioner, the
+    /// registry, the mails sent, and the registry's directory.
+    type TestState = (
         ControlPlaneState,
         Arc<FakeProvisioner>,
         Arc<site_registry::SiteRegistry>,
         Arc<Mutex<Vec<String>>>,
         TempDir,
-    ) {
+    );
+
+    /// Returns `(ControlPlaneState, Arc<FakeProvisioner>, Arc<SiteRegistry>, Arc<Mutex<Vec<String>>>, TempDir)`.
+    /// `TempDir` must be kept alive for the duration of the test.
+    fn test_state() -> TestState {
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_clone = Arc::clone(&captured);
 

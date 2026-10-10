@@ -3917,7 +3917,7 @@ mod tests {
         let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val["ok"], true, "expected ok:true, got: {val}");
-        assert!(val["id"].as_str().map_or(false, |s| s.starts_with("sug-")),
+        assert!(val["id"].as_str().is_some_and(|s| s.starts_with("sug-")),
             "expected id starting with sug-, got: {}", val["id"]);
     }
 

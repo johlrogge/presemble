@@ -602,7 +602,7 @@ mod tests {
     fn gen_pair(seed: u64) -> (String, String) {
         let mut rng = Rng::new(seed);
         let word = |rng: &mut Rng| VOCAB[rng.below(VOCAB.len())].to_string();
-        let n = if seed % 25 == 0 { 0 } else { 1 + rng.below(12) };
+        let n = if seed.is_multiple_of(25) { 0 } else { 1 + rng.below(12) };
         let mut words: Vec<String> = (0..n).map(|_| word(&mut rng)).collect();
         let sep = |rng: &mut Rng| if rng.below(8) == 0 { "\n" } else { " " };
         let join = |words: &[String], rng: &mut Rng| {

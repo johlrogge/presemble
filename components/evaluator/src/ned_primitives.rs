@@ -783,7 +783,7 @@ mod tests {
         };
         // The document root is the only node with no parents.
         // Integer attribute-value nodes are also roots (no Child-edge parents).
-        assert!(sel.len() >= 1);
+        assert!(!sel.is_empty());
     }
 
     #[test]
@@ -2122,7 +2122,7 @@ mod tests {
             _ => panic!("expected Opaque"),
         };
         // At minimum the heading element should be included (its text descendant is "Hello")
-        assert!(sel.len() >= 1, "expected at least one match");
+        assert!(!sel.is_empty(), "expected at least one match");
     }
 
     #[test]
@@ -2138,7 +2138,7 @@ mod tests {
             Value::Opaque(a) => a.downcast_ref::<Selection>().cloned().unwrap(),
             _ => panic!("expected Opaque"),
         };
-        assert!(sel.len() >= 1, "expected at least one match");
+        assert!(!sel.is_empty(), "expected at least one match");
     }
 
     // ── Prelude helper: ned/nth-after ─────────────────────────────────────────

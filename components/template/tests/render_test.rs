@@ -1,5 +1,3 @@
-use template;
-
 /// End-to-end: render a schema-derived document and verify that the slot outer element
 /// carries `data-presemble-schema-constraints-occurs` when the grammar specifies it.
 #[test]

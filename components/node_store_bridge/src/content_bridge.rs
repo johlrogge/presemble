@@ -1428,11 +1428,11 @@ mod tests {
         'outer: for child in children {
             let grandchildren = store.children(child).to_vec();
             for gc in grandchildren {
-                if let Some(Node::Text(text)) = store.get(gc) {
-                    if text.contains("Original body") {
-                        store.replace_node(gc, Node::Text("Mutated body".to_string()));
-                        break 'outer;
-                    }
+                if let Some(Node::Text(text)) = store.get(gc)
+                    && text.contains("Original body")
+                {
+                    store.replace_node(gc, Node::Text("Mutated body".to_string()));
+                    break 'outer;
                 }
             }
         }

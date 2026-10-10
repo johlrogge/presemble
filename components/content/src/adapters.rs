@@ -247,7 +247,7 @@ headings
     fn apply_source_edits(src: &str, edits: &[SourceEdit]) -> String {
         let mut result = src.to_string();
         let mut sorted: Vec<_> = edits.to_vec();
-        sorted.sort_by(|a, b| b.span.start.cmp(&a.span.start));
+        sorted.sort_by_key(|e| std::cmp::Reverse(e.span.start));
         for edit in &sorted {
             result.replace_range(edit.span.start..edit.span.end, &edit.new_text);
         }

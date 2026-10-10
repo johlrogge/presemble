@@ -12,6 +12,7 @@
 //! - P1, `inline_round_trip_on_generated_writable_trees`: for trees from the
 //!   writable generator, `parse(serialize(t)) == t` and `check_writable` says
 //!   so;
+//!
 //! The source corpus for P2 and P4 is `resources/test/inline-corpus.json`,
 //! shared with `content_store`.
 //!

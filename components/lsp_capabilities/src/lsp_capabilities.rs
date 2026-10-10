@@ -1587,8 +1587,7 @@ mod tests {
         let completions = content_completions("", &grammar, None);
         let first = completions
             .iter()
-            .filter(|c| c.label != "----")
-            .next()
+            .find(|c| c.label != "----")
             .expect("should have at least one non-separator completion");
         assert!(first.preselect, "first missing slot should be preselected: {first:#?}");
         // Only one should be preselected
