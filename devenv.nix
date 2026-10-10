@@ -34,6 +34,7 @@ in
     pkgs.rep
     pkgs.jet
     pkgs.deno
+    pkgs.just
     pkgs.openstackclient
     pkgs.opentofu
     pkgs.tofu-ls
