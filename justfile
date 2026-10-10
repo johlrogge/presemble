@@ -311,6 +311,12 @@ fmt-check:
       cargo polylith cargo --profile "$profile" fmt --all --check
     done
 
+# Report markup that looks unfinished in site/ and example-sites/ (writes
+# target/unfinished-markup-census.txt).
+[group('develop')]
+census-markup:
+    cargo polylith cargo --profile dev test -p content --test unfinished_markup_census -- --ignored --nocapture
+
 # Preview changes to the conductor box / network. The Caddy basic_auth hash is
 # sourced from the auth-file just-in-time into -var (rendered into cloud-init).
 # Preview changes to the conductor box.
