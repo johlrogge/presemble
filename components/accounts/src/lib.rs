@@ -1043,6 +1043,7 @@ mod tests {
         // Tamper: change a character in the payload portion
         let raw = token.as_str();
         let dot = raw.find('.').unwrap();
+        assert!(dot > 0, "the payload is not empty, so index 0 is inside it");
         let mut chars: Vec<char> = raw.chars().collect();
         // Flip first char of payload
         chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
