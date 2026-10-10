@@ -285,6 +285,16 @@ test:
 clippy:
     cargo polylith cargo --profile dev clippy --all-targets -- -D warnings
 
+# Format every crate with rustfmt (default config, style edition 2024).
+[group('develop')]
+fmt:
+    cargo fmt --all
+
+# Check formatting as CI does; changes nothing.
+[group('develop')]
+fmt-check:
+    cargo fmt --all --check
+
 # Preview changes to the conductor box / network. The Caddy basic_auth hash is
 # sourced from the auth-file just-in-time into -var (rendered into cloud-init).
 # Preview changes to the conductor box.
