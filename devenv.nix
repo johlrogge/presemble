@@ -27,6 +27,14 @@ in
     language = "system";
     pass_filenames = false;
   };
+  git-hooks.hooks.rustfmt-check = {
+    enable = true;
+    name = "rustfmt (check)";
+    entry = "just fmt-check";
+    files = "\\.rs$";
+    language = "system";
+    pass_filenames = false;
+  };
 
   packages = [
     pkgs.helix

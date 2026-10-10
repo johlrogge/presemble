@@ -29,6 +29,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Format
+        run: devenv shell -- just fmt-check
+
       - name: Run tests
         run: devenv shell -- cargo polylith cargo --profile dev test
 
