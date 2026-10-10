@@ -285,15 +285,26 @@ test:
 clippy:
     cargo polylith cargo --profile dev clippy --all-targets -- -D warnings
 
-# Format every crate with rustfmt (default config, style edition 2024).
+# Format every crate of both polylith profiles with rustfmt (default
+# config, style edition 2024). rustfmt can need a second pass to settle.
 [group('develop')]
 fmt:
-    cargo fmt --all
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for profile in live dev; do
+      cargo polylith cargo --profile "$profile" fmt --all
+      cargo polylith cargo --profile "$profile" fmt --all --check >/dev/null 2>&1 \
+        || cargo polylith cargo --profile "$profile" fmt --all
+    done
 
-# Check formatting as CI does; changes nothing.
+# Check formatting of both polylith profiles, as CI does; changes nothing.
 [group('develop')]
 fmt-check:
-    cargo fmt --all --check
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for profile in live dev; do
+      cargo polylith cargo --profile "$profile" fmt --all --check
+    done
 
 # Preview changes to the conductor box / network. The Caddy basic_auth hash is
 # sourced from the auth-file just-in-time into -var (rendered into cloud-init).
