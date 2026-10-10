@@ -82,40 +82,6 @@ pub fn parse_schema_url(url: &str) -> Option<(String, SchemaKind)> {
     }
 }
 
-/// Infer whether a URL path refers to a collection index or an item page.
-///
-/// Rules (by URL segment depth):
-/// - `""` (empty) → `Index` (root)
-/// - `"/"` (root) → `Index`
-/// - `/foo/` or `/foo/index.html` (depth 1) → `Index` (collection)
-/// - `/foo/bar/`, `/foo/bar`, `/foo/bar/index.html` (depth 2+) → `Item`
-///
-/// The algorithm:
-/// 1. Strip `index.html` suffix if present (canonical form)
-/// 2. Strip trailing slash
-/// 3. Split by `/` and filter empty segments
-/// 4. Count: 0 → root Index, 1 → collection Index, 2+ → Item
-///
-/// # Deprecation note
-///
-/// For canonical `/_schema/...` URLs, use [`parse_schema_url`] instead.
-/// This function is retained for callers that classify content-URL-shape paths.
-#[deprecated(note = "Use `parse_schema_url` for canonical `/_schema/...` URLs")]
-pub fn schema_kind_for_path(path: &UrlPath) -> SchemaKind {
-    let s = path.as_str();
-    // Canonical form: strip index.html suffix
-    let s = s.strip_suffix("index.html").unwrap_or(s);
-    // Strip trailing slash
-    let s = s.trim_end_matches('/');
-    // Count non-empty segments
-    let depth = s.split('/').filter(|seg| !seg.is_empty()).count();
-    if depth <= 1 {
-        SchemaKind::Index
-    } else {
-        SchemaKind::Item
-    }
-}
-
 #[derive(Debug)]
 pub enum FileKind {
     Content { schema_stem: SchemaStem },
@@ -588,41 +554,10 @@ mod tests {
         assert_eq!(parse_schema_url("/_schema/"), None);  // empty kind segment
     }
 
-    // --- schema_kind_for_path tests ---
-
     #[test]
-    fn schema_kind_for_root_is_index() {
-        assert_eq!(schema_kind_for_path(&UrlPath::new("/")), SchemaKind::Index);
-    }
-
-    #[test]
-    fn schema_kind_for_collection_with_trailing_slash_is_index() {
-        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/")), SchemaKind::Index);
-    }
-
-    #[test]
-    fn schema_kind_for_item_no_trailing_slash_is_item() {
-        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo")), SchemaKind::Item);
-    }
-
-    #[test]
-    fn schema_kind_for_empty_path_is_index() {
-        assert_eq!(schema_kind_for_path(&UrlPath::new("")), SchemaKind::Index);
-    }
-
-    #[test]
-    fn schema_kind_for_item_with_trailing_slash_is_item() {
-        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo/")), SchemaKind::Item);
-    }
-
-    #[test]
-    fn schema_kind_for_item_with_index_html_suffix_is_item() {
-        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/post-foo/index.html")), SchemaKind::Item);
-    }
-
-    #[test]
-    fn schema_kind_for_collection_with_index_html_suffix_is_index() {
-        assert_eq!(schema_kind_for_path(&UrlPath::new("/blog/index.html")), SchemaKind::Index);
+    fn parse_schema_url_index_with_trailing_slash() {
+        assert_eq!(parse_schema_url("/_schema/index/"), Some((String::new(), SchemaKind::Index)));
+        assert_eq!(parse_schema_url("/_schema/post/index/"), Some(("post".to_string(), SchemaKind::Index)));
     }
 
     // ---
